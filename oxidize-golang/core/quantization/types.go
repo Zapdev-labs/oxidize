@@ -1,7 +1,4 @@
 // Package quantization mirrors oxidize_core::compute::quantization. It
-// enumerates the supported GGML quantization types and provides per-format
-// dequantize kernels, size lookups, scalar quantize kernels, importance
-// matrix support, and mixed-precision planning.
 package quantization
 
 import (

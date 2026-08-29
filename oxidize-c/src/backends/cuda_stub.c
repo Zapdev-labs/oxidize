@@ -1,10 +1,3 @@
-/*
- * cuda_stub.c — stub implementation of CUDA API when compiled without OC_CUDA.
- *
- * Returns OC_ERR_UNSUPPORTED for all functions, so the CPU forward path
- * is used. This file is compiled instead of cuda.cu when OC_CUDA is not
- * defined, keeping the build dependency-free.
- */
 #include "oxidize/cuda.h"
 
 #include <string.h>

@@ -1,11 +1,3 @@
-/*
- * inf_model.h — Full inference model struct.
- *
- * Port of oxidize-core/src/model/inference.rs::InferenceModel.
- *
- * Bundles all model state: config, token embeddings, output head, per-layer
- * weights, MTP weights, KV cache, SSM state, workspace, and EAGLE3 capture.
- */
 #ifndef OXIDIZE_INF_MODEL_H
 #define OXIDIZE_INF_MODEL_H
 
@@ -99,7 +91,6 @@ bool oc_inf_model_is_loaded(const OcInferenceModel *m);
 /* Check if continuous-batching decode is enabled. */
 bool oc_inf_model_batched_decode_enabled(void);
 
-/* ─── Attention head dimension helpers (port of inference.rs) ────────── */
 
 /* Compute (q_head_dim, q_heads, kv_head_dim, kv_heads) from config, layer
  * norms, and projection output sizes. Mirrors Rust attention_head_dims(). */
@@ -118,7 +109,6 @@ OcError oc_gemv_weight_head(const OcWeightStorage *ws,
                              uint32_t head, uint32_t n_heads,
                              const float *input, float *output);
 
-/* ─── Forward pass methods (port of inference/forward.rs) ────────────── */
 
 /* Embed a token into workspace.x[..hidden_size].
  * Handles F32 and quantized embeddings, embedding_scale. */
@@ -189,18 +179,8 @@ OcError oc_inf_model_run_layer_range(OcInferenceModel *m,
                                        size_t start, size_t end,
                                        size_t pos);
 
-/* ─── MTP/nextn draft generation ──────────────────────────────────────── */
 
-/* Generate draft tokens using the native MTP/nextn block.
- *
- * start_token: the last committed target token.
- * start_hidden: the final normed hidden state for start_token [hidden_size].
- * max_tokens: maximum number of draft tokens to generate.
- * out_tokens: output array (caller-allocated, size >= max_tokens).
- * out_logits: output array of logits (caller-allocated, size >= max_tokens * vocab_size).
- * out_n: actual number of draft tokens generated.
- *
- * Returns OC_ERR_MODEL if no usable MTP block is present. */
+/* Generate draft tokens using the native MTP/nextn block. */
 OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
                                         uint32_t start_token,
                                         const float *start_hidden, size_t hidden_len,
@@ -209,41 +189,18 @@ OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
                                         float *out_logits,
                                         size_t *out_n);
 
-/* ─── Batched forward (prefill + cross-sequence decode) ───────────────── */
 
 /* Check if all layers support the batched GEMM path (no Mamba/SSM/MoE).
  * Returns true when the model can use forward_tokens / forward_batch. */
 bool oc_inf_model_layers_supported_for_batched(const OcInferenceModel *m);
 
-/* Batched prefill: process multiple tokens of ONE sequence via GEMM.
- * Mirrors Rust forward_batched. Each weight matrix is read once and
- * applied to all positions via oc_gemm_weight.
- *
- * tokens:    array of token IDs to process.
- * n_tokens:  number of tokens.
- * start_pos: absolute position of the first token.
- * need_logits: if true, compute final norm + lm_head for the last token.
- * out_logits: if need_logits, set to logits buffer (vocab_size floats).
- * out_logits_len: set to vocab_size.
- *
- * The model's KV cache is updated for all tokens. workspace.x contains
- * the last token's hidden state on return. */
+/* Batched prefill: process multiple tokens of ONE sequence via GEMM. */
 OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
                                       const uint32_t *tokens, size_t n_tokens,
                                       size_t start_pos, bool need_logits,
                                       float **out_logits, size_t *out_logits_len);
 
-/* Cross-sequence batched decode: process N sequences (one token each) via GEMM.
- * Mirrors Rust forward_batch. Each weight matrix is read once and fanned out
- * across all N sequences. Each sequence reads its own caller-owned OcSeqKv.
- *
- * tokens:    array of token IDs (one per sequence).
- * positions: array of absolute positions (one per sequence).
- * kvs:       array of caller-owned SeqKv buffers (one per sequence).
- * n_seqs:    number of sequences.
- * out_logits: caller-allocated array of n_seqs * vocab_size floats.
- *             Filled with logits for each sequence (only if need_logits).
- * need_logits: if true, compute logits for each sequence. */
+/* Cross-sequence batched decode: process N sequences (one token each) via GEMM. */
 OcError oc_inf_model_forward_batch(OcInferenceModel *m,
                                      const uint32_t *tokens,
                                      const size_t *positions,

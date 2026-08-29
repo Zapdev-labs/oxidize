@@ -1,17 +1,8 @@
-/*
- * election.c — leader election protocol for distributed inference clusters.
- *
- * Raft-style leader election: nodes start as FOLLOWER, transition to
- * CANDIDATE when the election timeout expires, request votes, and become
- * LEADER once they win a majority. Leaders maintain authority via periodic
- * heartbeats.
- */
 #include "oxidize/election.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 OcError oc_election_config_init(OcElectionConfig *cfg)
 {
@@ -22,7 +13,6 @@ OcError oc_election_config_init(OcElectionConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_election_init(const OcElectionConfig *config, uint64_t self_id,
                          OcElectionState **out)
@@ -63,7 +53,6 @@ void oc_election_free(OcElectionState *state)
     free(state);
 }
 
-/* ─── Periodic tick ─────────────────────────────────────────────────── */
 
 OcError oc_election_tick(OcElectionState *state, uint64_t current_ms)
 {
@@ -74,10 +63,7 @@ OcError oc_election_tick(OcElectionState *state, uint64_t current_ms)
         return OC_OK;
     }
 
-    /* Check election timeout. Guard against the initial state where
-     * last_heartbeat_ms == 0: treat the first tick as a heartbeat so a
-     * node doesn't immediately start an election at t=0 before it has had
-     * a chance to hear from a leader. */
+    /* Check election timeout. Guard against the initial state where */
     if (state->last_heartbeat_ms == 0) {
         state->last_heartbeat_ms = current_ms;
         return OC_OK;
@@ -100,7 +86,6 @@ OcError oc_election_tick(OcElectionState *state, uint64_t current_ms)
     return OC_OK;
 }
 
-/* ─── Vote RPC ──────────────────────────────────────────────────────── */
 
 OcError oc_election_request_vote(OcElectionState *state,
                                  uint64_t candidate_id, uint64_t term,
@@ -152,7 +137,6 @@ OcError oc_election_request_vote(OcElectionState *state,
     return OC_OK;
 }
 
-/* ─── Receive vote ──────────────────────────────────────────────────── */
 
 OcError oc_election_receive_vote(OcElectionState *state,
                                 uint64_t voter_id, uint64_t term,
@@ -187,7 +171,6 @@ OcError oc_election_receive_vote(OcElectionState *state,
     return OC_OK;
 }
 
-/* ─── Heartbeat ─────────────────────────────────────────────────────── */
 
 OcError oc_election_heartbeat(OcElectionState *state,
                               uint64_t leader_id, uint64_t term)
@@ -214,7 +197,6 @@ OcError oc_election_heartbeat(OcElectionState *state,
     return OC_OK;
 }
 
-/* ─── Role transitions ──────────────────────────────────────────────── */
 
 OcError oc_election_become_leader(OcElectionState *state)
 {
@@ -228,7 +210,6 @@ OcError oc_election_become_leader(OcElectionState *state)
     return OC_OK;
 }
 
-/* ─── Queries ───────────────────────────────────────────────────────── */
 
 OcElectionRole oc_election_get_role(const OcElectionState *state)
 {

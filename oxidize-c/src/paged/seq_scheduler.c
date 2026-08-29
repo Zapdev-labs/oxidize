@@ -1,14 +1,8 @@
-/*
- * seq_scheduler.c — vLLM-style sequence scheduler implementation.
- *
- * See include/oxidize/seq_scheduler.h for design notes.
- */
 #include "oxidize/seq_scheduler.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 OcSeqSchedulerConfig oc_seq_sched_config_default(void)
 {
@@ -19,7 +13,6 @@ OcSeqSchedulerConfig oc_seq_sched_config_default(void)
     return c;
 }
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 #define SEQ_NOT_FOUND ((size_t)-1)
 
@@ -121,7 +114,6 @@ static void free_seq_pages(OcSeqScheduler *sched, OcSeqInfo *s)
     s->n_pages = 0;
 }
 
-/* ─── Scheduler ────────────────────────────────────────────────────────── */
 
 OcError oc_seq_sched_init(OcSeqScheduler **out, OcSeqSchedulerConfig config,
                            OcKvPageManager *page_mgr)
@@ -189,7 +181,6 @@ OcError oc_seq_sched_schedule(OcSeqScheduler *s, OcSeqBatch *out_batch)
     memset(out_batch, 0, sizeof(*out_batch));
     size_t batch_count = 0;
 
-    /* 1. Decode phase: schedule all RUNNING sequences (one token each). */
     for (uint32_t i = 0; i < s->config.max_batch_size &&
                          batch_count < OC_SEQ_SCHED_MAX_BATCH; i++) {
         OcSeqInfo *seq = s->sequences[i];
@@ -201,7 +192,6 @@ OcError oc_seq_sched_schedule(OcSeqScheduler *s, OcSeqBatch *out_batch)
         }
     }
 
-    /* 2. Prefill phase: admit WAITING sequences if capacity allows. */
     for (uint32_t i = 0; i < s->config.max_batch_size &&
                          batch_count < OC_SEQ_SCHED_MAX_BATCH; i++) {
         OcSeqInfo *seq = s->sequences[i];
@@ -228,7 +218,6 @@ OcError oc_seq_sched_schedule(OcSeqScheduler *s, OcSeqBatch *out_batch)
         batch_count++;
     }
 
-    /* 3. Swap phase: if memory pressure is high, swap RUNNING -> SWAPPED. */
     uint32_t water_mark = (uint32_t)((float)s->config.max_total_tokens *
                                      s->config.water_level);
     if (s->total_tokens > water_mark && s->n_running > 0) {
@@ -247,7 +236,6 @@ OcError oc_seq_sched_schedule(OcSeqScheduler *s, OcSeqBatch *out_batch)
         }
     }
 
-    /* 4. Restore swapped sequences if capacity frees up. */
     if (s->n_swapped > 0 && s->total_tokens < water_mark) {
         for (uint32_t i = 0; i < s->config.max_batch_size; i++) {
             OcSeqInfo *seq = s->sequences[i];

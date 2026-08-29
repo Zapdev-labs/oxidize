@@ -1,13 +1,3 @@
-/* log.c — oc_log leveled logging with OX_LOG_LEVEL env filter.
- *
- * The minimum level is determined by:
- *   1. oc_log_set_level() if explicitly called (sticky for the process), OR
- *   2. OX_LOG_LEVEL env var at first use (cached), OR
- *   3. OC_LOG_INFO default.
- *
- * Output goes to stderr with a level prefix and a trailing newline if the
- * message doesn't already end with one.
- */
 #define _POSIX_C_SOURCE 200809L  /* for strcasecmp */
 
 #include "oxidize/log.h"

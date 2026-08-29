@@ -23,17 +23,14 @@ constexpr size_t QK_K = 256;                  // values per super-block
 constexpr size_t BLOCK_Q4_K_SIZE = 144;       // f16 d + f16 dmin + 12 scales + 128 nibbles
 constexpr size_t BLOCK_Q8_K_BYTES = 4 + 256 + 32;  // f32 d + 256 int8 + 16 i16 bsums
 
-// --- ISA detection (oxidize-kernels/src/lib.rs + cpu.rs) -------------------
 bool avx2_available();        // AVX2 + FMA
 bool avx512_available();      // AVX-512F + BW
 bool avx512vnni_available();  // + VNNI
 std::string cpu_summary();    // one-line human summary of detected ISA
 
-// --- Q8_K activation quantization (oxidize-kernels/src/q8k.rs) -------------
 // `vector` has n_blocks*QK_K f32 values; `out` receives n_blocks*BLOCK_Q8_K_BYTES.
 void quantize_q8_k_into(const float* vector, size_t n_blocks, uint8_t* out);
 
-// --- Q4_K x Q8_K dot (oxidize-kernels/src/q4k_scalar.rs) -------------------
 // Dot one Q4_K row (blocks_per_row blocks) against a Q8_K vector.
 float q4k_q8k_row_dot(const uint8_t* row, size_t blocks_per_row,
                       const uint8_t* q8k);
@@ -42,7 +39,6 @@ float q4k_q8k_row_dot(const uint8_t* row, size_t blocks_per_row,
 void gemv_q4k_range(const uint8_t* rows, size_t blocks_per_row,
                     const uint8_t* q8k, float* out, size_t n_rows);
 
-// --- Pruning (oxidize-kernels/src/prune.rs) -------------------------------
 // Per-output-row masks; 1 = keep, 0 = prune. Row-major weights[rows*cols].
 std::vector<uint8_t> magnitude_mask(const float* weights, size_t rows,
                                     size_t cols, float sparsity);

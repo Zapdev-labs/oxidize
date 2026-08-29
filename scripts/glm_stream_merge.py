@@ -93,7 +93,6 @@ def f32_to_bf16_bytes(arr: np.ndarray) -> bytes:
     return u16.tobytes()
 
 
-
 def read_tensor_bytes(path: Path, name: str) -> tuple[bytes, str, list[int]]:
     with open(path, "rb") as f:
         header_len = int.from_bytes(f.read(8), "little")

@@ -1,7 +1,4 @@
 // Package backend mirrors oxidize_core::backend (the Backend enum and
-// ComputeBackend trait). It provides platform-aware backend selection and the
-// abstraction that every compute backend (CPU, CUDA, Metal, MLX, Vulkan,
-// WebGPU) implements.
 package backend
 
 import (

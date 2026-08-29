@@ -1,10 +1,3 @@
-/*
- * ssm.h — State-Space Model (SSM) recurrent state for layer-wise inference.
- *
- * Port of oxidize-core/src/model/layer_wise/ssm.rs.
- * Manages recurrent state checkpoints, convolution history rings, and
- * speculative rollback for SSM-based architectures (Mamba, Jamba, etc.).
- */
 #ifndef OXIDIZE_SSM_H
 #define OXIDIZE_SSM_H
 

@@ -1,9 +1,3 @@
-/*
- * video_decoder.c — Video frame decoding primitives implementation.
- *
- * Port of oxidize-core/src/video/decoder.rs. Dependency-free: no FFmpeg.
- * Provides an owning frame list and a repetitive-frame synthesizer.
- */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_decoder.h"
@@ -11,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── helpers ────────────────────────────────────────────────────────── */
 
 static size_t frame_float_count(uint32_t w, uint32_t h)
 {
@@ -49,7 +42,6 @@ static OcError list_grow(OcVideoFrameList *list)
     return OC_OK;
 }
 
-/* ─── list lifecycle ─────────────────────────────────────────────────── */
 
 OcError oc_video_frame_list_init(OcVideoFrameList *list, size_t capacity)
 {
@@ -86,7 +78,6 @@ void oc_video_frame_list_free(OcVideoFrameList *list)
     list->capacity = 0;
 }
 
-/* ─── add ────────────────────────────────────────────────────────────── */
 
 OcError oc_video_frame_list_add(OcVideoFrameList *list,
                                  uint32_t w, uint32_t h,
@@ -147,7 +138,6 @@ OcError oc_video_frame_list_add_raw(OcVideoFrameList *list, OcVideoFrame *frame)
     return OC_OK;
 }
 
-/* ─── repetitive decoder ─────────────────────────────────────────────── */
 
 OcError oc_video_decoder_repetitive(OcVideoFrameList *out,
                                      uint32_t w, uint32_t h,
@@ -172,7 +162,6 @@ OcError oc_video_decoder_repetitive(OcVideoFrameList *out,
     return OC_OK;
 }
 
-/* ─── accessors ──────────────────────────────────────────────────────── */
 
 OcError oc_video_frame_get(const OcVideoFrameList *list, size_t idx,
                             const OcVideoFrame **out)

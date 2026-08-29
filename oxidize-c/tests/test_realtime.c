@@ -1,11 +1,4 @@
-/*
- * test_realtime.c — Realtime API session tests.
- *
- * VAL-RT-001..003 cover the pure helpers (no socket I/O, no loaded model):
- *   1. Message type parsing (input_text_delta, session.update, unknown).
- *   2. Event formatting (each event type produces valid JSON).
- *   3. Session init/free without a model (error event path).
- */
+/* test_realtime.c — Realtime API session tests. VAL-RT-001..003 cover the pure helpers (no socket I/O, no loaded model): */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 
@@ -13,7 +6,6 @@
 
 #include <string.h>
 
-/* ─── Message type parsing ─────────────────────────────────────────────────── */
 
 Test(realtime, parse_input_text_delta)
 {
@@ -62,7 +54,6 @@ Test(realtime, parse_null_json)
     cr_assert_eq(oc_realtime_parse_type(NULL, 0), OC_RT_MSG_UNKNOWN);
 }
 
-/* ─── Event formatting ─────────────────────────────────────────────────────── */
 
 Test(realtime, format_speech_started)
 {
@@ -101,7 +92,6 @@ Test(realtime, format_overflow_returns_zero)
     cr_assert_eq(n, 0u);
 }
 
-/* ─── Session init/free (no model) ──────────────────────────────────────────── */
 
 Test(realtime, session_init_free_without_model)
 {

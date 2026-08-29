@@ -6,9 +6,6 @@
 use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TrainingMetrics
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A snapshot of training state at a single optimizer step.
 #[derive(Debug, Clone)]
@@ -52,9 +49,6 @@ impl TrainingMetrics {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MetricsLog
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Ordered history of training metrics with analysis helpers.
 #[derive(Debug, Default)]
@@ -199,9 +193,6 @@ impl MetricsLog {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ProgressReporter
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Prints live training progress to stdout using only `print!` / `println!`.
 #[derive(Debug)]
@@ -278,9 +269,6 @@ impl ProgressReporter {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EarlyStopping
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Monitors validation (or training) loss and signals when to stop training
 /// early because no meaningful improvement has occurred for `patience` steps.
@@ -338,9 +326,6 @@ impl EarlyStopping {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

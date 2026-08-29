@@ -1,9 +1,3 @@
-/*
- * benchmark_suite.h — Comprehensive benchmark suite.
- *
- * Runs standardized benchmarks for matvec, quantization, tokenization,
- * and end-to-end generation speed. Port from oxidize-core/src/util/benchmark_suite.rs.
- */
 #ifndef OXIDIZE_BENCHMARK_SUITE_H
 #define OXIDIZE_BENCHMARK_SUITE_H
 

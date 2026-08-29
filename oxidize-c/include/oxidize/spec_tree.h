@@ -1,13 +1,3 @@
-/*
- * spec_tree.h — Tree-based speculative decoding support.
- *
- * Stores a tree of candidate token continuations produced by a draft model,
- * allows the target model to verify leaves in a single batched forward, then
- * marks accepted nodes and prunes rejected branches.
- *
- * Distinct from speculative.h (linear K-token draft verification): this is
- * the tree variant where each node may branch up to `max_children` ways.
- */
 #ifndef OXIDIZE_SPEC_TREE_H
 #define OXIDIZE_SPEC_TREE_H
 
@@ -21,14 +11,12 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_SPEC_TREE_MAX_CHILDREN 8
 #define OC_SPEC_TREE_DEFAULT_MAX_DEPTH    4
 #define OC_SPEC_TREE_DEFAULT_MAX_CHILDREN 8
 #define OC_SPEC_TREE_DEFAULT_MAX_NODES    64
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct OcSpecNode {
     uint32_t token_id;
@@ -54,7 +42,6 @@ typedef struct OcSpecTree {
     OcSpecTreeConfig config;
 } OcSpecTree;
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 /* Initialize config with defaults. */
 OcError oc_spec_tree_config_init(OcSpecTreeConfig *cfg);
@@ -70,10 +57,7 @@ void oc_spec_tree_free(OcSpecTree *tree);
 OcError oc_spec_tree_add_root(OcSpecTree *tree, uint32_t token_id,
                               float logprob, uint32_t *out_idx);
 
-/* Add a child node under `parent_idx`. Returns the new node index via
- * out_idx if non-NULL. Fails if the tree is full, the parent does not exist,
- * the parent already has `max_children`, or the new node's depth would
- * exceed `max_depth`. */
+/* Add a child node under `parent_idx`. Returns the new node index via */
 OcError oc_spec_tree_add_child(OcSpecTree *tree, int32_t parent_idx,
                                uint32_t token_id, float logprob,
                                uint32_t *out_idx);

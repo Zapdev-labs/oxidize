@@ -134,7 +134,6 @@ void oc_eagle_state_free(OcEagleState *state)
     memset(state, 0, sizeof(*state));
 }
 
-/* ─── Real Eagle3 draft model (port of eagle3.rs) ───────────────────── */
 
 void oc_eagle3_config_init(OcEagle3Config *cfg)
 {
@@ -349,7 +348,6 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     size_t kv_size = n_kv_heads * hd;
     size_t kv_len = n_kv_heads * hd;
 
-    /* 1. Token embedding. */
     float *embd = malloc(h * sizeof(float));
     if (!embd) return OC_ERR_OOM;
     if (m->tok_embeddings.data && m->tok_embeddings.rows > token) {
@@ -358,7 +356,6 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         memset(embd, 0, h * sizeof(float));
     }
 
-    /* 2. Norm embedding. */
     float *embd_norm = malloc(h * sizeof(float));
     if (!embd_norm) { free(embd); return OC_ERR_OOM; }
     if (m->layer.attn_norm)
@@ -366,7 +363,6 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     else
         memcpy(embd_norm, embd, h * sizeof(float));
 
-    /* 3. Norm g_embeddings. */
     float *g_norm = malloc(h * sizeof(float));
     if (!g_norm) { free(embd); free(embd_norm); return OC_ERR_OOM; }
     if (m->layer.attn_norm_2)
@@ -374,17 +370,14 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     else
         memcpy(g_norm, m->g_embeddings, h * sizeof(float));
 
-    /* 4. Residual selection. */
     float *residual = cfg->norm_before_residual ? g_norm : m->g_embeddings;
 
-    /* 5. Concat [embd_norm | g_norm]. */
     size_t concat_len = 2 * h;
     float *concat = malloc(concat_len * sizeof(float));
     if (!concat) { free(embd); free(embd_norm); free(g_norm); return OC_ERR_OOM; }
     memcpy(concat, embd_norm, h * sizeof(float));
     memcpy(concat + h, g_norm, h * sizeof(float));
 
-    /* 6. QKV projections. */
     float *q = malloc(q_size * sizeof(float));
     float *k = malloc(kv_size * sizeof(float));
     float *v = malloc(kv_size * sizeof(float));
@@ -404,10 +397,8 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         eagle3_gemv(m->layer.attention.v_proj.data, kv_size, concat_len, concat, v);
     else memset(v, 0, kv_size * sizeof(float));
 
-    /* 7. RoPE. */
     eagle3_apply_rope(q, k, n_heads, n_kv_heads, hd, m->position_offset, cfg->rope_theta);
 
-    /* 8. KV cache append. */
     OcEagle3KvCache *cache = &m->kv_caches[0];
     if (cache->seq_len < cache->capacity) {
         size_t offset = cache->seq_len * kv_len;
@@ -416,7 +407,6 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         cache->seq_len++;
     }
 
-    /* 9. Flash attention decode. */
     float *attn_out = malloc(q_size * sizeof(float));
     if (!attn_out) {
         free(embd); free(embd_norm); free(g_norm); free(concat);
@@ -432,7 +422,6 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         memset(attn_out, 0, q_size * sizeof(float));
     }
 
-    /* 10. Output proj + residual. */
     float *hidden = malloc(h * sizeof(float));
     if (!hidden) {
         free(embd); free(embd_norm); free(g_norm); free(concat);
@@ -448,7 +437,6 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
 
     for (size_t i = 0; i < h; i++) hidden[i] += residual[i];
 
-    /* 11. FFN norm. */
     float *normed_ffn = malloc(h * sizeof(float));
     if (!normed_ffn) {
         free(embd); free(embd_norm); free(g_norm); free(concat);
@@ -460,7 +448,6 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     else
         memcpy(normed_ffn, hidden, h * sizeof(float));
 
-    /* 12. MLP: gate * silu(gate) * up -> down. */
     size_t inter = cfg->intermediate_size;
     float *gate_out = malloc(inter * sizeof(float));
     float *up_out = malloc(inter * sizeof(float));
@@ -491,14 +478,12 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     else memset(mlp_out, 0, h * sizeof(float));
     for (size_t i = 0; i < h; i++) hidden[i] += mlp_out[i];
 
-    /* 13. Update state. */
     memcpy(m->g_embeddings, hidden, h * sizeof(float));
     m->position_offset++;
 
     /* Copy hidden to output. */
     memcpy(out_hidden, hidden, h * sizeof(float));
 
-    /* 14. Logits. */
     if (out_logits && logits_len > 0) {
         oc_eagle3_logits_from_hidden(m, hidden, h, out_logits, logits_len);
     }

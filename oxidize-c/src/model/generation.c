@@ -113,7 +113,6 @@ uint64_t oc_gen_total_tokens(const OcGenResult *result)
     return (uint64_t)result->n_prompt_tokens + (uint64_t)result->n_tokens;
 }
 
-/* ─── Full generation loop ────────────────────────────────────────────── */
 
 /* Get monotonic time in seconds. */
 static double get_time_sec(void)
@@ -153,7 +152,6 @@ OcError oc_gen_run(void *model_ptr,
     result->stopped_on_eos = false;
     result->n_tokens = 0;
 
-    /* 1. Prefill: forward all prompt tokens. */
     double prefill_start = 0.0;
     float *logits = NULL;
     size_t logits_len = 0;
@@ -181,7 +179,6 @@ OcError oc_gen_run(void *model_ptr,
         n_prompt = 1;
     }
 
-    /* 2. Sample first token. */
     uint32_t token = oc_sample(logits, logits_len, &sampler, recent, n_recent);
     if (n_recent < 64) recent[n_recent++] = token;
     result->tokens[result->n_tokens++] = token;
@@ -199,7 +196,6 @@ OcError oc_gen_run(void *model_ptr,
         return OC_OK;
     }
 
-    /* 3. Decode loop. */
     double decode_start = get_time_sec();
     size_t pos = n_prompt;
 

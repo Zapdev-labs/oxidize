@@ -1,17 +1,3 @@
-/*
- * inspect.h — Model inspector: detailed analysis of a loaded GGUF model.
- *
- * Port of the `--inspect` CLI feature from oxidize-core. Provides a
- * structured `OcModelInfo` containing: architecture metadata, layer/embd/
- * head counts, parameter count, file size, dominant quant type, per-tensor
- * summary, memory estimates, thread/NUMA suggestions, tokenizer info, and
- * architecture-specific feature flags (RoPE, RMSNorm, SwiGLU, GQA, MLA).
- *
- * The inspector can open a GGUF file directly via `oc_inspect_model()`, or
- * analyze an already-loaded `OcLlamaModel` via `oc_inspect_llama()`. Output
- * is formatted as a human-readable table (`oc_inspect_format`) or JSON
- * (`oc_inspect_format_json`).
- */
 #ifndef OXIDIZE_INSPECT_H
 #define OXIDIZE_INSPECT_H
 
@@ -26,12 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Per-tensor summary ──────────────────────────────────────────────────
- *
- * A compact view of a single GGUF tensor. `name` is NUL-terminated (copied
- * from the GGUF tensor table). `type` is the raw ggml dtype id (0=F32, 1=F16,
- * 8=Q8_0, ...). `bytes` is the on-disk byte size. `dims[i]` follows GGUF
- * order (dims[0] innermost); `n_dims` is the count of valid entries. */
 typedef struct OcTensorSummary {
     char     name[128];
     uint32_t type;
@@ -40,11 +20,6 @@ typedef struct OcTensorSummary {
     uint64_t dims[4];
 } OcTensorSummary;
 
-/* ─── Model info ──────────────────────────────────────────────────────────
- *
- * The full inspection result. Strings are NUL-terminated; numeric fields
- * default to 0. `tensors` is a heap-allocated array of `n_tensors` entries
- * (freed by `oc_inspect_free()`). All other fields are by-value. */
 typedef struct OcModelInfo {
     /* Architecture + identity. */
     char     arch[64];        /* "llama", "qwen2", "deepseek2", ...        */
@@ -93,31 +68,16 @@ typedef struct OcModelInfo {
     uint32_t sliding_window;
 } OcModelInfo;
 
-/* Inspect a GGUF file on disk: open, parse metadata + tensor table, compute
- * all summary fields, fill `*out`. Returns OC_OK, OC_ERR_IO (file open),
- * OC_ERR_FORMAT (bad GGUF), OC_ERR_OOM, or OC_ERR_INVALID_ARG (NULL args).
- * On error, `*out` is zeroed. On success, caller owns `out->tensors` and
- * must call `oc_inspect_free(out)` when done. */
+/* Inspect a GGUF file on disk: open, parse metadata + tensor table, compute */
 OcError oc_inspect_model(const char *path, OcModelInfo *out);
 
-/* Inspect an already-loaded OcLlamaModel: derive all summary fields from
- * the model's config + GGUF metadata. Does NOT re-open the file. Returns
- * OC_OK or OC_ERR_INVALID_ARG (NULL args). Caller owns `out->tensors` and
- * must call `oc_inspect_free(out)`. */
+/* Inspect an already-loaded OcLlamaModel: derive all summary fields from the model's config + GGUF metadata. */
 OcError oc_inspect_llama(const OcLlamaModel *model, OcModelInfo *out);
 
-/* Format `info` as a human-readable table into `buf` (up to `cap-1` chars,
- * NUL-terminated). Returns the full length of the formatted output
- * (excluding NUL), like snprintf: if the return value is >= `cap`, the
- * output was truncated. If `buf` is NULL or `cap` is 0, nothing is
- * written and the required length is returned. */
+/* Format `info` as a human-readable table into `buf` (up to `cap-1` chars, */
 size_t oc_inspect_format(const OcModelInfo *info, char *buf, size_t cap);
 
-/* Format `info` as a single-line JSON object into `buf` (up to `cap-1`
- * chars, NUL-terminated). Returns the full length of the formatted output
- * (excluding NUL), like snprintf: if the return value is >= `cap`, the
- * output was truncated. If `buf` is NULL or `cap` is 0, nothing is
- * written and the required length is returned. */
+/* Format `info` as a single-line JSON object into `buf` (up to `cap-1` */
 size_t oc_inspect_format_json(const OcModelInfo *info, char *buf, size_t cap);
 
 /* Free the heap-allocated fields of `info` (currently `info->tensors`).

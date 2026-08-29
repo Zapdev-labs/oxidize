@@ -1,9 +1,3 @@
-/*
- * cluster.h — GPU cluster management for distributed inference.
- *
- * Manages a cluster of GPU nodes for distributed inference workloads.
- * Port from oxidize-core/src/cluster/gpu_cluster.rs.
- */
 #ifndef OXIDIZE_CLUSTER_H
 #define OXIDIZE_CLUSTER_H
 

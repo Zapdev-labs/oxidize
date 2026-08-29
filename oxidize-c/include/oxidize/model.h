@@ -1,24 +1,3 @@
-/*
- * model.h — OcModelArchitecture enum + detection + tensor-name mapping.
- *
- * Port of oxidize-core/src/model/inference.rs::ModelArchitecture and
- * oxidize-core/src/format/gguf.rs::map_tensor_name to C11.
- *
- * `oc_model_arch_from_str()` recognizes the 17 architecture variants
- * enumerated in inference.rs::ModelArchitecture::from_gguf:
- *   llama, mistral, mixtral, deepseek (+deepseek2/v2/v3/moe),
- *   qwen (+qwen2/2moe/3/3moe/35/3_5/3_5_text/35_text/3_5_moe/3_5_moe_text/35moe),
- *   gemma (+2/3/4), phi (+3), falcon, gpt2, gptj, gptneox,
- *   minimax (+minimax-m2/text-01), lfm2, lfm2moe,
- *   glm (+glm4/moe/moe_dsa/dsa/glmmoe/glmmoedsa),
- *   hunyuan (+moe/hunyuanmoe/hy_v3/hyv3/hunyuan_v3),
- *   plus OC_ARCH_UNKNOWN for unrecognized strings (16 recognized + 1 unknown
- *   = 17 enum values). LongCat is currently implemented by the C port only.
- *
- * `oc_gguf_map_tensor_name()` maps HuggingFace tensor names to the oxidize
- * canonical form (e.g. "model.layers.3.self_attn.q_proj.weight" →
- * "blk.3.attn_q.weight"). Per-architecture mapping tables mirror Rust.
- */
 #ifndef OXIDIZE_MODEL_H
 #define OXIDIZE_MODEL_H
 
@@ -59,12 +38,7 @@ typedef enum {
     OC_ARCH__COUNT,
 } OcModelArchitecture;
 
-/* Map a `general.architecture` string to OcModelArchitecture. The string is
- * matched case-insensitively after '-' → '_' normalization (mirrors Rust
- * `arch.replace('-', "_")`). Unknown strings return OC_ARCH_UNKNOWN.
- * `oc_error_msg(OC_ERR_MODEL)` is the canonical error code for callers that
- * need to propagate "unsupported architecture" — they should check for
- * OC_ARCH_UNKNOWN and return OC_ERR_MODEL. */
+/* Map a `general.architecture` string to OcModelArchitecture. The string is */
 OcModelArchitecture oc_model_arch_from_str(const char *s);
 
 /* Inverse of oc_model_arch_from_str: returns a stable canonical name
@@ -95,32 +69,7 @@ bool oc_model_arch_uses_shortconv(OcModelArchitecture arch);
  * Gemma and Phi use this pattern. */
 bool oc_model_arch_uses_parallel_attn_ffn(OcModelArchitecture arch);
 
-/* Map a HuggingFace tensor name to the oxidize canonical form for the given
- * architecture. Returns an arena-owned, NUL-terminated string (so the caller
- * must keep `arena` alive for the lifetime of the result). If the name does
- * not match any known pattern, returns an arena-owned copy of `name`
- * (mirrors Rust's `mapped.unwrap_or_else(|| name.to_owned())`). Returns NULL
- * only on OOM.
- *
- * Examples (Llama/Qwen2 dense):
- *   "model.embed_tokens.weight"        → "tok_embeddings.weight"
- *   "lm_head.weight"                   → "output.weight"
- *   "model.norm.weight"                → "norm.weight"
- *   "model.layers.3.self_attn.q_proj.weight" → "blk.3.attn_q.weight"
- *   "model.layers.3.input_layernorm.weight"  → "blk.3.attn_norm.weight"
- *
- * MoE (Qwen2-MoE / Mixtral — block_sparse_moe.experts.M.w1.weight):
- *   "model.layers.4.block_sparse_moe.experts.2.w1.weight"
- *     → "blk.4.ffn_gate.2.weight"
- *
- * Qwen3-MoE shared expert (mlp.shared_expert.*):
- *   "model.layers.1.mlp.shared_expert.gate_proj.weight"
- *     → "blk.1.ffn_gate_shexp.weight"
- *
- * DeepSeek MLA (self_attn.q_a_proj.weight etc.):
- *   "model.layers.1.self_attn.q_a_proj.weight"            → "blk.1.attn_q_a.weight"
- *   "model.layers.1.self_attn.kv_a_proj_with_mqa.weight"  → "blk.1.attn_kv_a_mqa.weight"
- */
+/* Map a HuggingFace tensor name to the oxidize canonical form for the given */
 const char *oc_gguf_map_tensor_name(OcModelArchitecture arch, const char *name,
                                     OcArena *arena);
 

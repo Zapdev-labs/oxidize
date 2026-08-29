@@ -102,11 +102,6 @@ type GpuActivationBuffer struct {
 }
 
 // GpuState mirrors types.rs:GpuState: a per-context bundle of resident weight
-// caches, buffer pools, layer-management state, and activation buffers.
-//
-// In the pure-Go (CGO_ENABLED=0) build the "device" buffers are host slices;
-// the cuda build tag can layer real device allocations on top while reusing the
-// same bookkeeping for the LRU / budget logic.
 type GpuState struct {
 	mu sync.Mutex
 

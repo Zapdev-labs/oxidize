@@ -1,10 +1,3 @@
-/* test_config.c — Criterion tests for the model config module.
- *
- * Builds small GGUF files in /tmp with the GGUF writer (using llama-style
- * metadata keys), then round-trips them through oc_model_config_from_gguf
- * and exercises the init/validate/print/arch_name/n_params/is_moe/has_gqa
- * helpers.
- */
 #define _POSIX_C_SOURCE 200809L
 
 #include <criterion/criterion.h>
@@ -18,7 +11,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ─── Helpers ─────────────────────────────────────────────────────────── */
 
 static const char *tmp_gguf(const char *suffix)
 {
@@ -64,7 +56,6 @@ static OcError write_llama_gguf(const char *path,
     return OC_OK;
 }
 
-/* ─── Tests ───────────────────────────────────────────────────────────── */
 
 Test(config, init_defaults)
 {

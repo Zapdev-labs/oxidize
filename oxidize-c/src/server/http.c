@@ -1,17 +1,3 @@
-/*
- * http.c — minimal dependency-free HTTP/1.1 server.
- *
- * Uses POSIX sockets (libc + libpthread only). Each worker thread runs
- * accept() in a loop, reads one request, dispatches to the handler, writes
- * the response, and closes the connection (Connection: close — no
- * keep-alive). This is sufficient for single-client dev use and the
- * `oxidize run`/`--serve-api` workflow.
- *
- * Request parsing: reads up to OC_HTTP_MAX_REQUEST_BYTES, locates the
- * "\r\n\r\n" header/body separator, parses the request line, extracts
- * Content-Length, and NUL-terminates the body. Does not support chunked
- * transfer-encoding (rejects with 411).
- */
 #define _GNU_SOURCE 1   /* accept4, SO_REUSEPORT on Linux */
 #include "oxidize/http.h"
 
@@ -36,7 +22,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* ─── Status lines ────────────────────────────────────────────────────── */
 
 const char *oc_http_status_line(int status)
 {
@@ -61,7 +46,6 @@ const char *oc_http_status_line(int status)
     }
 }
 
-/* ─── Response formatting ──────────────────────────────────────────────── */
 
 size_t oc_http_format_response(char *buf, size_t cap,
                                int status, const char *content_type,
@@ -86,10 +70,6 @@ size_t oc_http_format_response(char *buf, size_t cap,
     return header_len + body_len;
 }
 
-/* ─── Request parsing ────────────────────────────────────────────────────
- *
- * Returns true on success; fills `req`. On failure, returns false and sets
- * `*out_status` to the appropriate HTTP error code (400, 411, 413). */
 
 typedef struct HeaderValue {
     char *data;
@@ -238,7 +218,6 @@ static bool request_wants_completion_stream(const OcHttpRequest *req)
     return oc_http_json_bool_field(req->body, "stream", false);
 }
 
-/* ─── Worker thread ────────────────────────────────────────────────────── */
 
 typedef struct OcWorkerCtx {
     OcHttpServer *srv;
@@ -537,15 +516,7 @@ static void *worker_main(void *arg)
                 free(big);
             }
         }
-        /* Free the handler-returned body. Handlers malloc their JSON
-         * responses (see oc_openai_handler); the server core owns freeing
-         * them after the response is written. String literals (used by
-         * some test handlers) are also safe to pass to free() per C11
-         * because free(NULL) is a no-op and we never return a literal
-         * when body_len > 0 in production code — but to be safe we only
-         * free when the handler indicated a non-empty malloc'd body.
-         * NOTE: handlers that return string literals with body_len > 0
-         * MUST instead return a malloc'd copy (oc_openai_handler does). */
+        /* Free the handler-returned body. Handlers malloc their JSON because free(NULL) is a no-op and we never return a literal */
         if (body != NULL && body_len > 0) {
             free((void *)body);
         }
@@ -557,7 +528,6 @@ static void *worker_main(void *arg)
     return NULL;
 }
 
-/* ─── Server lifecycle ────────────────────────────────────────────────── */
 
 static OcError http_server_start(const char *host, uint16_t port,
                                  size_t n_threads, OcHttpHandler handler,

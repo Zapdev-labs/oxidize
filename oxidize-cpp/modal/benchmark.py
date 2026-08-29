@@ -233,7 +233,6 @@ def _gpu_run(gpu_label: str, max_tokens: int) -> dict:
     return out
 
 
-# ---- model provisioning (CPU; no GPU cost) --------------------------------
 @app.function(image=image, volumes={MODELS_MOUNT: models_volume}, timeout=60 * 20)
 def ensure_model() -> str:
     import os

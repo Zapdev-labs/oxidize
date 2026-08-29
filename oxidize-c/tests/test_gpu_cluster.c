@@ -1,11 +1,8 @@
-/* test_gpu_cluster.c — GPU family profile + manifest generation tests. */
 #include <criterion/criterion.h>
 #include "oxidize/gpu_cluster.h"
 #include <string.h>
 
-/* ----------------------------------------------------------------- */
 /* Profile lookups.                                                   */
-/* ----------------------------------------------------------------- */
 
 Test(gpu_cluster, profile_b200)
 {
@@ -58,9 +55,7 @@ Test(gpu_cluster, profile_invalid_returns_null)
     cr_assert_null(oc_gpu_profile((OcGpuFamily)99));
 }
 
-/* ----------------------------------------------------------------- */
 /* Slug / name strings.                                               */
-/* ----------------------------------------------------------------- */
 
 Test(gpu_cluster, slug_strings)
 {
@@ -78,9 +73,7 @@ Test(gpu_cluster, name_strings)
     cr_assert_str_eq(oc_gpu_family_name(OC_GPU_FAMILY__COUNT), "unknown");
 }
 
-/* ----------------------------------------------------------------- */
 /* Slug parsing.                                                      */
-/* ----------------------------------------------------------------- */
 
 Test(gpu_cluster, from_slug_canonical)
 {
@@ -103,9 +96,7 @@ Test(gpu_cluster, from_slug_invalid)
     cr_assert_eq(oc_gpu_family_from_slug(NULL), OC_GPU_FAMILY__COUNT);
 }
 
-/* ----------------------------------------------------------------- */
 /* Rank ordering.                                                     */
-/* ----------------------------------------------------------------- */
 
 Test(gpu_cluster, rank_ordering)
 {
@@ -123,9 +114,7 @@ Test(gpu_cluster, rank_values)
     cr_assert_eq(oc_gpu_family_rank(OC_GPU_FAMILY_RTX_PRO_6000), 1u);
 }
 
-/* ----------------------------------------------------------------- */
 /* Enumeration.                                                       */
-/* ----------------------------------------------------------------- */
 
 Test(gpu_cluster, n_families)
 {
@@ -156,9 +145,7 @@ Test(gpu_cluster, enumerate_all_families)
     }
 }
 
-/* ----------------------------------------------------------------- */
 /* Label lookup.                                                      */
-/* ----------------------------------------------------------------- */
 
 Test(gpu_cluster, label_product)
 {
@@ -179,9 +166,7 @@ Test(gpu_cluster, label_unknown)
     cr_assert_null(oc_gpu_cluster_label(NULL));
 }
 
-/* ----------------------------------------------------------------- */
 /* Manifest generation.                                               */
-/* ----------------------------------------------------------------- */
 
 Test(gpu_cluster, node_pool_yaml_b200)
 {

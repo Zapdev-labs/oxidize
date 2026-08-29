@@ -1,14 +1,3 @@
-/*
- * sse.c — Server-Sent Events implementation.
- *
- * Companion to oxidize-c/include/oxidize/sse.h. Formats and parses the
- * text/event-stream wire format, manages a small client table, and
- * broadcasts events. Built on plain libc + write(); no HTTP plumbing is
- * reimplemented here (the caller is expected to have already written the
- * HTTP upgrade response with Content-Type: text/event-stream).
- *
- * Concurrency: NOT thread-safe. Callers serialize externally.
- */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/sse.h"
@@ -22,7 +11,6 @@
 #include <time.h>
 #include <unistd.h>
 
-/* ─── Internal helpers ──────────────────────────────────────────────────── */
 
 /* Append `s` (NUL-terminated) to `buf` at offset `*off`, advancing *off.
  * Returns true on success, false on overflow. */
@@ -35,11 +23,7 @@ static bool buf_append(char *buf, size_t cap, size_t *off, const char *s)
     return true;
 }
 
-/* Write all bytes to fd, retrying on EINTR. Returns true if all bytes were
- * written, false on a hard error (broken pipe, connection reset, etc.).
- * Blocks SIGPIPE around the write so a dead client does not kill the
- * process; instead write() returns -1/EPIPE and we treat it as a
- * disconnect. */
+/* Write all bytes to fd, retrying on EINTR. Returns true if all bytes were */
 static bool write_all(int fd, const char *buf, size_t len)
 {
     /* Block SIGPIPE for the lifetime of this process so a dead client
@@ -79,7 +63,6 @@ static size_t skip_eol(const char *buf, size_t len, size_t *pos)
     return consumed;
 }
 
-/* ─── Per-client helpers ────────────────────────────────────────────────── */
 
 OcError oc_sse_init(OcSseClient *c, int fd)
 {
@@ -153,21 +136,14 @@ size_t oc_sse_format_event_raw(const char *event, const char *data,
 size_t oc_sse_parse_event(const char *buf, size_t len, OcSseEvent *out_event)
 {
     if (!buf || !out_event || len == 0) return 0;
-    /* The parser mutates the caller's buffer in place to NUL-terminate field
-     * values and to join multi-line `data:` payloads with '\n'. The buffer
-     * is treated as writable per the documented contract (callers pass a
-     * writable recv buffer). `buf` is `const char *` in the signature for
-     * API ergonomics; we cast away const here. */
+    /* The parser mutates the caller's buffer in place to NUL-terminate field */
     char *wbuf = (char *)buf;
 
     memset(out_event, 0, sizeof(*out_event));
     size_t pos = 0;
     bool have_field = false;
 
-    /* For multi-line `data:` we rewrite the buffer in place: the first
-     * data value stays where it is, and subsequent values are moved right
-     * after it (joined by '\n'). `data_start` is the anchor offset of the
-     * joined data region; `data_write` is the current write cursor. */
+    /* For multi-line `data:` we rewrite the buffer in place: the first */
     size_t data_start = 0;
     char *data_write = NULL;
     bool data_started = false;
@@ -287,7 +263,6 @@ OcError oc_sse_send_heartbeat(OcSseClient *c)
     return OC_OK;
 }
 
-/* ─── Server ─────────────────────────────────────────────────────────────── */
 
 OcError oc_sse_server_init(OcSseServer *s, size_t max_clients)
 {

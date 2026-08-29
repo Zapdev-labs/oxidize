@@ -354,9 +354,9 @@ pub fn sample_with_repetition_and_grammar(
         .max_by(|a, b| a.total_cmp(b))
         .ok_or(SamplingError::EmptyLogits)?;
     const MAX_PARTIAL_TOP_K: usize = 1024;
-    let top_k_limit = config.top_k.filter(|top_k| {
-        *top_k < adjusted_logits.len() && *top_k <= MAX_PARTIAL_TOP_K
-    });
+    let top_k_limit = config
+        .top_k
+        .filter(|top_k| *top_k < adjusted_logits.len() && *top_k <= MAX_PARTIAL_TOP_K);
     let mut indexed_probs = if let Some(top_k) = top_k_limit {
         let mut raw_sum = 0.0_f32;
         let mut heap: BinaryHeap<Reverse<TopKCandidate>> = BinaryHeap::with_capacity(top_k);
@@ -371,10 +371,8 @@ pub fn sample_with_repetition_and_grammar(
         if raw_sum <= 0.0 || !raw_sum.is_finite() {
             return greedy(logits);
         }
-        let mut top_candidates: Vec<(usize, f32)> = heap
-            .into_iter()
-            .map(|Reverse(c)| (c.idx, c.prob))
-            .collect();
+        let mut top_candidates: Vec<(usize, f32)> =
+            heap.into_iter().map(|Reverse(c)| (c.idx, c.prob)).collect();
         for (_, p) in &mut top_candidates {
             *p /= raw_sum;
         }

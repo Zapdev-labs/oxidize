@@ -1,22 +1,3 @@
-/* mmap.c — read-only memory mapping with madvise/mlock/prefault.
- *
- * Port of oxidize-core::MappedGgufFile mmap machinery (memmap2-based) to C.
- * The single place in the C port where mmap/madvise/mlock syscalls appear.
- *
- * Lifecycle:
- *   - oc_mmap_open_readonly(): open(path) + mmap(PROT_READ, MAP_PRIVATE)
- *     + MADV_SEQUENTIAL + MADV_WILLNEED (best-effort, Linux).
- *   - oc_mmap_advise_hugepage(): MADV_HUGEPAGE (best-effort). Caller decides
- *     when hugepages are appropriate (Rust enables THP only when the model
- *     fits in RAM with >= 2x headroom — see MappedGgufFile::advise_huge_pages).
- *   - oc_mmap_mlock_with_headroom(): mlock() guarded by MemAvailable headroom
- *     check (model_bytes < available * 7/10), mirroring Rust
- *     prefault_pages_locked. Also runs a prefault sweep.
- *   - oc_mmap_close(): munmap + close(fd) + free(m).
- *
- * Best-effort policy: a failure to madvise/mlock is logged at WARN level but
- * does NOT return an error (the mapping is still usable).
- */
 
 /* Expose POSIX/Linux extensions: O_CLOEXEC, madvise, MADV_*, mlock, setrlimit,
  * pthread_create, etc. Must be the very first non-comment line so system
@@ -44,10 +25,6 @@
 #include "oxidize/log.h"
 #include "oxidize/util/bytes.h"
 
-/* ─── OcMmap definition ────────────────────────────────────────────────────
- *
- * Defined here (not in the header) so callers can't poke at the fields
- * directly. The header exposes only the typedef + accessor functions. */
 struct OcMmap {
     void   *addr;       /* mmap'd region (PROT_READ, MAP_PRIVATE); NULL if closed */
     size_t  len;        /* length of the mapping in bytes */
@@ -170,10 +147,7 @@ OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out)
     if (!m) return OC_ERR_OOM;
 
 #ifdef __linux__
-    /* Note: oc_mmap_open_fd takes ownership of `fd` (m->fd = fd on success,
-     * and oc_mmap_close() will close it). Every error path must therefore
-     * close(fd) here — mirroring oc_mmap_open_readonly's cleanup — otherwise
-     * the caller has no way to reclaim the fd and it leaks. */
+    /* Note: oc_mmap_open_fd takes ownership of `fd` (m->fd = fd on success, */
     /* Reject len > file size: mmap would succeed but touching pages past EOF
      * SIGBUSes. Only enforced for regular files (the only mappable case here). */
     struct stat st;
@@ -359,14 +333,6 @@ bool oc_mmap_mlock_with_headroom(OcMmap *m)
 #endif
 }
 
-/* ─── Prefault ────────────────────────────────────────────────────────────
- *
- * Touch every 4 KiB page via volatile reads so they are faulted into the page
- * cache. Mirrors Rust `prefault_pages`. The XOR checksum is a sanity check
- * that the mapping is readable (and lets tests verify the sweep ran).
- *
- * Linux page size is virtually always 4 KiB on x86_64. THP regions still get
- * touched at 4 KiB granularity; the kernel handles the rest. */
 uint8_t oc_mmap_prefault(const OcMmap *m)
 {
     if (!m || !m->addr) return 0;

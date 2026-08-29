@@ -1,4 +1,3 @@
-/* test_model_registry.c — model registry tests. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <criterion/criterion.h>
@@ -10,7 +9,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* ─── Test fixtures ─────────────────────────────────────────────────────── */
 
 /* Create a temp directory and a couple of fake .gguf files (zero-byte, so
  * the GGUF parse will fail gracefully and entries get arch=UNKNOWN). */
@@ -47,7 +45,6 @@ static void touch_gguf(const char *name)
     if (fp) fclose(fp);
 }
 
-/* ─── init / free ───────────────────────────────────────────────────────── */
 
 Test(model_registry, init_free)
 {
@@ -88,7 +85,6 @@ Test(model_registry, free_null)
     oc_model_registry_free(NULL);
 }
 
-/* ─── add / remove ──────────────────────────────────────────────────────── */
 
 Test(model_registry, add_single)
 {
@@ -154,7 +150,6 @@ Test(model_registry, remove_null)
     oc_model_registry_free(&reg);
 }
 
-/* ─── scan ─────────────────────────────────────────────────────────────── */
 
 Test(model_registry, scan_empty_dir)
 {
@@ -219,7 +214,6 @@ Test(model_registry, scan_null_args)
     oc_model_registry_free(&reg);
 }
 
-/* ─── find ──────────────────────────────────────────────────────────────── */
 
 Test(model_registry, find_substring)
 {
@@ -258,7 +252,6 @@ Test(model_registry, find_null)
     oc_model_registry_free(&reg);
 }
 
-/* ─── list ──────────────────────────────────────────────────────────────── */
 
 Test(model_registry, list_by_name)
 {
@@ -296,7 +289,6 @@ Test(model_registry, list_null_registry)
                  0);
 }
 
-/* ─── format (JSON) ─────────────────────────────────────────────────────── */
 
 Test(model_registry, format_empty)
 {
@@ -349,7 +341,6 @@ Test(model_registry, format_null)
     oc_model_registry_free(&reg);
 }
 
-/* ─── stats ──────────────────────────────────────────────────────────────── */
 
 Test(model_registry, stats_empty)
 {

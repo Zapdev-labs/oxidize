@@ -1,10 +1,3 @@
-/*
- * mtp.h — Multi-Token Prediction (MTP/nextn) draft generation.
- *
- * Port of oxidize-core/src/model/inference/mtp.rs.
- * Generates draft tokens using the model's native MTP/nextn block,
- * feeding accepted tokens back for multi-step speculative decoding.
- */
 #ifndef OXIDIZE_MTP_H
 #define OXIDIZE_MTP_H
 
@@ -54,10 +47,7 @@ void oc_mtp_config_init(OcMtpConfig *cfg);
 OcError oc_mtp_engine_init(OcMtpEngine *engine, const OcMtpConfig *cfg);
 void oc_mtp_engine_free(OcMtpEngine *engine);
 
-/* Generate draft tokens from start position.
- * start_token: the committed token at the current position.
- * start_hidden: hidden state vector (hidden_size floats).
- * Returns n_draft draft tokens in engine->draft_tokens. */
+/* Generate draft tokens from start position. */
 OcError oc_mtp_draft(OcMtpEngine *engine,
                      uint32_t start_token,
                      const float *start_hidden,

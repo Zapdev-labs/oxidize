@@ -1,11 +1,9 @@
-/* test_node.c — mesh node tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <stdio.h>
 #include <string.h>
 #include "oxidize/node.h"
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 Test(node, init_creates_online_node)
 {
@@ -70,7 +68,6 @@ Test(node, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── Connection management ────────────────────────────────────────── */
 
 Test(node, connect_adds_peer)
 {
@@ -159,7 +156,6 @@ Test(node, disconnect_rejects_zero_peer)
     oc_node_free(n);
 }
 
-/* ─── Queries ──────────────────────────────────────────────────────── */
 
 Test(node, get_info_copies_state)
 {
@@ -218,7 +214,6 @@ Test(node, has_capability_null_returns_false)
     cr_assert_not(oc_node_has_capability(NULL, OC_NODE_CAP_GPU));
 }
 
-/* ─── Traffic accounting ───────────────────────────────────────────── */
 
 Test(node, record_sent_accumulates)
 {
@@ -250,7 +245,6 @@ Test(node, record_sent_null_fails)
     cr_assert_eq(oc_node_record_received(NULL, 100), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Capability names ──────────────────────────────────────────────── */
 
 Test(node, capability_name_returns_string)
 {

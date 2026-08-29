@@ -1,11 +1,8 @@
-/* test_mesh_chat.c — Chat routing over mesh tests. */
 #include <criterion/criterion.h>
 #include "oxidize/mesh_chat.h"
 #include <string.h>
 
-/* ----------------------------------------------------------------- */
 /* init.                                                              */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, init)
 {
@@ -29,9 +26,7 @@ Test(mesh_chat, init_null_conv)
     cr_assert_neq(oc_mesh_chat_init(NULL, "x"), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* add_message.                                                       */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, add_message_basic)
 {
@@ -85,9 +80,7 @@ Test(mesh_chat, add_message_null_conv)
                                            "x", "y"), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* get_messages + filtering.                                          */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, get_messages_all)
 {
@@ -152,9 +145,7 @@ Test(mesh_chat, get_messages_null)
                                             out, 1, NULL), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* message_count.                                                     */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, message_count_all)
 {
@@ -182,9 +173,7 @@ Test(mesh_chat, message_count_null_conv)
     cr_assert_eq(oc_mesh_chat_message_count(NULL, OC_MESH_CHAT_ROLE__COUNT), 0u);
 }
 
-/* ----------------------------------------------------------------- */
 /* role_name.                                                         */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, role_name)
 {
@@ -194,9 +183,7 @@ Test(mesh_chat, role_name)
     cr_assert_str_eq(oc_mesh_chat_role_name(OC_MESH_CHAT_ROLE__COUNT), "unknown");
 }
 
-/* ----------------------------------------------------------------- */
 /* clear.                                                             */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, clear)
 {
@@ -222,9 +209,7 @@ Test(mesh_chat, clear_null)
     cr_assert_neq(oc_mesh_chat_clear(NULL), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* serialize.                                                         */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, serialize_basic)
 {
@@ -269,9 +254,7 @@ Test(mesh_chat, serialize_overflow)
     cr_assert_neq(oc_mesh_chat_serialize(&conv, buf, sizeof(buf)), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* Overflow: max 256 messages.                                        */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_chat, overflow_max_messages)
 {

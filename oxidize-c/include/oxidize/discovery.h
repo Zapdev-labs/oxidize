@@ -1,9 +1,3 @@
-/*
- * discovery.h — Mesh node discovery protocol.
- *
- * Discovers peers on the network via UDP multicast or manual seed lists.
- * Port from oxidize-core/src/mesh/discovery.rs.
- */
 #ifndef OXIDIZE_DISCOVERY_H
 #define OXIDIZE_DISCOVERY_H
 

@@ -1,9 +1,3 @@
-/*
- * continuous_batching.c — continuous batching scheduler implementation.
- *
- * Port of oxidize-core/src/paged_attention/ continuous batching concepts.
- * See include/oxidize/continuous_batching.h for design notes.
- */
 #include "oxidize/continuous_batching.h"
 
 #include <stdlib.h>
@@ -12,7 +6,6 @@
 /* ssize_t substitute: return value >= 0 means index, -1 means not found. */
 #define SLOT_NOT_FOUND ((size_t)-1)
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 OcBatchConfig oc_batch_config_default(void)
 {
@@ -23,7 +16,6 @@ OcBatchConfig oc_batch_config_default(void)
     return c;
 }
 
-/* ─── Scheduler ────────────────────────────────────────────────────────── */
 
 static void slot_free(OcBatchSlot *slot)
 {

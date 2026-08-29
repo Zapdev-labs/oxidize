@@ -134,9 +134,7 @@ pub(super) fn gpu_decode_graph_end_capture(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // GPH kernel launchers — read pos/context/token_id from d_state[0..3].
-// ---------------------------------------------------------------------------
 
 #[cfg(feature = "cuda")]
 pub(super) fn launch_rope_f32_gph(

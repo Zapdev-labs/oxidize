@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── API ──────────────────────────────────────────────────────────────── */
 
 OcError oc_attn_sink_config_init(OcAttentionSinkConfig *cfg)
 {

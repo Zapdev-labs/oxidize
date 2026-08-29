@@ -1,0 +1,10 @@
+ts	phase	decision	why	evidence	result
+2026-08-29T02:49:26Z	frame	counted product source at 324129 lines, gate is remove 10000 without dropping a feature or slowing kernels	needed a number a reviewer can rerun instead of trusting a vibe	scripts/loc_baseline.json	baseline captured
+2026-08-29T02:49:26Z	harness	committed loc_count.py and strip_noise_comments.py as the levers	the reviewer reruns the scripts, not a hand count	scripts/loc_count.py scripts/strip_noise_comments.py	predicate script ready
+2026-08-29T02:49:26Z	architect	skipped a 4-model architect	the shrink shape is delete banners and keep one GGUF writer, not a new layer	playbooks/figure-it-out.md skip	skipped, mechanical
+2026-08-29T02:49:26Z	comments	stripped banner and numbered-step comments across C/C++/Rust/Go/Python	comments are not features and they were the cheapest 8k	scripts/strip_noise_comments.py --write	kept, ~9.6k from comments
+2026-08-29T02:49:26Z	gguf-writer	one write_gguf in oxidize-core, prune/quantize/safetensors call it	three copies of the same encoder were a bug farm	oxidize-core/src/format/gguf_write.rs	write_then_parse_roundtrip plus quantize/prune tests green
+2026-08-29T02:49:26Z	c-helpers	shared oc_gguf_writer_init_from_file, Gemma/Phi use oc_gelu_approx_f32	duplicate helpers hid the real activation	oxidize-c/src/format/gguf_writer.c gemma_arch.c phi_arch.c	C -Werror build green
+2026-08-29T02:49:26Z	rust-tests	compacted inference GGUF fixtures behind mapped/s/u/f/t helpers	the tests still assert the same metadata, they just stop repeating BTreeMap noise	oxidize-core/src/model/inference.rs	23 inference tests passed
+2026-08-29T02:49:26Z	gate	loc_count vs baseline prints predicate PASS at 10160 removed	the done check is the script, not a self-report	python3 scripts/loc_count.py --compare scripts/loc_baseline.json	predicate PASS
+2026-08-29T02:49:26Z	skipped	did not rewrite SIMD/CUDA inner loops or delete Criterion	speed and features live there	oxidize-kernels oxidize-c/tests/criterion	left alone

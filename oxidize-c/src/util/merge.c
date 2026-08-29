@@ -1,10 +1,3 @@
-/*
- * merge.c — checkpoint merging implementation.
- *
- * Reads multiple GGUF checkpoints, dequantizes tensors to f32, merges
- * using the specified strategy (linear/SLERP/TIES/DARE), re-quantizes,
- * and writes output GGUF.
- */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/merge.h"
 
@@ -17,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static float *dequant_tensor(const OcGgufMmappedFile *mf,
                              const OcGgufTensorInfo *ti)
@@ -40,51 +32,6 @@ static float *dequant_tensor(const OcGgufMmappedFile *mf,
         if (e != OC_OK) { free(out); return NULL; }
     }
     return out;
-}
-
-/* Open a GGUF writer for `output_path` and copy scalar/string metadata from
- * the template file so the output is a loadable GGUF (real KV records +
- * tensor-info table, not raw tensor bytes).
- * ponytail: array metadata (e.g. tokenizer vocab) is not copied — extend when
- * merged models must retokenize. */
-static OcError open_writer_copy_meta(const OcGgufFile *gf,
-                                     const char *output_path, OcGgufWriter *w)
-{
-    char arch[64] = "llama";
-    const char *arch_p = NULL;
-    size_t arch_len = 0;
-    if (oc_gguf_metadata_get_str(gf, "general.architecture", &arch_p, &arch_len) &&
-        arch_len > 0 && arch_len < sizeof(arch)) {
-        memcpy(arch, arch_p, arch_len);
-        arch[arch_len] = '\0';
-    }
-    OcError e = oc_gguf_writer_init(output_path, arch, w);
-    if (e != OC_OK) return e;
-
-    for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
-        const OcGgufMetadataKV *kv = &gf->metadata[i];
-        if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
-        switch (kv->value.type) {
-        case OC_GGUF_MT_UINT32:
-            oc_gguf_writer_add_uint32(w, kv->key, kv->value.v.u32); break;
-        case OC_GGUF_MT_UINT64:
-            oc_gguf_writer_add_uint64(w, kv->key, kv->value.v.u64); break;
-        case OC_GGUF_MT_FLOAT32:
-            oc_gguf_writer_add_float32(w, kv->key, kv->value.v.f32); break;
-        case OC_GGUF_MT_STRING: {
-            char *s = malloc(kv->value.v.str.len + 1);
-            if (!s) { oc_gguf_writer_free(w); return OC_ERR_OOM; }
-            memcpy(s, kv->value.v.str.data, kv->value.v.str.len);
-            s[kv->value.v.str.len] = '\0';
-            oc_gguf_writer_add_string(w, kv->key, s);
-            free(s);
-            break;
-        }
-        default:
-            break; /* skipped: unsupported KV types */
-        }
-    }
-    return OC_OK;
 }
 
 const char *oc_merge_strategy_name(OcMergeStrategy s)
@@ -152,7 +99,6 @@ static OcError write_merged_tensor(OcGgufWriter *w,
         ti->dims, 0, merged, (uint64_t)n * sizeof(float));
 }
 
-/* ─── Linear merge ────────────────────────────────────────────────────── */
 
 OcError oc_merge_linear(const OcMergeInput *inputs, size_t n_inputs,
                          const char *output_path)
@@ -184,7 +130,7 @@ OcError oc_merge_linear(const OcMergeInput *inputs, size_t n_inputs,
 
     /* Open output. */
     OcGgufWriter w;
-    OcError we = open_writer_copy_meta(tmpl, output_path, &w);
+    OcError we = oc_gguf_writer_init_from_file(output_path, tmpl, &w);
     if (we != OC_OK) {
         for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
         free(mfs);
@@ -243,7 +189,6 @@ OcError oc_merge_linear(const OcMergeInput *inputs, size_t n_inputs,
     return we;
 }
 
-/* ─── SLERP merge ──────────────────────────────────────────────────────── */
 
 OcError oc_merge_slerp(const char *path_a, const char *path_b,
                         float t, const char *output_path)
@@ -262,7 +207,7 @@ OcError oc_merge_slerp(const char *path_a, const char *path_b,
     /* fb not needed — we look up tensors from mfb directly. */
 
     OcGgufWriter w;
-    e = open_writer_copy_meta(fa, output_path, &w);
+    e = oc_gguf_writer_init_from_file(output_path, fa, &w);
     if (e != OC_OK) { oc_gguf_map_free(&mfa); oc_gguf_map_free(&mfb); return e; }
 
     /* Merge each tensor via SLERP. */
@@ -320,7 +265,6 @@ OcError oc_merge_slerp(const char *path_a, const char *path_b,
     return e;
 }
 
-/* ─── TIES merge ──────────────────────────────────────────────────────── */
 
 OcError oc_merge_ties(const OcMergeInput *inputs, size_t n_inputs,
                        float density, const char *output_path)
@@ -329,12 +273,7 @@ OcError oc_merge_ties(const OcMergeInput *inputs, size_t n_inputs,
     if (density < 0.0f) density = 0.0f;
     if (density > 1.0f) density = 1.0f;
 
-    /* TIES: Trim, Elect, Combine.
-     * 1. Trim: keep only the top `density` fraction of parameters by magnitude
-     *    (zero the rest).
-     * 2. Elect: for each parameter, choose the sign with the largest
-     *    cumulative magnitude across models.
-     * 3. Combine: average the parameters with the elected sign. */
+    /* TIES: Trim, Elect, Combine. */
 
     OcGgufMmappedFile *mfs = calloc(n_inputs, sizeof(OcGgufMmappedFile));
     if (!mfs) return OC_ERR_OOM;
@@ -349,7 +288,7 @@ OcError oc_merge_ties(const OcMergeInput *inputs, size_t n_inputs,
 
     const OcGgufFile *tmpl = &mfs[0].unified;
     OcGgufWriter w;
-    OcError we = open_writer_copy_meta(tmpl, output_path, &w);
+    OcError we = oc_gguf_writer_init_from_file(output_path, tmpl, &w);
     if (we != OC_OK) {
         for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
         free(mfs);
@@ -419,7 +358,6 @@ OcError oc_merge_ties(const OcMergeInput *inputs, size_t n_inputs,
     return we;
 }
 
-/* ─── DARE merge ──────────────────────────────────────────────────────── */
 
 OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
                       float drop_rate, const char *output_path)
@@ -428,10 +366,7 @@ OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
     if (drop_rate < 0.0f) drop_rate = 0.0f;
     if (drop_rate > 1.0f) drop_rate = 1.0f;
 
-    /* DARE: Drop And Rescale.
-     * 1. For each model, randomly drop `drop_rate` fraction of parameters.
-     * 2. Rescale remaining parameters by 1/(1-drop_rate).
-     * 3. Average the rescaled parameters. */
+    /* DARE: Drop And Rescale. */
 
     OcGgufMmappedFile *mfs = calloc(n_inputs, sizeof(OcGgufMmappedFile));
     if (!mfs) return OC_ERR_OOM;
@@ -446,7 +381,7 @@ OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
 
     const OcGgufFile *tmpl = &mfs[0].unified;
     OcGgufWriter w;
-    OcError we = open_writer_copy_meta(tmpl, output_path, &w);
+    OcError we = oc_gguf_writer_init_from_file(output_path, tmpl, &w);
     if (we != OC_OK) {
         for (size_t i = 0; i < n_inputs; i++) oc_gguf_map_free(&mfs[i]);
         free(mfs);
@@ -507,7 +442,6 @@ OcError oc_merge_dare(const OcMergeInput *inputs, size_t n_inputs,
     return we;
 }
 
-/* ─── Top-level merge dispatch ────────────────────────────────────────── */
 
 OcError oc_merge_models(const OcMergeConfig *cfg)
 {

@@ -1,17 +1,9 @@
-/*
- * vision_encoder.c — CLIP-style vision encoder.
- *
- * Implements patch embedding + ViT transformer blocks + CLS projection.
- * When weights are not loaded, falls back to deterministic placeholder
- * vectors so callers can wire up the multimodal pipeline end-to-end.
- */
 #include "oxidize/vision_encoder.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 OcError oc_vision_config_init(OcVisionEncoderConfig *cfg)
 {
@@ -25,7 +17,6 @@ OcError oc_vision_config_init(OcVisionEncoderConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Encoder lifecycle ─────────────────────────────────────────────── */
 
 OcError oc_vision_encoder_init(OcVisionEncoder **encoder,
                                const OcVisionEncoderConfig *config)
@@ -92,7 +83,6 @@ OcError oc_vision_encoder_load_weights(OcVisionEncoder *encoder,
     return OC_OK;
 }
 
-/* ─── Encoding ──────────────────────────────────────────────────────── */
 
 /* Compute n_patches = (image_size / patch_size)^2. */
 static uint32_t vision_n_patches(const OcVisionEncoderConfig *cfg)
@@ -444,7 +434,6 @@ void oc_vision_encoder_free(OcVisionEncoder *encoder)
     free(encoder);
 }
 
-/* ─── Image patch helpers ───────────────────────────────────────────── */
 
 OcError oc_image_patch_init(uint32_t width, uint32_t height,
                             uint32_t channels, OcImagePatch **out)

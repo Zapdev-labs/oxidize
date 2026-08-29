@@ -1,4 +1,3 @@
-/* test_inf_forward.c — Forward pass tests for OcInferenceModel. */
 #include <criterion/criterion.h>
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"
@@ -445,7 +444,6 @@ Test(inf_fwd, null_safety)
     cr_assert_null(oc_inf_model_last_output_hidden(NULL));
 }
 
-/* ─── MTP draft generation tests ───────────────────────────────────────── */
 
 Test(inf_fwd, mtp_draft_no_mtp)
 {
@@ -504,7 +502,6 @@ Test(inf_fwd, mtp_draft_null_safety)
     oc_inf_model_free(&m);
 }
 
-/* ─── attention_head_dims + gemv_weight_head tests ───────────────────── */
 
 Test(inf_fwd, attention_head_dims_basic)
 {
@@ -602,7 +599,6 @@ Test(inf_fwd, gemv_weight_head_null)
     cr_assert_neq(oc_gemv_weight_head(NULL, 1, 1, 0, 0, input, output), OC_OK);
 }
 
-/* ─── Batched forward tests ───────────────────────────────────────────── */
 
 Test(inf_fwd, layers_supported_for_batched)
 {

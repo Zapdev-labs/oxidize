@@ -1,10 +1,3 @@
-/*
- * dtype.h — OcDType elementary data type enum.
- *
- * Mirrors the Rust `oxidize-core` storage dtype set. Used by OcTensor to
- * describe the on-disk/in-memory element type BEFORE quantization. Quantized
- * types live in `tensor.h::OcGgufQuantizationType` (a separate enum).
- */
 #ifndef OXIDIZE_DTYPE_H
 #define OXIDIZE_DTYPE_H
 

@@ -1,19 +1,9 @@
-/*
- * config.c — Model configuration implementation.
- *
- * Extracts a normalized OcModelConfig from a parsed GGUF file's metadata.
- * The metadata keys are namespaced by the architecture string read from
- * "general.architecture" (e.g. "llama.block_count", "qwen2.embedding_length",
- * "mistral.attention.head_count"). This module reads the common Llama-family
- * superset shared across llama, mistral, qwen2, gemma, phi, glm, etc.
- */
 #include "oxidize/config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ─────────────────────────────────────────────────────────── */
 
 /* Typed convenience getters mirroring llama.c's cfg_u32/cfg_f32/cfg_str. */
 static uint32_t cfg_u32(const OcGgufFile *f, const char *key, uint32_t def)
@@ -49,7 +39,6 @@ static void set_str(char *dst, size_t dst_cap, const char *src)
     dst[dst_cap - 1] = '\0';
 }
 
-/* ─── Public API ──────────────────────────────────────────────────────── */
 
 OcError oc_model_config_init(OcModelConfig *cfg)
 {
@@ -274,21 +263,13 @@ uint64_t oc_model_config_n_params(const OcModelConfig *cfg)
     uint64_t total = vocab * hidden;
 
     /* Per-layer parameters. */
-    /* Attention: q_proj (hidden -> n_heads*head_dim),
-     *            k_proj (hidden -> n_kv_heads*head_dim),
-     *            v_proj (hidden -> n_kv_heads*head_dim),
-     *            o_proj (n_heads*head_dim -> hidden).
-     * Each with bias counted separately below (set to 0 — biases uncommon in
-     * modern LLMs). */
+    /* Attention: q_proj (hidden -> n_heads*head_dim), */
     uint64_t q_out = (uint64_t)cfg->n_heads * head_dim;
     uint64_t kv_out = (uint64_t)cfg->n_kv_heads * head_dim;
     uint64_t attn = hidden * q_out + hidden * kv_out + hidden * kv_out +
                     q_out * hidden;
 
-    /* FFN: for SwiGLU/GEG it is 3 matrices (gate, up, down) of
-     *   hidden * inter + hidden * inter + inter * hidden.
-     * For MoE, multiply by n_expert (active params only count
-     * n_expert_used, but total parameter count counts all experts). */
+    /* FFN: for SwiGLU/GEG it is 3 matrices (gate, up, down) of hidden * inter + hidden * inter + inter * hidden. */
     uint64_t ffn_per_layer = hidden * inter + hidden * inter + inter * hidden;
     uint64_t ffn = ffn_per_layer;
     if (cfg->n_expert > 0) {

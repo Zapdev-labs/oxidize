@@ -1,4 +1,3 @@
-/* test_seq_scheduler.c — sequence scheduler tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include "oxidize/seq_scheduler.h"
@@ -21,7 +20,6 @@ static OcSeqRequest make_request(uint64_t id, const uint32_t *prompt,
 
 static uint32_t one_prompt[] = {1};
 
-/* ─── Basic lifecycle ──────────────────────────────────────────────────── */
 
 Test(seq_scheduler, config_default)
 {
@@ -59,7 +57,6 @@ Test(seq_scheduler, init_invalid_water_level)
     cr_assert_eq(oc_seq_sched_init(&s, c, NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Add requests ─────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, add_request)
 {
@@ -110,7 +107,6 @@ Test(seq_scheduler, add_when_full)
     oc_seq_sched_free(s);
 }
 
-/* ─── Scheduling ───────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, schedule_empty)
 {
@@ -187,7 +183,6 @@ Test(seq_scheduler, schedule_mixed_batch)
     oc_seq_sched_free(s);
 }
 
-/* ─── Append token ────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, append_token_transitions_running)
 {
@@ -230,7 +225,6 @@ Test(seq_scheduler, append_token_unknown_id)
     oc_seq_sched_free(s);
 }
 
-/* ─── Finish / Abort ───────────────────────────────────────────────────── */
 
 Test(seq_scheduler, finish_request)
 {
@@ -311,7 +305,6 @@ Test(seq_scheduler, aborted_excluded_from_schedule)
     oc_seq_sched_free(s);
 }
 
-/* ─── Capacity ─────────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, can_fit_within_capacity)
 {

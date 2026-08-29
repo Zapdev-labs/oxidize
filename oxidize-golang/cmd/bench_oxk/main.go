@@ -10,23 +10,6 @@ import (
 )
 
 // Full decode-token GEMV plan for Qwen3-30B-A3B, so the reported tok/s reflects
-// one real token's worth of work (every attention + MoE projection across all
-// layers) instead of a single isolated GEMV.
-//
-// Canonical config (Qwen3-30B-A3B):
-//
-//	hidden_size           = 2048
-//	num_hidden_layers     = 48
-//	q_proj out            = 32 heads * 128 head_dim = 4096
-//	kv_proj out           = 4  kv_heads * 128       = 512
-//	num_experts           = 128, num_experts_per_tok = 8
-//	moe_intermediate_size = 768
-//	vocab_size            = 151936
-//
-// Only the active experts (8) are streamed per token, matching real MoE decode.
-// All `cols` are multiples of QK_K (256) as required by the OXK kernel.
-//
-// Keep this plan in sync with bench_oxk.py and oxk_token_bench.rs.
 
 const (
 	hiddenSize = 2048

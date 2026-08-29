@@ -1,16 +1,3 @@
-/* utf8_utils.h — shared UTF-8 helpers for the tokenizer implementations.
- *
- * Internal header (src/format/ only). All functions are `static inline` so
- * each translation unit gets its own copy with no link-time dependency.
- *
- *   - oc_utf8_decode_cp:  decode one codepoint (permissive; used by the
- *     BPE / SentencePiece / WordPiece tokenizers, which treat invalid lead
- *     bytes as lone single-byte codepoints).
- *   - oc_utf8_encode_cp:  encode one codepoint as UTF-8.
- *   - oc_utf8_lossy:      strict lossy conversion matching Rust
- *     `String::from_utf8_lossy` (WHATWG: one U+FFFD per maximal invalid
- *     subsequence).
- */
 #ifndef OXIDIZE_FORMAT_UTF8_UTILS_H
 #define OXIDIZE_FORMAT_UTF8_UTILS_H
 
@@ -19,11 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Decode 1..4 bytes of UTF-8 starting at `s` (up to `len` bytes available).
- * Writes the codepoint to `*cp` and returns the number of bytes consumed.
- * Returns 0 only when len == 0. Invalid UTF-8 (bad lead byte, truncated or
- * malformed continuation) yields the lead byte as a lone codepoint and
- * consumes 1 byte. */
+/* Decode 1..4 bytes of UTF-8 starting at `s` (up to `len` bytes available). */
 static inline size_t oc_utf8_decode_cp(const char *s, size_t len, uint32_t *cp)
 {
     if (len == 0) { *cp = 0; return 0; }
@@ -88,14 +71,7 @@ static inline size_t oc_utf8_encode_cp(uint32_t cp, char *buf)
     return 4;
 }
 
-/* Lossy UTF-8 validation matching Rust `String::from_utf8_lossy` (WHATWG
- * "Encoding" spec): each maximal invalid subsequence (a bad lead byte, or a
- * lead byte plus its longest valid continuation prefix) is replaced by a
- * single U+FFFD (0xEF 0xBF 0xBD). Overlongs, surrogates, and codepoints
- * above U+10FFFF are rejected at the second byte via lead-specific ranges.
- * `out` must hold at least `len * 3 + 1` bytes (worst case: every byte
- * becomes a 3-byte replacement). Returns the output byte length (no NUL is
- * written). */
+/* Lossy UTF-8 validation matching Rust `String::from_utf8_lossy` (WHATWG */
 static inline size_t oc_utf8_lossy(const uint8_t *bytes, size_t len, uint8_t *out)
 {
     static const uint8_t REPL[3] = { 0xEF, 0xBF, 0xBD };

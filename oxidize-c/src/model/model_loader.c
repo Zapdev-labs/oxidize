@@ -1,8 +1,3 @@
-/*
- * model_loader.c — Universal model loader implementation.
- *
- * Uses the existing GGUF parser to load and inspect model files.
- */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/model_loader.h"
 #include "oxidize/gguf.h"

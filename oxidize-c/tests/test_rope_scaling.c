@@ -1,4 +1,3 @@
-/* test_rope_scaling.c — RoPE scaling tests. */
 #include <criterion/criterion.h>
 #include "oxidize/rope_scaling.h"
 #include <math.h>
@@ -325,20 +324,10 @@ Test(rope, ntk_modifies_base)
     cr_assert(differs, "NTK should produce different angles than no-scaling");
 }
 
-/* ─── deepseek_yarn mscale pair ──────────────────────────────────────────
- *
- * The two derived scales are what the DeepSeek reference calls
- * `rope_attn_factor` (on cos/sin) and `softmax_scale` (on attention logits).
- * Which one carries the correction is decided entirely by the mscale pair,
- * and getting it backwards is a silent whole-model correctness bug — hence
- * pinning the exact constants for both conventions here. */
 
 Test(rope_scaling, deepseek_yarn_scales_longcat)
 {
-    /* LongCat-2.0: factor 120, mscale = mscale_all_dim = 1, head_dim 192.
-     * get_mscale(120, 1) = 0.1*ln(120) + 1 = 1.47874917.
-     * Both terms are equal, so the RoPE factor cancels to exactly 1 and the
-     * whole correction lands on the softmax scale, squared. */
+    /* LongCat-2.0: factor 120, mscale = mscale_all_dim = 1, head_dim 192. */
     float rope_f = -1.0f, softmax = -1.0f;
     oc_rope_deepseek_yarn_scales(120.0f, 1.0f, 1.0f, 192, &rope_f, &softmax);
 
@@ -381,10 +370,7 @@ Test(rope_scaling, deepseek_yarn_scales_no_scaling)
 
 Test(rope_scaling, yarn_correction_range_longcat)
 {
-    /* LongCat: rope dim 64, base 1e6, original ctx 8192, beta_fast 32,
-     * beta_slow 1. corr = dim * ln(orig/(beta*2pi)) / (2*ln(base)).
-     *   lo = floor(64 * ln(8192/(32*2pi)) / (2*ln(1e6))) = floor(8.586) = 8
-     *   hi = ceil (64 * ln(8192/( 1*2pi)) / (2*ln(1e6))) = ceil (16.615) = 17 */
+    /* LongCat: rope dim 64, base 1e6, original ctx 8192, beta_fast 32, */
     const float two_pi = 6.283185307f;
     float base_log = 2.0f * logf(1.0e6f);
     float lo = floorf(64.0f * logf(8192.0f / (32.0f * two_pi)) / base_log);

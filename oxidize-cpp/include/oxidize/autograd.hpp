@@ -54,7 +54,6 @@ class Tape {
   std::vector<std::function<void()>> ops_;  // backward closures (push order)
 };
 
-// ---- Per-op backward kernels (called inside tape closures) ----------------
 
 // MatMul backward. y = W * x.
 //   dx += W^T * dy        (x: [cols], W: [rows x cols], y: [rows])

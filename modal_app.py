@@ -66,7 +66,6 @@ registry_cache = modal.Volume.from_name("oxidize-cargo-registry", create_if_miss
 # Persists HF model downloads (~/.cache/oxidize/hf) across runs.
 model_cache = modal.Volume.from_name("oxidize-model-cache", create_if_missing=True)
 
-# --- CUDA image: nvcc-capable devel base + Rust 1.95 toolchain ---------------
 # build.rs compiles kernels/gemv_f32.cu -> PTX with nvcc, so we need the *devel*
 # CUDA image (toolkit), not just runtime. No GPU is needed to *compile* the PTX.
 CUDA_TAG = "12.8.1-devel-ubuntu22.04"
@@ -325,9 +324,7 @@ def batched_decode_tps(
     return summary
 
 
-# ---------------------------------------------------------------------------
 # GPU path: build CUDA on a cheap CPU container, benchmark on the GPU box.
-# ---------------------------------------------------------------------------
 CUDA_BUILD = dict(
     image=cuda_image,
     volumes={

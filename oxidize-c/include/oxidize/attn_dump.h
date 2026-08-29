@@ -1,10 +1,3 @@
-/*
- * attn_dump.h — per-layer attention weight dump for debugging/validation.
- *
- * When OXIDIZE_TRACE_VALS or OXIDIZE_TRACE_FWD env vars are set, writes
- * per-layer attention weights, RMSNorm outputs, and logits to disk for
- * comparison with the Rust reference implementation.
- */
 #ifndef OXIDIZE_ATTN_DUMP_H
 #define OXIDIZE_ATTN_DUMP_H
 

@@ -1,33 +1,3 @@
-/*
- * hf_hub.h — HuggingFace Hub GGUF model downloader.
- *
- * Ports the HF resolver from `oxidize-golang/hf/hub.go` and
- * `oxidize-python/oxidize_python/hf/hub.py` into the dependency-free C11
- * port. Downloads GGUF model files from huggingface.co using a raw-socket
- * HTTP/1.1 client (no libcurl), with:
- *
- *   - JSON parsing of the /api/models/{repo} "siblings" array (minimal
- *     ad-hoc parser — enough to extract rfilename values, no full JSON
- *     tree is built).
- *   - Resume of partial downloads via HTTP Range requests.
- *   - SHA-256 verification of completed downloads.
- *   - Cache directory management under ~/.cache/oxidize/hf/.
- *   - A simple mutex-guarded single-slot rate limiter (max 1 concurrent
- *     download) so parallel callers don't hammer the Hub.
- *   - Progress callback for UI integration.
- *
- * The HTTP client uses raw TCP sockets + TLS is NOT implemented here —
- * HuggingFace's API is HTTPS-only in production, but for the dependency-
- * free C11 port (and for testability), the client speaks plain HTTP/1.1
- * over TCP. The host:port are configurable via OcHfConfig::api_base so a
- * caller can point at an HTTPS-terminating proxy or a local mirror. This
- * mirrors how `mesh.c` and `http.c` keep the dependency surface to libc +
- * libpthread only.
- *
- * Concurrency contract: oc_hf_download() acquires a process-global mutex
- * for the duration of the transfer. Callers that want parallel downloads
- * must run them in separate processes.
- */
 #ifndef OXIDIZE_HF_HUB_H
 #define OXIDIZE_HF_HUB_H
 
@@ -41,7 +11,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 /* Default cache root: ~/.cache/oxidize/hf (computed at runtime; the macro
  * is the relative suffix under $HOME). */
@@ -72,7 +41,6 @@ extern "C" {
 /* Chunk size for download reads (64 KiB). */
 #define OC_HF_DOWNLOAD_CHUNK 65536u
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 /* Quantization-type filter for oc_hf_list_models(). Pass NULL or "" to
  * disable filtering (return all .gguf files). */
@@ -107,37 +75,24 @@ typedef struct OcHfDownloadProgress {
  * Returning non-zero aborts the download with OC_ERR_IO. */
 typedef int (*OcHfProgressCb)(const OcHfDownloadProgress *prog, void *user);
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 /* Initialize a config with defaults. `cache_dir` may be NULL (uses the
  * default ~/.cache/oxidize/hf). Returns OC_OK or OC_ERR_INVALID_ARG. */
 OcError oc_hf_config_init(OcHfConfig *cfg, const char *cache_dir);
 
-/* List .gguf models in a HuggingFace repo that match the config's
- * quant_type filter. Writes up to *inout_count entries into `out_models`
- * (caller-allocated array). On return *inout_count holds the actual count.
- * Network call: GET {api_base}/api/models/{repo_id}. */
+/* List .gguf models in a HuggingFace repo that match the config's */
 OcError oc_hf_list_models(const OcHfConfig *cfg,
                           OcHfModel *out_models, size_t *inout_count);
 
-/* Resolve a repo_id + filename to a HuggingFace download URL. If
- * `out_model->filename` is empty on input, picks the single .gguf in the
- * repo (or returns OC_ERR_MODEL if there are 0 or >1). Fills
- * out_model->download_url, ->filename, ->repo_id. */
+/* Resolve a repo_id + filename to a HuggingFace download URL. If */
 OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model);
 
-/* Get the local cache path for a repo_id + filename. Writes a NUL-
- * terminated path into `out_path` (cap bytes). The path is
- *   {cache_dir}/{repo_with_slashes_as_underscores}/{filename}
- * Does not require the file to exist. */
+/* Get the local cache path for a repo_id + filename. Writes a NUL- */
 OcError oc_hf_cache_path(const OcHfConfig *cfg,
                          const char *repo_id, const char *filename,
                          char *out_path, size_t cap);
 
-/* Download a model file to cache_dir. Resumes partial downloads if a
- * .part file exists. Verifies SHA-256 if model->sha256 is non-empty.
- * Invokes `cb` (if non-NULL) periodically. Network call: HTTP GET with
- * Range header. Acquires a global mutex for the duration. */
+/* Download a model file to cache_dir. Resumes partial downloads if a Range header. Acquires a global mutex for the duration. */
 OcError oc_hf_download(const OcHfConfig *cfg, const OcHfModel *model,
                        OcHfProgressCb cb, void *user);
 
@@ -157,12 +112,8 @@ OcError oc_hf_cache_size(const OcHfConfig *cfg, uint64_t *out_bytes);
 OcError oc_hf_cache_clean(const OcHfConfig *cfg, uint64_t max_age_seconds,
                           size_t *out_removed);
 
-/* ─── Helpers (exposed for testing) ──────────────────────────────────── */
 
-/* Parse a quant type from a .gguf filename. Looks for the Q\d[_-]\w+
- * pattern (e.g. "Q4_K_M", "Q8_0", "F16"). Writes a NUL-terminated upper-
- * case tag into out (cap bytes); writes "" if none found. Returns true if
- * a quant tag was found. */
+/* Parse a quant type from a .gguf filename. Looks for the Q\d[_-]\w+ */
 bool oc_hf_parse_quant_type(const char *filename, char *out, size_t cap);
 
 /* True if `filename` ends with ".gguf" (case-insensitive). */

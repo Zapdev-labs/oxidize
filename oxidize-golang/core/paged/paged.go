@@ -307,9 +307,6 @@ func (p *BlockPool) PrefixCacheLen() int {
 }
 
 // CopyOnWrite implements copy-on-write for a shared block. If the block's ref
-// count is > 1, a new block is allocated, the original's ref is decremented,
-// and the new block id is returned (found=true). If the block is not shared,
-// (0, false, nil) is returned. Mirrors BlockPool::copy_on_write.
 func (p *BlockPool) CopyOnWrite(id int) (int, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -371,9 +368,6 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 }
 
 // AddRequest enqueues a new request. The MaxRequests limit applies to
-// the active set, not the queue, so callers can buffer more requests
-// than the concurrency limit and let the scheduler pick/preempt from
-// the queue as needed.
 func (s *Scheduler) AddRequest(tokens []int, maxTokens int) (*Request, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -476,10 +470,6 @@ func (s *Scheduler) LookupBlockHash(h BlockHash) (int, bool) {
 }
 
 // ComputeBlockHash computes a deterministic FNV-1a block hash from tokens,
-// mirroring the Rust `compute_block_hash` (64-bit FNV-1a). The 64-bit digest is
-// stored in the leading 8 bytes of the [16]byte hash so existing String()/map
-// behaviour is preserved while collisions are far less likely than the old
-// XOR-fold scheme.
 func ComputeBlockHash(tokens []int) BlockHash {
 	const (
 		fnvOffset uint64 = 0xcbf29ce484222325

@@ -1,8 +1,3 @@
-/*
- * grammar.c — grammar constraint implementation.
- *
- * Provides JSON validation and choice-based constraints for structured output.
- */
 #include "oxidize/grammar.h"
 
 #include <stdlib.h>

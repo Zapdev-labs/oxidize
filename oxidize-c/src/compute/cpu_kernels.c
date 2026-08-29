@@ -107,13 +107,6 @@ void oc_cpu_matvec_f32_scalar(const float *w, const float *x, float *out,
 }
 
 
-/* ─── SIMD kernels ───────────────────────────────────────────────────
- *
- * Compiled with per-function target attributes (same pattern as
- * oxk_avx2.c / oxk_avx512.c) so the whole library stays baseline-ISA and
- * dispatch happens at runtime through OcCpuKernels. Tails fall back to
- * the scalar loop, so results are bit-comparable to the reference for
- * n < vector width. */
 #if defined(OC_CPU_KERNELS_HAVE_AVX2)
 
 __attribute__((target("avx2,fma")))

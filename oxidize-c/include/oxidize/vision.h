@@ -1,15 +1,3 @@
-/*
- * vision.h — CLIP-style vision encoder for multimodal inference.
- *
- * Provides image encoding via a simplified CLIP-style vision transformer
- * (ViT): patch embedding via linear projection, positional embeddings,
- * optional layer norm, and mean pooling. Produces image embeddings that
- * can be injected into the LLM's embedding space.
- *
- * Weight matrices (patch_proj, pos_emb, ln_w, ln_b) are set from a GGUF
- * vision model. When weights are absent, the encoder returns mean-pooled
- * patch statistics as a fallback.
- */
 #ifndef OXIDIZE_VISION_H
 #define OXIDIZE_VISION_H
 

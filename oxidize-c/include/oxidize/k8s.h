@@ -1,10 +1,3 @@
-/*
- * k8s.h — Kubernetes integration stubs.
- *
- * Provides a minimal API for Kubernetes-based deployment coordination.
- * This is a stub implementation that doesn't actually talk to Kubernetes.
- * Port from oxidize-core/src/mesh/k8s.rs.
- */
 #ifndef OXIDIZE_K8S_H
 #define OXIDIZE_K8S_H
 
@@ -44,10 +37,7 @@ OcError oc_k8s_detect(OcK8sCluster *cluster);
 OcError oc_k8s_add_pod(OcK8sCluster *cluster, const char *name,
                       const char *ip, uint16_t port);
 OcError oc_k8s_get_pods(const OcK8sCluster *cluster, const OcK8sPod **out, uint32_t *count);
-/* Copy the ready pods into `out` (capacity `cap` entries) and store how
- * many were written in `*count`. Returns OC_ERR_OOM if more pods are ready
- * than `cap` holds — `*count` is then set to the number required so the
- * caller can retry with a large enough buffer. */
+/* Copy the ready pods into `out` (capacity `cap` entries) and store how */
 OcError oc_k8s_get_ready_pods(const OcK8sCluster *cluster, OcK8sPod *out,
                               uint32_t cap, uint32_t *count);
 uint32_t oc_k8s_n_pods(const OcK8sCluster *cluster);

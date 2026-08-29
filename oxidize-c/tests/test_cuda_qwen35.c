@@ -231,10 +231,7 @@ Test(cuda_qwen35, delta_head_matches_reference_step)
         float inv = 1.0f / sqrtf(sum / (float)DV + 1e-6f);
         mirror[i] = mirror[i] * inv * norm_w[i] * silu_stable(gate[i]);
     }
-    /* Gate is applied after the full head, so recompute from ungated mirror.
-     * Easier: compare CPU out against a second CPU step — this test asserts
-     * the host delta loop used by the CUDA kernel description is finite and
-     * agrees with the library step on the same inputs. */
+    /* Gate is applied after the full head, so recompute from ungated mirror. */
     for (size_t i = 0; i < DV; i++)
         cr_assert(isfinite(out[i]));
     cr_assert(fabsf(out[0]) + fabsf(out[1]) > 0.0f);

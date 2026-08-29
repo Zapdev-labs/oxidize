@@ -1,20 +1,3 @@
-/*
- * tokenizer_train.c — BPE tokenizer trainer implementation.
- *
- * See tokenizer_train.h for the public API and algorithm overview.
- *
- * Internal representation:
- *   - Each "word" (pre-token) is an array of symbol ids (uint32_t). The
- *     initial symbols are individual UTF-8 codepoint strings. Merges replace
- *     adjacent symbol pairs with a single new symbol id.
- *   - The vocab is a dynamic array of OcBpeVocabEntry (token string + id).
- *   - Merge rules are a dynamic array of OcBpeMerge.
- *   - A hash map from token string -> vocab id is used for fast lookup.
- *
- * The implementation is self-contained (no dependency on OcHashtable to keep
- * the trainer module independent; we use a simple linear-probing hash map
- * internally).
- */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup, strndup */
 
@@ -27,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Dynamic array helpers ────────────────────────────────────────────── */
 
 #define DA_INIT_CAP 16
 
@@ -135,7 +117,6 @@ static void merge_free(OcMergeArray *ma)
     ma->cap = 0;
 }
 
-/* ─── String hash map (token -> vocab id) ────────────────────────────────── */
 
 /* Simple open-addressing hash map: string key -> uint32_t value.
  * Uses FNV-1a hashing + linear probing. */
@@ -197,11 +178,7 @@ static OcError tokenmap_grow(TokenMap *m)
     /* Rehash all live entries. */
     for (size_t i = 0; i < m->cap; i++) {
         if (m->entries[i].key != NULL && m->entries[i].key[0] != '\0') {
-            /* Skip tombstones (key = "\0__DELETED__" — but we use a single
-             * char check; tombstones are marked by key pointing to a static
-             * sentinel). Actually, we use a simpler scheme: key is NULL for
-             * empty, and a non-NULL but empty string "" for tombstone. But
-             * empty string is a valid token... Let's use a dedicated flag. */
+            /* Skip tombstones (key = "\0__DELETED__" — but we use a single */
             /* For simplicity, we never insert empty strings as keys. */
             uint64_t h = fnv1a(m->entries[i].key);
             size_t idx = (size_t)(h & (ncap - 1));
@@ -283,7 +260,6 @@ static bool tokenmap_get(const TokenMap *m, const char *key, uint32_t *out)
     return false;
 }
 
-/* ─── Trainer struct ───────────────────────────────────────────────────── */
 
 struct OcBpeTrainer {
     OcBpeTrainConfig config;
@@ -293,7 +269,6 @@ struct OcBpeTrainer {
     bool             trained;
 };
 
-/* ─── UTF-8 helpers ─────────────────────────────────────────────────────── */
 
 /* Decode the next UTF-8 codepoint from `s` starting at byte `*i`. Writes
  * the codepoint to `*cp` and advances `*i` by the number of bytes consumed.
@@ -369,7 +344,6 @@ static int utf8_encode(uint32_t cp, char *buf)
     }
 }
 
-/* ─── Pre-tokenization ─────────────────────────────────────────────────── */
 
 /* Check if a byte is whitespace or punctuation (for pre-tokenization). */
 static bool is_word_separator(char c)
@@ -395,7 +369,6 @@ static bool is_punctuation(char c)
            (c >= 0x7B && c <= 0x7E);
 }
 
-/* ─── Training ─────────────────────────────────────────────────────────── */
 
 /* Reset the trainer to a clean state (free existing data, reinit maps). */
 static void trainer_reset(OcBpeTrainer *t)
@@ -446,14 +419,7 @@ static char *build_merged_token(const char *left, const char *right)
     return result;
 }
 
-/* Count the most frequent adjacent pair across all words. Writes the best
- * pair (left_id, right_id) and its count to the output params. Returns
- * OC_OK or OC_ERR_OOM. If no pair has count > 0, sets *best_count = 0.
- *
- * Implementation: a simple open-addressing hash map where the key is
- * (left << 32) | right. A separate `occupied` flag distinguishes empty
- * slots from valid key=0 pairs (which occur when both symbols have vocab
- * id 0, e.g. the pair ('a','a') when 'a' is the first vocab entry). */
+/* Count the most frequent adjacent pair across all words. Writes the best */
 static OcError find_best_pair(const OcWordArray *words, uint32_t *best_left,
                              uint32_t *best_right, size_t *best_count)
 {
@@ -619,7 +585,6 @@ OcError oc_bpe_trainer_train(OcBpeTrainer *t, const char *corpus, size_t corpus_
         return e;
     }
 
-    /* ── Step 1: Pre-tokenize the corpus ──────────────────────────── */
     /* Split into words (whitespace + punctuation boundaries), then split
      * each word into individual UTF-8 codepoint symbols. */
 
@@ -700,7 +665,6 @@ OcError oc_bpe_trainer_train(OcBpeTrainer *t, const char *corpus, size_t corpus_
         }
     }
 
-    /* ── Step 2-6: Iterative BPE merge loop ───────────────────────── */
     size_t merges_done = 0;
     size_t max_merges = t->config.max_merges;
     size_t max_vocab = t->config.max_vocab_size;
@@ -789,7 +753,6 @@ train_fail_words:
     return e;
 }
 
-/* ─── Public API: init / getters / save / free ─────────────────────────── */
 
 OcBpeTrainer *oc_bpe_trainer_init(OcBpeTrainConfig config)
 {

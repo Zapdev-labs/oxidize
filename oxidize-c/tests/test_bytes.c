@@ -1,4 +1,3 @@
-/* test_bytes.c — byte-level read primitive tests. */
 #include <criterion/criterion.h>
 #include "oxidize/util/bytes.h"
 
@@ -58,4 +57,3 @@ Test(bytes, volatile_read)
     cr_assert_eq(oc_read_volatile_byte(buf, 2, 5), 0, "oob");
     cr_assert_eq(oc_read_volatile_byte(NULL, 0, 0), 0, "NULL");
 }
-

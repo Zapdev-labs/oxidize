@@ -1,4 +1,3 @@
-/* test_flash_attention.c — flash attention kernel tests. */
 #include <criterion/criterion.h>
 #include "oxidize/flash_attention.h"
 #include <math.h>
@@ -6,10 +5,7 @@
 
 Test(flash_attn, single_position)
 {
-    /* Q = K = [1, 0, 0, 0], V = [1, 2, 3, 4]
-     * score = 1/sqrt(4) * (1*1) = 0.5
-     * softmax(0.5) = 1.0 (single element)
-     * out = 1.0 * V = [1, 2, 3, 4] */
+    /* Q = K = [1, 0, 0, 0], V = [1, 2, 3, 4] */
     float q[] = {1, 0, 0, 0};
     float k[] = {1, 0, 0, 0};
     float v[] = {1, 2, 3, 4};
@@ -91,7 +87,6 @@ Test(flash_attn, multi_head)
     cr_assert_float_eq(out[3], 7.0f, 1e-5f);
 }
 
-/* ─── decode_heads_f32 tests ────────────────────────────────────────── */
 
 Test(flash_decode_heads, f32_basic)
 {
@@ -182,7 +177,6 @@ Test(flash_decode_heads, f32_block_boundary)
     cr_assert_float_eq(out[0], 32.0f, 0.5f);
 }
 
-/* ─── decode_heads_f16 tests ────────────────────────────────────────── */
 
 Test(flash_decode_heads, f16_matches_f32)
 {
@@ -225,14 +219,10 @@ Test(flash_decode_heads, f16_null_safety)
     cr_assert_neq(oc_flash_attention_decode_heads_f16(NULL, NULL, NULL, 0, 1, 1, 1, 1, NULL), OC_OK);
 }
 
-/* ─── prefill_f32 tests ─────────────────────────────────────────────── */
 
 Test(flash_prefill, basic)
 {
-    /* 2 queries, 2 KV positions, head_dim=2.
-     * Q0=[1,0] attends to K0=[1,0] and K1=[0,1].
-     * Score(Q0,K0) = 1/sqrt(2), Score(Q0,K1) = 0.
-     * Since softmax of [1/sqrt(2), 0] is not uniform, out is weighted toward K0. */
+    /* 2 queries, 2 KV positions, head_dim=2. */
     float q[4] = {1, 0, 0, 1};
     float k[4] = {1, 0, 0, 1};
     float v[4] = {10, 0, 0, 20};
@@ -283,7 +273,6 @@ Test(flash_prefill, block_boundary)
     cr_assert_float_eq(out[0], 32.0f, 0.5f);
 }
 
-/* ─── f16 conversion tests ──────────────────────────────────────────── */
 
 Test(f16_conv, round_trip)
 {

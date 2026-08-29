@@ -1,11 +1,3 @@
-/*
- * gpu_cluster.h — GPU family profiles and Kubernetes manifest generation.
- *
- * Port from oxidize-core/src/cluster/gpu_cluster.rs. Defines a catalog of
- * supported GPU families with their memory, power, and partitioning
- * characteristics, plus helpers to generate Kubernetes manifests (node pool
- * and device plugin YAML) for each family.
- */
 #ifndef OXIDIZE_GPU_CLUSTER_H
 #define OXIDIZE_GPU_CLUSTER_H
 
@@ -70,26 +62,14 @@ size_t oc_gpu_n_families(void);
  * out-of-range indices. */
 OcGpuFamily oc_gpu_family_by_index(size_t idx);
 
-/* Lookup a common Kubernetes label value by key. Recognized keys:
- *   "nvidia.com/gpu.product"  -> product string
- *   "nvidia.com/gpu.memory"  -> memory in MiB (as decimal string)
- *   "nvidia.com/gpu.count"    -> time-slice replicas (as decimal string)
- *   "network"                -> network class
- *   "workload"               -> workload type
- * Returns NULL for unrecognized keys. */
+/* Lookup a common Kubernetes label value by key. Recognized keys: */
 const char *oc_gpu_cluster_label(const char *key);
 
-/* Render a Kubernetes NodePool manifest for the given family into `out`.
- * `replicas` selects the node count. The YAML is NUL-terminated. Returns
- * OC_ERR_INVALID_ARG for invalid families, OC_ERR_INVALID_ARG for NULL out
- * buffer, OC_ERR_INTERNAL if the manifest would overflow `out_len`. */
+/* Render a Kubernetes NodePool manifest for the given family into `out`. */
 OcError oc_gpu_cluster_node_pool_yaml(OcGpuFamily family, uint32_t replicas,
                                       char *out, size_t out_len);
 
-/* Render a Kubernetes NVIDIA device plugin manifest for the given family
- * into `out`. The YAML is NUL-terminated. Returns OC_ERR_INVALID_ARG for
- * invalid families, OC_ERR_INVALID_ARG for NULL out buffer, OC_ERR_INTERNAL
- * if the manifest would overflow `out_len`. */
+/* Render a Kubernetes NVIDIA device plugin manifest for the given family */
 OcError oc_gpu_cluster_device_plugin_yaml(OcGpuFamily family, char *out, size_t out_len);
 
 #ifdef __cplusplus

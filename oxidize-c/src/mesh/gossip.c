@@ -1,18 +1,9 @@
-/*
- * gossip.c — gossip protocol for cluster node discovery and health checking.
- *
- * Transport-agnostic membership layer. Each node owns a list of known peers
- * (including itself) and refreshes timestamps via oc_gossip_tick. Peers
- * whose last_seen is older than config.timeout_ms are flagged unhealthy.
- * Peer lists are exchanged with oc_gossip_serialize / deserialize / merge.
- */
 #include "oxidize/gossip.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ───────────────────────────────────────────────────────── */
 
 static void gossip_node_init(OcGossipNode *node, uint64_t id,
                              const char *addr, uint16_t port,
@@ -37,7 +28,6 @@ static int32_t gossip_find(const OcGossipState *state, uint64_t id)
     return -1;
 }
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 OcError oc_gossip_config_init(OcGossipConfig *cfg)
 {
@@ -49,7 +39,6 @@ OcError oc_gossip_config_init(OcGossipConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_gossip_init(const OcGossipConfig *config, uint64_t self_id,
                        OcGossipState **out)
@@ -92,7 +81,6 @@ void oc_gossip_free(OcGossipState *state)
     free(state);
 }
 
-/* ─── Peer management ───────────────────────────────────────────────── */
 
 OcError oc_gossip_add_node(OcGossipState *state, uint64_t id,
                            const char *addr, uint16_t port)
@@ -133,7 +121,6 @@ OcError oc_gossip_remove_node(OcGossipState *state, uint64_t id)
     return OC_OK;
 }
 
-/* ─── Periodic update ───────────────────────────────────────────────── */
 
 OcError oc_gossip_tick(OcGossipState *state, uint64_t current_time_ms)
 {
@@ -159,7 +146,6 @@ OcError oc_gossip_tick(OcGossipState *state, uint64_t current_time_ms)
     return OC_OK;
 }
 
-/* ─── Queries ───────────────────────────────────────────────────────── */
 
 OcError oc_gossip_get_nodes(const OcGossipState *state,
                             OcGossipNode *out_nodes, uint32_t max,
@@ -189,7 +175,6 @@ uint32_t oc_gossip_get_healthy_count(const OcGossipState *state)
     return count;
 }
 
-/* ─── Peer exchange ────────────────────────────────────────────────── */
 
 OcError oc_gossip_merge(OcGossipState *state, uint64_t current_time_ms,
                         const OcGossipNode *remote_nodes, uint32_t count)
@@ -230,7 +215,6 @@ OcError oc_gossip_merge(OcGossipState *state, uint64_t current_time_ms,
     return OC_OK;
 }
 
-/* ─── Serialization ─────────────────────────────────────────────────── */
 
 /* On-the-wire format: u32 count, then count packed OcGossipNode records.
  * We pack by writing fields individually (no padding) so the format is

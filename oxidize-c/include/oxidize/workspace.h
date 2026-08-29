@@ -1,12 +1,3 @@
-/*
- * workspace.h — Inference workspace pre-allocation.
- *
- * Port of oxidize-core/src/model/inference.rs::Workspace.
- *
- * Pre-allocates all scratch buffers needed for a single forward pass,
- * avoiding per-token malloc/free in the hot decode path. Sized from
- * OcInferenceConfig via oc_workspace_for_config().
- */
 #ifndef OXIDIZE_WORKSPACE_H
 #define OXIDIZE_WORKSPACE_H
 

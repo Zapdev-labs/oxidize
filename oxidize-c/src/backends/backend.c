@@ -1,18 +1,9 @@
-/*
- * backend.c — Abstract compute backend interface implementation.
- *
- * Provides detection and initialization for CPU, CUDA, Vulkan, Metal, and
- * WebGPU backends. In the dependency-free C11 port, only the CPU backend
- * is available; GPU backends report unavailable (unless OC_CUDA is defined,
- * in which case the existing oc_cuda_available() is consulted).
- */
 #include "oxidize/backend.h"
 #include "oxidize/cuda.h"
 
 #include <stdio.h>
 #include <string.h>
 
-/* ─── Helpers ───────────────────────────────────────────────────────── */
 
 const char *oc_backend_type_name(OcBackendType type)
 {
@@ -43,7 +34,6 @@ static void fill_info(OcBackendInfo *info, OcBackendType type)
     info->compute_capability_minor = 0;
 }
 
-/* ─── Detection ─────────────────────────────────────────────────────── */
 
 OcError oc_backend_detect(OcBackendType type, OcBackendInfo *out)
 {
@@ -103,7 +93,6 @@ OcError oc_backend_detect_all(OcBackendInfo *out, uint32_t *n_out,
     return OC_OK;
 }
 
-/* ─── Init / Free ───────────────────────────────────────────────────── */
 
 OcError oc_backend_init(OcBackend *backend, OcBackendType type)
 {
@@ -137,7 +126,6 @@ void oc_backend_free(OcBackend *backend)
     memset(backend, 0, sizeof(*backend));
 }
 
-/* ─── Queries ───────────────────────────────────────────────────────── */
 
 bool oc_backend_is_available(OcBackendType type)
 {
@@ -165,7 +153,6 @@ OcBackendType oc_backend_best_available(void)
     return OC_BACKEND_CPU;
 }
 
-/* ─── Info printing ──────────────────────────────────────────────────── */
 
 size_t oc_backend_info_print(const OcBackendInfo *info, char *out,
                              size_t out_size)

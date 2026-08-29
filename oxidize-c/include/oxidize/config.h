@@ -1,16 +1,3 @@
-/*
- * config.h — Model configuration extracted from GGUF metadata or config.json.
- *
- * Port of oxidize-core/src/model/inference.rs::ModelConfig to C11. Provides a
- * single normalized `OcModelConfig` struct populated from architecture-
- * specific GGUF metadata keys (e.g. "llama.block_count",
- * "llama.embedding_length", "llama.attention.head_count", ...) and consumed
- * by the inference engine and CLI.
- *
- * `oc_model_config_from_gguf()` reads `general.architecture` to determine the
- * metadata-key prefix, then pulls the common keys shared across all
- * Llama-family architectures (llama, mistral, qwen2, gemma, phi, glm, ...).
- */
 #ifndef OXIDIZE_CONFIG_H
 #define OXIDIZE_CONFIG_H
 
@@ -34,10 +21,7 @@ extern "C" {
 /* Maximum FFN type string length (NUL-terminated). */
 #define OC_CONFIG_FFN_TYPE_LEN 16
 
-/* Normalized model configuration. Fields are the common superset across the
- * Llama-family architectures supported by oxidize. Architecture-specific
- * extras (MLA compression dims, DeepSeek shared-expert shapes, ...) are not
- * captured here; callers needing them should read the GGUF directly. */
+/* Normalized model configuration. */
 typedef struct OcModelConfig {
     char     arch[OC_CONFIG_ARCH_LEN];            /* "llama", "qwen2", ... */
     uint32_t n_layers;                             /* transformer block count */
@@ -63,27 +47,13 @@ typedef struct OcModelConfig {
  * or OC_ERR_INVALID_ARG. */
 OcError oc_model_config_init(OcModelConfig *cfg);
 
-/* Populate `cfg` from a parsed GGUF file's metadata. Reads
- * `general.architecture` for the key prefix, then pulls the common Llama-
- * family keys (block_count, embedding_length, feed_forward_length,
- * attention.head_count, attention.head_count_kv, attention.key_length,
- * context_length, rope.freq_base, rope.scaling.type, rope.scaling.factor,
- * attention.layer_norm_epsilon, expert_count, expert_used_count,
- * attention.sliding_window). Missing keys fall back to defaults.
- * Returns OC_OK, OC_ERR_INVALID_ARG, OC_ERR_FORMAT (no architecture), or
- * OC_ERR_OOM. */
+/* Populate `cfg` from a parsed GGUF file's metadata. Reads */
 OcError oc_model_config_from_gguf(const OcGgufFile *gguf, OcModelConfig *cfg);
 
-/* Validate the config: required fields present (n_layers, n_heads,
- * hidden_dim, vocab_size > 0; head_dim divides hidden_dim; n_kv_heads <=
- * n_heads; n_expert_used <= n_expert when MoE). Returns OC_OK or
- * OC_ERR_INVALID_ARG. */
+/* Validate the config: required fields present (n_layers, n_heads, */
 OcError oc_model_config_validate(const OcModelConfig *cfg);
 
-/* Write a human-readable summary of the config into `out` (up to `out_size-1`
- * chars, NUL-terminated). Returns the number of bytes written (excluding
- * NUL). If `out` is NULL or out_size==0, returns the length that would have
- * been written. */
+/* Write a human-readable summary of the config into `out` (up to `out_size-1` */
 size_t oc_model_config_print(const OcModelConfig *cfg, char *out, size_t out_size);
 
 /* Return a pointer to the config's arch string (convenience accessor; never

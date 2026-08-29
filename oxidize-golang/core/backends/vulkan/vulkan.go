@@ -1,8 +1,4 @@
 // Package vulkanbackend mirrors oxidize_core::backends::vulkan. It provides
-// shader source constants, a device classifier, a layer dispatch planner,
-// and the BuildInfo + selector helpers. The actual GPU dispatch path is a
-// stub in this Go port; production deployments would wire it to ash/vulkan
-// via CGo.
 package vulkanbackend
 
 import (
@@ -121,9 +117,6 @@ type LayerDispatch struct {
 }
 
 // Q4Q8GemvShader, Q4KGemvShader, F32GemmShader, FusedAttentionShader mirror
-// the VULKAN_*_SHADER constants from the Rust crate. We expose them as
-// empty placeholders to preserve the public surface; a real build would
-// embed the SPIR-V sources.
 const (
 	Q4Q8GemvShader      = "// SPIR-V placeholder for Q4_Q8 GEMV\n"
 	Q4KGemvShader       = "// SPIR-V placeholder for Q4_K GEMV\n"

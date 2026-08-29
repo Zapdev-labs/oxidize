@@ -1,8 +1,3 @@
-/*
- * gpu_cluster.c — GPU family profiles and Kubernetes manifest generation.
- *
- * Port from oxidize-core/src/cluster/gpu_cluster.rs.
- */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/gpu_cluster.h"
@@ -11,9 +6,7 @@
 #include <string.h>
 #include <strings.h> /* strcasecmp */
 
-/* ------------------------------------------------------------------ */
 /* Static GPU family profiles.                                         */
-/* ------------------------------------------------------------------ */
 
 static const OcGpuProfile OC_PROFILES[] = {
     [OC_GPU_FAMILY_B200] = {
@@ -77,18 +70,14 @@ static const uint8_t OC_FAMILY_RANKS[] = {
 #define OC_N_FAMILIES \
     (sizeof(OC_PROFILES) / sizeof(OC_PROFILES[0]))
 
-/* ------------------------------------------------------------------ */
 /* Helpers.                                                            */
-/* ------------------------------------------------------------------ */
 
 static bool family_valid(OcGpuFamily f)
 {
     return (size_t)f < OC_N_FAMILIES;
 }
 
-/* ------------------------------------------------------------------ */
 /* Public API.                                                         */
-/* ------------------------------------------------------------------ */
 
 const OcGpuProfile *oc_gpu_profile(OcGpuFamily family)
 {
@@ -159,9 +148,7 @@ const char *oc_gpu_cluster_label(const char *key)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
 /* Manifest generation.                                                */
-/* ------------------------------------------------------------------ */
 
 OcError oc_gpu_cluster_node_pool_yaml(OcGpuFamily family, uint32_t replicas,
                                       char *out, size_t out_len)

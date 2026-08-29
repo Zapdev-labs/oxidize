@@ -1,9 +1,3 @@
-/*
- * eagle3.h — Eagle-3 speculative decoding support.
- *
- * Eagle uses a lightweight draft model to generate candidate tokens
- * for speculative decoding. Port from oxidize-core/src/model/eagle3.rs.
- */
 #ifndef OXIDIZE_EAGLE3_H
 #define OXIDIZE_EAGLE3_H
 
@@ -51,7 +45,6 @@ uint32_t oc_eagle_n_draft(const OcEagleState *state);
 float oc_eagle_acceptance_rate(const OcEagleState *state);
 void oc_eagle_state_free(OcEagleState *state);
 
-/* ─── Real Eagle3 draft model (port of eagle3.rs) ───────────────────── */
 
 /* Eagle3 configuration (parsed from GGUF metadata). */
 typedef struct OcEagle3Config {

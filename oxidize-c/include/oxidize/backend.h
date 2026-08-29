@@ -1,13 +1,3 @@
-/*
- * backend.h — Abstract compute backend interface.
- *
- * Provides a unified abstraction over CPU, CUDA, Vulkan, Metal, and WebGPU
- * compute backends. Mirrors oxidize-core/src/backend.rs::ComputeBackend.
- *
- * In the dependency-free C11 port, only the CPU backend is available.
- * The CUDA path (compiled with -DOC_CUDA) populates GPU device info via
- * the existing OcCudaContext; Vulkan/Metal/WebGPU report unavailable.
- */
 #ifndef OXIDIZE_BACKEND_H
 #define OXIDIZE_BACKEND_H
 
@@ -61,10 +51,7 @@ typedef struct OcBackend {
  * enum range. Never returns NULL. */
 const char *oc_backend_type_name(OcBackendType type);
 
-/* Detect if the given backend is available on this system and populate
- * `out` with device info. Returns OC_OK on success (even if the backend is
- * not available — check `out->available`). Returns OC_ERR_INVALID_ARG if
- * `out` is NULL. */
+/* Detect if the given backend is available on this system and populate */
 OcError oc_backend_detect(OcBackendType type, OcBackendInfo *out);
 
 /* Detect all backends. Writes up to `max` entries into `out` and sets
@@ -73,10 +60,7 @@ OcError oc_backend_detect(OcBackendType type, OcBackendInfo *out);
 OcError oc_backend_detect_all(OcBackendInfo *out, uint32_t *n_out,
                               uint32_t max);
 
-/* Initialize a backend instance for the given type. On success,
- * `backend->initialized` is true and `backend->user_data` may hold
- * backend-specific context. Returns OC_ERR_BACKEND if the backend is not
- * available, OC_ERR_INVALID_ARG if `backend` is NULL. */
+/* Initialize a backend instance for the given type. On success, */
 OcError oc_backend_init(OcBackend *backend, OcBackendType type);
 
 /* Cleanup: release any resources held by the backend. Safe on NULL or
@@ -92,10 +76,7 @@ bool oc_backend_is_available(OcBackendType type);
  * available. */
 OcBackendType oc_backend_best_available(void);
 
-/* Format a human-readable description of the backend info into `out`
- * (NUL-terminated, up to `out_size-1` chars). Returns the number of bytes
- * written (excluding NUL). If `out` is NULL or `out_size` is 0, returns
- * the length that would have been written. */
+/* Format a human-readable description of the backend info into `out` */
 size_t oc_backend_info_print(const OcBackendInfo *info, char *out,
                              size_t out_size);
 

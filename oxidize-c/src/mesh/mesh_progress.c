@@ -1,8 +1,3 @@
-/*
- * mesh_progress.c — Distributed inference task progress tracking.
- *
- * Port from oxidize-core/src/mesh/progress.rs.
- */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mesh_progress.h"
@@ -10,9 +5,7 @@
 #include <math.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
 /* Helpers.                                                            */
-/* ------------------------------------------------------------------ */
 
 static void copy_str(char *dst, size_t cap, const char *src)
 {
@@ -50,9 +43,7 @@ static OcMeshProgress *find_entry(OcMeshProgressTracker *tracker, const char *ta
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
 /* Public API.                                                         */
-/* ------------------------------------------------------------------ */
 
 OcError oc_mesh_progress_init(OcMeshProgressTracker *tracker)
 {

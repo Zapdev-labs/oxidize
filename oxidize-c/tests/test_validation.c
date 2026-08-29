@@ -1,10 +1,8 @@
-/* test_validation.c — cross-validation and quality-assessment tests. */
 #include <criterion/criterion.h>
 #include <math.h>
 #include <string.h>
 #include "oxidize/validation.h"
 
-/* ─── Helpers ─────────────────────────────────────────────────────── */
 
 static void add_simple_sample(OcValidationState *s, uint32_t expected,
                               uint32_t predicted, float logprob, float weight)
@@ -20,7 +18,6 @@ static void add_simple_sample(OcValidationState *s, uint32_t expected,
     cr_assert_eq(oc_validation_add_sample(s, &sample), OC_OK);
 }
 
-/* ─── Config ──────────────────────────────────────────────────────── */
 
 Test(validation, config_init_defaults)
 {
@@ -36,7 +33,6 @@ Test(validation, config_init_null)
     cr_assert_eq(oc_validation_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Lifecycle ───────────────────────────────────────────────────── */
 
 Test(validation, init_default)
 {
@@ -90,7 +86,6 @@ Test(validation, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── Sample management ──────────────────────────────────────────── */
 
 Test(validation, add_sample)
 {
@@ -166,7 +161,6 @@ Test(validation, clear_empty_state)
     oc_validation_free(s);
 }
 
-/* ─── Single-pass validation ──────────────────────────────────────── */
 
 Test(validation, single_all_correct)
 {
@@ -245,7 +239,6 @@ Test(validation, single_null_args)
     oc_validation_free(s);
 }
 
-/* ─── K-fold ──────────────────────────────────────────────────────── */
 
 Test(validation, k_fold_deterministic_with_seed)
 {
@@ -326,7 +319,6 @@ Test(validation, k_fold_null_args)
     cr_assert_eq(oc_validation_k_fold(NULL, &r), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Confusion matrix ────────────────────────────────────────────── */
 
 Test(validation, confusion_matrix_diagonal)
 {
@@ -374,7 +366,6 @@ Test(validation, confusion_matrix_zero_classes)
     oc_validation_free(s);
 }
 
-/* ─── Perplexity ──────────────────────────────────────────────────── */
 
 Test(validation, perplexity_uniform)
 {

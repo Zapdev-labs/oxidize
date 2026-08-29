@@ -1,9 +1,3 @@
-/*
- * version.h — the single source of truth for the oxidize-c version string.
- *
- * Both the CLI's `--version` output and the server's /openapi.json `info.version`
- * read this, so the two cannot drift apart.
- */
 #ifndef OXIDIZE_VERSION_H
 #define OXIDIZE_VERSION_H
 

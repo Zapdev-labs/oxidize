@@ -1,10 +1,3 @@
-/*
- * benchmark.c — Inference benchmarking implementation.
- *
- * Uses clock_gettime(CLOCK_MONOTONIC) for wall-clock timing (matching
- * the main CLI's decode/prefill tok/s measurements). Memory tracking
- * uses the mem_util module's RSS query.
- */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/benchmark.h"
 
@@ -19,7 +12,6 @@
 #include <string.h>
 #include <time.h>
 
-/* ─── Timing helpers ────────────────────────────────────────────────────── */
 
 static double now_ms(void)
 {
@@ -28,7 +20,6 @@ static double now_ms(void)
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 }
 
-/* ─── Main benchmark ────────────────────────────────────────────────────── */
 
 OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
                           OcBenchmarkResult *out)
@@ -64,10 +55,7 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
     for (uint32_t rep = 0; rep < n_reps; rep++) {
         oc_llama_session_reset(&sess);
 
-        /* Prefill phase (skipped entirely when prompt_length == 0 so that a
-         * decode-only configuration stays decode-only). When batch_size > 1,
-         * we simulate batched prefill by running batch_size sequences
-         * sequentially and dividing the total time by batch_size. */
+        /* Prefill phase (skipped entirely when prompt_length == 0 so that a decode-only configuration stays decode-only). */
         uint32_t prompt_len = cfg->prompt_length;
         double prefill_ms = 0.0;
         if (prompt_len > 0) {
@@ -200,7 +188,6 @@ OcError oc_benchmark_scaling(OcLlamaModel *model, OcBenchmarkResult *out)
     return OC_OK;
 }
 
-/* ─── Formatting ────────────────────────────────────────────────────────── */
 
 size_t oc_benchmark_format(const OcBenchmarkResult *r, char *buf, size_t cap)
 {
@@ -280,7 +267,6 @@ void oc_benchmark_print(const OcBenchmarkResult *r)
     }
 }
 
-/* ─── Micro-benchmarks ──────────────────────────────────────────────────── */
 
 double oc_benchmark_matvec(uint32_t n_rows, uint32_t n_cols, uint32_t n_iters)
 {
@@ -315,10 +301,7 @@ double oc_benchmark_matvec(uint32_t n_rows, uint32_t n_cols, uint32_t n_iters)
     return (double)n_rows * n_iters / (elapsed / 1000.0);
 }
 
-/* Time one OXK quantized matvec entry point over `n_iters` iterations.
- * Weight/input buffers are zero-initialized but correctly packed/sized for
- * the block format, so the kernel exercises its real code path.
- * Returns rows/sec, or 0.0 on allocation failure or zero elapsed time. */
+/* Time one OXK quantized matvec entry point over `n_iters` iterations. */
 static double bench_oxk_matvec(void (*matvec)(const uint8_t *, size_t, size_t,
                                               const float *, float *),
                                uint32_t n_rows, uint32_t n_cols,

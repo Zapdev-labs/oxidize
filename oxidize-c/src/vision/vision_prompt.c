@@ -136,10 +136,7 @@ OcError oc_vision_prompt_render_tokens(const OcVisionPrompt *vp,
         break;
     }
 
-    /* Tokenize text: use simple word-level tokenization.
-     * Each word becomes a token (hash of the word), spaces are separate tokens.
-     * This is a basic tokenizer for prompt construction; real inference should
-     * use the model's actual tokenizer. */
+    /* Tokenize text: use simple word-level tokenization. */
     size_t i = 0;
     while (vp->text[i] && *out_n < max_tokens) {
         if (vp->text[i] == ' ' || vp->text[i] == '\t') {

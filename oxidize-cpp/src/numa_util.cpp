@@ -36,7 +36,6 @@
 #include <omp.h>
 #endif
 
-// ---- syscall numbers (x86-64 Linux) ----------------------------------------
 #ifndef __NR_set_mempolicy
 #define __NR_set_mempolicy 238
 #endif
@@ -54,9 +53,7 @@
 
 namespace oxidize {
 
-// ---------------------------------------------------------------------------
 // Sysfs helpers
-// ---------------------------------------------------------------------------
 
 /// Parse a Linux cpulist string like "0,2,4-6,8" into a sorted vector of
 /// cpu ids.
@@ -116,9 +113,7 @@ std::vector<NumaNode> discover_numa_nodes() {
     return nodes;
 }
 
-// ---------------------------------------------------------------------------
 // Argument parsing
-// ---------------------------------------------------------------------------
 
 NumaConfig parse_numa_arg(const std::string& s) {
     NumaConfig cfg;
@@ -144,9 +139,7 @@ NumaConfig parse_numa_arg(const std::string& s) {
     return cfg;
 }
 
-// ---------------------------------------------------------------------------
 // Syscall wrappers
-// ---------------------------------------------------------------------------
 
 /// Build a nodemask unsigned long array for a single node id.
 /// Kernel nodemask is an array of `unsigned long` words; each bit = one node.
@@ -191,9 +184,7 @@ static bool pin_thread_to_cpuset(const cpu_set_t& cpuset) {
     return sched_setaffinity(tid, sizeof(cpu_set_t), &cpuset) == 0;
 }
 
-// ---------------------------------------------------------------------------
 // Core init
-// ---------------------------------------------------------------------------
 
 // Count unique physical cores among `cpus` via sysfs core_id (SMT siblings
 // share a core_id). Returns 0 on any sysfs read failure.

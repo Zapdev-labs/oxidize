@@ -15,7 +15,6 @@ use oxidize_core::tensor;
 use std::ffi::{CStr, c_char};
 use std::sync::Once;
 
-// ── thread pool init ──────────────────────────────────────────────────────────
 
 static RAYON_INIT: Once = Once::new();
 
@@ -51,7 +50,6 @@ fn init_thread_pool() {
     });
 }
 
-// ── version ──────────────────────────────────────────────────────────────────
 
 static VERSION: &[u8] = b"0.1.0\0";
 
@@ -60,7 +58,6 @@ pub extern "C" fn oxidize_ffi_version() -> *const c_char {
     VERSION.as_ptr().cast()
 }
 
-// ── quantization type map ─────────────────────────────────────────────────────
 
 fn to_gguf_type(t: u32) -> Option<GgufQuantizationType> {
     match t {
@@ -82,7 +79,6 @@ fn to_gguf_type(t: u32) -> Option<GgufQuantizationType> {
     }
 }
 
-// ── fused quantized GEMV ─────────────────────────────────────────────────────
 
 /// output[i] = dot(row_i_of_W, vector) for all rows, using AVX2+FMA when available.
 /// Returns 0 on success, -1 on error.
@@ -111,7 +107,6 @@ pub unsafe extern "C" fn oxidize_gemv_quantized(
     }
 }
 
-// ── model handle ─────────────────────────────────────────────────────────────
 
 struct ModelHandle {
     model: InferenceModel,
@@ -168,7 +163,6 @@ pub unsafe extern "C" fn oxidize_model_vocab_size(handle: *mut std::ffi::c_void)
     h.model.config().vocab_size as u32
 }
 
-// ── session handle ────────────────────────────────────────────────────────────
 
 /// Create a new inference session. Must be freed with oxidize_session_free.
 #[unsafe(no_mangle)]
@@ -199,7 +193,6 @@ pub unsafe extern "C" fn oxidize_session_free(session: *mut std::ffi::c_void) {
     }
 }
 
-// ── forward pass ─────────────────────────────────────────────────────────────
 
 /// Run one decode step.
 ///

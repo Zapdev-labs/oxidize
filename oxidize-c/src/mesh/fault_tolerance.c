@@ -1,17 +1,8 @@
-/*
- * fault_tolerance.c — Mesh fault tolerance: heartbeat monitoring, failure
- * detection, and failover.
- *
- * Transport-agnostic membership layer. Each node periodically emits
- * heartbeats; the manager tracks per-node last_heartbeat_ms and, on each
- * oc_ft_tick, flags timed-out nodes as SUSPECT then DEAD.
- */
 #include "oxidize/fault_tolerance.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ───────────────────────────────────────────────────────── */
 
 /* Find index of node by id, or -1 if absent. */
 static int32_t ft_find(const OcFtManager *mgr, uint64_t node_id)
@@ -31,7 +22,6 @@ static void ft_node_init(OcFtNodeState *node, uint64_t node_id)
     node->status            = OC_FT_ALIVE;
 }
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 OcError oc_ft_config_init(OcFtConfig *cfg)
 {
@@ -43,7 +33,6 @@ OcError oc_ft_config_init(OcFtConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_ft_init(const OcFtConfig *config, uint64_t self_id,
                    OcFtManager **out)
@@ -78,7 +67,6 @@ void oc_ft_free(OcFtManager *mgr)
     free(mgr);
 }
 
-/* ─── Node management ──────────────────────────────────────────────── */
 
 OcError oc_ft_add_node(OcFtManager *mgr, uint64_t node_id)
 {
@@ -107,7 +95,6 @@ OcError oc_ft_remove_node(OcFtManager *mgr, uint64_t node_id)
     return OC_OK;
 }
 
-/* ─── Heartbeats ────────────────────────────────────────────────────── */
 
 OcError oc_ft_heartbeat(OcFtManager *mgr, uint64_t node_id,
                         uint64_t current_ms)
@@ -155,7 +142,6 @@ OcError oc_ft_tick(OcFtManager *mgr, uint64_t current_ms)
     return OC_OK;
 }
 
-/* ─── Queries ────────────────────────────────────────────────────────── */
 
 OcError oc_ft_get_node_state(const OcFtManager *mgr, uint64_t node_id,
                              OcFtNodeState *out_state)
@@ -193,7 +179,6 @@ OcError oc_ft_get_dead_nodes(const OcFtManager *mgr, uint64_t *out_ids,
     return OC_OK;
 }
 
-/* ─── Recovery ──────────────────────────────────────────────────────── */
 
 OcError oc_ft_recover(OcFtManager *mgr, uint64_t node_id)
 {

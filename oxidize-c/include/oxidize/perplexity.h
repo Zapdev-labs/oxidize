@@ -1,9 +1,3 @@
-/*
- * perplexity.h — perplexity evaluation over text datasets.
- *
- * Computes the perplexity (average negative log-likelihood per token)
- * of a model on a given text input. Useful for model quality evaluation.
- */
 #ifndef OXIDIZE_PERPLEXITY_H
 #define OXIDIZE_PERPLEXITY_H
 

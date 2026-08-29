@@ -1,25 +1,9 @@
-/*
- * iq_grids.c — Importance matrix quantization grid implementation.
- *
- * Ports the codebook-grid quantization concept from
- * oxidize-core/src/compute/iq_grids.rs. The grids here store dequantized
- * float codebook vectors for direct nearest-neighbor search.
- */
 #include "oxidize/iq_grids.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Built-in codebook grids ──────────────────────────────────────────
- *
- * These are dequantized representations of the IQ2_XXS / IQ3_XXS / IQ4_NL
- * codebooks. The raw codebooks encode quantized nibbles; here we expand
- * them to float vectors for nearest-neighbor search and dequantization.
- * For compactness and clarity, the 2-bit and 4-bit grids are generated
- * procedurally; the 3-bit grid uses a small static table mirroring the
- * Rust IQ3XXS_GRID values (dequantized to 4-element float vectors).
- */
 
 /* IQ4_NL: 16 single-element entries, non-linear scale.
  * Values approximate the IQ4_NL dequant table from ggml. */
@@ -30,10 +14,7 @@ static const float IQ4_NL_VALUES[16] = {
      53.0f,   69.0f,   89.0f, 113.0f,
 };
 
-/* IQ2_XXS grid: 256 entries × 8 dims. Each byte nibble takes one of three
- * values: 0x08, 0x19, 0x2b (dequantized as -0.5, 0.0, 0.5 by convention).
- * We generate all combinations procedurally rather than hard-coding 256×8
- * floats. The three dequant levels: */
+/* IQ2_XXS grid: 256 entries × 8 dims. Each byte nibble takes one of three */
 #define IQ2_LEVELS   3
 static const float IQ2_DEQUANT[3] = { -0.5f, 0.0f, 0.5f };
 
@@ -62,12 +43,7 @@ static float iq3_nibble_dequant(uint8_t nibble)
     return 0.0f;
 }
 
-/* Generate the 2-bit (IQ2_XXS) grid: 256 entries × 8 dims.
- * Each entry is a combination of the 3 IQ2 levels across 8 positions.
- * 3^8 = 6561, but the IQ2_XXS grid only uses 256 selected combinations.
- * We generate a representative 256-entry subset by iterating over byte
- * patterns: each of the 8 nibbles is one of 3 values, and we select 256
- * patterns by treating each grid entry as a base-3 number (truncated). */
+/* Generate the 2-bit (IQ2_XXS) grid: 256 entries × 8 dims. */
 static void generate_iq2_grid(float *data)
 {
     /* Each of 256 entries corresponds to an 8-nibble pattern.
@@ -99,7 +75,6 @@ static void generate_iq3_grid(float *data)
     }
 }
 
-/* ─── Public API ─────────────────────────────────────────────────────── */
 
 OcError oc_iq_grid_init(OcIqGrid *grid, OcIqGridType type)
 {

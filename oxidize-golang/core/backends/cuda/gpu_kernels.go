@@ -6,9 +6,6 @@ import (
 )
 
 // GpuInitActivationBuffers allocates (or reallocates) the activation buffers
-// for a given model size. Safe to call multiple times; existing buffers are
-// kept when the dimensions are unchanged. Mirrors
-// gpu_kernels.rs:gpu_init_activation_buffers.
 func GpuInitActivationBuffers(hiddenSize, intermediateSize int) error {
 	if hiddenSize <= 0 || intermediateSize <= 0 {
 		return &MemoryError{Message: "activation buffer dims must be positive"}
@@ -103,12 +100,6 @@ func rmsNormInto(x, weight []float32, eps float32, out []float32) {
 }
 
 // GpuAttnRmsAndQkvQ4K runs the fused attention pre-projection on-device: it
-// RMS-norms the resident hidden state, then projects Q/K/V with the given
-// quantized weights, leaving the results in qOut/kOut/vOut. Mirrors
-// gpu_native_forward.rs:gpu_attn_rms_and_qkv_q4k.
-//
-// wq/wk/wv are raw quantized weight bytes of type qType; qLen/kvLen are the
-// projection output dimensions and hiddenSize the input dimension.
 func GpuAttnRmsAndQkvQ4K(
 	attnNorm []float32, eps float32,
 	wq []byte, qLen int,

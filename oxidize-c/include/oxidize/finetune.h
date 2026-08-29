@@ -1,13 +1,3 @@
-/*
- * finetune.h — LoRA/SFT finetuning utility stubs.
- *
- * Provides the API surface for fine-tuning models with LoRA adapters.
- * The actual training loop requires gradient computation (not yet
- * implemented in the C port), but the infrastructure for saving/loading
- * LoRA adapters and running SFT is provided.
- *
- * Port of oxidize-finetuning/ Rust crate.
- */
 #ifndef OXIDIZE_FINETUNE_H
 #define OXIDIZE_FINETUNE_H
 

@@ -1,20 +1,3 @@
-/*
- * continuous_batching.h — continuous batching scheduler for inference requests.
- *
- * Port of oxidize-core/src/paged_attention/ continuous batching concepts.
- * Batches multiple inference requests with different sequence lengths
- * together (vLLM-style), allowing prefill of new requests to interleave
- * with decoding of in-progress requests.
- *
- * Design:
- *   - OcBatchConfig: tuning knobs (max_batch_size, max_seq_len, strategy).
- *   - OcBatchRequest: a single inference request (prompt tokens + max_tokens).
- *   - OcBatchSlot: per-request runtime state (generated tokens, status).
- *   - OcBatchScheduler: holds slots, selects the next batch to run, tracks
- *     throughput stats.
- *   - Scheduling strategies: FCFS (arrival order) or SHORTEST_JOB_FIRST
- *     (smallest remaining work first).
- */
 #ifndef OXIDIZE_CONTINUOUS_BATCHING_H
 #define OXIDIZE_CONTINUOUS_BATCHING_H
 
@@ -28,20 +11,17 @@
 extern "C" {
 #endif
 
-/* ─── Constants ────────────────────────────────────────────────────────── */
 
 #define OC_BATCH_DEFAULT_MAX_BATCH_SIZE 32
 #define OC_BATCH_DEFAULT_MAX_SEQ_LEN    4096
 #define OC_BATCH_MAX_TOKENS_PER_REQUEST  8192
 
-/* ─── Scheduling strategy ─────────────────────────────────────────────── */
 
 typedef enum {
     OC_BATCH_FCFS = 0,            /* first-come, first-served             */
     OC_BATCH_SHORTEST_JOB_FIRST,  /* smallest remaining work first        */
 } OcBatchStrategy;
 
-/* ─── Slot state ───────────────────────────────────────────────────────── */
 
 typedef enum {
     OC_BATCH_SLOT_WAITING    = 0,  /* queued, not yet running             */
@@ -50,7 +30,6 @@ typedef enum {
     OC_BATCH_SLOT_ABORTED    = 3,  /* cancelled by caller                 */
 } OcBatchSlotState;
 
-/* ─── Request / Slot / Stats ──────────────────────────────────────────── */
 
 /* A single inference request submitted by the caller. The scheduler copies
  * prompt_tokens (caller retains ownership of the input array). */
@@ -86,7 +65,6 @@ typedef struct OcBatchStats {
     double   throughput_tok_per_sec;      /* tokens / elapsed seconds        */
 } OcBatchStats;
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 typedef struct OcBatchConfig {
     uint32_t          max_batch_size;     /* max concurrent slots            */
@@ -97,7 +75,6 @@ typedef struct OcBatchConfig {
 /* Returns a sensible default config. */
 OcBatchConfig oc_batch_config_default(void);
 
-/* ─── Scheduler ────────────────────────────────────────────────────────── */
 
 typedef struct OcBatchScheduler {
     OcBatchConfig   config;
@@ -121,19 +98,13 @@ OcError oc_batch_scheduler_init(OcBatchScheduler **out, OcBatchConfig config);
  * OC_ERR_OOM if the scheduler is full or allocation fails. */
 OcError oc_batch_scheduler_add(OcBatchScheduler *s, const OcBatchRequest *req);
 
-/* Select the next batch of slots to process. Writes up to max_slots slot
- * pointers into out_slots (borrowed; owned by scheduler) and the count
- * into out_count. Only WAITING and RUNNING slots are returned. Returns
- * OC_OK even if out_count == 0 (nothing to do). */
+/* Select the next batch of slots to process. Writes up to max_slots slot */
 OcError oc_batch_scheduler_next_batch(OcBatchScheduler *s,
                                        OcBatchSlot **out_slots,
                                        size_t max_slots,
                                        size_t *out_count);
 
-/* Append a generated token to the slot matching request_id. Transitions
- * WAITING -> RUNNING on the first token. Transitions to COMPLETED when
- * n_generated reaches max_tokens. Returns OC_ERR_INVALID_ARG if the
- * request_id is unknown or the slot is already terminal. */
+/* Append a generated token to the slot matching request_id. Transitions */
 OcError oc_batch_scheduler_update_token(OcBatchScheduler *s,
                                         uint64_t request_id,
                                         uint32_t token);

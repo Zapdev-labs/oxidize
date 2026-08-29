@@ -1,10 +1,3 @@
-/*
- * tensor_ops.c — High-level tensor operations implementation.
- *
- * All operations use plain C loops with no external dependencies.
- * SIMD-optimized versions can be added later via function pointers
- * or compile-time dispatch (matching the simd.h pattern).
- */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/tensor_ops.h"
 
@@ -13,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Element-wise operations ──────────────────────────────────────────── */
 
 void oc_tensor_add_f32(const float *a, const float *b, float *out, size_t n)
 {
@@ -92,7 +84,6 @@ void oc_tensor_iscale_f32(float *a, float scale, size_t n)
     for (size_t i = 0; i < n; i++) a[i] *= scale;
 }
 
-/* ─── Reductions ────────────────────────────────────────────────────────── */
 
 float oc_tensor_sum_f32(const float *a, size_t n)
 {
@@ -146,7 +137,6 @@ float oc_tensor_variance_f32(const float *a, size_t n)
     return var / (float)n;
 }
 
-/* ─── Copy / transpose / concat ─────────────────────────────────────────── */
 
 void oc_tensor_copy_f32(const float *src, float *dst, size_t n)
 {
@@ -177,7 +167,6 @@ void oc_tensor_repeat_row_f32(const float *row, float *out,
         memcpy(out + i * n, row, n * sizeof(float));
 }
 
-/* ─── Softmax ──────────────────────────────────────────────────────────── */
 
 void oc_tensor_softmax_f32(const float *a, float *out, size_t n)
 {
@@ -243,7 +232,6 @@ void oc_tensor_log_softmax_f32(const float *a, float *out, size_t n)
         out[i] = a[i] - logsum;
 }
 
-/* ─── Normalization ────────────────────────────────────────────────────── */
 
 void oc_tensor_layer_norm_f32(const float *a, const float *weight,
                                const float *bias, float *out,
@@ -269,7 +257,6 @@ void oc_tensor_rms_norm_f32(const float *a, const float *weight,
         out[i] = a[i] * inv_rms * weight[i];
 }
 
-/* ─── Rotary position embedding ─────────────────────────────────────────── */
 
 void oc_tensor_rope_neox_f32(float *x, size_t head_dim,
                               uint32_t position, float freq_base)
@@ -311,7 +298,6 @@ void oc_tensor_rope_neox_row_f32(float *x, size_t n_head, size_t head_dim,
     }
 }
 
-/* ─── GEMM ──────────────────────────────────────────────────────────────── */
 
 void oc_tensor_gemm_f32(const float *A, const float *B, float *C,
                          size_t M, size_t K, size_t N)
@@ -348,7 +334,6 @@ void oc_tensor_gemm_batch_f32(const float *A, const float *B, float *C,
     }
 }
 
-/* ─── Attention helpers ────────────────────────────────────────────────── */
 
 void oc_tensor_attention_head_f32(const float *Q, const float *K,
                                     const float *V, float *out,
@@ -409,7 +394,6 @@ void oc_tensor_attention_mha_f32(const float *Q, const float *K,
     }
 }
 
-/* ─── Utility ───────────────────────────────────────────────────────────── */
 
 void oc_tensor_fill_f32(float *a, float val, size_t n)
 {

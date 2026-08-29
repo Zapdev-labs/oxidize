@@ -108,9 +108,6 @@ impl NF4Block {
     }
 }
 
-// ---------------------------------------------------------------------------
-// QLoRAAdapter
-// ---------------------------------------------------------------------------
 
 /// QLoRA adapter: the frozen base weight is stored in NF4 blocks, while the
 /// trainable LoRA delta (A, B) lives in full f32.
@@ -277,9 +274,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -293,7 +287,6 @@ mod tests {
         }
     }
 
-    // --- NF4Block -----------------------------------------------------------
 
     #[test]
     fn nf4_roundtrip_all_table_values() {
@@ -365,7 +358,6 @@ mod tests {
         }
     }
 
-    // --- QLoRAAdapter -------------------------------------------------------
 
     fn make_qlora(in_dim: usize, out_dim: usize) -> QLoRAAdapter {
         let cfg = make_config(4, 8.0);

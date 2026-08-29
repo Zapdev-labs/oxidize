@@ -1,10 +1,3 @@
-/*
- * mesh.c — distributed inference mesh implementation with TCP sockets.
- *
- * Provides peer discovery via TCP connections, broadcast for tensor
- * sharding, and all-reduce for gradient accumulation. When compiled
- * without network support (OC_NO_NETWORK), falls back to single-node stubs.
- */
 #define _POSIX_C_SOURCE 200809L
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1  /* BSD socket opts (IP_MULTICAST_TTL, etc.) on macOS */
@@ -67,10 +60,7 @@ static int mesh_tcp_connect(const char *host, uint16_t port)
     return fd;
 }
 
-/* Accept any pending inbound connections and register them as peers.
- * The listen socket is non-blocking, so this drains the backlog without
- * stalling. ponytail: poll-on-use instead of an accept thread; add a
- * dedicated accept loop if latency-sensitive discovery is ever needed. */
+/* Accept any pending inbound connections and register them as peers. */
 static void mesh_accept_pending(OcMesh *mesh)
 {
     if (mesh->listen_fd < 0) return;

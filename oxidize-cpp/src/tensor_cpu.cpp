@@ -414,7 +414,6 @@ inline bool is_q4_k(QuantType q) {
   return q == QuantType::Q4_K_S || q == QuantType::Q4_K_M;
 }
 
-// ---- int8 fused-dot path (ported back from oxidize-c) ----------------------
 // The activation vector is quantized to int8 blocks of 32 ONCE per matvec,
 // then Q4_0/Q8_0/Q4_K/Q6_K weight rows are dotted with AVX2 maddubs integer
 // ops instead of nibble->float->FMA. ~2.4x measured on Q4_0 decode. Trade-off:

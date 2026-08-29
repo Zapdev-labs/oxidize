@@ -1,9 +1,3 @@
-/*
- * frame_sampler.h — Video frame sampling for multimodal models.
- *
- * Samples frames from video at various strategies for vision model input.
- * Port from oxidize-core/src/video/frame_sampler.rs.
- */
 #ifndef OXIDIZE_FRAME_SAMPLER_H
 #define OXIDIZE_FRAME_SAMPLER_H
 

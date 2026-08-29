@@ -1,4 +1,3 @@
-/* test_activation_stats.c — activation stats tests. */
 #include <criterion/criterion.h>
 #include "oxidize/activation_stats.h"
 #include <math.h>
@@ -18,11 +17,7 @@ Test(act_stats, observe_and_get_norms)
     OcActivationStats stats;
     oc_activation_stats_init(&stats, 1);
 
-    /* Observe a batch of 2 samples, 3 features each.
-     * Sample 0: [1, 0, 0]
-     * Sample 1: [0, 2, 0]
-     * sum_sq = [1, 4, 0], n_samples = 2
-     * L2 norms = [sqrt(0.5), sqrt(2), 0] = [0.707, 1.414, 0] */
+    /* Observe a batch of 2 samples, 3 features each. */
     float activations[] = {1.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f};
     cr_assert_eq(oc_activation_stats_observe(&stats, 0, activations, 2, 3), OC_OK);
 

@@ -116,7 +116,6 @@ void oc_dflash_state_free(OcDFlashState *state)
     memset(state, 0, sizeof(*state));
 }
 
-/* ─── Real DFlash draft model (port of dflash.rs) ───────────────────── */
 
 void oc_dflash_model_config_init(OcDFlashModelConfig *cfg)
 {
@@ -285,7 +284,6 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
     size_t kv_size = n_kv_heads * hd;
     size_t kv_len = n_kv_heads * hd;
 
-    /* 1. Token embedding. */
     float *hidden = malloc(h * sizeof(float));
     if (!hidden) return OC_ERR_OOM;
     if (m->tok_embeddings.data && m->tok_embeddings.rows > token) {
@@ -294,7 +292,6 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
         memset(hidden, 0, h * sizeof(float));
     }
 
-    /* 2. Optional target hidden fusion. */
     float *target_context = NULL;
     if (target_hidden && target_hidden_len > 0 && m->fc.data) {
         float *fused = malloc(h * sizeof(float));
@@ -314,7 +311,6 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
         }
     }
 
-    /* 3. Layer loop. */
     for (size_t li = 0; li < m->n_layers; li++) {
         OcDFlashDecoderLayer *layer = &m->layers[li];
 
@@ -426,7 +422,6 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
         free(normed_ffn); free(gate_out); free(up_out); free(act); free(mlp_out);
     }
 
-    /* 4. Final norm. */
     if (m->norm) {
         float *normed = malloc(h * sizeof(float));
         if (!normed) { free(hidden); free(target_context); return OC_ERR_OOM; }
@@ -435,7 +430,6 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
         free(normed);
     }
 
-    /* 5. Copy output. */
     memcpy(out_hidden, hidden, h * sizeof(float));
     m->position_offset++;
 

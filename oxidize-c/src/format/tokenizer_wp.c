@@ -1,34 +1,5 @@
-/* tokenizer_wp.c — WordPiece tokenizer with `##` continuation prefix,
- * for BERT model family.
- *
- * Faithful port of oxidize-core/src/format/tokenizer.rs::
- *   - `load_wordpiece`                          (load from GGUF metadata)
- *   - `WordPieceTokenizer::new`                  (test constructor)
- *   - `WordPieceTokenizer::with_unknown_token`
- *   - `WordPieceTokenizer::encode`               (greedy longest match)
- *   - `WordPieceTokenizer::decode`               (strip `##` on continuation)
- *   - `WordPieceTokenizer::encode_word_into`     (per-word greedy match)
- *
- * Algorithm (mirrors Rust `encode`):
- *   1. Iterate the input by Unicode codepoint. Whitespace codepoints flush
- *      the current word and emit the whitespace char's own id (or `<unk>`
- *      if absent). Non-whitespace codepoints accumulate into `current_word`.
- *   2. For each word, run greedy longest-match: starting at `start_idx = 0`,
- *      scan `end_idx` from the longest candidate down to `start_idx + 1`,
- *      prepend `##` to the candidate when `start_idx > 0` (continuation),
- *      and emit the first id found. If no candidate matches, emit `<unk>`
- *      and stop (mirrors Rust's early `return`).
- *
- * Whitespace detection uses the Unicode White_Space property to match
- * Rust's `char::is_whitespace` exactly (covers U+0009..U+000D, U+0020,
- * U+0085, U+00A0, U+1680, U+2000..U+200A, U+2028, U+2029, U+202F, U+205F,
- * U+3000). This matters for round-trip parity on multilingual corpora.
- *
- * `##` continuation (VAL-TOK-008): a token like `##ing` only matches at a
- * non-zero offset within a word. On decode, the `##` prefix is stripped and
- * the remainder is concatenated directly to the previous output (no
- * separator), so `["play", "##ing"]` decodes to `"playing"`.
- */
+/* tokenizer_wp.c — WordPiece tokenizer with `##` continuation prefix, for BERT model family. */
+/* `##` continuation (VAL-TOK-008): a token like `##ing` only matches at a */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup */
 
@@ -49,7 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── WordPiece tokenizer state ─────────────────────────────────────── */
 
 struct OcWordPieceTokenizer {
     /* vocab: token string → id. Keys are arena-owned NUL-terminated strings. */
@@ -67,7 +37,6 @@ struct OcWordPieceTokenizer {
     uint32_t  mask_id;     bool has_mask;
 };
 
-/* ─── UTF-8 + Unicode helpers ────────────────────────────────────────── */
 
 /* UTF-8 codepoint decode/encode are shared (utf8_utils.h). */
 
@@ -109,7 +78,6 @@ static size_t wp_char_boundaries(const char *text, size_t text_len, size_t *out)
     return n;
 }
 
-/* ─── Constructor (mirrors Rust `WordPieceTokenizer::new`) ──────────── */
 
 OcError oc_wp_new(const char *const *vocab_tokens, size_t n_tokens,
                   OcArena *arena, OcWordPieceTokenizer **out)
@@ -170,7 +138,6 @@ OcError oc_wp_with_unknown_token(OcWordPieceTokenizer *wp, OcArena *arena,
     return OC_OK;
 }
 
-/* ─── Encode ─────────────────────────────────────────────────────────── */
 
 /* Encode one word via greedy longest-match. Mirrors Rust
  * `WordPieceTokenizer::encode_word_into`. Appends ids to `encoded`. */
@@ -361,7 +328,6 @@ OcError oc_wp_encode(const OcWordPieceTokenizer *wp, const char *text,
     return OC_OK;
 }
 
-/* ─── Decode ─────────────────────────────────────────────────────────── */
 
 OcError oc_wp_decode(const OcWordPieceTokenizer *wp, const uint32_t *ids,
                      size_t count, char **out_text)
@@ -410,7 +376,6 @@ OcError oc_wp_decode(const OcWordPieceTokenizer *wp, const uint32_t *ids,
     return OC_OK;
 }
 
-/* ─── Load from GGUF metadata ───────────────────────────────────────── */
 
 static OcError wp_get_string_array(const OcGgufFile *gguf, const char *key,
                                    OcArena *arena, OcVector *out)

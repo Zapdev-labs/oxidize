@@ -8,7 +8,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ─── BlockPool ────────────────────────────────────────────────────────── */
 
 Test(paged, block_pool_alloc_free)
 {
@@ -142,7 +141,6 @@ Test(paged, prefix_insert_rejects_invalid_block_id)
     oc_block_pool_free(&pool);
 }
 
-/* ─── BlockTable ────────────────────────────────────────────────────────── */
 
 Test(paged, block_table_basic)
 {
@@ -207,7 +205,6 @@ Test(paged, block_table_blocks_needed)
     oc_block_table_free(&bt);
 }
 
-/* ─── Sequence ──────────────────────────────────────────────────────────── */
 
 Test(paged, sequence_basic)
 {
@@ -233,7 +230,6 @@ Test(paged, sequence_basic)
     oc_seq_free(&seq);
 }
 
-/* ─── Scheduler ─────────────────────────────────────────────────────────── */
 
 Test(paged, scheduler_single_seq)
 {
@@ -440,7 +436,6 @@ Test(paged, decode_reports_copy_on_write_for_shared_partial_page)
     oc_scheduler_free(&sched);
 }
 
-/* ─── Block hash ────────────────────────────────────────────────────────── */
 
 Test(paged, block_hash_deterministic)
 {
@@ -458,17 +453,10 @@ Test(paged, block_hash_deterministic)
     cr_assert_neq(h_prefix, h1, "prefix hash differs from full hash");
 }
 
-/* ─── Paged attention kernel ────────────────────────────────────────────── */
 
 Test(paged, attention_kernel_basic)
 {
-    /* 2 blocks × 4 slots × 1 kv_head × 2 head_dim.
-     * K cache: block 0 = [[1,0],[0,1],[0,0],[0,0]]
-     *          block 1 = [[0,0],[0,0],[0,0],[0,0]]
-     * V cache: block 0 = [[10,0],[0,20],[0,0],[0,0]]
-     *          block 1 = [[0,0],[0,0],[0,0],[0,0]]
-     * Query = [1, 0] (head_dim=2)
-     * Only token 0 has non-zero K·Q dot product → output should be V[0] = [10, 0]. */
+    /* 2 blocks × 4 slots × 1 kv_head × 2 head_dim. */
     uint32_t block_size = 4, n_kv_heads = 1, head_dim = 2;
     size_t block_stride = block_size * n_kv_heads * head_dim; /* 8 */
     size_t n_blocks = 2;
@@ -479,12 +467,7 @@ Test(paged, attention_kernel_basic)
     kv[0] = 1.0f; kv[1] = 0.0f;
     /* K for block 0, slot 1: [0, 1] */
     kv[8] = 0.0f; /* wait, slot stride = n_kv_heads * head_dim = 2 */
-    /* Actually layout: kv[block * block_stride + slot * slot_stride + kv_head * head_dim + d]
-     * block_stride = 4 * 1 * 2 = 8
-     * slot_stride = 1 * 2 = 2
-     * K block 0: [1,0, 0,1, 0,0, 0,0] at offset 0
-     * V block 0: [10,0, 0,20, 0,0, 0,0] at offset 16 (after K for 2 blocks)
-     */
+    /* Actually layout: kv[block * block_stride + slot * slot_stride + kv_head * head_dim + d] */
     /* K block 0 slot 0 = [1, 0] */
     kv[0 * 8 + 0 * 2 + 0 * 2 + 0] = 1.0f;
     kv[0 * 8 + 0 * 2 + 0 * 2 + 1] = 0.0f;
@@ -507,11 +490,7 @@ Test(paged, attention_kernel_basic)
     /* Attend to 2 past tokens (slot 0 and 1 in block 0). */
     oc_paged_attention_head(kv, block_table, 2, q, 0, 1, 2, 4, 2, out);
 
-    /* Q·K[0] = 1*1 + 0*0 = 1 → exp(1/sqrt(2))
-     * Q·K[1] = 1*0 + 0*1 = 0 → exp(0/sqrt(2))
-     * softmax: weight[0] = e^0.707/(e^0.707+1) ≈ 0.669
-     *          weight[1] = 1/(e^0.707+1) ≈ 0.331
-     * out = 0.669 * [10, 0] + 0.331 * [0, 20] = [6.69, 6.62] */
+    /* Q·K[0] = 1*1 + 0*0 = 1 → exp(1/sqrt(2)) */
     cr_assert_float_eq(out[0], 10.0f * 0.669f, 0.1f, "out[0] approx 6.69");
     cr_assert_float_eq(out[1], 20.0f * 0.331f, 0.1f, "out[1] approx 6.62");
 }

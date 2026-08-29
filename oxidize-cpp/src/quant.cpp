@@ -170,7 +170,6 @@ inline void iq1s_grid_decode(uint16_t index, int8_t* out) {
   }
 }
 
-// ── Per-type dequant kernels ──────────────────────────────────────────────
 
 void dequant_f32(const uint8_t* in, float* out, size_t n) {
   validate_layout(QuantType::F32, n * 4, n, 4, 1);

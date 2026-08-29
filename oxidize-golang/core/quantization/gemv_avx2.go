@@ -6,11 +6,6 @@ import (
 )
 
 // QuantizeVectorQ8KInto quantizes `vector` (length nBlocks*256) into nBlocks
-// Q8_K blocks written to `out`. Mirrors quantize_vector_q8_k_into in
-// oxidize-core/src/compute/tensor/kernels/q_kernels.rs.
-//
-// Each Q8_K block is 292 bytes: 4 bytes d (f32 LE), 256 bytes qs (i8), then
-// 16 int16 LE bsums (one per 16-element group).
 func QuantizeVectorQ8KInto(vector []float32, nBlocks int, out []byte) error {
 	if len(vector) < nBlocks*QK_K {
 		return &Error{Message: "q8_k: input vector too small"}
@@ -75,14 +70,6 @@ func readQ8KBsum(bsums []byte, idx int) int32 {
 }
 
 // Q4KQ8KRowDot computes one output-row dot product of a Q4_K weight row against
-// a Q8_K-quantized input vector, using integer multiply-adds. This mirrors the
-// math of q4_k_q8_k_row_dot_avx2 (and its scalar fallback) in Rust: the result
-// is bit-equivalent to dequantizing the Q4_K row and the Q8_K vector and taking
-// a float dot product, but stays in integer arithmetic per super-block.
-//
-//   row            : blocksPerRow Q4_K blocks (144 bytes each)
-//   blocksPerRow   : number of 256-element super-blocks in the row
-//   q8k            : blocksPerRow Q8_K blocks (292 bytes each)
 func Q4KQ8KRowDot(row []byte, blocksPerRow int, q8k []byte) float32 {
 	var acc float32
 	for blockIdx := 0; blockIdx < blocksPerRow; blockIdx++ {
@@ -130,14 +117,6 @@ func Q4KQ8KRowDot(row []byte, blocksPerRow int, q8k []byte) float32 {
 }
 
 // Q4KQ8KRowDotX4 computes 4 consecutive Q4_K weight rows against one shared
-// Q8_K input vector, writing the four dot products to out. The Q8_K sub-group
-// loads and bsum pair-sums are computed once per block and reused across all
-// four rows (cache-locality win), mirroring q4_k_q8_k_row_dot_x4_avx2.
-//
-//   rows         : at least 4*rowBytes bytes (4 Q4_K rows spaced rowBytes apart)
-//   rowBytes     : stride between rows (blocksPerRow*144 typically)
-//   blocksPerRow : super-blocks per row
-//   q8k          : blocksPerRow Q8_K blocks
 func Q4KQ8KRowDotX4(rows []byte, rowBytes, blocksPerRow int, q8k []byte, out *[4]float32) {
 	var acc [4]int32Pair
 	for r := 0; r < 4; r++ {

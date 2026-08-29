@@ -1,15 +1,4 @@
-/*
- * activation.h — RMSNorm, RoPE, SwiGLU, and related activation kernels.
- *
- * Port of oxidize-core/src/compute/tensor/kernels/activation.rs:
- *   - rms_norm_f32          (RMSNorm with eps)
- *   - apply_rope_f32_yarn   (split-halves NeoX-style RoPE, YaRN-capable)
- *   - apply_swiglu_inplace_f32 (SwiGLU: silu(x)*y)
- *
- * Bit-exactness with the Rust reference is the hard invariant (VAL-FWD-001..
- * 004). These are the scalar reference paths; SIMD-accelerated variants are
- * layered on later by the quant-simd-dispatch feature.
- */
+/* activation.h — RMSNorm, RoPE, SwiGLU. Bit-exact with Rust (VAL-FWD-001). */
 #ifndef OXIDIZE_ACTIVATION_H
 #define OXIDIZE_ACTIVATION_H
 
@@ -27,10 +16,7 @@ extern "C" {
 void oc_rms_norm_f32(const float *x, const float *weight, float *out,
                      size_t n, float eps);
 
-/* SwiGLU in-place: gate[i] = silu(gate[i]) * up[i], where silu(x)=x*sigmoid(x).
- * `gate` is modified in place; `up` is read-only. Length `n`. Mirrors Rust
- * `apply_swiglu_inplace_f32`. Uses the Schraudolph-tolerant exp from <math.h>
- * (exact sigmoid; no fast-approx here — parity-first). */
+/* SwiGLU in-place: gate[i] = silu(gate[i]) * up[i], where silu(x)=x*sigmoid(x). */
 void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n);
 
 /* GeGLU in-place: gate[i] = gelu(gate[i]) * up[i].
@@ -45,39 +31,16 @@ float oc_gelu_approx_f32(float x);
 /* Exact GeLU: 0.5 * x * (1 + erf(x / sqrt(2))). */
 float oc_gelu_exact_f32(float x);
 
-/* Apply RoPE (Rotary Positional Embedding) to one head of length `head_dim`
- * at absolute `position`. Split-halves (NeoX-style) layout:
- *   half = head_dim / 2
- *   freq_i = theta ^ (-2*i / head_dim),  i = 0..half-1
- *   angle_i = position * freq_i
- *   out[i]          = x[i]        * cos(angle_i) - x[half+i] * sin(angle_i)
- *   out[half+i]     = x[i]        * sin(angle_i) + x[half+i] * cos(angle_i)
- * Only the first `rope_len` elements are rotated when `rope_len < head_dim`
- * (partial RoPE, MiniMax/Qwen3.5); the remainder pass through unchanged.
- * `in` and `out` may alias. `rope_len` is capped to head_dim internally.
- *
- * Position 0 fast path: copies input unchanged (no rotation needed).
- *
- * YaRN scaling is available via oc_rope_apply() in rope_scaling.h and
- * oc_apply_rope_yarn_f32() below. */
+/* Apply RoPE (Rotary Positional Embedding) to one head of length `head_dim` */
 void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
                       size_t rope_len, int64_t position, float theta);
 
-/* Interleaved ("NORM") RoPE — rotates (2i, 2i+1) instead of (i, i+half).
- * llama.cpp's LLAMA_ROPE_TYPE_NORM. Same signature and aliasing rules as
- * oc_apply_rope_f32; see the note there on why the two are not
- * interchangeable. */
+/* Interleaved ("NORM") RoPE — rotates (2i, 2i+1) instead of (i, i+half). oc_apply_rope_f32; see the note there on why the two are not */
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta);
 
-/* Apply RoPE with YaRN long-context scaling.
- * YaRN: scale = yarn_factor * (orig_ctx / position) when position > orig_ctx,
- * with a smooth interpolation between [orig_ctx * 0.8, orig_ctx * 1.2].
- * When yarn_factor == 0 or position <= yarn_orig_ctx, behaves as normal RoPE. */
-/* As oc_apply_rope_yarn_f32, but with an explicit cos/sin amplitude.
- * `attn_factor` < 0 selects the standard YaRN mscale (1 + 0.1*ln(factor));
- * deepseek_yarn models pass the value from oc_rope_deepseek_yarn_scales(),
- * which is 1.0 whenever mscale == mscale_all_dim. */
+/* Apply RoPE with YaRN long-context scaling. */
+/* As oc_apply_rope_yarn_f32, but with an explicit cos/sin amplitude. */
 void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
                                     size_t rope_len, int64_t position,
                                     float theta, float yarn_factor,

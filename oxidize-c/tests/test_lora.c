@@ -1,4 +1,3 @@
-/* test_lora.c — LoRA adapter inference tests. */
 #include <criterion/criterion.h>
 #include "oxidize/lora.h"
 
@@ -103,7 +102,6 @@ Test(lora, set_invalid_weight_name)
     oc_lora_model_free(&lm);
 }
 
-/* ─── LoRA plan tests ───────────────────────────────────────────────── */
 
 Test(lora_plan, basic_match)
 {

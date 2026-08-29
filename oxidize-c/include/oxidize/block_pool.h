@@ -1,19 +1,3 @@
-/*
- * block_pool.h — memory block pool allocator for efficient tensor allocation.
- *
- * Inspired by vLLM's block pool: a fixed pool of equally-sized memory blocks
- * with a free-list for O(1) alloc/free. Blocks are referenced by index so
- * callers can store compact uint32 handles instead of pointers.
- *
- * NOTE: This is a standalone slab allocator, distinct from the ref-counted
- * OcBlockPool in paged_attention.h. That pool is tied to the paged-attention
- * scheduler; this one is a generic memory allocator for arbitrary tensors.
- *
- * Design:
- *   - OcBlkPool: pool of n_blocks blocks each of block_size bytes.
- *   - Free list is a LIFO stack for cache-friendliness.
- *   - allocated[] tracks which blocks are currently in use.
- */
 #ifndef OXIDIZE_BLOCK_POOL_H
 #define OXIDIZE_BLOCK_POOL_H
 

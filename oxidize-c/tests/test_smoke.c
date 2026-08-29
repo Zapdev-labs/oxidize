@@ -1,20 +1,3 @@
-/* test_smoke.c — placeholder smoke test for the Criterion test harness.
- *
- * This file exists so the `criterion-test-infra` feature can demonstrate that
- * the vendored Criterion (MIT) framework is wired up correctly:
- *
- *   - `make test` compiles every tests/test_*.c (including this one) against
- *     tests/criterion/lib/libcriterion.a and links them into a single
- *     `test_runner` binary.
- *   - Criterion auto-registers each `Test(suite, case)` and provides `main()`.
- *   - The smoke test exercises the canonical Criterion assertion API
- *     (cr_assert, cr_expect, cr_assert_eq, cr_assert_str_eq) so downstream
- *     workers can copy this file as a template when adding new test_<module>.c
- *     files.
- *
- * When real module tests are added, keep this file as a permanent harness
- * sanity check (it verifies the framework itself works).
- */
 #include <criterion/criterion.h>
 
 #include <string.h>

@@ -1,13 +1,3 @@
-/*
- * moe.c — Mixture-of-Experts routing and expert forward pass implementation.
- *
- * Implements the gate router, top-k/top-p/softmax routing, per-expert
- * matvec forward, weighted combine, and stats tracking (per-expert usage
- * counts + mean Shannon routing entropy).
- *
- * Port conventions mirror lora.c: scalar f32 throughout, owned malloc'd
- * weight buffers, NULL-safe public functions, OcError return codes.
- */
 #include "oxidize/moe.h"
 
 #include <math.h>
@@ -15,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ─────────────────────────────────────────────────────────── */
 
 static bool config_valid(const OcMoeConfig *c)
 {
@@ -89,7 +78,6 @@ static void sort_descending(IdxVal *arr, size_t n)
     }
 }
 
-/* ─── Routing method name ─────────────────────────────────────────────── */
 
 const char *oc_moe_routing_method_name(OcMoeRoutingMethod method)
 {
@@ -101,7 +89,6 @@ const char *oc_moe_routing_method_name(OcMoeRoutingMethod method)
     }
 }
 
-/* ─── Init / free ─────────────────────────────────────────────────────── */
 
 OcError oc_moe_router_init(OcMoeRouter *r, const OcMoeConfig *config)
 {
@@ -208,7 +195,6 @@ void oc_moe_router_free(OcMoeRouter *r)
     memset(r, 0, sizeof(*r));
 }
 
-/* ─── Route ──────────────────────────────────────────────────────────── */
 
 /* Compute gate logits = gate_weights @ hidden.  logits[e] = dot(row_e, hidden). */
 static void compute_gate_logits(const OcMoeRouter *r,
@@ -328,7 +314,6 @@ OcError oc_moe_route(OcMoeRouter *r,
     return OC_OK;
 }
 
-/* ─── Expert forward ──────────────────────────────────────────────────── */
 
 OcError oc_moe_expert_forward(const OcMoeRouter *r,
                               uint32_t expert_idx,
@@ -391,7 +376,6 @@ OcError oc_moe_expert_forward(const OcMoeRouter *r,
     return OC_OK;
 }
 
-/* ─── Combine ─────────────────────────────────────────────────────────── */
 
 OcError oc_moe_combine(const OcMoeRouteResult *result,
                        const float *const *expert_outs,
@@ -415,7 +399,6 @@ OcError oc_moe_combine(const OcMoeRouteResult *result,
     return OC_OK;
 }
 
-/* ─── Stats ───────────────────────────────────────────────────────────── */
 
 OcError oc_moe_get_stats(const OcMoeRouter *r, OcMoeStats *stats)
 {
@@ -441,7 +424,6 @@ void oc_moe_stats_free(OcMoeStats *stats)
     memset(stats, 0, sizeof(*stats));
 }
 
-/* ─── JSON format ─────────────────────────────────────────────────────── */
 
 /* Write a uint64 array as JSON into buf. Returns chars written. */
 static size_t format_u64_array(char *buf, size_t cap, size_t *off,

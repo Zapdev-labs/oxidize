@@ -1,12 +1,3 @@
-/*
- * mlx_inference.c — MLX (Apple Metal) inference engine, macOS stub.
- *
- * Port of oxidize-core/src/model/mlx_inference.rs. On non-macOS hosts
- * every operation is a stub that returns OC_ERR_BACKEND; the engine
- * object is still constructible so callers can compile and link
- * unconditionally. On macOS a real MLX binding would live here, but
- * this port intentionally ships stubs only.
- */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mlx_inference.h"
@@ -14,7 +5,6 @@
 #include <stddef.h>
 #include <string.h>
 
-/* ─── Platform detection ─────────────────────────────────────────────── */
 
 #if defined(__APPLE__) && defined(__MACH__)
 #  define OC_MLX_HOST_MACOS 1
@@ -22,13 +12,11 @@
 #  define OC_MLX_HOST_MACOS 0
 #endif
 
-/* ─── Defaults ───────────────────────────────────────────────────────── */
 
 #define OC_MLX_DEFAULT_HIDDEN_SIZE 4096u
 #define OC_MLX_DEFAULT_VOCAB_SIZE  32000u
 #define OC_MLX_DEFAULT_N_LAYERS    32u
 
-/* ─── Config ────────────────────────────────────────────────────────── */
 
 void oc_mlx_config_init(OcMlxConfig *cfg)
 {
@@ -42,7 +30,6 @@ void oc_mlx_config_init(OcMlxConfig *cfg)
     cfg->model_path[0] = '\0';
 }
 
-/* ─── Engine lifecycle ───────────────────────────────────────────────── */
 
 OcError oc_mlx_engine_init(OcMlxEngine *engine, const OcMlxConfig *cfg)
 {
@@ -98,7 +85,6 @@ OcError oc_mlx_engine_generate(OcMlxEngine *engine,
     return OC_ERR_BACKEND;
 }
 
-/* ─── Platform info ─────────────────────────────────────────────────── */
 
 bool oc_mlx_is_available(void)
 {

@@ -1,10 +1,3 @@
-/*
- * string.h — string utility helpers.
- *
- * Provides safe, NUL-terminated string helpers that the C library lacks or
- * implements awkwardly (e.g. strndup is POSIX, not C11). All allocations
- * here use malloc and must be freed with oc_free (plain free).
- */
 #ifndef OXIDIZE_UTIL_STRING_H
 #define OXIDIZE_UTIL_STRING_H
 
@@ -39,10 +32,7 @@ bool oc_starts_with(const char *s, const char *prefix);
 /* Check if `s` ends with `suffix`. NULL `s` or `suffix` returns false. */
 bool oc_ends_with(const char *s, const char *suffix);
 
-/* Split `s` on the first occurrence of `delim`. Writes the left part (malloc'd,
- * NUL-terminated) to `*out_left` and returns a pointer into `s` past the delim
- * (or NULL if delim not found). Caller frees `*out_left`. If `delim` not found,
- * `*out_left` is set to NULL and the whole `s` is returned. */
+/* Split `s` on the first occurrence of `delim`. Writes the left part (malloc'd, */
 const char *oc_split_once(const char *s, char delim, char **out_left);
 
 /* Trim leading + trailing ASCII whitespace in place. Returns a pointer into

@@ -1,18 +1,3 @@
-/*
- * realtime.h — OpenAI Realtime API over WebSocket.
- *
- * Implements the `server-realtime` feature on top of server-websocket. A
- * realtime session is a bidirectional WebSocket connection that streams
- * model output as a sequence of typed events (text deltas, speech
- * markers, errors). Incoming client messages are JSON-encoded commands:
- *   {"type":"input_text_delta","delta":"..."}
- *   {"type":"session.update","session":{"temperature":0.7,...}}
- *   {"type":"input_audio_buffer.append","audio":"base64..."}
- *
- * Scope (oxidize-c port): the text streaming path. Audio encoding/decoding
- * is out of scope (the Rust core handles TTS/STT); the C port forwards
- * text input through the loaded model and emits text_delta events.
- */
 #ifndef OXIDIZE_REALTIME_H
 #define OXIDIZE_REALTIME_H
 
@@ -30,7 +15,6 @@
 extern "C" {
 #endif
 
-/* ─── Event types emitted by the server ───────────────────────────────────── */
 typedef enum {
     OC_RT_SPEECH_STARTED = 0,
     OC_RT_TEXT_DELTA,
@@ -38,7 +22,6 @@ typedef enum {
     OC_RT_ERROR,
 } OcRealtimeEvent;
 
-/* ─── Incoming client message types (parsed from JSON) ────────────────────── */
 typedef enum {
     OC_RT_MSG_UNKNOWN = 0,
     OC_RT_MSG_INPUT_TEXT_DELTA,
@@ -48,7 +31,6 @@ typedef enum {
     OC_RT_MSG_RESPONSE_CANCEL,
 } OcRealtimeMessageType;
 
-/* ─── Session config (updatable via session.update) ───────────────────────── */
 typedef struct OcRealtimeSessionConfig {
     float temperature;
     char  voice[64];
@@ -56,7 +38,6 @@ typedef struct OcRealtimeSessionConfig {
     uint32_t max_response_tokens;
 } OcRealtimeSessionConfig;
 
-/* ─── Realtime session ────────────────────────────────────────────────────── */
 typedef struct OcRealtimeSession {
     OcWsSession            *ws;
     OcLlamaModel           *model;
@@ -94,14 +75,10 @@ OcError oc_realtime_handle_session(OcRealtimeSession *sess);
 OcError oc_realtime_send_event(OcRealtimeSession *sess,
                                OcRealtimeEvent ev, const char *data);
 
-/* Process one incoming client message (JSON). Parses the type and
- * dispatches: input_text_delta → tokenize + forward through model +
- * emit text_delta events; session.update → update cfg; others →
- * acknowledged or ignored. Returns OC_OK or OC_ERR_FORMAT. */
+/* Process one incoming client message (JSON). */
 OcError oc_realtime_process_message(OcRealtimeSession *sess,
                                     const char *json, size_t len);
 
-/* ─── Pure helpers (exposed for testing) ──────────────────────────────────── */
 
 /* Parse the "type" field of a JSON message. Returns the matching enum or
  * OC_RT_MSG_UNKNOWN if unrecognized. */

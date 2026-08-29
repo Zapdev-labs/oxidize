@@ -1,11 +1,6 @@
 package paged
 
 // This file ports the vLLM-style three-phase scheduler from
-// oxidize-core/src/paged_attention/scheduler/* (core.rs, config.rs,
-// prefix_cache.rs, lifecycle.rs, sequence.rs). It is additive: the legacy
-// `Scheduler` in paged.go is left untouched so existing callers keep working,
-// while `SchedulerV2` provides budgeted batching, prefill chunking, prefix
-// caching, and copy-on-write.
 
 import (
 	"fmt"
@@ -338,13 +333,6 @@ func (s *SchedulerV2) applyPrefillChunk(seq *Sequence, chunkSize int) error {
 }
 
 // Step performs one scheduler step using the three-phase policy:
-//
-//	Phase 1: decode for fully-prefilled running sequences (1 token each)
-//	Phase 2: continue prefill for partially-prefilled running sequences
-//	Phase 3: prefill from the waiting queue (FCFS)
-//
-// The token budget (MaxBatchedTokens) is enforced across all phases. Mirrors
-// scheduler/core.rs::step.
 func (s *SchedulerV2) Step() (*SchedulerStepResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

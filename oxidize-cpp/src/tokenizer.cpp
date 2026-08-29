@@ -162,7 +162,6 @@ bool Tokenizer::is_eog(Token id) const {
   return i == eos_id_ || (eot_id_ >= 0 && i == eot_id_);
 }
 
-// --- SentencePiece (llama) -------------------------------------------------
 
 std::vector<Token> Tokenizer::encode_spm(const std::string& text) const {
   // Normalize: optional leading space, then every ' ' -> "▁".
@@ -250,7 +249,6 @@ std::vector<Token> Tokenizer::encode_spm(const std::string& text) const {
   return out;
 }
 
-// --- byte-level BPE (gpt2/qwen) --------------------------------------------
 
 namespace {
 

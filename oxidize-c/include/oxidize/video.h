@@ -1,18 +1,3 @@
-/*
- * video.h — Video multimodal frame sampling and temporal aggregation.
- *
- * Port of oxidize-core/src/video/. Provides frame extraction from video
- * files, temporal sampling strategies, and frame-to-embedding aggregation
- * for video-language multimodal inference.
- *
- * The C port does not include a video decoder (to stay dependency-free).
- * Frame data is expected to be provided by the caller (e.g., via FFmpeg
- * or GStreamer bindings). This module handles:
- *   - Uniform temporal sampling (N frames evenly spaced)
- *   - Scene-change detection (histogram difference threshold)
- *   - Frame batching for vision encoder
- *   - Temporal aggregation (mean pooling, attention pooling)
- */
 #ifndef OXIDIZE_VIDEO_H
 #define OXIDIZE_VIDEO_H
 
@@ -27,12 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Frame representation ────────────────────────────────────────────────
- *
- * A single RGB frame. Pixel data is row-major, interleaved RGB.
- * The frame does NOT own the pixel data — the caller manages the buffer
- * lifecycle (typically a frame pool or mmap'd video stream).
- */
 typedef struct OcVideoFrame {
     uint8_t       *rgb;       /* width * height * 3 bytes               */
     uint32_t       width;
@@ -41,7 +20,6 @@ typedef struct OcVideoFrame {
     uint32_t       frame_idx;     /* sequential index                      */
 } OcVideoFrame;
 
-/* ─── Frame extraction config ──────────────────────────────────────────── */
 
 typedef enum {
     OC_FRAME_SAMPLE_UNIFORM  = 0, /* N frames evenly spaced               */
@@ -64,12 +42,6 @@ typedef struct OcVideoFrameConfig {
 #define OC_VIDEO_FRAME_CONFIG_DEFAULT ((OcVideoFrameConfig){ \
     OC_FRAME_SAMPLE_UNIFORM, 8, 1, 0.3f, 32, true, 224, 224 })
 
-/* ─── Frame sampler ──────────────────────────────────────────────────────
- *
- * Given a sequence of decoded frames (from any video decoder), this
- * module selects the most informative subset according to the configured
- * sampling strategy.
- */
 typedef struct OcVideoFrameSampler {
     OcVideoFrameConfig cfg;
     /* Internal state for scene-change detection */
@@ -94,7 +66,6 @@ OcError oc_video_sampler_plan(OcVideoFrameSampler *s, uint32_t total_frames,
 /* Reset the sampler for a new video. */
 void oc_video_sampler_reset(OcVideoFrameSampler *s);
 
-/* ─── Frame-to-embedding aggregation ───────────────────────────────────── */
 
 typedef enum {
     OC_TEMPORAL_MEAN    = 0,  /* mean pool across frames                  */
@@ -119,7 +90,6 @@ OcError oc_video_aggregate(const float *frame_embeddings, /* [n_frames * dim] */
 /* Free a video embedding. */
 void oc_video_embedding_free(OcVideoEmbedding *emb);
 
-/* ─── Video + text multimodal prompt ───────────────────────────────────── */
 
 typedef struct OcVideoPrompt {
     OcVideoEmbedding *video_emb;
@@ -136,7 +106,6 @@ OcError oc_video_prompt_create(OcVideoEmbedding *video_emb,
 /* Free a video prompt (does not free video_emb or token_ids). */
 void oc_video_prompt_free(OcVideoPrompt *p);
 
-/* ─── Histogram utilities (for scene-change detection) ─────────────────── */
 
 /* Compute a coarse 64-bin RGB histogram from a frame. */
 void oc_video_compute_histogram(const OcVideoFrame *frame, uint32_t hist[64]);

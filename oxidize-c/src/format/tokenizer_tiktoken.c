@@ -1,38 +1,4 @@
-/* tokenizer_tiktoken.c — raw Tiktoken tokenizer (byte-level, no GPT-2
- * byte_to_unicode mapping), for models that declare `tokenizer.ggml.model
- * == "tiktoken"`.
- *
- * Faithful port of oxidize-core/src/format/tokenizer.rs::
- *   - `load_tiktoken`                          (load from GGUF metadata)
- *   - `TiktokenTokenizer::new`                 (test constructor)
- *   - `TiktokenTokenizer::with_unknown_token`
- *   - `TiktokenTokenizer::encode`              (byte-level BPE merge loop)
- *   - `TiktokenTokenizer::decode`              (concatenate byte sequences)
- *
- * Differences from the BPE path (tokenizer_bpe.c):
- *   - Vocab keys are raw byte sequences (Vec<u8> in Rust), NOT GPT-2-mapped
- *     strings. A tiktoken token may contain any byte value including NUL,
- *     so the vocab uses a byte-sequence hash map (FNV-1a + linear probing)
- *     rather than the NUL-terminated OcHashtable used by BPE.
- *   - No `special_pieces` pre-split (raw tiktoken GGUFs do not carry
- *     CONTROL/USER_DEFINED piece metadata the way Qwen GGUFs do).
- *   - No `byte_to_unicode` mapping on encode or decode — input bytes are
- *     looked up directly in the vocab.
- *
- * Encode algorithm (mirrors Rust `TiktokenTokenizer::encode`):
- *   1. For each input byte, look up the single-byte token in the vocab;
- *      emit its id, or the `<unk>` id when absent (VAL-TOK-009:
- *      "<unk> fallback for OOV characters matches Rust").
- *   2. Run the standard BPE merge loop: repeatedly find the adjacent
- *      (left, right) id pair with the lowest merge rank, replace every
- *      non-overlapping occurrence with its merged id, and repeat until
- *      no merge applies. Identical to the BPE merge loop except the
- *      vocab is byte-keyed.
- *
- * Decode (mirrors Rust `TiktokenTokenizer::decode`): concatenate the byte
- * sequences of each id, then apply `String::from_utf8_lossy` (replace
- * invalid UTF-8 with U+FFFD).
- */
+/* tokenizer_tiktoken.c — raw Tiktoken tokenizer (byte-level, no GPT-2 - No `special_pieces` pre-split (raw tiktoken GGUFs do not carry emit its id, or the `<unk>` id when absent (VAL-TOK-009: */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup */
 
@@ -52,7 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Byte-sequence open-addressing hash map ─────────────────────────── */
 
 /* FNV-1a 64-bit hash of a byte sequence. */
 static uint64_t tikt_fnv1a_bytes(const uint8_t *data, size_t len)
@@ -218,9 +183,6 @@ static bool tikt_bytemap_get(const OcByteMap *m, const uint8_t *key, size_t key_
     return false;
 }
 
-/* ─── u64 → u32 open-addressing map (merge ranks / merged ids) ────────
- * Duplicated from tokenizer_bpe.c (the BPE u64map is file-static there).
- * Kept local so this file is self-contained. */
 
 static uint64_t tikt_fnv1a_u64(uint64_t key)
 {
@@ -334,7 +296,6 @@ static inline uint64_t tikt_pair_key(uint32_t left, uint32_t right)
     return ((uint64_t)left << 32) | (uint64_t)right;
 }
 
-/* ─── Tiktoken tokenizer state ─────────────────────────────────────── */
 
 struct OcTiktokenTokenizer {
     /* vocab: byte sequence → id. */
@@ -360,7 +321,6 @@ struct OcTiktokenTokenizer {
     uint32_t  mask_id;     bool has_mask;
 };
 
-/* ─── Constructor (mirrors Rust `TiktokenTokenizer::new`) ──────────── */
 
 OcError oc_tiktoken_new(const OcByteSlice *vocab_tokens, size_t n_vocab,
                         const OcByteSlicePair *merge_pairs, size_t n_merges,
@@ -468,7 +428,6 @@ OcError oc_tiktoken_with_unknown_token(OcTiktokenTokenizer *t, OcArena *arena,
     return OC_OK;
 }
 
-/* ─── Encode ─────────────────────────────────────────────────────────── */
 
 /* Find the (left, right) pair present in the sequence with the lowest rank.
  * Mirrors Rust `best_merge_for_sequence`. */
@@ -570,7 +529,6 @@ OcError oc_tiktoken_encode(const OcTiktokenTokenizer *t, const char *text,
     return OC_OK;
 }
 
-/* ─── Decode ─────────────────────────────────────────────────────────── */
 
 /* Lossy UTF-8 conversion is shared (utf8_utils.h::oc_utf8_lossy) and matches
  * Rust `String::from_utf8_lossy`: one U+FFFD per maximal invalid
@@ -637,7 +595,6 @@ OcError oc_tiktoken_decode(const OcTiktokenTokenizer *t, const uint32_t *ids,
     return OC_OK;
 }
 
-/* ─── Load from GGUF metadata ───────────────────────────────────────── */
 
 /* Helper: read a string array from GGUF metadata into a vector of
  * (data, len) slices. The slices alias into the GGUF's arena (caller

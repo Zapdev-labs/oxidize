@@ -32,7 +32,6 @@ OcError oc_inf_config_init(OcInfConfig *cfg)
     return OC_OK;
 }
 
-/* ─── OcInferenceConfig (full model config) ────────────────────────────── */
 
 void oc_inference_config_init(OcInferenceConfig *cfg)
 {

@@ -1,4 +1,3 @@
-/* test_inference.c — Inference engine tests. */
 #include <criterion/criterion.h>
 #include "oxidize/inference.h"
 #include "oxidize/model.h"
@@ -193,7 +192,6 @@ Test(inf, encode_decode_roundtrip)
     oc_inf_engine_free(&engine);
 }
 
-/* ─── OcInferenceConfig tests ─────────────────────────────────────────── */
 
 Test(inf_cfg, init_defaults)
 {
@@ -506,7 +504,6 @@ Test(inf_cfg, apply_rope_head_null)
     /* Should not crash. */
 }
 
-/* ─── Model arch trait method tests ───────────────────────────────────── */
 
 Test(arch_traits, sliding_window)
 {

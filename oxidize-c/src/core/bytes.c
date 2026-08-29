@@ -1,9 +1,3 @@
-/*
- * bytes.c — OcBytes byte buffer utilities for serialization.
- *
- * Growable byte buffer with append and bounds-checked read primitives
- * (little-endian). May own its data (malloc'd) or borrow it.
- */
 #include "oxidize/bytes.h"
 
 #include <stdlib.h>

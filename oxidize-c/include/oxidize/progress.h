@@ -1,9 +1,3 @@
-/*
- * progress.h — Progress tracking for long-running operations.
- *
- * Provides a progress tracker for model loading, quantization, and
- * other long-running tasks. Port from oxidize-core/src/mesh/progress.rs.
- */
 #ifndef OXIDIZE_PROGRESS_H
 #define OXIDIZE_PROGRESS_H
 

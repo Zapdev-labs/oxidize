@@ -1,14 +1,8 @@
-/*
- * phi_arch.c — Phi-2 / Phi-3 architecture forward pass implementation.
- * GeGLU + RoPE + dense MHA (no GQA).
- */
 #include "oxidize/phi_arch.h"
 #include "oxidize/flash_attention.h"
+#include "oxidize/activation.h"
 
 #include <math.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include <stdlib.h>
 #include <string.h>
 
@@ -77,13 +71,6 @@ OcError oc_phi_model_init(OcPhiModel *model, const OcPhiConfig *cfg)
     return OC_OK;
 }
 
-static float phi_gelu_tanh(float x)
-{
-    float c = 0.7978845608028654f;
-    float inner = c * (x + 0.044715f * x * x * x);
-    return 0.5f * x * (1.0f + tanhf(inner));
-}
-
 OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
 {
     if (!model || !model->initialized || !logits) return OC_ERR_INVALID_ARG;
@@ -102,7 +89,6 @@ OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
     size_t vocab = cfg->vocab_size;
     float eps = 1e-5f;
 
-    /* 1. Token embedding. */
     float *hidden = malloc(h * sizeof(float));
     if (!hidden) return OC_ERR_OOM;
     size_t tok_idx = (size_t)token;
@@ -244,7 +230,7 @@ OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
                 for (size_t c = 0; c < h; c++) dot += layer->w_up[r * h + c] * normed[c];
                 up_out[r] = dot;
             }
-        for (size_t i = 0; i < inter; i++) act[i] = phi_gelu_tanh(gate_out[i]) * up_out[i];
+        for (size_t i = 0; i < inter; i++) act[i] = oc_gelu_approx_f32(gate_out[i]) * up_out[i];
         if (layer->w_down)
             for (size_t r = 0; r < h; r++) {
                 float dot = 0.0f;

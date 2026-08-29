@@ -59,7 +59,6 @@ int fd_check(const char* name, size_t n,
   return fails;
 }
 
-// ---- Tests ---------------------------------------------------------------
 
 int test_matmul_backward() {
   printf("  matmul_backward...\n");

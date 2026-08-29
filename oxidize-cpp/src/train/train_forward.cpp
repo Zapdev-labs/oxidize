@@ -18,7 +18,6 @@
 
 namespace oxidize {
 
-// ---- FTWeight ---------------------------------------------------------------
 
 void FTWeight::init_from(const LlamaWeight& src, size_t rows_, size_t cols_) {
   rows = rows_;
@@ -52,7 +51,6 @@ void FTWeight::adamw_step(float lr, float beta1, float beta2, float eps,
   }
 }
 
-// ---- FTLayer ----------------------------------------------------------------
 
 void FTLayer::zero_grad() {
   attn_q.zero_grad(); attn_k.zero_grad(); attn_v.zero_grad(); attn_o.zero_grad();
@@ -61,7 +59,6 @@ void FTLayer::zero_grad() {
   std::fill(dffn_norm.begin(), dffn_norm.end(), 0.0f);
 }
 
-// ---- TrainModel helpers ----------------------------------------------------
 
 void TrainModel::dequant_weight(const LlamaWeight& w,
                                  std::vector<float>& out) const {
@@ -84,7 +81,6 @@ const float* TrainModel::get_W_q(size_t l, std::vector<float>& scratch) const {
   return scratch.data();
 }
 
-// ---- TrainModel construction -----------------------------------------------
 
 TrainModel::TrainModel(const LlamaModel* base, const TrainConfig& cfg,
                        uint64_t seed)
@@ -285,7 +281,6 @@ TrainModel::TrainModel(const LlamaModel* base, const TrainConfig& cfg,
   }
 }
 
-// ---- Forward pass ----------------------------------------------------------
 
 std::vector<float> TrainModel::forward(const std::vector<Token>& tokens) {
   const InferenceConfig& ic = base_->config();
@@ -533,7 +528,6 @@ std::vector<float> TrainModel::forward(const std::vector<Token>& tokens) {
   return logits_save_;
 }
 
-// ---- Backward pass ---------------------------------------------------------
 
 void TrainModel::backward(const std::vector<float>& logits_grad,
                           const std::vector<Token>& tokens,
@@ -884,7 +878,6 @@ void TrainModel::backward(const std::vector<float>& logits_grad,
   }
 }
 
-// ---- Optimizer step --------------------------------------------------------
 
 float TrainModel::grad_norm() const {
   double sum_sq = 0.0;

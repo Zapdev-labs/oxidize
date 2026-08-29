@@ -1,4 +1,3 @@
-/* test_log.c — oc_log leveled logging + OX_LOG_LEVEL tests. */
 #define _POSIX_C_SOURCE 200809L  /* setenv/unsetenv */
 
 #include <criterion/criterion.h>
@@ -56,4 +55,3 @@ Test(log, emits_at_or_above)
     oc_log_debug("should be filtered out");
     oc_log_set_level(OC_LOG_INFO);
 }
-

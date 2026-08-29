@@ -1,14 +1,3 @@
-/*
- * lora.h — LoRA (Low-Rank Adaptation) adapter inference support.
- *
- * Applies LoRA adapters on top of base model weights during inference.
- * A LoRA adapter consists of low-rank matrices A and B for each target
- * weight, where the effective weight is: W_eff = W + alpha * B @ A.
- *
- * During forward pass, the adapter is applied by computing the delta
- * activation: delta_x = alpha * B @ (A @ x), and adding it to the base
- * output. This avoids modifying the base weights.
- */
 #ifndef OXIDIZE_LORA_H
 #define OXIDIZE_LORA_H
 
@@ -57,12 +46,7 @@ OcError oc_lora_set_adapter(OcLoraModel *lm, size_t layer_idx,
                             uint32_t rank, uint32_t rows, uint32_t cols,
                             float alpha);
 
-/* Apply LoRA delta to an activation vector.
- * Given the base activation `x` (length `cols`), computes:
- *   delta = alpha * B @ (A @ x)
- * and adds it to `out` (length `rows`).
- *
- * `temp` is a scratch buffer of at least `rank` floats. */
+/* Apply LoRA delta to an activation vector. */
 void oc_lora_apply(const OcLoraAdapter *adapter,
                    const float *x, float *out, float *temp);
 
@@ -72,7 +56,6 @@ void oc_lora_model_free(OcLoraModel *lm);
 /* Check if any adapters are loaded. */
 bool oc_lora_is_active(const OcLoraModel *lm);
 
-/* ─── LoRA plan (auto-matching adapter tensors to base tensors) ─────── */
 
 /* Whether the adapter is LoRA (f32/f16 base) or QLoRA (quantized base). */
 typedef enum OcAdapterKind {
@@ -105,18 +88,7 @@ typedef enum OcLoraPlanError {
     OC_LORA_PLAN_INVALID_ARG = 4,
 } OcLoraPlanError;
 
-/* Auto-match `.lora_a.weight` / `.lora_b.weight` adapter tensor pairs
- * against base model tensors.
- *
- * Parameters:
- *   base_tensor_names    - array of base tensor name strings
- *   n_base               - number of base tensors
- *   adapter_tensor_names - array of adapter tensor name strings
- *   n_adapter            - number of adapter tensors
- *   base_qtype           - base quantization type (0 = F32/unknown -> Lora)
- *
- * Returns error code; plan is written to *out_plan on success.
- * Caller must call oc_lora_plan_free when done. */
+/* Auto-match `.lora_a.weight` / `.lora_b.weight` adapter tensor pairs */
 OcLoraPlanError oc_lora_plan_application(const char *const *base_tensor_names,
                                           size_t n_base,
                                           const char *const *adapter_tensor_names,

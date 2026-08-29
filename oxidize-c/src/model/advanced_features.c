@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Prompt Cache ─────────────────────────────────────────────────── */
 
 static uint64_t hash_tokens(const uint32_t *tokens, size_t n)
 {
@@ -69,7 +68,6 @@ void oc_prompt_cache_free(OcPromptCache *cache)
     memset(cache, 0, sizeof(*cache));
 }
 
-/* ─── Speculative Decoding Stats ──────────────────────────────────── */
 
 OcError oc_spec_stats_init(OcSpecStats *stats, OcSpecMode mode, uint32_t n_draft)
 {
@@ -107,7 +105,6 @@ const char *oc_spec_mode_name(OcSpecMode mode)
     }
 }
 
-/* ─── Multi-Model Serving ─────────────────────────────────────────── */
 
 OcError oc_multi_model_init(OcMultiModelServer *srv, const OcMultiModelConfig *cfg)
 {

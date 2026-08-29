@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Internal types ──────────────────────────────────────────────────── */
 
 typedef struct {
     OcSeqId  id;
@@ -41,7 +40,6 @@ struct OcBatchEngine {
     OcBatchForward forward;  /* optional forward callback */
 };
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 void oc_batch_config_init(OcBatchConfig *cfg)
 {
@@ -50,7 +48,6 @@ void oc_batch_config_init(OcBatchConfig *cfg)
     cfg->default_capacity_tokens = 2048;
 }
 
-/* ─── Engine lifecycle ────────────────────────────────────────────────── */
 
 OcError oc_batch_engine_init(OcBatchEngine **out, const OcBatchConfig *cfg,
                              uint32_t kv_layers, uint32_t kv_row_len)
@@ -100,7 +97,6 @@ void oc_batch_engine_free(OcBatchEngine *engine)
     free(engine);
 }
 
-/* ─── Submit ───────────────────────────────────────────────────────────── */
 
 OcError oc_batch_submit(OcBatchEngine *engine,
                         const uint32_t *prompt, size_t prompt_len,
@@ -135,7 +131,6 @@ OcError oc_batch_submit(OcBatchEngine *engine,
     return OC_OK;
 }
 
-/* ─── Query ───────────────────────────────────────────────────────────── */
 
 size_t oc_batch_active_len(const OcBatchEngine *engine)
 {
@@ -153,7 +148,6 @@ bool oc_batch_has_work(const OcBatchEngine *engine)
     return engine->pending_count > 0 || engine->active_count > 0;
 }
 
-/* ─── Cancel ──────────────────────────────────────────────────────────── */
 
 bool oc_batch_cancel(OcBatchEngine *engine, OcSeqId id)
 {
@@ -179,7 +173,6 @@ bool oc_batch_cancel(OcBatchEngine *engine, OcSeqId id)
     return false;
 }
 
-/* ─── Step ────────────────────────────────────────────────────────────── */
 
 static void admit_pending(OcBatchEngine *engine)
 {
@@ -277,7 +270,6 @@ OcError oc_batch_step(OcBatchEngine *engine,
     return OC_OK;
 }
 
-/* ─── Position query ──────────────────────────────────────────────────── */
 
 OcError oc_batch_seq_position(const OcBatchEngine *engine, OcSeqId id, size_t *out_pos)
 {

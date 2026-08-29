@@ -1,10 +1,8 @@
-/* test_scheduler.c — request scheduler tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <string.h>
 #include "oxidize/scheduler.h"
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static OcSchedRequest make_request(uint64_t id, const uint32_t *prompt,
                                     uint32_t n_prompt, uint32_t max_tokens,
@@ -18,7 +16,6 @@ static OcSchedRequest make_request(uint64_t id, const uint32_t *prompt,
 
 static uint32_t one_prompt[] = {1};
 
-/* ─── Config tests ──────────────────────────────────────────────────────── */
 
 Test(scheduler, config_init_defaults)
 {
@@ -35,7 +32,6 @@ Test(scheduler, config_init_null)
     cr_assert_eq(oc_sched_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Init/free tests ───────────────────────────────────────────────────── */
 
 Test(scheduler, init_free)
 {
@@ -89,7 +85,6 @@ Test(scheduler, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── Request init tests ────────────────────────────────────────────────── */
 
 Test(scheduler, request_init_copies_tokens)
 {
@@ -126,7 +121,6 @@ Test(scheduler, request_init_null_prompt_nonzero_fails)
                  OC_ERR_INVALID_ARG);
 }
 
-/* ─── Add request tests ─────────────────────────────────────────────────── */
 
 Test(scheduler, add_request_returns_id)
 {
@@ -170,7 +164,6 @@ Test(scheduler, add_multiple_monotonic_ids)
     oc_sched_free(&sched);
 }
 
-/* ─── Next batch tests ───────────────────────────────────────────────────── */
 
 Test(scheduler, next_batch_empty)
 {
@@ -275,7 +268,6 @@ Test(scheduler, next_batch_fifo_same_priority)
     oc_sched_free(&sched);
 }
 
-/* ─── Complete / cancel tests ───────────────────────────────────────────── */
 
 Test(scheduler, complete_request)
 {

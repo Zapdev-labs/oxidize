@@ -1,9 +1,3 @@
-/*
- * model_loader.h — Universal model loader for GGUF files.
- *
- * Provides a unified interface for loading GGUF models with architecture
- * detection, tensor mapping, and metadata extraction.
- */
 #ifndef OXIDIZE_MODEL_LOADER_H
 #define OXIDIZE_MODEL_LOADER_H
 

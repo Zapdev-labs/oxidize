@@ -1,17 +1,3 @@
-/* hashtable.c — OcHashtable open-addressing string-keyed map (FNV-1a).
- *
- * Implementation:
- * - Buckets are an array of {key, value, hash} slots. A NULL key marks an
- *   empty slot. A deleted slot uses a sentinel key (HT_TOMBSTONE) so probe
- *   sequences continue past deletions.
- * - Hash: FNV-1a 64-bit, masked by (cap - 1) (cap is always a power of two).
- * - Collision resolution: linear probing.
- * - Grow: when load (size + tombstones) / cap > 0.7, double the bucket count
- *   and reinsert live entries (tombstones dropped).
- *
- * The hashtable does NOT own keys or values. The typical pattern is to dup
- * keys into an OcArena at insertion time.
- */
 #include "oxidize/hashtable.h"
 
 #include <stdlib.h>

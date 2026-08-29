@@ -1,34 +1,3 @@
-/*
- * wasm_bridge.c — WebAssembly bridge implementation.
- *
- * Port of oxidize-core/src/util/web_worker.rs to C11.
- *
- * Design notes
- * ------------
- * The Rust web_worker.rs exposes a JSON-over-postMessage protocol: the JS
- * host posts an inference request, the worker runs generation against a
- * LlamaModel, and returns the response as JSON. It also embeds a 60+ line
- * TypeScript interface string (`WASM_WORKER_TYPESCRIPT_BINDINGS`) via
- * `#[wasm_bindgen(typescript_custom_section)]`.
- *
- * The C port mirrors this with a direct C ABI (OcWasmBridge) plus an
- * optional message queue for callers that prefer the async postMessage
- * style. The full Llama forward pass is delegated to the host via a
- * pluggable host-hook table (so the same .c file compiles in a real WASM
- * runtime where the host provides the kernel, and on a native dev box
- * where a built-in stub generator produces deterministic tokens for tests).
- *
- * The TypeScript interface contract is emitted verbatim by
- * oc_wasm_bridge_format_interface() — the same declarations the Rust
- * `wasm_bindgen` typescript_custom_section emits.
- *
- * Memory tracking uses malloc accounting + a peak watermark; on Linux/macOS
- * the RSS query from mem_util.h is consulted for `memory_used`. On pure
- * WASM the malloc accounting is authoritative (RSS is unavailable).
- *
- * No external deps beyond libc + libm. Compiles with:
- *   cc -std=c11 -Wall -Wextra -Werror -O2 -c src/util/wasm_bridge.c -I include
- */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -49,13 +18,11 @@
 #define OC_WASM_HAS_CLOCK 0
 #endif
 
-/* ─── Host hook table ───────────────────────────────────────────────────── */
 
 /* The OcWasmHostHooks table and oc_wasm_bridge_install_hooks() are declared
  * in the public header (wasm.h) so downstream WASM users can attach a real
  * forward-pass implementation. */
 
-/* ─── Bridge state ──────────────────────────────────────────────────────── */
 
 /* Hidden definition referenced by the public opaque typedef in wasm.h. */
 struct OcWasmBridge {
@@ -77,7 +44,6 @@ struct OcWasmBridge {
     uint64_t            alloc_bytes;
 };
 
-/* ─── Forward declarations for built-in stub hooks ─────────────────────── */
 
 static bool  stub_load_model_bytes(const uint8_t *data, size_t len,
                                    const char *path, void *userdata);
@@ -93,7 +59,6 @@ static const OcWasmHostHooks STUB_HOOKS = {
     .release          = stub_release,
 };
 
-/* ─── Timing helpers ────────────────────────────────────────────────────── */
 
 static double now_ms(void)
 {
@@ -108,7 +73,6 @@ static double now_ms(void)
 #endif
 }
 
-/* ─── Config defaults ──────────────────────────────────────────────────── */
 
 void oc_wasm_bridge_config_default(OcWasmBridgeConfig *cfg)
 {
@@ -123,7 +87,6 @@ void oc_wasm_bridge_config_default(OcWasmBridgeConfig *cfg)
     cfg->queue_cap     = OC_WASM_MSG_QUEUE_CAP;
 }
 
-/* ─── Memory accounting ───────────────────────────────────────────────── */
 
 /* Track an allocation of `n` bytes against the bridge's accounting. */
 static void track_alloc(OcWasmBridge *br, size_t n)
@@ -164,7 +127,6 @@ static void refresh_memory_used(OcWasmBridge *br)
     }
 }
 
-/* ─── Init / free ──────────────────────────────────────────────────────── */
 
 OcWasmBridge *oc_wasm_bridge_init(const OcWasmBridgeConfig *cfg)
 {
@@ -246,7 +208,6 @@ void oc_wasm_bridge_free(OcWasmBridge *br)
     free(br);
 }
 
-/* ─── Model loading ────────────────────────────────────────────────────── */
 
 OcError oc_wasm_bridge_load_model(OcWasmBridge *br, const char *path)
 {
@@ -286,7 +247,6 @@ OcError oc_wasm_bridge_load_model_bytes(OcWasmBridge *br,
     return OC_OK;
 }
 
-/* ─── Generation ──────────────────────────────────────────────────────── */
 
 size_t oc_wasm_bridge_generate(OcWasmBridge *br,
                                const char *prompt,
@@ -378,11 +338,7 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
         produced++;
         br->stats.tokens_generated++;
 
-        /* Append a textual representation of the token to the output
-         * buffer BEFORE consulting the callback, so an early stop still
-         * includes the token that was generated and delivered. The stub
-         * generator emits ASCII token-id strings for determinism; a real
-         * host hook would decode the token to text. */
+        /* Append a textual representation of the token to the output */
         if (out_buf && out_cap > 0) {
             char tok_str[16];
             int n = snprintf(tok_str, sizeof(tok_str), "%u ", tok);
@@ -431,7 +387,6 @@ OcError oc_wasm_bridge_cancel(OcWasmBridge *br)
     return OC_OK;
 }
 
-/* ─── Stats ───────────────────────────────────────────────────────────── */
 
 OcError oc_wasm_bridge_get_stats(OcWasmBridge *br, OcWasmStats *out)
 {
@@ -441,7 +396,6 @@ OcError oc_wasm_bridge_get_stats(OcWasmBridge *br, OcWasmStats *out)
     return OC_OK;
 }
 
-/* ─── Message queue ──────────────────────────────────────────────────── */
 
 OcError oc_wasm_bridge_enqueue(OcWasmBridge *br, OcWasmMessage *msg)
 {
@@ -497,13 +451,8 @@ uint32_t oc_wasm_bridge_queue_depth(const OcWasmBridge *br)
     return br->stats.messages_queued;
 }
 
-/* ─── Built-in stub host hooks ───────────────────────────────────────── */
 
-/* The stub generator produces deterministic tokens derived from the prompt
- * hash + index. This mirrors the Rust test fixtures which assert exact
- * token sequences (e.g. `generated_tokens: vec![9, 9, 9]` for a fixed
- * seed). The stub accepts any model path/bytes so tests can exercise the
- * bridge without a real GGUF. */
+/* The stub generator produces deterministic tokens derived from the prompt */
 
 static bool stub_load_model_bytes(const uint8_t *data, size_t len,
                                   const char *path, void *userdata)
@@ -532,10 +481,7 @@ static uint32_t stub_sample_token(const char *prompt,
                                  void *userdata)
 {
     (void)max_tokens; (void)userdata;
-    /* Mirror the Rust stub generator which echoes the last prompt token
-     * (or 1 if empty). To keep the C stub deterministic without a real
-     * tokenizer, we derive a token from the prompt hash + index. With
-     * temperature ~0 (greedy), the same prompt yields the same sequence. */
+    /* Mirror the Rust stub generator which echoes the last prompt token */
     if (temperature <= 0.0f) {
         /* Greedy: always return the same token (the Rust default echoes
          * the last prompt token, e.g. vec![9,9,9] for prompt [7,9]). */
@@ -561,12 +507,8 @@ static void stub_release(void *userdata)
     (void)userdata;
 }
 
-/* ─── TypeScript interface contract ──────────────────────────────────── */
 
-/* This string mirrors the Rust `WASM_WORKER_TYPESCRIPT_BINDINGS` literal in
- * oxidize-core/src/util/web_worker.rs, augmented with the C-bridge-specific
- * stats interface. Stored as a single string literal so callers can paste
- * it into a .ts file verbatim. */
+/* This string mirrors the Rust `WASM_WORKER_TYPESCRIPT_BINDINGS` literal in oxidize-core/src/util/web_worker.rs, augmented with the C-bridge-specific stats interface. */
 static const char WASM_INTERFACE_STRING[] =
     "\n"
     "export interface OxidizeWorkerModelConfig {\n"
@@ -680,7 +622,6 @@ const char *oc_wasm_bridge_interface_string(void)
     return WASM_INTERFACE_STRING;
 }
 
-/* ─── Host hook installation (public API, declared in wasm.h) ─────────── */
 
 OcError oc_wasm_bridge_install_hooks(OcWasmBridge *br,
                                      const OcWasmHostHooks *hooks,
@@ -697,7 +638,6 @@ OcError oc_wasm_bridge_install_hooks(OcWasmBridge *br,
     return OC_OK;
 }
 
-/* ─── Test-only helpers (not in public header) ────────────────────────── */
 
 /* Exposed for the test suite to verify the built-in stub is in use by
  * default (no host hooks installed). Returns true if the stub hooks are

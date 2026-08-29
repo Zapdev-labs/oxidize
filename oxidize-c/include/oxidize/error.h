@@ -1,13 +1,3 @@
-/*
- * error.h — OcError codes + OcErrorCtx chain.
- *
- * Mirrors the Rust `oxidize-core` error convention: every public function
- * returns an `OcError` code; rich context is carried via `OcErrorCtx` with an
- * optional cause chain. No `exit()` on recoverable errors.
- *
- * Port of the conceptual `OcError`/`OcErrorCtx` trinity-side defined in
- * architecture.md §3.1.
- */
 #ifndef OXIDIZE_ERROR_H
 #define OXIDIZE_ERROR_H
 

@@ -127,7 +127,6 @@ bool oc_lora_is_active(const OcLoraModel *lm)
     return lm ? lm->active : false;
 }
 
-/* ─── LoRA plan (auto-matching) ─────────────────────────────────────── */
 
 /* Check if a string ends with suffix. Returns pointer to base if yes, NULL if no. */
 static const char *strip_suffix(const char *s, const char *suffix, size_t *out_base_len)

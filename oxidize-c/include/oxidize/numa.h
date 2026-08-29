@@ -1,9 +1,3 @@
-/*
- * numa.h — NUMA awareness for thread affinity and memory allocation.
- *
- * Provides utilities for detecting NUMA topology, pinning threads to
- * specific NUMA nodes, and allocating memory on specific nodes.
- */
 #ifndef OXIDIZE_NUMA_H
 #define OXIDIZE_NUMA_H
 
@@ -17,12 +11,10 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_NUMA_MAX_NODES 16
 #define OC_NUMA_MAX_CPUS 1024
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct {
     uint32_t node_id;
@@ -46,7 +38,6 @@ typedef enum {
     OC_NUMA_POLICY_PREFERRED = 3,  /* prefer a node */
 } OcNumaMemPolicy;
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 /* Detect NUMA topology. Returns OC_OK if NUMA is available. */
 OcError oc_numa_detect(OcNumaTopology *out);

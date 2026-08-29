@@ -1,13 +1,3 @@
-/* test_gguf_writer.c — Criterion tests for the GGUF v3 writer.
- *
- * Covers:
- *   - Header initialization (magic, version, counts)
- *   - Metadata KV of each type (string, uint32, uint64, float32, array<string>)
- *   - Tensor writing (single, multiple, alignment)
- *   - Finalize (count patching)
- *   - Round-trip: write then parse back with the GGUF parser
- *   - Error handling (NULL args, finalized writer, etc.)
- */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -31,7 +21,6 @@ static const char *make_temp_path(const char *suffix)
     return path;
 }
 
-/* ─── Header initialization ─────────────────────────────────────────────── */
 
 Test(gguf_writer, init_creates_valid_header)
 {
@@ -92,7 +81,6 @@ Test(gguf_writer, init_null_arch_skips_arch_kv)
     unlink(path);
 }
 
-/* ─── Metadata KV: string ───────────────────────────────────────────────── */
 
 Test(gguf_writer, add_string_metadata)
 {
@@ -130,7 +118,6 @@ Test(gguf_writer, add_string_null_args)
     unlink(make_temp_path("ns.gguf"));
 }
 
-/* ─── Metadata KV: uint32 ───────────────────────────────────────────────── */
 
 Test(gguf_writer, add_uint32_metadata)
 {
@@ -179,7 +166,6 @@ Test(gguf_writer, add_uint32_max_value)
     unlink(path);
 }
 
-/* ─── Metadata KV: uint64 ───────────────────────────────────────────────── */
 
 Test(gguf_writer, add_uint64_metadata)
 {
@@ -219,7 +205,6 @@ Test(gguf_writer, add_uint64_large_value)
     unlink(path);
 }
 
-/* ─── Metadata KV: float32 ──────────────────────────────────────────────── */
 
 Test(gguf_writer, add_float32_metadata)
 {
@@ -262,7 +247,6 @@ Test(gguf_writer, add_float32_zero_and_negative)
     unlink(path);
 }
 
-/* ─── Metadata KV: array<string> ────────────────────────────────────────── */
 
 Test(gguf_writer, add_array_string_metadata)
 {
@@ -312,7 +296,6 @@ Test(gguf_writer, add_array_string_empty)
     unlink(path);
 }
 
-/* ─── Tensor writing ─────────────────────────────────────────────────────── */
 
 Test(gguf_writer, add_single_tensor)
 {
@@ -416,7 +399,6 @@ Test(gguf_writer, add_tensor_data_null_with_size)
     unlink(make_temp_path("tdn.gguf"));
 }
 
-/* ─── Finalize ───────────────────────────────────────────────────────────── */
 
 Test(gguf_writer, finalize_patches_counts)
 {

@@ -1,13 +1,3 @@
-/*
- * vector.h — OcVector dynamic array of arbitrary element size.
- *
- * Backed by a contiguous `malloc`'d buffer that grows geometrically (factor 2).
- * Supports push/get/len/free. Elements are copied by value (memcpy) at the
- * caller-specified element size. The vector owns its backing buffer; callers
- * own any pointers stored as elements.
- *
- * Port concept: architecture.md §2 (src/core/vector.c).
- */
 #ifndef OXIDIZE_VECTOR_H
 #define OXIDIZE_VECTOR_H
 

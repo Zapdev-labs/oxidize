@@ -1,16 +1,3 @@
-/*
- * autotune.c — CPU detection, GGUF fingerprint, tuning plan.
- *
- * Port of oxidize-core/src/autotune/{detect,fingerprint,rules}.rs.
- *
- * Linux detection: /proc/cpuinfo (model name), /sys/devices/system/cpu/
- * (core counts), /sys/devices/system/node/ (NUMA), /proc/meminfo (RAM).
- * SIMD via oc_simd_caps() (which uses __builtin_cpu_supports). Other
- * platforms get a conservative scalar-only info.
- *
- * The plan() function is PURE: same (cpu, model) inputs → same plan output,
- * with every decision captured in a rationale string (no side effects).
- */
 /* _GNU_SOURCE enables cpu_set_t + sched_setaffinity on glibc. Must be the
  * first non-comment thing in the file. */
 #ifdef __linux__
@@ -43,7 +30,6 @@ static uint32_t meta_u32_or_zero(const OcGgufFile *f, const char *key)
     return oc_gguf_metadata_get_u32(f, key, &v) ? v : 0;
 }
 
-/* ─── CPU detection ───────────────────────────────────────────────────── */
 
 #if defined(__linux__)
 #  define OC_LINUX 1
@@ -200,20 +186,7 @@ static void read_model_name(char *buf, size_t cap)
 #endif
 }
 
-/* Physical (non-SMT) core count.
- *
- * Derived from /proc/cpuinfo's per-socket "siblings" (logical) and "cpu cores"
- * (physical): their ratio is the SMT factor, and logical / factor is the
- * machine's physical core count. Counting unique (physical id, core id) pairs
- * would also work but needs a set; this needs two integers.
- *
- * Returns `logical` unchanged when the fields are missing or implausible.
- * That was the previous unconditional behaviour and it is the safe direction
- * to fail — the thread count merely stops excluding SMT siblings.
- *
- * This matters more than it looks: the tuning plan sizes the compute pool
- * from it, and on a 2x24-core box reporting 96 instead of 48 costs about
- * half the throughput (96 threads measured slower than 16). */
+/* Physical (non-SMT) core count. */
 static uint32_t count_physical_cores(uint32_t logical)
 {
 #if OC_LINUX
@@ -258,7 +231,6 @@ OcError oc_autotune_detect_cpu(OcCpuInfo *out)
     return OC_OK;
 }
 
-/* ─── GGUF fingerprint ────────────────────────────────────────────────── */
 
 OcError oc_autotune_fingerprint_gguf(const OcGgufMmappedFile *m,
                                      OcModelFingerprint *out)
@@ -334,7 +306,6 @@ OcError oc_autotune_fingerprint_gguf(const OcGgufMmappedFile *m,
     return OC_OK;
 }
 
-/* ─── Plan (pure function) ────────────────────────────────────────────── */
 
 OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
                               const OcModelFingerprint *model)
@@ -342,10 +313,7 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
     OcTuningPlan p;
     memset(&p, 0, sizeof(p));
     p.simd_level = cpu ? cpu->simd.level : OC_SIMD_SCALAR;
-    /* Tested by equality, not `>=`: OC_SIMD_NEON sorts above the x86 tiers
-     * numerically but is a different architecture, and there is no NEON
-     * dequant kernel — oc_simd_try_dequant() returns false there. An ordered
-     * test would promise a SIMD dequant path that silently falls back. */
+    /* Tested by equality, not `>=`: OC_SIMD_NEON sorts above the x86 tiers */
     p.use_simd_dequant = (p.simd_level == OC_SIMD_AVX2 ||
                           p.simd_level == OC_SIMD_AVX512);
 
@@ -356,22 +324,7 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
     p.use_hugepages = fits_2x;
     p.mlock_weights = (msize > 0 && avail >= (msize * 10) / 7);  /* 30% headroom */
 
-    /* Threads + NUMA.
-     *
-     * The old rule capped dense models at 16 threads. That was measured when
-     * the forward pass dequantized every weight row to f32 and was bound on
-     * scratch traffic, where extra threads bought nothing. With the fused
-     * integer kernels the work is compute-bound and the optimum moved a long
-     * way up. Measured on 2x Xeon Gold 5220R (24 cores/socket, 96 logical),
-     * Llama-3.1-8B-Q4_K_M, tokens/sec:
-     *
-     *     16 threads  2.94      40 threads  5.43
-     *     24 threads  4.09      64 threads  5.41
-     *     32 threads  5.09      96 threads  2.92
-     *
-     * So: scale with physical cores, and stay off the logical (SMT) count —
-     * 96 threads is worse than 16. Physical cores lands at 48 here, inside
-     * the flat 40-64 optimum. */
+    /* Threads + NUMA. */
     bool big_model = (msize > (192ULL << 30));   /* > 192 GB */
     const uint32_t phys = (cpu && cpu->physical_cores > 0)
                         ? cpu->physical_cores : 1u;
@@ -456,11 +409,8 @@ void oc_autotune_plan_dump(const OcTuningPlan *plan,
             plan->rationale_memory ? plan->rationale_memory : "");
 }
 
-/* ─── Apply (autotune-plan-apply feature) ────────────────────────────────
- *
- * Applies the memory-side of the plan (hugepages + mlock) to the mmap'd
- * GGUF. Thread/NUMA policy is caller-side (set via pthread_setaffinity on
- * worker threads) because it must be applied per-thread, not globally. */
+/* ─── Apply (autotune-plan-apply feature) ──────────────────────────────── Applies the memory-side of the plan (hugepages + mlock) to the mmap'd GGUF. */
+/* worker threads) because it must be applied per-thread, not globally. */
 
 OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m)
 {
@@ -487,10 +437,7 @@ OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m)
 OcError oc_autotune_bind_to_numa_node(uint32_t node)
 {
 #if OC_LINUX
-    /* Use libnuma if available, else best-effort via CPU affinity to the
-     * node's CPUs. The simplest portable approach is to read the node's
-     * CPU list from /sys/devices/system/node/nodeN/cpulist and apply it
-     * via sched_setaffinity. */
+    /* Use libnuma if available, else best-effort via CPU affinity to the node's CPUs. */
     char path[128];
     snprintf(path, sizeof(path),
              "/sys/devices/system/node/node%u/cpulist", node);

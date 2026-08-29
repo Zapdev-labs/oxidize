@@ -1,4 +1,3 @@
-/* test_weight_ops.c — Weight matrix operations tests. */
 #include <criterion/criterion.h>
 #include "oxidize/weight_ops.h"
 #include "oxidize/weight_storage.h"
@@ -242,7 +241,6 @@ Test(wops, gemv_weight_q8_0)
     oc_weight_storage_free(&ws);
 }
 
-/* ─── MoE FFN forward tests ───────────────────────────────────────────── */
 
 Test(wops, moe_softmax_gating)
 {

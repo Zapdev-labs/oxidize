@@ -1,10 +1,3 @@
-/*
- * oxk_avx512.c — AVX-512 OXK kernel implementations.
- *
- * These implementations use AVX-512BW + AVX-512VNNI intrinsics for
- * Q8_0 and Q4_0/Q4_1 dot products and matvec. All functions are guarded
- * by target attributes so they compile on any CPU.
- */
 #include "oxidize/oxk.h"
 #include "oxidize/oxk_avx512.h"
 
@@ -14,7 +7,6 @@
  * replaced by scalar-forwarding stubs at the bottom of this file so the
  * symbols still link (the dispatcher never selects them off-x86). */
 #if defined(__x86_64__) || defined(__i386__)
-
 
 
 #include <immintrin.h>
@@ -30,21 +22,8 @@ static inline int32_t hsum_i32_8_avx512(__m256i v)
     return _mm_cvtsi128_si32(s);
 }
 
-/* Vectorized replacement for the per-(block, activation) scalar loop that
- * folds the activation's 16 block sums against the row's per-group scales.
- *
- * That loop was the real cost of these kernels: 16 scalar iterations of
- * load / sign-extend / multiply / add against just FOUR vpdpbusd of actual
- * work per block, so the epilogue outweighed the dot by an order of
- * magnitude. vpmaddwd does the same reduction in one instruction — and
- * because the whole term is exact int32 arithmetic, reassociating it cannot
- * change the result, so the float accumulation below stays bit-identical to
- * the scalar reference.
- *
- * `w16` holds the 16 per-group weights already widened to int16, laid out to
- * match the bsums: for the 16-group types (Q6_K, Q3_K, Q2_K) that is one
- * weight per group; for Q4_K's 8 groups of 32 each weight is duplicated, so
- * lane k of the result is w_k * (bsum_2k + bsum_2k+1). */
+/* Vectorized replacement for the per-(block, activation) scalar loop that folds the activation's 16 block sums against the row's per-group scales. */
+/* because the whole term is exact int32 arithmetic, reassociating it cannot */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline int32_t fold_bsums(__m256i w16, const uint8_t *bsums)
 {
@@ -53,25 +32,12 @@ static inline int32_t fold_bsums(__m256i w16, const uint8_t *bsums)
 }
 
 
-
-
-
-
-/* ─── Helper: horizontal sum of __m512i (16 int32 lanes) ──────────────── */
-
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline int32_t mm512_hsum_epi32(__m512i v)
 {
     return _mm512_reduce_add_epi32(v);
 }
 
-/* ─── VNNI dot product: 32 signed int8 × 32 signed int8 ──────────────────
- *
- * VNNI computes uint8 × int8 → int32. To handle signed × signed, we split
- * the weight vector into positive and negative parts:
- *   w_s8 * q_s8 = w_pos * q - w_neg * q
- * where w_pos = max(0, w) and w_neg = max(0, -w), both as uint8.
- */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline int32_t vnni_dot_s8x32(const int8_t *w, const int8_t *q)
 {
@@ -92,7 +58,6 @@ static inline int32_t vnni_dot_s8x32(const int8_t *w, const int8_t *q)
     return mm512_hsum_epi32(result);
 }
 
-/* ─── Q8_0 × Q8_0 VNNI ────────────────────────────────────────────────── */
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
@@ -131,7 +96,6 @@ float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
     return result;
 }
 
-/* ─── Q4_0 × Q8_0 BW (forward to scalar for correctness) ─────────────── */
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q4_0_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
@@ -140,7 +104,6 @@ float oc_oxk_dot_q4_0_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
     return oc_oxk_dot_q4_0_q8_0_scalar(row, blocks, q8);
 }
 
-/* ─── Q4_1 × Q8_0 BW (forward to scalar) ──────────────────────────────── */
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q4_1_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
@@ -149,7 +112,6 @@ float oc_oxk_dot_q4_1_q8_0_avx512_bw(const uint8_t *row, size_t blocks,
     return oc_oxk_dot_q4_1_q8_0_scalar(row, blocks, q8);
 }
 
-/* ─── Matvec variants (forward to scalar for now) ─────────────────────── */
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 void oc_oxk_matvec_q8_0_f32_avx512_vnni(const uint8_t *w, size_t n_rows,
@@ -167,11 +129,6 @@ void oc_oxk_matvec_q4_0_f32_avx512_bw(const uint8_t *w, size_t n_rows,
     oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out);
 }
 
-/* ─── VNNI prepared-Q4_K multi-activation dot ─────────────────────────────
- *
- * Pointer math must mirror oxk.c::q4k_prep_ptrs exactly; the layout is part
- * of oc_oxk_q4_k_prep_row()'s contract and test_oxk_gguf_layout.c catches
- * drift. */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks,
                                           const uint8_t *acts,
@@ -270,11 +227,6 @@ void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks,
     }
 }
 
-/* ─── VNNI prepared-Q6_K multi-activation dot ─────────────────────────────
- *
- * Layout must mirror oxk.c::q6k_prep_ptrs. Each 64-code chunk covers four
- * 16-element scale groups: dpbusd lane i sums elements 4i..4i+3, so lanes
- * 0-3 belong to group 4gp, 4-7 to 4gp+1, 8-11 to 4gp+2, 12-15 to 4gp+3. */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks,
                                           const uint8_t *acts,
@@ -357,13 +309,7 @@ void oc_oxk_dot_q6_k_prepped_multi_avx512(const void *prep, size_t blocks,
 }
 
 
-/* Single-activation VNNI form of the bodies above.
- *
- * Decode has exactly one activation per matmul, so it never reaches the
- * 4-wide loop and used to drop to the scalar prepared dot — 256 scalar
- * multiply-adds per block against four vpdpbusd. Sharing the same prepared
- * layout means decode and prefill still agree bit-for-bit on the integer
- * terms; only the float accumulation order (identical here) matters. */
+/* Single-activation VNNI form of the bodies above. */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline float dot_q3q6_prepped_one(const void *prep, size_t blocks,
                                          const uint8_t *act, int32_t offset)
@@ -467,15 +413,6 @@ float oc_oxk_dot_q2_k_prepped_avx512(const void *prep, size_t blocks,
     return sum;
 }
 
-/* ─── VNNI Q3_K / Q2_K prepared-row multi dots ───────────────────────────
- *
- * Both are 16 groups of 16 weights, so one 64-byte code load spans FOUR
- * groups — lanes 0-3 of the vpdpbusd result belong to group 4gp, lanes 4-7 to
- * 4gp+1, and so on. That is the only structural difference from the Q4_K
- * kernel above, whose groups are 32 wide and so span two per load.
- *
- * Q3_K reuses the Q6_K prepared layout, so the body is shared and the code
- * offset (-4 for Q3_K, -32 for Q6_K) is a parameter the compiler folds. */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline void dot_q3q6_prepped_multi_body(const void *prep, size_t blocks,
                                                const uint8_t *acts,
@@ -627,8 +564,6 @@ void oc_oxk_dot_q2_k_prepped_multi_avx512(const void *prep, size_t blocks,
     }
 }
 
-/* ─── VNNI Q6_K × Q8_K dot ──────────────────────────────────────────────── */
-
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
@@ -709,7 +644,6 @@ float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── VNNI Q5_K × Q8_K dot ──────────────────────────────────────────────── */
 
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q5_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
@@ -741,10 +675,7 @@ float oc_oxk_dot_q5_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
             const __m256i packed = _mm256_loadu_si256(
                 (const __m256i *)(qs + gp * 32));
 
-            /* qh[l] carries one high bit per 64-element group: bit 2*gp for
-             * the low-nibble half, bit 2*gp+1 for the high-nibble half —
-             * the u1/u2 stepping masks of dequant_q5_k, NOT a flat 256-bit
-             * field. */
+            /* qh[l] carries one high bit per 64-element group: bit 2*gp for the low-nibble half, bit 2*gp+1 for the high-nibble half — the u1/u2 stepping masks of dequant_q5_k, NOT a flat 256-bit field. */
             const __m256i qhv = _mm256_loadu_si256((const __m256i *)qh);
             const __m256i one = _mm256_set1_epi8(0x01);
             const __m256i h_lo = _mm256_and_si256(

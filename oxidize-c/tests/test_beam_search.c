@@ -1,4 +1,3 @@
-/* test_beam_search.c — Beam search tests. */
 #include <criterion/criterion.h>
 #include "oxidize/sampling.h"
 #include "oxidize/error.h"
@@ -99,7 +98,6 @@ Test(beam, result_free)
     cr_assert_eq(result.n_tokens, 0);
 }
 
-/* ─── Speculative decode probability helpers ───────────────────────────── */
 
 Test(beam, residual_probs_basic)
 {
@@ -158,7 +156,6 @@ Test(beam, sample_probabilities_weighted)
     cr_assert_eq(idx, 1);
 }
 
-/* ─── Repetition penalties ─────────────────────────────────────────────── */
 
 Test(beam, rep_penalty_basic)
 {

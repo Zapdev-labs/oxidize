@@ -1,15 +1,4 @@
-/*
- * test_autotune.c — autotune detect + fingerprint + plan tests.
- *
- * VAL-AUTOTUNE-001..006 cover:
- *   1. CPU detection returns sensible values on this host.
- *   2. Plan is pure (same inputs → same outputs).
- *   3. Plan picks threads, NUMA, hugepages per the learned heuristics.
- *   4. Parser fixtures (no weights) fingerprint gracefully (zeros, UNKNOWN
- *      arch, no dominant qtype) — must not crash.
- *   5. SIMD level in plan matches detected caps.
- *   6. NUMA name function covers all enum values.
- */
+/* test_autotune.c — autotune detect + fingerprint + plan tests. VAL-AUTOTUNE-001..006 cover: arch, no dominant qtype) — must not crash. */
 #include <criterion/criterion.h>
 
 #include "oxidize/autotune.h"
@@ -17,7 +6,6 @@
 
 #include <string.h>
 
-/* ─── CPU detection ────────────────────────────────────────────────────── */
 
 Test(autotune, detect_cpu_returns_sensible_values)
 {
@@ -37,7 +25,6 @@ Test(autotune, detect_cpu_null_arg_rejected)
     cr_assert_eq(oc_autotune_detect_cpu(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Plan purity ──────────────────────────────────────────────────────── */
 
 Test(autotune, plan_is_pure_same_inputs_same_output)
 {
@@ -62,11 +49,7 @@ Test(autotune, plan_threads_match_learned_heuristics)
     OcCpuInfo cpu;
     oc_autotune_detect_cpu(&cpu);
 
-    /* One thread per physical core. The plan used to cap at 16, which was
-     * measured against the old dequant-to-f32 forward pass; the fused integer
-     * kernels are compute-bound and 16 leaves most of the machine idle
-     * (2.94 vs 5.43 tok/s on a 48-core dual socket). SMT threads are excluded
-     * deliberately — 96 threads measured worse than 16. */
+    /* One thread per physical core. The plan used to cap at 16, which was */
     OcModelFingerprint small;
     memset(&small, 0, sizeof(small));
     small.file_bytes = 8ULL << 30;
@@ -82,10 +65,7 @@ Test(autotune, plan_threads_match_learned_heuristics)
         cr_assert_eq(p.numa, OC_NUMA_SINGLE, "small model → single-socket");
     }
 
-    /* Large model (>192 GB): interleave across sockets, same thread rule.
-     * 48 was previously hardcoded here because that is the physical core
-     * count of the box it was tuned on; deriving it keeps the plan right on
-     * other machines. */
+    /* Large model (>192 GB): interleave across sockets, same thread rule. 48 was previously hardcoded here because that is the physical core */
     OcModelFingerprint big;
     memset(&big, 0, sizeof(big));
     big.file_bytes = 256ULL << 30;   /* 256 GB */
@@ -127,7 +107,6 @@ Test(autotune, plan_simd_matches_caps)
     }
 }
 
-/* ─── NUMA name ────────────────────────────────────────────────────────── */
 
 Test(autotune, numa_name_covers_enum)
 {
@@ -136,9 +115,6 @@ Test(autotune, numa_name_covers_enum)
     cr_assert_str_eq(oc_autotune_numa_name(OC_NUMA_INTERLEAVE), "interleave");
 }
 
-/* ─── Fingerprint gracefully handles parser fixtures ────────────────────
- * The parser fixtures have a valid GGUF header but no weights — fingerprint
- * must return OC_OK with zeroed counts, not crash. */
 Test(autotune, fingerprint_handles_parser_fixture)
 {
     OcGgufMmappedFile m;
@@ -178,7 +154,6 @@ Test(autotune, plan_dump_does_not_crash)
     cr_assert(true, "plan_dump ran without crashing");
 }
 
-/* ─── Apply (autotune-plan-apply) ──────────────────────────────────────── */
 
 Test(autotune, apply_null_args_rejected)
 {

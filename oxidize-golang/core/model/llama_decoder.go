@@ -25,9 +25,6 @@ type LlamaDecoderConfig struct {
 }
 
 // LayerIsGlobal reports whether layer idx uses global (full-context) attention
-// rather than sliding-window attention. Without a window, every layer is
-// global. With a window but no interleaving pattern (Mistral), every layer is
-// local. Gemma: every Nth layer (1-indexed) is global.
 func (c LlamaDecoderConfig) LayerIsGlobal(idx int) bool {
 	if c.SlidingWindow == 0 {
 		return true
@@ -121,11 +118,6 @@ type DecoderAttentionLayer struct {
 }
 
 // DecoderLayer is norm → attention → MLP (dense and/or MoE).
-//
-// For most architectures PostAttentionLayernorm holds the pre-MLP norm. For
-// Gemma (sandwich norm) it is the true post-attention norm (applied to the
-// attention output before the residual), PreFFNLayernorm is the pre-MLP norm,
-// and PostFFNLayernorm is applied to the FFN output before its residual.
 type DecoderLayer struct {
 	InputLayernorm, PostAttentionLayernorm []float32
 	PreFFNLayernorm, PostFFNLayernorm      []float32

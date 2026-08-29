@@ -1,9 +1,4 @@
-/*
- * activation.c — RMSNorm, RoPE, SwiGLU scalar reference implementations.
- *
- * Port of oxidize-core/src/compute/tensor/kernels/activation.rs. Bit-exact
- * with the Rust scalar reference (VAL-FWD-001..004).
- */
+/* activation.c — RMSNorm, RoPE, SwiGLU scalar reference implementations. Port of oxidize-core/src/compute/tensor/kernels/activation.rs. Bit-exact with the Rust scalar reference (VAL-FWD-001..004). */
 #include "oxidize/activation.h"
 #include "oxidize/attn_kernels.h"
 
@@ -66,12 +61,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     }
     if (rope_len == 0) return;
     size_t half = rope_len / 2;
-    /* freq starts at 1.0 (= theta^0) and is multiplied by theta^(-2/rope_len)
-     * each step. Pair i uses freq = theta^(-2*i/rope_len).
-     * The decay spans the rotary sub-block, not the whole head: under partial
-     * RoPE (qwen35 rotates 64 of 256 dims) normalizing by head_dim would leave
-     * the highest pair at theta^(-62/256) instead of theta^(-62/64). Same
-     * convention as oc_apply_rope_yarn_scaled_f32 below and llama.cpp's n_rot. */
+    /* freq starts at 1.0 (= theta^0) and is multiplied by theta^(-2/rope_len) */
     float freq_mul = powf(theta, -2.0f / (float)rope_len);
     float freq = 1.0f;
     /* If in/out alias, we must read both halves before writing. Use a local
@@ -88,19 +78,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     }
 }
 
-/* Interleaved ("NORM") RoPE: rotates the pair (2i, 2i+1) rather than
- * (i, i + rope_len/2).
- *
- * These are the two conventions in the wild and they are NOT interchangeable
- * — each assigns a different frequency to a given dimension, so using the
- * wrong one produces text that is locally plausible and globally wrong.
- * oc_apply_rope_f32 above implements the split-half (GPT-NeoX) form, which is
- * what Qwen-family GGUFs want; llama.cpp calls this one LLAMA_ROPE_TYPE_NORM
- * and uses it for the Llama and Muse Glimmer families, whose converters
- * pre-permute Q/K so that the interleaved form is the correct one.
- *
- * Dimensions at or above `rope_len` are copied through (partial RoPE), and
- * `in` may alias `out`. */
+/* Interleaved ("NORM") RoPE: rotates the pair (2i, 2i+1) rather than */
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta)
 {
@@ -130,7 +108,6 @@ void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
     }
 }
 
-/* ─── Softmax ──────────────────────────────────────────────────────────── */
 
 void oc_softmax_f32(const float *input, float *output, size_t n)
 {
@@ -153,7 +130,6 @@ void oc_softmax_f32(const float *input, float *output, size_t n)
         output[i] *= inv_sum;
 }
 
-/* ─── LayerNorm ────────────────────────────────────────────────────────── */
 
 void oc_layer_norm_f32(const float *input, const float *weight, const float *bias,
                         float *output, size_t n, float eps)
@@ -176,7 +152,6 @@ void oc_layer_norm_f32(const float *input, const float *weight, const float *bia
         output[i] = (input[i] - mean) * inv_std * weight[i] + bias[i];
 }
 
-/* ─── SwiGLU (non-inplace) ────────────────────────────────────────────── */
 
 void oc_swiglu_f32(const float *gate, const float *up, float *output, size_t n)
 {
@@ -187,7 +162,6 @@ void oc_swiglu_f32(const float *gate, const float *up, float *output, size_t n)
     }
 }
 
-/* ─── Scaled Dot-Product Attention ────────────────────────────────────── */
 
 void oc_scaled_dot_product_attention_f32(const float *query,
                                           const float *key,
@@ -235,7 +209,6 @@ void oc_scaled_dot_product_attention_f32(const float *query,
         acc[i] *= inv_sum;
 }
 
-/* ─── Qwen-style RMSNorm ───────────────────────────────────────────────── */
 
 void oc_rms_norm_f32_qwen(const float *x, const float *weight, float *out,
                            size_t n, float eps, bool weight_plus_one)
@@ -289,12 +262,7 @@ void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
 
     /* YaRN parameters (matching Rust apply_rope_f32_yarn). */
     float freq_scale = 1.0f / yarn_factor;
-    /* attn_factor < 0 means "use the standard YaRN mscale". deepseek_yarn
-     * passes an explicit value instead, because its mscale/mscale_all_dim
-     * pair decides how much of the correction rides on cos/sin versus the
-     * softmax scale -- and for LongCat (both terms 1) the RoPE share is
-     * exactly 1.0, so baking 1.4787 in here would double-count against the
-     * mscale_all_dim^2 already folded into the attention scale. */
+    /* attn_factor < 0 means "use the standard YaRN mscale". deepseek_yarn passes an explicit value instead, because its mscale/mscale_all_dim */
     /* Compute correction range.
      * corr_dim(n_dims, orig_ctx, n_rot, base) =
      *   n_dims * ln(orig_ctx / (n_rot * 2*PI)) / (2 * ln(base)) */

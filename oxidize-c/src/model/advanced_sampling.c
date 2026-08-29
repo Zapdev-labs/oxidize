@@ -8,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helper: sort indices by logits descending ─────────────────────────── */
 
 typedef struct { float logit; size_t idx; } LogitIndex;
 
@@ -70,7 +69,6 @@ static float rng_from_state(uint32_t *state)
     return (float)(*state >> 8) / (float)(1u << 24);
 }
 
-/* ─── Mirostat v1 ──────────────────────────────────────────────────────── */
 
 uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
                                 float *mu, float tau, float eta,
@@ -117,7 +115,6 @@ uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
     return token;
 }
 
-/* ─── Mirostat v2 ──────────────────────────────────────────────────────── */
 
 uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
                                 float *mu, float tau, float eta,
@@ -181,7 +178,6 @@ uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
     return token;
 }
 
-/* ─── Tail-free sampling (TFS) ──────────────────────────────────────────── */
 
 uint32_t oc_sample_tfs(const float *logits, size_t vocab_size,
                        float z, float temperature)
@@ -257,7 +253,6 @@ uint32_t oc_sample_tfs(const float *logits, size_t vocab_size,
     return token;
 }
 
-/* ─── Locally typical sampling ─────────────────────────────────────────── */
 
 uint32_t oc_sample_typical(const float *logits, size_t vocab_size,
                             float p, float temperature)
@@ -334,7 +329,6 @@ uint32_t oc_sample_typical(const float *logits, size_t vocab_size,
     return token;
 }
 
-/* ─── Top-A sampling ───────────────────────────────────────────────────── */
 
 uint32_t oc_sample_top_a(const float *logits, size_t vocab_size,
                           float a, float temperature)
@@ -389,7 +383,6 @@ uint32_t oc_sample_top_a(const float *logits, size_t vocab_size,
     return token;
 }
 
-/* ─── Eta cutoff ──────────────────────────────────────────────────────── */
 
 uint32_t oc_sample_eta_cutoff(const float *logits, size_t vocab_size,
                                 float epsilon, float temperature)
@@ -445,7 +438,6 @@ uint32_t oc_sample_eta_cutoff(const float *logits, size_t vocab_size,
     return token;
 }
 
-/* ─── Penalty sampling ────────────────────────────────────────────────── */
 
 void oc_apply_penalties(float *logits, size_t vocab_size,
                         const uint32_t *recent_tokens, size_t n_recent,
@@ -473,7 +465,6 @@ void oc_apply_penalties(float *logits, size_t vocab_size,
     free(counts);
 }
 
-/* ─── Beam search ──────────────────────────────────────────────────────── */
 
 OcError oc_beam_search_init(OcBeamSearchState *st, size_t beam_width,
                              size_t max_length, float length_penalty,
@@ -664,7 +655,6 @@ void oc_beam_search_free(OcBeamSearchState *st)
     st->n_finished = 0;
 }
 
-/* ─── Contrastive search ──────────────────────────────────────────────── */
 
 uint32_t oc_sample_contrastive(const float *logits, size_t vocab_size,
                                 const float *past_keys,
@@ -697,10 +687,7 @@ uint32_t oc_sample_contrastive(const float *logits, size_t vocab_size,
     if (sum == 0.0f) sum = 1.0f;
     for (size_t i = 0; i < top_k; i++) cand_probs[i] /= sum;
 
-    /* Degeneration penalty: max cosine similarity between the current
-     * representation and past keys.
-     * ponytail: the API exposes a single current_key, so the similarity term
-     * is candidate-independent; per-candidate reps would need an API change. */
+    /* Degeneration penalty: max cosine similarity between the current */
     float max_sim = 0.0f;
     if (past_keys && current_key) {
         for (size_t t = 0; t < seq_len; t++) {
@@ -731,7 +718,6 @@ uint32_t oc_sample_contrastive(const float *logits, size_t vocab_size,
     return best_token;
 }
 
-/* ─── Sampler chain ────────────────────────────────────────────────────── */
 
 void oc_sampler_chain_init(OcSamplerChain *chain)
 {
@@ -804,10 +790,7 @@ uint32_t oc_sampler_chain_sample(OcSamplerChain *chain,
 {
     if (!chain || !logits || vocab_size == 0) return 0;
 
-    /* Apply every transform step in order; a terminal sampling step is
-     * deferred until all transforms have run, so chain order cannot
-     * silently skip configured steps. Only the first terminal step is
-     * honored. */
+    /* Apply every transform step in order; a terminal sampling step is */
     const OcSamplerStep *terminal = NULL;
     bool greedy = false;
 

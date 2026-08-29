@@ -1,18 +1,3 @@
-/*
- * parallel.c — persistent worker pool (see parallel.h).
- *
- * Dispatch is a generation counter rather than a queue. Publishing a region
- * is one release-store; each worker compares the counter against the last
- * generation it ran and, when it moves, executes its fixed slice. Completion
- * is an atomic decrement the caller spins on. No allocation and no mutex on
- * the dispatch path — the region body is often only microseconds of work, so
- * a futex round trip per region would cost more than the work itself.
- *
- * Workers spin for a bounded number of iterations before parking on a condvar.
- * Generation and decode are back-to-back regions, so a spinning worker
- * normally finds the next region before it ever parks; the condvar only
- * matters between tokens or while the model is loading.
- */
 #define _POSIX_C_SOURCE 200809L
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1  /* _SC_NPROCESSORS_ONLN is BSD-surface on macOS */
@@ -122,10 +107,7 @@ static void *worker_main(void *arg)
                 continue;
             }
             pthread_mutex_lock(&g_pool.lock);
-            /* Publish that we are about to park BEFORE re-checking, so a
-             * dispatcher that sees a zero count cannot have missed us: it
-             * would then also have published its generation, which the
-             * re-check below observes while we still hold the lock. */
+            /* Publish that we are about to park BEFORE re-checking, so a dispatcher that sees a zero count cannot have missed us: it would then also have published its generation, which the re-check below observes while we still hold the lock. */
             atomic_fetch_add_explicit(&g_pool.n_parked, 1u, memory_order_seq_cst);
             /* Re-check under the lock: the region may have been published
              * between the load above and taking the lock, and the signal
@@ -250,19 +232,7 @@ void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data)
     atomic_store_explicit(&g_pool.n_remaining, nt, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_pool.generation, 1u, memory_order_seq_cst);
 
-    /* Wake anyone who parked — but only if anyone actually did.
-     *
-     * A forward pass opens on the order of 200 regions per token, and between
-     * consecutive regions the workers are still spinning, so the common case
-     * is that nothing is parked and the mutex round trip is pure overhead.
-     * Taking a lock and broadcasting 200 times per token across 48 threads was
-     * limiting how far this scaled: throughput peaked at 40 threads and fell
-     * off at 48, where llama.cpp's stays flat.
-     *
-     * The generation store above is seq_cst, and a parking worker increments
-     * n_parked under the lock before re-checking the generation, so the two
-     * orderings interleave safely: either we see its increment and signal, or
-     * it sees our new generation and does not sleep. */
+    /* Wake anyone who parked — but only if anyone actually did. is that nothing is parked and the mutex round trip is pure overhead. */
     if (atomic_load_explicit(&g_pool.n_parked, memory_order_seq_cst) != 0) {
         pthread_mutex_lock(&g_pool.lock);
         pthread_cond_broadcast(&g_pool.wake);

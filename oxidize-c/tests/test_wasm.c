@@ -1,19 +1,3 @@
-/* test_wasm.c — WASM bridge tests.
- *
- * Verifies:
- *   - init/free bridge (default + custom config)
- *   - config defaults match the Rust WorkerModelConfig::default()
- *   - load_model via stub hooks (path + bytes)
- *   - generate() produces tokens, invokes callback, populates stats
- *   - cancel() interrupts generation
- *   - message queue enqueue/drain/depth
- *   - format_interface() emits the TypeScript contract
- *   - null/invalid-arg handling on every entry point
- *
- * Uses the built-in stub host hooks (no real GGUF required). Mirrors the
- * Rust web_worker.rs unit tests which assert exact token sequences against
- * the deterministic stub generator.
- */
 #include <criterion/criterion.h>
 #include <string.h>
 
@@ -24,7 +8,6 @@ extern bool oc_wasm_bridge_using_stub_hooks(const OcWasmBridge *br);
 extern const OcWasmBridgeConfig *oc_wasm_bridge_peek_config(const OcWasmBridge *br);
 extern void oc_wasm_bridge_test_unload_model(OcWasmBridge *br);
 
-/* ─── Callback state for counting tokens ──────────────────────────────── */
 
 typedef struct CbState {
     uint32_t count;
@@ -44,7 +27,6 @@ static bool count_callback(uint32_t token, uint32_t index, void *ud)
     return true;
 }
 
-/* ─── Init / free ─────────────────────────────────────────────────────── */
 
 Test(wasm, init_free_default)
 {
@@ -93,7 +75,6 @@ Test(wasm, init_eager_load_invalid_path)
     oc_wasm_bridge_free(br);
 }
 
-/* ─── Config defaults ────────────────────────────────────────────────── */
 
 Test(wasm, config_defaults_match_rust)
 {
@@ -119,7 +100,6 @@ Test(wasm, config_default_null_safe)
     cr_assert(true);
 }
 
-/* ─── Model loading ──────────────────────────────────────────────────── */
 
 Test(wasm, load_model_path_null_handling)
 {
@@ -159,7 +139,6 @@ Test(wasm, load_model_bytes_null_handling)
     oc_wasm_bridge_free(br);
 }
 
-/* ─── Generation ─────────────────────────────────────────────────────── */
 
 Test(wasm, generate_without_model_fails_gracefully)
 {
@@ -243,7 +222,6 @@ Test(wasm, generate_deterministic_with_zero_temp)
     oc_wasm_bridge_free(br);
 }
 
-/* ─── Cancellation ───────────────────────────────────────────────────── */
 
 Test(wasm, cancel_sets_flag)
 {
@@ -258,7 +236,6 @@ Test(wasm, cancel_null_handling)
     cr_assert_neq(oc_wasm_bridge_cancel(NULL), OC_OK);
 }
 
-/* ─── Stats ──────────────────────────────────────────────────────────── */
 
 Test(wasm, get_stats_null_handling)
 {
@@ -285,7 +262,6 @@ Test(wasm, stats_initial_state)
     oc_wasm_bridge_free(br);
 }
 
-/* ─── Message queue ─────────────────────────────────────────────────── */
 
 Test(wasm, queue_enqueue_drain)
 {
@@ -331,11 +307,7 @@ Test(wasm, queue_drain_empty_returns_error)
 
 Test(wasm, queue_cancel_message_drains)
 {
-    /* Draining a CANCEL message should return OC_OK and set the cancel flag.
-     * The flag is observed by the next generate() call's first forward step;
-     * since generate() resets the flag at entry, the cancel must be requested
-     * *during* generation (via the callback) to actually interrupt it — see
-     * the `cancel_during_generate` test below. */
+    /* Draining a CANCEL message should return OC_OK and set the cancel flag. */
     OcWasmBridge *br = oc_wasm_bridge_init(NULL);
     cr_assert_not_null(br);
     OcWasmMessage cancel = { .type = OC_WASM_MSG_CANCEL };
@@ -405,7 +377,6 @@ Test(wasm, queue_overflow)
     oc_wasm_bridge_free(br);
 }
 
-/* ─── TypeScript interface ───────────────────────────────────────────── */
 
 Test(wasm, format_interface_produces_typescript)
 {

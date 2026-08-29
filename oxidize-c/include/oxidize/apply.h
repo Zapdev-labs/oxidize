@@ -1,10 +1,3 @@
-/*
- * apply.h — Apply a tuning plan to the runtime.
- *
- * Bridges the autotune `OcPlan` to concrete runtime overrides (threads,
- * batch, NUMA, flash attention, OXK, mlock, mmap). Port concept:
- * oxidize-core/src/autotune/apply.rs.
- */
 #ifndef OXIDIZE_APPLY_H
 #define OXIDIZE_APPLY_H
 

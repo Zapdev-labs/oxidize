@@ -1,18 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-/*
- * llama.c — Llama-family dense forward pass (CPU).
- *
- * Port of oxidize-core/src/model/inference.rs (Llama/Mistral path of
- * `InferenceModel::forward_single`) + inference/{forward,layers,load}.rs.
- *
- * Weight matrices are read zero-copy from the mmap'd GGUF. The matvec
- * dequantizes one weight row at a time via the SIMD-accelerated
- * `oc_quant_dequant_row`, then does an f32 dot with the activation.
- *
- * Bit-exactness target (VAL-FWD-001..004): RMSNorm, RoPE, SwiGLU, attention
- * match the Rust scalar reference. F32-accumulated RMSNorm (not f64) to
- * mirror Rust's `x.iter().map(|v| v*v).sum::<f32>()`.
- */
+/* llama.c — Llama-family dense forward pass (CPU). Weight matrices are read zero-copy from the mmap'd GGUF. The matvec Bit-exactness target (VAL-FWD-001..004): RMSNorm, RoPE, SwiGLU, attention */
 #include "oxidize/llama.h"
 #include "oxidize/rope_scaling.h"
 
@@ -35,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static inline size_t oc_max_sz(size_t a, size_t b) { return a > b ? a : b; }
 
@@ -109,16 +95,8 @@ static float *load_norm(const OcGgufMmappedFile *m, const OcGgufTensorInfo *info
     return out;
 }
 
-/* ─── Config parsing ──────────────────────────────────────────────────── */
 
-/* Read element `idx` of a u32-ish metadata array, falling back to `def` when
- * the key is missing, is not an array, or is too short.
- *
- * Gemma 4 stores attention.head_count_kv and attention.sliding_window_pattern
- * as per-layer arrays rather than scalars, which the cfg_u32 getters cannot
- * see at all — they ask for a scalar and get nothing. GGUF writers are not
- * consistent about the integer width used for such arrays, so accept any of
- * the unsigned/signed 32-and-under types rather than requiring UINT32. */
+/* Read element `idx` of a u32-ish metadata array, falling back to `def` when */
 static uint32_t cfg_u32_at(const OcGgufFile *f, const char *key, size_t idx,
                            uint32_t def)
 {
@@ -322,10 +300,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             cfg->v_rms_norm = true;
         } else if (strcmp(arch_str, "muse-glimmer") == 0 ||
                    strcmp(arch_str, "muse_glimmer") == 0) {
-            /* Muse Glimmer: dense SwiGLU, sandwich norms, per-head QK-norm,
-             * gated attention output, [local,local,local,global] attention
-             * with RoPE on the local layers only, and a scaled + softcapped
-             * lm_head. See llama.cpp src/models/muse-glimmer.cpp. */
+            /* Muse Glimmer: dense SwiGLU, sandwich norms, per-head QK-norm, */
             cfg->embd_rms_norm = true;
             cfg->attn_out_gate = true;
             cfg->rope_swa_only = true;
@@ -342,11 +317,7 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             snprintf(key, sizeof(key), "%sattention.sliding_window", prefix);
             cfg->sliding_window = cfg_u32(f, key, 0);
 
-            /* Per-layer sliding/global pattern. The metadata carries the
-             * period (4), and llama.cpp's set_swa_pattern makes layer il
-             * sliding when il % period < period - 1 — i.e. three local layers
-             * then one global, repeating. Materialize it per layer so the
-             * forward passes never re-derive it. */
+            /* Per-layer sliding/global pattern. */
             snprintf(key, sizeof(key), "%sattention.sliding_window_pattern",
                      prefix);
             uint32_t period = cfg_u32(f, key, 4);
@@ -582,7 +553,6 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     return OC_OK;
 }
 
-/* ─── Weight resolution ───────────────────────────────────────────────── */
 
 /* Match a canonical tensor name against the per-layer / global pattern set
  * and store into the model. Returns true if matched. */
@@ -635,11 +605,7 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
         unsigned long layer_idx = strtoul(cname + 4, &end, 10);
         if (end == cname + 4 || *end != '.') return false;
         const char *suf = end + 1;
-        /* LongCat ScMoE: one GGUF block holds two attention+FFN sub-blocks.
-         * Sub-block tensors carry a `_0`/`_1` marker on the stem (before
-         * `.weight`/`.bias`); everything else in the block — router, router
-         * bias, expert pool, indexer — exists once and belongs to the even
-         * sub-layer. */
+        /* LongCat ScMoE: one GGUF block holds two attention+FFN sub-blocks. */
         char stem[96];
         if (m->cfg.is_longcat) {
             const char *dot = strrchr(suf, '.');
@@ -860,10 +826,7 @@ static OcError resolve_weights(OcLlamaModel *m)
          * every other architecture ropes every layer. */
         L->use_rope = !m->cfg.rope_swa_only || swa;
 
-        /* Gemma 4 global layers reuse the K projection as V, and so ship no
-         * attn_v tensor. Alias rather than special-casing every consumer.
-         * Only do this when attn_v is genuinely absent: a model that has both
-         * must keep them distinct even if the flag is set. */
+        /* Gemma 4 global layers reuse the K projection as V, and so ship no */
         if (m->cfg.k_eq_v && L->attn_v.data == NULL && L->attn_k.data != NULL) {
             L->attn_v = L->attn_k;
         }
@@ -1055,7 +1018,6 @@ static OcError resolve_weights(OcLlamaModel *m)
     return OC_OK;
 }
 
-/* ─── Load ─────────────────────────────────────────────────────────────── */
 
 OcError oc_llama_load(const char *path, OcLlamaModel *out)
 {
@@ -1066,10 +1028,7 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     if (e != OC_OK) return e;
 
     out->arch = oc_gguf_arch_from_file(&out->gguf.unified);
-    /* Read the raw `general.architecture` string for the config-key prefix
-     * (must match the GGUF on-disk value exactly: "qwen2", not "qwen";
-     * "deepseek2", not "deepseek"). Fall back to the enum name only if the
-     * metadata key is absent. */
+    /* Read the raw `general.architecture` string for the config-key prefix */
     const char *arch_str = NULL;
     size_t arch_len = 0;
     if (!oc_gguf_metadata_get_str(&out->gguf.unified, "general.architecture",
@@ -1121,14 +1080,7 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     return OC_OK;
 }
 
-/* ─── Session ─────────────────────────────────────────────────────────── */
 
-/* ─── Q8 KV cache helpers ─────────────────────────────────────────────────
- *
- * Symmetric per-group int8, the same scheme as Q8_0 weights: one f32 scale
- * per (layer, position, kv head), codes in [-127, 127]. 127 rather than 128
- * keeps it symmetric so negation is exact and there is no asymmetric overflow.
- */
 #define OC_KV_Q8_QMAX 127.0f
 
 static void kv_q8_encode(const float *src, int8_t *codes, float *scale_out,
@@ -1177,23 +1129,10 @@ OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx, const char *explicit)
     return n_ctx >= 8192u ? OC_KV_Q8 : OC_KV_F32;
 }
 
-/* Floats per cached position per layer.
- *
- * The cache is indexed at a single uniform stride across layers, so on a model
- * whose layers disagree it must be the MAXIMUM, not any one layer's value.
- * Gemma 4 is exactly that case: sliding layers hold 16 KV heads x 256 = 4096
- * floats while global layers hold 4 x 512 = 2048. Sizing from cfg.n_head_kv
- * (the global count) would under-allocate every sliding layer by 2x and
- * corrupt the cache. Global layers leave the upper half of their row unused,
- * which is the price of a uniform stride. */
+/* Floats per cached position per layer. */
 static size_t kv_row_floats_for(const OcLlamaModel *model)
 {
-    /* MLA caches the COMPRESSED latent [c_kv | k_pe], not the expanded
-     * per-head K/V. Every head's K and V are linear in these same numbers,
-     * so forward_mla_attention folds k_b into the query and applies v_b to
-     * the attention-weighted latent. On LongCat-2.0 that is 576 floats per
-     * row instead of 64*192 = 12288 -- 21x less cache, and less arithmetic
-     * per step besides. */
+    /* MLA caches the COMPRESSED latent [c_kv | k_pe], not the expanded */
     if (model->cfg.uses_mla)
         return (size_t)model->cfg.mla_kv_lora_dim + model->cfg.mla_q_rope_dim;
 
@@ -1273,22 +1212,13 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
      * strides by head_dim. If those disagree the offsets would not line up,
      * so fall back to f32 rather than compute the wrong thing. */
     out->kv_group = model->cfg.kv_head_dim;
-    /* Q8 KV indexes its scale array at a single (n_head_kv, kv_head_dim)
-     * stride. Gemma 4's two layer geometries give two different strides, so
-     * the scales for sliding and global layers would alias. Rather than carry
-     * a per-layer scale layout for a path that is not the bottleneck, use f32
-     * KV there. */
+    /* Q8 KV indexes its scale array at a single (n_head_kv, kv_head_dim) */
     if (kv_type == OC_KV_Q8 && model->cfg.uses_gemma4) {
         oc_log(OC_LOG_WARN, "llama: Q8 KV does not support Gemma 4's "
                "per-layer KV geometry; using f32 KV");
         kv_type = OC_KV_F32;
     }
-    /* MLA does not store per-head K/V at all -- it caches the [c_kv | k_pe]
-     * latent, which has no kv-head structure for Q8's per-head scales to key
-     * off, and forward_mla_attention writes s->kv_k directly rather than
-     * going through kv_q8_encode. Q8 here would dereference the NULL kv_k
-     * that the Q8 path leaves behind. The latent is already 21x smaller than
-     * the expanded cache, so there is little left for Q8 to win. */
+    /* MLA does not store per-head K/V at all -- it caches the [c_kv | k_pe] */
     if (kv_type == OC_KV_Q8 && model->cfg.uses_mla) {
         oc_log(OC_LOG_WARN, "llama: Q8 KV does not apply to MLA's compressed "
                "latent cache; using f32 KV");
@@ -1318,11 +1248,7 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
         }
     } else {
         out->kv_k = xcalloc(total, sizeof(float));
-        /* MLA has no separate V cache: forward_mla_attention stores the
-         * [c_kv | k_pe] latent in kv_k and reconstructs V from it via v_b at
-         * the end of each head. Allocating kv_v would silently double the
-         * cache for a buffer nothing reads -- 171 KB per token on
-         * LongCat-2.0, i.e. 22 GB at a 128k context. */
+        /* MLA has no separate V cache: forward_mla_attention stores the [c_kv | k_pe] latent in kv_k and reconstructs V from it via v_b at the end of each head. */
         if (!model->cfg.uses_mla)
             out->kv_v = xcalloc(total, sizeof(float));
     }
@@ -1340,10 +1266,7 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
     out->k = xcalloc(out->kv_row_floats, sizeof(float));
     out->v = xcalloc(out->kv_row_floats, sizeof(float));
-    /* n_head*head_dim is what attention writes, but the Gemma-style sandwich
-     * norms reuse this buffer as an n_embd-wide scratch for the branch
-     * output. On a heavily-GQA model (Muse Glimmer: 32*128 = 4096 vs
-     * n_embd 6656) that is the larger of the two, so size it for both. */
+    /* n_head*head_dim is what attention writes, but the Gemma-style sandwich */
     out->attn_out = xcalloc(oc_max_sz((size_t)model->cfg.n_head *
                                       model->cfg.head_dim,
                                       (size_t)model->cfg.n_embd),
@@ -1607,7 +1530,6 @@ void oc_llama_free(OcLlamaModel *model)
     memset(model, 0, sizeof(*model));
 }
 
-/* ─── Forward pass ─────────────────────────────────────────────────────── */
 
 /* Embed one token: dequantize row `token` of tok_embeddings into `dst`. */
 static void embed_token_into(OcLlamaSession *s, uint32_t token, float *dst)
@@ -1622,11 +1544,7 @@ static void embed_token_into(OcLlamaSession *s, uint32_t token, float *dst)
             w->data + (size_t)token * w->row_bytes, w->row_bytes,
             dst, s->model->cfg.n_embd);
     }
-    /* Gemma scales the token embedding by sqrt(n_embd) once, here — it is a
-     * property of the embedding, not of each RMSNorm. The pre-existing
-     * `norm_scale` handling in forward_layer multiplies every normed
-     * activation instead, which is a different (and for Gemma 4, wrong)
-     * computation; uses_gemma4 takes this path and leaves that one alone. */
+    /* Gemma scales the token embedding by sqrt(n_embd); it is applied once after the embedding lookup, not inside each RMSNorm. */
     if (s->model->cfg.uses_gemma4 && s->model->cfg.norm_scale != 1.0f) {
         const float sc = s->model->cfg.norm_scale;
         for (size_t i = 0; i < s->model->cfg.n_embd; i++) dst[i] *= sc;
@@ -1660,13 +1578,7 @@ static void matvec(const OcWeightView *w, const float *in, float *out,
     }
 }
 
-/* out[0..cols) = W^T @ in, i.e. sum over rows of in[r] * W[r][:].
- *
- * This is the "absorption" step of MLA: folding k_b into the query so that
- * scoring can run against the cached latent directly instead of
- * reconstructing per-head K for every past position. Row-major access, so a
- * quantized W is walked exactly as matvec() walks it. `out` must be `cols`
- * long, `in` must be `rows` long. */
+/* out[0..cols) = W^T @ in, i.e. sum over rows of in[r] * W[r][:]. */
 static void matvec_transpose_acc(const OcWeightView *w, const float *in,
                                  float *out, float *temp)
 {
@@ -1690,10 +1602,7 @@ static void matvec_transpose_acc(const OcWeightView *w, const float *in,
  * GQA: Q head h attends to KV head (h / group_size). */
 static OcError forward_layer(OcLlamaSession *s, uint32_t layer);
 static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L);
-/* `query_pos` is the position of the query token: attention runs over cached
- * positions [start, query_pos]. Split out from attention_head() so batched
- * prefill can drive many query positions concurrently — the single-token
- * path always passes s->pos. */
+/* `query_pos` is the position of the query token: attention runs over cached */
 static const OcLlamaLayer *layer_for_attn(const OcLlamaSession *s, uint32_t layer)
 {
     if (s->model->mtp.present && layer >= s->model->cfg.n_layer)
@@ -1926,7 +1835,6 @@ static inline float post_norm_eps(const OcLlamaConfig *c)
     return c->post_norm_eps > 0.0f ? c->post_norm_eps : c->rms_norm_eps;
 }
 
-/* ─── Dense FFN (Llama/Mistral/Qwen2-dense path) ──────────────────────── */
 
 static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
 {
@@ -1965,21 +1873,6 @@ static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     oc_attn_add_f32(s->x, s->normed, c->n_embd);
 }
 
-/* ─── MoE FFN (Qwen3-MoE / Mixtral path) ────────────────────────────────
- *
- * Port of oxidize-core inference.rs::moe_ffn_forward_weights +
- * layers.rs MoE branch. For Qwen3-MoE: softmax gating over all experts,
- * top-k selection, renormalize top-k weights, per-expert SwiGLU FFN,
- * weighted sum, then add the shared expert (optionally sigmoid-gated).
- *
- * Expert weights are STACKED in ffn_gate_exps/ffn_up_exps/ffn_down_exps.
- * Expert i occupies rows [i*exp_i_size, (i+1)*exp_i_size) in gate/up and
- * [i*n_embd, (i+1)*n_embd) in down. We synthesize a per-expert OcWeightView
- * by slicing the stacked tensor's data pointer + per-expert row count.
- *
- * Each expert's down-projection output goes into s->shexp_out as a temp
- * (n_embd-sized), then is scaled by w and accumulated into s->expert_out.
- */
 static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
 {
     const OcLlamaConfig *c = &s->model->cfg;
@@ -1991,10 +1884,8 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     uint32_t i_size = c->expert_intermediate_size;
     if (i_size == 0) i_size = c->n_ff;
 
-    /* 1. Router logits: ffn_gate_inp @ normed → [n_slots]. */
     matvec(&L->ffn_gate_inp, s->normed, s->router_logits, s->dequant_temp);
 
-    /* 2. Gating: softmax (Qwen3-MoE) or sigmoid (DeepSeek). */
     if (!c->expert_gating_sigmoid) {
         float mx = s->router_logits[0];
         for (uint32_t i = 1; i < n_slots; i++) {
@@ -2015,7 +1906,6 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         }
     }
 
-    /* 3. Top-k selection by descending weight (partial selection sort). */
     uint32_t *sel = s->selected_experts;
     if (sel == NULL) { forward_dense_ffn(s, L); return; }
     for (uint32_t i = 0; i < n_slots; i++) sel[i] = i;
@@ -2036,11 +1926,6 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         uint32_t tmp = sel[i]; sel[i] = sel[best]; sel[best] = tmp;
     }
 
-    /* 4. Renormalize top-k weights (norm_topk_prob).
-     *
-     * NOT for zero-expert models: their softmax already spans every slot and
-     * routed mass summing to less than 1 is exactly how a token skips work.
-     * Rescaling to 1 would force every token through a full-strength FFN. */
     double weight_norm = 1.0;
     if (n_zero == 0) {
         weight_norm = 0.0;
@@ -2050,9 +1935,6 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     }
     float routed_scale = c->expert_weights_scale;
 
-    /* 5. Per-expert SwiGLU FFN, accumulated into s->expert_out (zeroed).
-     *    Each expert's down output goes into s->shexp_out (temp, n_embd),
-     *    then is scaled by w and added to s->expert_out. */
     memset(s->expert_out, 0, c->n_embd * sizeof(float));
     size_t gate_row_bytes = L->ffn_gate_exps.row_bytes;
     size_t up_row_bytes   = L->ffn_up_exps.row_bytes;
@@ -2184,8 +2066,6 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         }
     }
 
-    /* 6. Shared expert (always active, added with weight 1.0). Optional
-     *    sigmoid gate via ffn_gate_inp_shexp (Qwen2-MoE shared_expert_gate). */
     if (L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
         L->ffn_down_shexp.data != NULL) {
         matvec(&L->ffn_gate_shexp, s->normed, s->shexp_gate, s->dequant_temp);
@@ -2203,19 +2083,9 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         for (size_t i = 0; i < c->n_embd; i++) s->expert_out[i] += s->shexp_out[i];
     }
 
-    /* 7. Residual add: x += ffn_out. */
     for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->expert_out[i];
 }
 
-/* ─── DeepSeek MLA (Multi-head Latent Attention) forward ────────────────
- *
- * Port of oxidize-core inference/layers.rs::deepseek_mla_layer.
- *
- * Q path:  x → q_a_proj → q_a_norm → q_b_proj → split (q_nope | q_pe)
- * KV path: x → kv_a_proj_with_mqa → [kv_a_norm'd latent | k_pe]
- *          per-head: k_b_proj (k_nope), v_b_proj (v)
- * RoPE on q_pe and k_pe (decoupled), then standard attention.
- */
 static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
 {
     const OcLlamaConfig *c = &s->model->cfg;
@@ -2229,31 +2099,20 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
     uint32_t v_hd = c->mla_v_head_dim;
     uint32_t q_hd = c->head_dim;
 
-    /* 1. Q down-projection: q_a_proj @ normed → c_q [q_lora] */
     matvec(&L->mla_q_a, s->normed, s->mla_c_q, s->dequant_temp);
 
-    /* 2. RMSNorm c_q with q_a_norm. */
     oc_rms_norm_f32(s->mla_c_q, L->mla_q_a_norm, s->mla_c_q,
                     q_lora, c->rms_norm_eps);
 
-    /* 3. Q up-projection: q_b_proj @ c_q → q_full [n_head * q_hd] */
     matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
 
-    /* 4. KV down-projection: kv_a_proj_with_mqa @ normed → kv_compressed */
     matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed, s->dequant_temp);
 
-    /* 5. RMSNorm the kv_lora portion of kv_compressed. */
     oc_rms_norm_f32(s->mla_kv_compressed, L->mla_kv_a_norm,
                     s->mla_c_kv, kv_lora, c->rms_norm_eps);
     memcpy(s->mla_kv_compressed, s->mla_c_kv, kv_lora * sizeof(float));
 
-    /* Resolve the deepseek_yarn split ONCE: how much of the correction rides
-     * on cos/sin (rope_amp) versus the attention logits (attn_scale).
-     * DeepSeek-V3 (mscale_all_dim 0) puts it on cos/sin; LongCat (both terms
-     * 1) cancels the RoPE share to exactly 1.0 and puts it all on the
-     * logits. Applying the standard YaRN mscale here as well would
-     * double-count -- inflating the 64 rope dims against the 128 nope dims
-     * AND scaling the logits. */
+    /* Resolve the deepseek_yarn split ONCE: how much of the correction rides */
     float rope_amp = -1.0f;   /* < 0 = standard YaRN mscale */
     float attn_scale = 1.0f / sqrtf((float)q_hd);
     if (c->yarn_factor > 1.0f && c->yarn_mscale_all_dim > 0.0f) {
@@ -2262,12 +2121,6 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
                                       &rope_amp, &attn_scale);
     }
 
-    /* 6. RoPE on k_pe (the trailing q_rope slots of kv_compressed).
-     *
-     * YaRN changes the ROTATION FREQUENCIES, not just an amplitude, so it is
-     * still required here even for LongCat where the amplitude cancels to
-     * 1.0 -- a 120x context extension without the frequency ramp would place
-     * every position wrong. */
     float *k_pe = s->mla_kv_compressed + kv_lora;
     if (c->yarn_factor > 1.0f) {
         oc_apply_rope_yarn_scaled_f32(k_pe, k_pe, q_rope, q_rope, s->pos,
@@ -2277,31 +2130,12 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         oc_apply_rope_f32(k_pe, k_pe, q_rope, q_rope, s->pos, c->rope_theta);
     }
 
-    /* 7. Cache the LATENT, not the expanded per-head K/V.
-     *
-     * The obvious implementation decompresses c_kv into 64 heads of K and V
-     * and caches those: 64 * 192 floats for K plus the same for V, i.e.
-     * 7.5 MB per token on LongCat-2.0, which puts even an 8k context out of
-     * reach. But every head's K and V are linear functions of the SAME 576
-     * cached numbers, so storing [c_kv | k_pe] and folding the projections
-     * into the query instead costs 576 floats per token per layer -- 21x
-     * smaller -- and is also less arithmetic per step, because k_b and v_b
-     * are then applied once per token rather than once per cached position.
-     *
-     *   score_t = q_nope . (k_b[h] @ c_kv_t) + q_pe . k_pe_t
-     *           = (k_b[h]^T @ q_nope) . c_kv_t + q_pe . k_pe_t
-     *   out     = v_b[h] @ (sum_t p_t * c_kv_t)
-     *
-     * so k_b is absorbed into the query up front and v_b is applied once to
-     * the attention-weighted latent at the end. Both are exact -- this is a
-     * re-association, not an approximation. */
+    /* 7. Cache the LATENT, not the expanded per-head K/V. smaller -- and is also less arithmetic per step, because k_b and v_b */
     size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
     float *latent_row = s->kv_k + kv_off;
     memcpy(latent_row, s->mla_c_kv, kv_lora * sizeof(float));
     memcpy(latent_row + kv_lora, k_pe, q_rope * sizeof(float));
 
-    /* 8. RoPE on q_pe (the trailing q_rope slots of each q head). Must match
-     * the k_pe treatment above exactly, or Q and K rotate apart. */
     for (uint32_t h = 0; h < n_head; h++) {
         float *q_pe = s->mla_q_full + h * q_hd + k_nope_hd;
         if (c->yarn_factor > 1.0f) {
@@ -2313,19 +2147,6 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         }
     }
 
-    /* 9. Attention, scoring against the cached latent.
-     *
-     * The position loop is OUTER and the head loop INNER. That ordering is
-     * the whole point: all 64 heads score against the SAME cached row, so a
-     * head-outer loop re-reads the entire layer cache once per head. At an
-     * 8k context that is 76 * 64 * 8192 * 2304 B = 92 GB of KV traffic per
-     * token, five times the ~18.5 GB of weight traffic the model itself
-     * moves. Read each row once and fan it out across heads instead: 1.4 GB.
-     *
-     * The cost is carrying per-head online-softmax state (running max, sum,
-     * and a kv_lora accumulator) concurrently rather than one head at a
-     * time -- 64 * 512 floats each for the absorbed queries and the
-     * accumulators, 256 KB total. */
     const float scale = attn_scale;
     const size_t layer_base = (size_t)layer * c->n_ctx * s->kv_row_floats;
     const int64_t seq_len = s->pos + 1;
@@ -2382,7 +2203,6 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         matvec(&v_b_h, ctx, s->attn_out + (size_t)h * v_hd, s->dequant_temp);
     }
 
-    /* 10. Output projection. */
     matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     oc_attn_add_f32(s->x, s->normed, n_embd);
 }
@@ -2711,10 +2531,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
 
         /* Output projection. */
         matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
-        /* Gemma "sandwich" norm: the attention branch output is normed again
-         * before it rejoins the residual stream (HF post_attention_layernorm
-         * on the branch, not on the input). Skipped when the tensor is absent,
-         * which is every non-Gemma model. */
+        /* Gemma "sandwich" norm: the attention branch output is normed again */
         if (L->post_attention_norm != NULL) {
             oc_rms_norm_f32(s->normed, L->post_attention_norm,
                             s->attn_out, c->n_embd, post_norm_eps(c));
@@ -2738,14 +2555,8 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         forward_dense_ffn(s, L);
     }
 
-    /* Gemma 4 per-layer output scale. It multiplies the layer's whole output
-     * — the running residual stream after the FFN residual add — not just one
-     * branch. (llama.cpp gemma4.cpp: `cur = ggml_mul(cur, out_scale)` right
-     * before `inpL = cur`.) 1.0 when the tensor is absent. */
-    /* 0 means "unset", not "scale by zero". resolve_weights() seeds this to
-     * 1.0, but a hand-built OcLlamaModel (tests, embedders) is typically
-     * memset to zero, and treating that as a real scale silently zeroes the
-     * whole residual stream — all-zero logits with no error anywhere. */
+    /* Gemma 4 per-layer output scale. It multiplies the layer's whole output */
+    /* 0 means "unset", not "scale by zero". */
     if (L->layer_output_scale != 0.0f && L->layer_output_scale != 1.0f) {
         const float os = L->layer_output_scale;
         for (size_t i = 0; i < c->n_embd; i++) s->x[i] *= os;
@@ -2972,38 +2783,14 @@ OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
     return OC_OK;
 }
 
-/* ─── Batched prefill ────────────────────────────────────────────────────
- *
- * Prompt processing is throughput work, not latency work: every prompt token
- * is known up front, so they can share one pass over the weights instead of
- * each dragging the whole model through DRAM. The per-token path costs one
- * full weight sweep per token — on Qwen3-30B-A3B that is ~1.5 GB per token,
- * which measured 2.9 tok/s against llama.cpp's 129 tok/s for the same file.
- *
- * The arithmetic here is deliberately IDENTICAL to forward_layer(): same
- * norms, same RoPE, same online-softmax attention (reused verbatim, one
- * token at a time), same routing. Only the *matmuls* change shape — they go
- * through oc_matvec_*_batch(), which dots each weight row against a tile of
- * activations while the row is in cache. Attention itself is left per-token
- * because it touches the KV cache, not the weights, so it was never the
- * bottleneck.
- *
- * For the MoE FFN the win needs one extra step: tokens are grouped BY EXPERT
- * (a counting sort over the top-k choices) so each expert's weights are read
- * once for all the tokens that routed to it. Without that grouping a batch
- * of 512 tokens would still touch 512 * 8 expert weight sets independently
- * and nothing would be amortized.
- */
+/* because it touches the KV cache, not the weights, so it was never the */
 
 /* Tokens per prefill chunk. Larger amortizes the weight sweep further —
  * especially for MoE, where the win scales with tokens-per-expert — at a
  * linear cost in scratch (~127 KB/token on a 30B MoE, so ~65 MB here). */
 #define OC_PREFILL_CHUNK 512u
 
-/* Per-phase prefill timers. Prefill is a mix of weight-bound matmuls,
- * cache-bound attention and plain memory shuffling, and which one dominates
- * is not guessable — it moves with chunk size, expert count and thread
- * count. Accumulated per oc_llama_prefill() call and reported at DEBUG. */
+/* Per-phase prefill timers. Prefill is a mix of weight-bound matmuls, */
 typedef struct {
     double norm, qkv, rope_kv, attn, proj, router, gather, expert_mm, scatter;
 } PrefillTimers;
@@ -3169,7 +2956,6 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
     if (i_size == 0) i_size = c->n_ff;
     const float routed_scale = c->expert_weights_scale;
 
-    /* 1. Router logits for every token in one matmul. */
     double t_r0 = pf_now();
     mm_batch(&L->ffn_gate_inp, b->normed, b->n_embd, b->router, b->n_slots,
              n, b);
@@ -3243,7 +3029,6 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         }
     }
 
-    /* 5. Counting sort of (token, weight) pairs into per-expert groups. */
     for (uint32_t e = 0; e < n_slots; e++) b->ex_off[e + 1] += b->ex_off[e];
     for (size_t j = 0; j < n; j++) {
         for (uint32_t i = 0; i < k; i++) {
@@ -3254,7 +3039,6 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         }
     }
 
-    /* 6. One pass per expert over all of its tokens. */
     const size_t gate_rb = L->ffn_gate_exps.row_bytes;
     const size_t up_rb   = L->ffn_up_exps.row_bytes;
     const size_t down_rb = L->ffn_down_exps.row_bytes;
@@ -3316,7 +3100,6 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         g_pf_t.scatter += pf_now() - t_s0;
     }
 
-    /* 7. Shared expert (always active), batched over every token. */
     if (L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
         L->ffn_down_shexp.data != NULL) {
         mm_batch(&L->ffn_gate_shexp, b->normed, b->n_embd, b->ffn_a, b->ffw,
@@ -3346,7 +3129,6 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         }
     }
 
-    /* 8. Residual add. */
     for (size_t j = 0; j < n; j++) {
         const float *src = b->expert_out + j * b->n_embd;
         float *dst = b->x + j * b->n_embd;
@@ -3590,12 +3372,7 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
     mm_batch(&L->attn_k, b->normed, b->n_embd, b->k_buf, b->kv_row, n, b);
     mm_batch(&L->attn_v, b->normed, b->n_embd, b->v_buf, b->kv_row, n, b);
 
-    /* Per-token QK-norm + RoPE + KV store. Every token is independent, and at
-     * a 512-token chunk this is 512*24 head-sized RMSNorms — enough that
-     * running it on one thread showed up as half the cost of the whole
-     * full-attention layer. Each worker needs its own head-sized scratch, so
-     * reserve it up front (a failure inside the region could not be reported)
-     * and fall back to serial if the pool cannot provide it. */
+    /* Per-token QK-norm + RoPE + KV store. Every token is independent, and at */
     Qwen35QkJob qjob = { s, b, L, pos0, hd, kvdim, c->n_head, L->n_head_kv,
                          c->n_head_kv, (size_t)qdim, c->rms_norm_eps,
                          c->n_ctx };
@@ -3755,14 +3532,7 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
 
     g_pf_t.rope_kv += pf_now() - t_rk0;
 
-    /* Attention over the whole chunk, parallel across (token, head).
-     *
-     * This has to be threaded, not just looped: prefill attention is
-     * quadratic in the chunk length, and every (token, head) pair sweeps its
-     * own slice of the KV cache. Left serial it dominates everything the
-     * batched matmuls just saved — for a 500-token chunk it is ~200 GB of
-     * cache reads on one core. Each pair writes only its own head slice of
-     * attn_out, so there is nothing to synchronize. */
+    /* Attention over the whole chunk, parallel across (token, head). */
     double t0 = pf_now();
     AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, NULL,
                      c->attn_out_gate ? b->mgate : NULL };
@@ -3811,11 +3581,7 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     return OC_OK;
 }
 
-/* Whether the batched path covers this model. Everything it does not cover
- * falls back to the per-token loop, which is unchanged. MLA, Gemma 4's dual
- * geometry (per-layer head_dim / k_eq_v aliasing) and the LayerNorm archs
- * with their own forward passes each need their own batched form; none of
- * them is the MoE prefill case this targets. */
+/* Whether the batched path covers this model. Everything it does not cover */
 static bool prefill_batch_supported(const OcLlamaModel *m)
 {
     if (m->arch == OC_ARCH_GPT2 || m->arch == OC_ARCH_GPTJ ||
@@ -3990,7 +3756,6 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
     return OC_OK;
 }
 
-/* ─── Batched decode ─────────────────────────────────────────────────── */
 
 OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
                                OcBatchSession *out)
@@ -4012,10 +3777,7 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     out->model = model;
     out->max_seqs = max_seqs;
     if (model->cfg.uses_mla) {
-        /* Must agree with kv_row_floats_for(): the latent, not the expanded
-         * per-head K/V. Sizing this the old way allocated 12288 floats per
-         * row per sequence -- about 76 GB for a 2-sequence 8k-context
-         * LongCat batch, against the 3.6 GB the latent needs. */
+        /* Must agree with kv_row_floats_for(): the latent, not the expanded */
         out->kv_row_floats = kv_row_floats_for(model);
     } else {
         out->kv_row_floats = (size_t)model->cfg.n_head_kv * model->cfg.kv_head_dim;
@@ -4037,10 +3799,7 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
     out->k = xcalloc(out->kv_row_floats, sizeof(float));
     out->v = xcalloc(out->kv_row_floats, sizeof(float));
-    /* n_head*head_dim is what attention writes, but the Gemma-style sandwich
-     * norms reuse this buffer as an n_embd-wide scratch for the branch
-     * output. On a heavily-GQA model (Muse Glimmer: 32*128 = 4096 vs
-     * n_embd 6656) that is the larger of the two, so size it for both. */
+    /* n_head*head_dim is what attention writes, but the Gemma-style sandwich */
     out->attn_out = xcalloc(oc_max_sz((size_t)model->cfg.n_head *
                                       model->cfg.head_dim,
                                       (size_t)model->cfg.n_embd),
@@ -4112,11 +3871,7 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
         if (seqs[s].pos < 0 || (uint64_t)seqs[s].pos >= m->cfg.n_ctx)
             return OC_ERR_INVALID_ARG;
         /* Set up a temporary session view sharing the workspace. */
-        /* Zeroed, not just field-by-field assigned: this struct has grown
-         * several times (MLA scratch, Q8 KV code/scale pointers) and each
-         * time the un-assigned tail became stack garbage that the forward
-         * pass then wrote through. kv_type 0 is OC_KV_F32, which is what the
-         * batch path uses. */
+        /* Zeroed, not just field-by-field assigned: this struct has grown */
         OcLlamaSession tmp;
         memset(&tmp, 0, sizeof tmp);
         tmp.model = m;

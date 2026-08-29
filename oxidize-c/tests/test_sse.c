@@ -1,4 +1,3 @@
-/* test_sse.c — SSE streaming tests. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <criterion/criterion.h>
@@ -8,7 +7,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ─── Per-client: init / free ───────────────────────────────────────────── */
 
 Test(sse, init_free)
 {
@@ -32,7 +30,6 @@ Test(sse, free_null)
     oc_sse_free(NULL);
 }
 
-/* ─── format_event ───────────────────────────────────────────────────────── */
 
 Test(sse, format_event_basic)
 {
@@ -116,7 +113,6 @@ Test(sse, format_event_overflow)
     cr_assert_eq(oc_sse_format_event(&ev, buf, sizeof(buf)), 0);
 }
 
-/* ─── parse_event ───────────────────────────────────────────────────────── */
 
 Test(sse, parse_event_basic)
 {
@@ -186,7 +182,6 @@ Test(sse, parse_event_null)
     cr_assert_eq(oc_sse_parse_event(buf, strlen(buf), NULL), 0);
 }
 
-/* ─── send_event (via pipe) ──────────────────────────────────────────────── */
 
 Test(sse, send_event_pipe)
 {
@@ -243,7 +238,6 @@ Test(sse, send_event_null)
     oc_sse_free(&c);
 }
 
-/* ─── Server: init / free ────────────────────────────────────────────────── */
 
 Test(sse_server, init_free)
 {
@@ -281,7 +275,6 @@ Test(sse_server, free_null)
     oc_sse_server_free(NULL);
 }
 
-/* ─── accept / disconnect ────────────────────────────────────────────────── */
 
 Test(sse_server, accept_disconnect)
 {
@@ -322,7 +315,6 @@ Test(sse_server, accept_at_capacity)
     oc_sse_server_free(&s);
 }
 
-/* ─── broadcast ─────────────────────────────────────────────────────────── */
 
 Test(sse_server, broadcast_to_clients)
 {

@@ -1,27 +1,5 @@
-/*
- * test_quant.c — quantization scalar reference tests (VAL-QUANT-001..015).
- *
- * Covers the `quant-standard-types` feature scope: block-size constants,
- * dequant-to-f32, pack-then-dequant round-trip, random-block corpus sweep,
- * unknown-type error handling.
- *
- * Bit-exact parity with Rust `oxidize-core/src/compute/quantization.rs`
- * scalar dequant is validated by:
- *   - Constructing canonical blocks using the same encoder algorithm the
- *     Rust reference uses (so the expected dequant output is computable by
- *     hand for zero/known-scale blocks).
- *   - Round-trip tests for types whose Rust encoder IS a true inverse of the
- *     dequant (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K_M, F32, F16, BF16, I*).
- *   - For Q2_K / Q3_K / Q5_K / Q6_K: the Rust `quantize_k_packed_scalar`
- *     produces a simplified layout that is NOT a true inverse of the
- *     super-block dequant (the d field lands at offset 0 in the pack but is
- *     read from offset 80+ by the dequant). These types are tested by
- *     dequantizing hand-crafted blocks with known scales and verifying the
- *     output matches the hand-computed expected values.
- *
- * SIMD parity (scalar-vs-AVX2 / AVX2-vs-AVX-512) is layered on by the
- * `quant-simd-dispatch` feature.
- */
+/* test_quant.c — quantization scalar reference tests (VAL-QUANT-001..015). */
+/* Bit-exact parity with Rust `oxidize-core/src/compute/quantization.rs` */
 #include <criterion/criterion.h>
 #include <criterion/redirect.h>
 
@@ -35,7 +13,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static void put_f16(uint8_t *buf, size_t off, uint16_t bits)
 {
@@ -268,7 +245,6 @@ Test(quant, dequant_q4_0_zero_block, .description = "Q4_0 zero block dequant") {
     }
 }
 
-/* ─── Q8_0 dequant hand-crafted ──────────────────────────────────────── */
 
 Test(quant, dequant_q8_0_handcrafted, .description = "VAL-QUANT-004: Q8_0 dequant on hand-crafted block") {
     /* d=0.5 (f16 0x3800), qs[i] = i as i8. Expected: out[i] = (i8)qs[i] * 0.5. */
@@ -285,7 +261,6 @@ Test(quant, dequant_q8_0_handcrafted, .description = "VAL-QUANT-004: Q8_0 dequan
     }
 }
 
-/* ─── Q6_K dequant hand-crafted (known scales) ─────────────────────────── */
 
 Test(quant, dequant_q6_k_handcrafted, .description = "VAL-QUANT-004: Q6_K dequant on hand-crafted block") {
     /* Construct a Q6_K block with d=1.0, all scales = 1 (signed i8), all
@@ -321,15 +296,9 @@ Test(quant, dequant_q6_k_zero_d, .description = "Q6_K with d=0 produces all zero
     }
 }
 
-/* ─── Q2_K dequant hand-crafted ────────────────────────────────────────── */
 
 Test(quant, dequant_q2_k_handcrafted, .description = "VAL-QUANT-005: Q2_K dequant on hand-crafted block") {
-    /* Q2_K layout (84 bytes): scales[0..16], qs[16..80], d[80..82], min[82..84].
-     * Set d=1.0, min=0.0, scales[0]=0x11 (sc1=1), scales[1]=0x11 (sc2=1),
-     * rest of scales = 0, qs all = 0xFF (so (qs >> shift) & 3 = 3 for all).
-     * For the first 32 outputs: dl1 = d * 1 = 1.0, ml1 = min * 1 = 0 → out = 3 - 0 = 3.
-     * For the next 32: dl2 = d * 1 = 1.0, ml2 = 0 → out = 3.
-     * Remaining 192: scales = 0 → dl = 0, ml = 0 → out = 0. */
+    /* Q2_K layout (84 bytes): scales[0..16], qs[16..80], d[80..82], min[82..84]. */
     uint8_t buf[84];
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x11;  /* scales[0] = 0x11 (sc1=1, ml1=1) */
@@ -363,15 +332,9 @@ Test(quant, dequant_q2_k_zero_block, .description = "Q2_K zero block (d=0) → a
     }
 }
 
-/* ─── Q3_K dequant hand-crafted ────────────────────────────────────────── */
 
 Test(quant, dequant_q3_k_handcrafted, .description = "VAL-QUANT-005: Q3_K dequant runs and produces finite output") {
-    /* Q3_K scale decoding is non-trivial (bit-shuffled 6-bit values). For a
-     * sanity test, set d=0 so all outputs are 0 regardless of scales — this
-     * verifies the dequant runs without crash and produces finite output.
-     * The bit-exact dequant parity vs Rust is validated by the corpus sweep
-     * on real GGUF fixtures (deferred to integration on .121 where Rust
-     * reference is available). */
+    /* Q3_K scale decoding is non-trivial (bit-shuffled 6-bit values). For a The bit-exact dequant parity vs Rust is validated by the corpus sweep */
     uint8_t buf[110];
     memset(buf, 0, sizeof(buf));
     /* d = 0.0 at [108..110]. */
@@ -386,13 +349,9 @@ Test(quant, dequant_q3_k_handcrafted, .description = "VAL-QUANT-005: Q3_K dequan
     }
 }
 
-/* ─── Q5_K dequant hand-crafted ────────────────────────────────────────── */
 
 Test(quant, dequant_q5_k_handcrafted, .description = "VAL-QUANT-004: Q5_K dequant on hand-crafted block") {
-    /* Q5_K layout: d[0..2], min[2..4], scales[4..16], qh[16..48], qs[48..176].
-     * Set d=1.0, min=0.0, scales[0]=1, scales[1]=1, rest=0, qh=0, qs=0.
-     * For first 32: qv1 = 0 + 0 = 0 (qh & u1 = 0). out = d1 * 0 - min1 = 0 - 0 = 0.
-     * (Since qs=0, qv=0 → out = 1*0 - 0 = 0.) Verify it runs without crash. */
+    /* Q5_K layout: d[0..2], min[2..4], scales[4..16], qh[16..48], qs[48..176]. */
     uint8_t buf[176];
     memset(buf, 0, sizeof(buf));
     put_f16(buf, 0, 0x3C00);  /* d = 1.0 */
@@ -420,15 +379,9 @@ Test(quant, dequant_q5_k_handcrafted, .description = "VAL-QUANT-004: Q5_K dequan
     }
 }
 
-/* ─── Q4_K dequant hand-crafted ────────────────────────────────────────── */
 
 Test(quant, dequant_q4_k_handcrafted, .description = "VAL-QUANT-003: Q4_K dequant on hand-crafted block") {
-    /* Q4_K layout: d[0..2], min[2..4], scales[4..16], qs[16..144].
-     * Set d=1.0, min=0.0, scales[0]=1 (sc1=1, m1=0), scales[1]=1 (sc2=1, m2=0),
-     * rest of scales = 0, qs[0..32] = 0x11 (low=1, high=1).
-     * First 32: out = d1 * (qs & 0xF) - min1 = 1 * 1 - 0 = 1.
-     * Next 32: out = d2 * (qs >> 4) - min2 = 1 * 1 - 0 = 1.
-     * Rest: scales=0 → d1=d2=0, min1=min2=0 → out = 0 - 0 = 0. */
+    /* Q4_K layout: d[0..2], min[2..4], scales[4..16], qs[16..144]. */
     uint8_t buf[144];
     memset(buf, 0, sizeof(buf));
     put_f16(buf, 0, 0x3C00);  /* d = 1.0 */
@@ -506,16 +459,6 @@ Test(quant, ggml_id_round_trip, .description = "oc_quant_type_from_ggml_id round
     cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_UNKNOWN), 0xffffffffu, "UNKNOWN ggml id");
 }
 
-/* ─── Golden vectors: interleaved-half nibble layout ───────────────────
- *
- * The ggml 4/5-bit block layout puts element j in the LOW nibble of qs[j]
- * and element j + QK/2 in the HIGH nibble. Reading them as sequential
- * pairs is a pure permutation: pack and dequant agree with each other, so
- * every round-trip test passes while real GGUF weights decode scrambled.
- * That is exactly how Q4_1/Q5_0/Q5_1 shipped broken, so these expectations
- * are fixed vectors derived from the llama.cpp semantics rather than from
- * anything this file computes.
- */
 static const uint8_t GOLDEN_Q5_1[] = {
     0x00, 0x34, 0x00, 0xBE, 0xA5, 0x3C, 0x0F, 0xF0, 0x03, 0x0A, 0x11, 0x18,
     0x1F, 0x26, 0x2D, 0x34, 0x3B, 0x42, 0x49, 0x50, 0x57, 0x5E, 0x65, 0x6C};
@@ -568,19 +511,6 @@ Test(quant, golden_interleaved_nibble_layout,
     }
 }
 
-/* ─── Encoder accuracy + payload coverage ──────────────────────────────
- *
- * Two properties that a finiteness check cannot see, and whose absence let
- * four broken K-quant encoders and two broken K-quant dequantizers ship:
- *
- *   1. Round-trip error must actually scale with the format's bit width. An
- *      encoder writing to the wrong offsets still produces finite output —
- *      it just produces noise, which shows up here as relative RMSE near or
- *      above 1.0 (output uncorrelated with input).
- *   2. Every payload byte must influence the result. A dequantizer that
- *      forgets to advance its nibble pointer silently ignores most of each
- *      super-block, which no round-trip average reliably catches.
- */
 
 /* Deterministic bell-shaped sample: real weight tensors are not uniform,
  * and nonlinear codebooks (IQ4/NVFP4) are tuned for this shape. */
@@ -788,14 +718,8 @@ Test(quant, pack_block_helper, .description = "oc_quant_pack_block works on a si
 /* ─── VAL-QUANT-014: random-block corpus sweep ──────────────────────────── */
 
 Test(quant, random_corpus_sweep, .description = "VAL-QUANT-014: random-block corpus sweep across standard types") {
-    /* For each standard quant type whose Rust encoder IS a true inverse of the
-     * dequant (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K_S, Q4_K_M, F32, F16, I8, I16,
-     * I32, I64, F64), generate 5 random blocks, pack → dequant, and verify the
-     * round-trip error is within the type's expected tolerance. The K-packed
-     * types (Q2_K/Q3_K/Q5_K/Q6_K) are excluded because their Rust
-     * `quantize_k_packed_scalar` produces a simplified layout that is NOT a
-     * true inverse of the super-block dequant — those are validated by the
-     * hand-crafted block tests above. */
+    /* For each standard quant type whose Rust encoder IS a true inverse of the dequant (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K_S, Q4_K_M, F32, F16, I8, I16, I32, I64, F64), generate 5 random blocks, pack → dequant, and verify the round-trip error is within the type's expected tolerance. */
+    /* types (Q2_K/Q3_K/Q5_K/Q6_K) are excluded because their Rust */
     struct {
         OcGgufQuantizationType t;
         float tolerance;
@@ -860,7 +784,6 @@ Test(quant, random_corpus_sweep, .description = "VAL-QUANT-014: random-block cor
     }
 }
 
-/* ─── Naming + sanity ─────────────────────────────────────────────────── */
 
 Test(quant, type_names, .description = "oc_quant_type_name returns canonical names") {
     cr_assert_str_eq(oc_quant_type_name(OC_QUANT_F32),    "F32");
@@ -1162,15 +1085,7 @@ Test(quant, nvfp4_zero_block, .description = "VAL-QUANT-009: NVFP4 zero-block (a
 }
 
 Test(quant, nvfp4_handcrafted, .description = "VAL-QUANT-009: NVFP4 dequant with known scales + nibbles") {
-    /* Construct a block where:
-     *   - scales[0] = UE4M3 for 1.0 (exp=8, mant=0 → (1+0)*2^(8-7) = 2.0...
-     *     wait, UE4M3: exp=(byte>>3)&0xf, mant=byte&7. For exp=8 (byte=0x40):
-     *       (1 + 0/8) * 2^(8-7) = 2.0. Not 1.0.
-     *     For scale=1.0: need (1 + mant/8) * 2^(exp-7) = 1.0 → exp=7, mant=0
-     *       → byte = (7<<3) | 0 = 0x38. Check: (1+0)*2^(7-7) = 1.0. ✓
-     *   - qs: pack nibbles 0,1,2,3 repeating. E2M1_DOUBLED_VALUES[0]=0, [1]=1,
-     *     [2]=2, [3]=3.
-     * Expected: out[0..15] = 1.0 * {0,1,2,3,0,1,2,3,...} for sub-block 0. */
+    /* Construct a block where: */
     uint8_t buf[36];
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x38;  /* scale[0] = UE4M3(1.0) */
@@ -1183,13 +1098,7 @@ Test(quant, nvfp4_handcrafted, .description = "VAL-QUANT-009: NVFP4 dequant with
     float dst[64];
     OcError e = oc_quant_dequant_row(OC_QUANT_NVFP4, buf, sizeof(buf), dst, 64);
     cr_assert_eq(e, OC_OK, "NVFP4 dequant");
-    /* Sub-block 0 (16 values): scale=1.0. For each qs byte j (0..7):
-     *   out[j]     = scale * E2M1[low]   (low nibble)
-     *   out[j + 8] = scale * E2M1[high]  (high nibble)
-     * qs bytes alternate: 0x10 (low=0,high=1), 0x32 (low=2,high=3).
-     * E2M1 table: [0]=0, [1]=1, [2]=2, [3]=3.
-     * So out[0..7] (low nibbles) = {0,2,0,2,0,2,0,2}
-     *    out[8..15] (high nibbles) = {1,3,1,3,1,3,1,3} */
+    /* Sub-block 0 (16 values): scale=1.0. For each qs byte j (0..7): */
     for (int j = 0; j < 8; j++) {
         float lo_exp = (j % 2 == 0) ? 0.0f : 2.0f;
         float hi_exp = (j % 2 == 0) ? 1.0f : 3.0f;
@@ -1306,10 +1215,7 @@ static void sha256_hex(const uint8_t hash[32], char out[65])
 }
 
 Test(quant, al_iq_constant_table_sha256, .description = "VAL-QUANT-016: AL/IQ/NVFP4 constant table SHA256 matches Rust") {
-    /* Expected SHA256 hashes computed from oxidize-core Rust sources via
-     * scripts/gen_quant_tables.py (one-time Python computation). The Rust
-     * tables are themselves transcribed verbatim from ggml-common.h, so a
-     * matching hash proves bit-exact parity with both. */
+    /* Expected SHA256 hashes computed from oxidize-core Rust sources via matching hash proves bit-exact parity with both. */
     struct { const char *name; const void *data; size_t len; const char *expected_sha; } tables[] = {
         { "KVALUES_IQ4NL",       KVALUES_IQ4NL,       sizeof(KVALUES_IQ4NL),
           "61aa47540aa024b5d6ddaa839b84ffe59f3d5a349af5c6c7ffcb5e0474b46163" },

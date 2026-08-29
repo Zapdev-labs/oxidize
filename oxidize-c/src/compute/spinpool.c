@@ -3,20 +3,12 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
-/*
- * spinpool.c — Spin-waiting thread pool for low-latency parallel compute.
- *
- * Ports the spin-pool concept from oxidize-core/src/compute/spinpool.rs.
- * Workers spin for `spin_iterations` loops before parking on a condvar,
- * keeping handoff latency low for the bursty task pattern of token decode.
- */
 #include "oxidize/spinpool.h"
 
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Worker thread entry point ──────────────────────────────────────── */
 
 static void *worker_loop(void *arg)
 {
@@ -75,7 +67,6 @@ static void *worker_loop(void *arg)
     return NULL;
 }
 
-/* ─── Public API ─────────────────────────────────────────────────────── */
 
 OcSpinPoolConfig oc_spinpool_config_default(void)
 {
@@ -253,19 +244,9 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
     /* We cannot capture ctx in a plain function pointer easily, so we use
      * a different approach: submit tasks that each run fn(item) and store
      * the result. We use a thread-local-ish approach via the arg. */
-    /* Since the task fn signature is void *(*fn)(void *arg), and we need
-     * to write to a specific out_results slot, we use a wrapper. But
-     * C function pointers don't capture closures. So we use a static
-     * trampoline function and pass the context as arg. */
+    /* Since the task fn signature is void *(*fn)(void *arg), and we need C function pointers don't capture closures. So we use a static */
 
-    /* Actually, the simplest correct approach: use the arg as the item,
-     * call fn directly, and collect results after wait. But the task
-     * struct stores result internally. Let's use a simpler approach:
-     * submit n_items tasks where arg = items[i], then after wait, the
-     * result is stored in the task's result field. But tasks are
-     * dequeued and the task struct is overwritten.
-     *
-     * Better: use a shared results array and a trampoline. */
+    /* Actually, the simplest correct approach: use the arg as the item, */
 
     /* Allocate a results array if caller didn't provide one. */
     void **results = out_results;

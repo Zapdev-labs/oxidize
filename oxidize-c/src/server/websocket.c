@@ -1,20 +1,4 @@
-/*
- * websocket.c — RFC 6455 WebSocket protocol implementation.
- *
- * Contains a dependency-free SHA-1 + Base64 (used only for the
- * Sec-WebSocket-Accept computation), frame parsing + construction
- * (pure, no socket I/O), and thin socket-level wrappers that drive the
- * session state machine.
- *
- * Frame parsing handles:
- *   - 7-bit, 16-bit, and 64-bit payload lengths (extended length fields)
- *   - Client-to-server masking (4-byte XOR)
- *   - Fragmented frames (FIN=0 continuation; the caller reassembles via
- *     the session's frag buffer)
- *
- * Frame construction produces unmasked server frames (RFC 6455 §5.1:
- * servers MUST NOT mask frames to clients).
- */
+/* websocket.c — RFC 6455 WebSocket protocol implementation. servers MUST NOT mask frames to clients). */
 #define _POSIX_C_SOURCE 200809L   /* snprintf */
 #include "oxidize/websocket.h"
 
@@ -26,7 +10,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* ─── SHA-1 (FIPS 180-4) ──────────────────────────────────────────────────── */
 
 typedef struct OcSha1Ctx {
     uint32_t state[5];
@@ -128,7 +111,6 @@ void oc_sha1(const uint8_t *data, size_t len, uint8_t out[20])
     sha1_final(&ctx, out);
 }
 
-/* ─── Base64 ──────────────────────────────────────────────────────────────── */
 
 static const char B64_ALPHABET[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -161,7 +143,6 @@ size_t oc_base64_encode(const uint8_t *data, size_t len, char *out, size_t cap)
     return o;
 }
 
-/* ─── WebSocket accept computation ─────────────────────────────────────────── */
 
 #define OC_WS_MAGIC "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -184,7 +165,6 @@ OcError oc_ws_compute_accept(const char *key, char *out, size_t cap)
     return OC_OK;
 }
 
-/* ─── Frame parsing ────────────────────────────────────────────────────────── */
 
 size_t oc_ws_parse_frame(const uint8_t *buf, size_t len, OcWsFrame *frame)
 {
@@ -229,7 +209,6 @@ size_t oc_ws_parse_frame(const uint8_t *buf, size_t len, OcWsFrame *frame)
     return frame->frame_len;
 }
 
-/* ─── Frame construction ──────────────────────────────────────────────────── */
 
 size_t oc_ws_build_frame(uint8_t opcode, bool fin, bool masked,
                          const uint8_t *mask, const uint8_t *payload,
@@ -278,7 +257,6 @@ size_t oc_ws_build_frame(uint8_t opcode, bool fin, bool masked,
     return total;
 }
 
-/* ─── Session lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_ws_session_init(OcWsSession *sess, int fd)
 {
@@ -315,7 +293,6 @@ void oc_ws_session_free(OcWsSession *sess)
     sess->frag_cap = 0;
 }
 
-/* ─── Socket-level read/send ───────────────────────────────────────────────── */
 
 /* ponytail: 16 MiB cap on a single (possibly fragmented) message — bump if a
  * legitimate use case ever needs more. */
@@ -380,10 +357,7 @@ OcError oc_ws_read_frame(OcWsSession *sess, OcWsFrame *frame)
         /* RFC 6455 §5.1: a server MUST reject unmasked client frames. */
         if (!frame->masked) return OC_ERR_FORMAT;
 
-        /* Copy + unmask the payload out of recv_buf into frag_buf so the
-         * receive buffer can be compacted immediately. Fragment payloads
-         * accumulate at frag_len; control/whole-message payloads land just
-         * past any in-progress fragment data. */
+        /* Copy + unmask the payload out of recv_buf into frag_buf so the receive buffer can be compacted immediately. */
         bool is_control = (frame->opcode & 0x8u) != 0;
         bool is_data_start = frame->opcode == OC_WS_OPCODE_TEXT ||
                              frame->opcode == OC_WS_OPCODE_BINARY;

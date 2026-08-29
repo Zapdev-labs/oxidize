@@ -1,18 +1,3 @@
-/*
- * kv_page.h — paged KV cache management (vLLM-style).
- *
- * Divides the KV cache into fixed-size pages that can be dynamically
- * allocated and freed for different sequences. Each page stores K and V
- * tensors for all layers and all tokens in the page.
- *
- * Design:
- *   - OcKvPageConfig: tuning knobs (page_size, head_dim, n_heads, n_layers,
- *     max_pages).
- *   - OcKvPage: single physical page with per-layer K/V storage and
- *     ref-counting.
- *   - OcKvPageManager: pool of pages with a free list and statistics.
- *   - OcKvPageStats: allocation/eviction counters.
- */
 #ifndef OXIDIZE_KV_PAGE_H
 #define OXIDIZE_KV_PAGE_H
 
@@ -26,7 +11,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ────────────────────────────────────────────────────────── */
 
 #define OC_KV_PAGE_DEFAULT_PAGE_SIZE  16
 #define OC_KV_PAGE_DEFAULT_HEAD_DIM   128
@@ -34,7 +18,6 @@ extern "C" {
 #define OC_KV_PAGE_DEFAULT_N_LAYERS   32
 #define OC_KV_PAGE_DEFAULT_MAX_PAGES  4096
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 typedef struct OcKvPageConfig {
     uint32_t page_size;   /* tokens per page (default 16)                */
@@ -47,7 +30,6 @@ typedef struct OcKvPageConfig {
 /* Returns a sensible default config. */
 OcKvPageConfig oc_kv_page_config_default(void);
 
-/* ─── Page ─────────────────────────────────────────────────────────────── */
 
 /* Per-page byte size for one of K or V:
  *   page_size * n_layers * head_dim * n_heads * sizeof(float)
@@ -59,16 +41,11 @@ typedef struct OcKvPage {
     uint32_t ref_count;   /* number of sequences referencing this page    */
     uint64_t seq_id;      /* owning sequence id (0 = free)                */
     uint32_t start_pos;   /* starting token position within the sequence  */
-    /*
-     * K/V storage: layer_k[layer][token][head_dim * n_heads]
-     *              layer_v[layer][token][head_dim * n_heads]
-     * Allocated lazily by oc_kv_page_init (single contiguous block each).
-     */
+    /* K/V storage: layer_k[layer][token][head_dim * n_heads] */
     float *layer_k;       /* [n_layers * page_size * head_dim * n_heads] */
     float *layer_v;       /* [n_layers * page_size * head_dim * n_heads] */
 } OcKvPage;
 
-/* ─── Stats ────────────────────────────────────────────────────────────── */
 
 typedef struct OcKvPageStats {
     uint32_t total_pages;       /* total physical pages              */
@@ -78,7 +55,6 @@ typedef struct OcKvPageStats {
     uint64_t eviction_count;    /* cumulative evictions             */
 } OcKvPageStats;
 
-/* ─── Page Manager ─────────────────────────────────────────────────────── */
 
 typedef struct OcKvPageManager {
     OcKvPageConfig config;

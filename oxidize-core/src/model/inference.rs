@@ -1990,56 +1990,56 @@ mod tests {
     use crate::gguf::{GgufFile, GgufMetadataValue, GgufTensorInfo, MappedGgufFile};
     use std::collections::BTreeMap;
 
-    #[test]
-    fn qwen35_mtp_metadata_subtracts_nextn_layers() {
-        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
+    fn s(k: &str, v: &str) -> (String, GgufMetadataValue) {
+        (k.to_owned(), GgufMetadataValue::String(v.to_owned()))
+    }
+    fn u(k: &str, v: u32) -> (String, GgufMetadataValue) {
+        (k.to_owned(), GgufMetadataValue::Uint32(v))
+    }
+    fn f(k: &str, v: f32) -> (String, GgufMetadataValue) {
+        (k.to_owned(), GgufMetadataValue::Float32(v))
+    }
+    fn t(name: &str, dims: Vec<u64>) -> GgufTensorInfo {
+        GgufTensorInfo {
+            name: name.to_owned(),
+            dimensions: dims,
+            ggml_type: 0,
+            relative_offset: 0,
+            absolute_offset: 0,
+            mmap_index: 0,
+        }
+    }
+    fn mapped(
+        tensor_count: u64,
+        metadata: BTreeMap<String, GgufMetadataValue>,
+        tensor_infos: Vec<GgufTensorInfo>,
+    ) -> MappedGgufFile {
+        MappedGgufFile::from_parsed_for_test(GgufFile {
             version: 3,
-            tensor_count: 1,
-            metadata: BTreeMap::from([
-                (
-                    "general.architecture".to_owned(),
-                    GgufMetadataValue::String("qwen35".to_owned()),
-                ),
-                (
-                    "qwen35.block_count".to_owned(),
-                    GgufMetadataValue::Uint32(65),
-                ),
-                (
-                    "qwen35.nextn_predict_layers".to_owned(),
-                    GgufMetadataValue::Uint32(1),
-                ),
-                (
-                    "qwen35.embedding_length".to_owned(),
-                    GgufMetadataValue::Uint32(5120),
-                ),
-                (
-                    "qwen35.feed_forward_length".to_owned(),
-                    GgufMetadataValue::Uint32(17408),
-                ),
-                (
-                    "qwen35.attention.head_count".to_owned(),
-                    GgufMetadataValue::Uint32(24),
-                ),
-                (
-                    "qwen35.attention.head_count_kv".to_owned(),
-                    GgufMetadataValue::Uint32(4),
-                ),
-                (
-                    "qwen35.attention.key_length".to_owned(),
-                    GgufMetadataValue::Uint32(256),
-                ),
-            ]),
-            tensor_infos: vec![GgufTensorInfo {
-                name: "tok_embeddings.weight".to_owned(),
-                dimensions: vec![5120, 248320],
-                ggml_type: 0,
-                relative_offset: 0,
-                absolute_offset: 0,
-                mmap_index: 0,
-            }],
+            tensor_count,
+            metadata,
+            tensor_infos,
             alignment: 32,
             data_section_start: 0,
-        });
+        })
+    }
+
+    #[test]
+    fn qwen35_mtp_metadata_subtracts_nextn_layers() {
+        let mapped = mapped(
+            1,
+            BTreeMap::from([
+                s("general.architecture", "qwen35"),
+                u("qwen35.block_count", 65),
+                u("qwen35.nextn_predict_layers", 1),
+                u("qwen35.embedding_length", 5120),
+                u("qwen35.feed_forward_length", 17408),
+                u("qwen35.attention.head_count", 24),
+                u("qwen35.attention.head_count_kv", 4),
+                u("qwen35.attention.key_length", 256),
+            ]),
+            vec![t("tok_embeddings.weight", vec![5120, 248320])],
+        );
 
         let cfg = InferenceConfig::from_gguf(&mapped);
 
@@ -2053,96 +2053,30 @@ mod tests {
 
     #[test]
     fn deepseek_v3_moe_metadata_is_parsed_for_kimi_style_routing() {
-        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
-            version: 3,
-            tensor_count: 3,
-            metadata: BTreeMap::from([
-                (
-                    "general.architecture".to_owned(),
-                    GgufMetadataValue::String("deepseek2".to_owned()),
-                ),
-                (
-                    "deepseek2.block_count".to_owned(),
-                    GgufMetadataValue::Uint32(61),
-                ),
-                (
-                    "deepseek2.embedding_length".to_owned(),
-                    GgufMetadataValue::Uint32(7168),
-                ),
-                (
-                    "deepseek2.feed_forward_length".to_owned(),
-                    GgufMetadataValue::Uint32(18432),
-                ),
-                (
-                    "deepseek2.attention.head_count".to_owned(),
-                    GgufMetadataValue::Uint32(64),
-                ),
-                (
-                    "deepseek2.attention.head_count_kv".to_owned(),
-                    GgufMetadataValue::Uint32(64),
-                ),
-                (
-                    "deepseek2.attention.key_length_mla".to_owned(),
-                    GgufMetadataValue::Uint32(128),
-                ),
-                (
-                    "deepseek2.expert_count".to_owned(),
-                    GgufMetadataValue::Uint32(384),
-                ),
-                (
-                    "deepseek2.expert_used_count".to_owned(),
-                    GgufMetadataValue::Uint32(8),
-                ),
-                (
-                    "deepseek2.expert_feed_forward_length".to_owned(),
-                    GgufMetadataValue::Uint32(2048),
-                ),
-                (
-                    "deepseek2.leading_dense_block_count".to_owned(),
-                    GgufMetadataValue::Uint32(1),
-                ),
-                (
-                    "deepseek2.expert_gating_func".to_owned(),
-                    GgufMetadataValue::Uint32(2),
-                ),
-                (
-                    "deepseek2.expert_weights_scale".to_owned(),
-                    GgufMetadataValue::Float32(2.827),
-                ),
-                (
-                    "deepseek2.expert_group_count".to_owned(),
-                    GgufMetadataValue::Uint32(1),
-                ),
+        let mapped = mapped(
+            3,
+            BTreeMap::from([
+                s("general.architecture", "deepseek2"),
+                u("deepseek2.block_count", 61),
+                u("deepseek2.embedding_length", 7168),
+                u("deepseek2.feed_forward_length", 18432),
+                u("deepseek2.attention.head_count", 64),
+                u("deepseek2.attention.head_count_kv", 64),
+                u("deepseek2.attention.key_length_mla", 128),
+                u("deepseek2.expert_count", 384),
+                u("deepseek2.expert_used_count", 8),
+                u("deepseek2.expert_feed_forward_length", 2048),
+                u("deepseek2.leading_dense_block_count", 1),
+                u("deepseek2.expert_gating_func", 2),
+                f("deepseek2.expert_weights_scale", 2.827),
+                u("deepseek2.expert_group_count", 1),
             ]),
-            tensor_infos: vec![
-                GgufTensorInfo {
-                    name: "tok_embeddings.weight".to_owned(),
-                    dimensions: vec![7168, 160000],
-                    ggml_type: 0,
-                    relative_offset: 0,
-                    absolute_offset: 0,
-                    mmap_index: 0,
-                },
-                GgufTensorInfo {
-                    name: "blk.1.ffn_gate_inp.weight".to_owned(),
-                    dimensions: vec![7168, 384],
-                    ggml_type: 0,
-                    relative_offset: 0,
-                    absolute_offset: 0,
-                    mmap_index: 0,
-                },
-                GgufTensorInfo {
-                    name: "blk.1.ffn_gate_shexp.weight".to_owned(),
-                    dimensions: vec![7168, 2048],
-                    ggml_type: 0,
-                    relative_offset: 0,
-                    absolute_offset: 0,
-                    mmap_index: 0,
-                },
+            vec![
+                t("tok_embeddings.weight", vec![7168, 160000]),
+                t("blk.1.ffn_gate_inp.weight", vec![7168, 384]),
+                t("blk.1.ffn_gate_shexp.weight", vec![7168, 2048]),
             ],
-            alignment: 32,
-            data_section_start: 0,
-        });
+        );
 
         let cfg = InferenceConfig::from_gguf(&mapped);
 
@@ -2163,86 +2097,28 @@ mod tests {
 
     #[test]
     fn glm_dsa_config_from_gguf_metadata() {
-        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
-            version: 3,
-            tensor_count: 1,
-            metadata: BTreeMap::from([
-                (
-                    "general.architecture".to_owned(),
-                    GgufMetadataValue::String("glm-dsa".to_owned()),
-                ),
-                (
-                    "glm-dsa.block_count".to_owned(),
-                    GgufMetadataValue::Uint32(79),
-                ),
-                (
-                    "glm-dsa.nextn_predict_layers".to_owned(),
-                    GgufMetadataValue::Uint32(1),
-                ),
-                (
-                    "glm-dsa.embedding_length".to_owned(),
-                    GgufMetadataValue::Uint32(6144),
-                ),
-                (
-                    "glm-dsa.feed_forward_length".to_owned(),
-                    GgufMetadataValue::Uint32(12288),
-                ),
-                (
-                    "glm-dsa.attention.head_count".to_owned(),
-                    GgufMetadataValue::Uint32(64),
-                ),
-                (
-                    "glm-dsa.attention.head_count_kv".to_owned(),
-                    GgufMetadataValue::Uint32(1),
-                ),
-                (
-                    "glm-dsa.attention.key_length_mla".to_owned(),
-                    GgufMetadataValue::Uint32(256),
-                ),
-                (
-                    "glm-dsa.expert_count".to_owned(),
-                    GgufMetadataValue::Uint32(256),
-                ),
-                (
-                    "glm-dsa.expert_used_count".to_owned(),
-                    GgufMetadataValue::Uint32(8),
-                ),
-                (
-                    "glm-dsa.expert_feed_forward_length".to_owned(),
-                    GgufMetadataValue::Uint32(2048),
-                ),
-                (
-                    "glm-dsa.leading_dense_block_count".to_owned(),
-                    GgufMetadataValue::Uint32(3),
-                ),
-                (
-                    "glm-dsa.expert_gating_func".to_owned(),
-                    GgufMetadataValue::Uint32(2),
-                ),
-                (
-                    "glm-dsa.expert_weights_scale".to_owned(),
-                    GgufMetadataValue::Float32(2.5),
-                ),
-                (
-                    "glm-dsa.rope.freq_base".to_owned(),
-                    GgufMetadataValue::Float32(8_000_000.0),
-                ),
-                (
-                    "glm-dsa.vocab_size".to_owned(),
-                    GgufMetadataValue::Uint32(154880),
-                ),
+        let mapped = mapped(
+            1,
+            BTreeMap::from([
+                s("general.architecture", "glm-dsa"),
+                u("glm-dsa.block_count", 79),
+                u("glm-dsa.nextn_predict_layers", 1),
+                u("glm-dsa.embedding_length", 6144),
+                u("glm-dsa.feed_forward_length", 12288),
+                u("glm-dsa.attention.head_count", 64),
+                u("glm-dsa.attention.head_count_kv", 1),
+                u("glm-dsa.attention.key_length_mla", 256),
+                u("glm-dsa.expert_count", 256),
+                u("glm-dsa.expert_used_count", 8),
+                u("glm-dsa.expert_feed_forward_length", 2048),
+                u("glm-dsa.leading_dense_block_count", 3),
+                u("glm-dsa.expert_gating_func", 2),
+                f("glm-dsa.expert_weights_scale", 2.5),
+                f("glm-dsa.rope.freq_base", 8_000_000.0),
+                u("glm-dsa.vocab_size", 154880),
             ]),
-            tensor_infos: vec![GgufTensorInfo {
-                name: "tok_embeddings.weight".to_owned(),
-                dimensions: vec![6144, 154880],
-                ggml_type: 0,
-                relative_offset: 0,
-                absolute_offset: 0,
-                mmap_index: 0,
-            }],
-            alignment: 32,
-            data_section_start: 0,
-        });
+            vec![t("tok_embeddings.weight", vec![6144, 154880])],
+        );
 
         let cfg = InferenceConfig::from_gguf(&mapped);
 
@@ -2263,92 +2139,29 @@ mod tests {
 
     #[test]
     fn hunyuan_moe_config_from_gguf_metadata() {
-        // Tencent Hunyuan (hy_v3): standard GQA + qk_norm attention, sigmoid
-        // MoE with a shared expert and one leading dense block. Not MLA.
-        let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
-            version: 3,
-            tensor_count: 1,
-            metadata: BTreeMap::from([
-                (
-                    "general.architecture".to_owned(),
-                    GgufMetadataValue::String("hunyuan-moe".to_owned()),
-                ),
-                (
-                    "hunyuan-moe.block_count".to_owned(),
-                    GgufMetadataValue::Uint32(80),
-                ),
-                (
-                    "hunyuan-moe.embedding_length".to_owned(),
-                    GgufMetadataValue::Uint32(4096),
-                ),
-                (
-                    "hunyuan-moe.feed_forward_length".to_owned(),
-                    GgufMetadataValue::Uint32(13312),
-                ),
-                (
-                    "hunyuan-moe.attention.head_count".to_owned(),
-                    GgufMetadataValue::Uint32(64),
-                ),
-                (
-                    "hunyuan-moe.attention.head_count_kv".to_owned(),
-                    GgufMetadataValue::Uint32(8),
-                ),
-                (
-                    "hunyuan-moe.attention.key_length".to_owned(),
-                    GgufMetadataValue::Uint32(128),
-                ),
-                (
-                    "hunyuan-moe.attention.value_length".to_owned(),
-                    GgufMetadataValue::Uint32(128),
-                ),
-                (
-                    "hunyuan-moe.expert_count".to_owned(),
-                    GgufMetadataValue::Uint32(192),
-                ),
-                (
-                    "hunyuan-moe.expert_used_count".to_owned(),
-                    GgufMetadataValue::Uint32(8),
-                ),
-                (
-                    "hunyuan-moe.expert_feed_forward_length".to_owned(),
-                    GgufMetadataValue::Uint32(1536),
-                ),
-                (
-                    "hunyuan-moe.expert_shared_count".to_owned(),
-                    GgufMetadataValue::Uint32(1),
-                ),
-                (
-                    "hunyuan-moe.leading_dense_block_count".to_owned(),
-                    GgufMetadataValue::Uint32(1),
-                ),
-                (
-                    "hunyuan-moe.expert_gating_func".to_owned(),
-                    GgufMetadataValue::Uint32(2),
-                ),
-                (
-                    "hunyuan-moe.expert_weights_scale".to_owned(),
-                    GgufMetadataValue::Float32(2.826),
-                ),
-                (
-                    "hunyuan-moe.rope.freq_base".to_owned(),
-                    GgufMetadataValue::Float32(11_158_840.0),
-                ),
-                (
-                    "hunyuan-moe.vocab_size".to_owned(),
-                    GgufMetadataValue::Uint32(120832),
-                ),
+        let mapped = mapped(
+            1,
+            BTreeMap::from([
+                s("general.architecture", "hunyuan-moe"),
+                u("hunyuan-moe.block_count", 80),
+                u("hunyuan-moe.embedding_length", 4096),
+                u("hunyuan-moe.feed_forward_length", 13312),
+                u("hunyuan-moe.attention.head_count", 64),
+                u("hunyuan-moe.attention.head_count_kv", 8),
+                u("hunyuan-moe.attention.key_length", 128),
+                u("hunyuan-moe.attention.value_length", 128),
+                u("hunyuan-moe.expert_count", 192),
+                u("hunyuan-moe.expert_used_count", 8),
+                u("hunyuan-moe.expert_feed_forward_length", 1536),
+                u("hunyuan-moe.expert_shared_count", 1),
+                u("hunyuan-moe.leading_dense_block_count", 1),
+                u("hunyuan-moe.expert_gating_func", 2),
+                f("hunyuan-moe.expert_weights_scale", 2.826),
+                f("hunyuan-moe.rope.freq_base", 11_158_840.0),
+                u("hunyuan-moe.vocab_size", 120832),
             ]),
-            tensor_infos: vec![GgufTensorInfo {
-                name: "tok_embeddings.weight".to_owned(),
-                dimensions: vec![4096, 120832],
-                ggml_type: 0,
-                relative_offset: 0,
-                absolute_offset: 0,
-                mmap_index: 0,
-            }],
-            alignment: 32,
-            data_section_start: 0,
-        });
+            vec![t("tok_embeddings.weight", vec![4096, 120832])],
+        );
 
         let cfg = InferenceConfig::from_gguf(&mapped);
 

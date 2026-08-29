@@ -1,4 +1,3 @@
-/* test_hashtable.c — OcHashtable (FNV-1a, open-addressing) tests. */
 #include <criterion/criterion.h>
 #include "oxidize/hashtable.h"
 
@@ -134,4 +133,3 @@ Test(hashtable, iterator_visits_all)
     cr_assert_eq(seen, 3, "should have seen 3 distinct keys");
     oc_hashtable_free(ht);
 }
-

@@ -1,9 +1,3 @@
-/*
- * web_worker.h — Web worker bridge for WASM/browser integration.
- *
- * Provides a message-based interface for running inference in a Web Worker.
- * Port from oxidize-core/src/util/web_worker.rs.
- */
 #ifndef OXIDIZE_WEB_WORKER_H
 #define OXIDIZE_WEB_WORKER_H
 

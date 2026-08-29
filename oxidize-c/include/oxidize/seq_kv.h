@@ -1,13 +1,3 @@
-/*
- * seq_kv.h — Per-sequence KV buffer for continuous batching.
- *
- * Port of oxidize-core/src/model/inference.rs::SeqKv.
- *
- * Caller-owned per-sequence KV buffer for batched decode. Layout is
- * layer-major then position-major: element for (kv_layer_idx, pos, channel)
- * lives at kv_layer_idx * capacity_tokens * kv_len + pos * kv_len + channel,
- * where kv_len = num_key_value_heads * kv_head_dim.
- */
 #ifndef OXIDIZE_SEQ_KV_H
 #define OXIDIZE_SEQ_KV_H
 
@@ -30,10 +20,7 @@ typedef struct {
     size_t   kv_len;          /* channels per position (n_kv_heads * head_dim) */
 } OcSeqKv;
 
-/* Allocate a zeroed KV buffer for one sequence.
- * kv_layer_count: number of attention layers.
- * capacity_tokens: max positions per layer.
- * kv_len: channels per position (n_kv_heads * kv_head_dim). */
+/* Allocate a zeroed KV buffer for one sequence. */
 OcError oc_seq_kv_init(OcSeqKv *kv, size_t kv_layer_count,
                        size_t capacity_tokens, size_t kv_len);
 

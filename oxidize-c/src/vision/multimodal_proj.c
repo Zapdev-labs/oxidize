@@ -1,17 +1,9 @@
-/*
- * multimodal_proj.c — Multimodal projection layer implementation.
- *
- * Implements the MLP projection that maps vision/audio/video encoder
- * outputs into the LLM embedding space. Supports configurable depth
- * (n_layers), hidden dimension, and activation (GELU/ReLU/SiLU).
- */
 #include "oxidize/multimodal_proj.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Activation helpers ─────────────────────────────────────────────────── */
 
 static float mm_gelu(float x)
 {
@@ -39,7 +31,6 @@ static float mm_activate(OcMultimodalActivation act, float x)
     }
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────────── */
 
 OcMultimodalProjection *oc_mm_proj_init(const OcMultimodalProjectionConfig *config)
 {
@@ -69,10 +60,7 @@ OcMultimodalProjection *oc_mm_proj_init(const OcMultimodalProjectionConfig *conf
         return NULL;
     }
 
-    /* Compute per-layer dims:
-     *   layer 0:  in = input_dim,  out = (n > 1) ? hidden_dim : output_dim
-     *   layer k:  in = prev_out,   out = (k == n-1) ? output_dim : hidden_dim
-     */
+    /* Compute per-layer dims: */
     for (uint32_t l = 0; l < n; l++) {
         proj->in_dims[l] = (l == 0) ? config->input_dim : proj->out_dims[l - 1];
         if (n == 1) {
@@ -113,7 +101,6 @@ void oc_mm_proj_free(OcMultimodalProjection *proj)
     free(proj);
 }
 
-/* ─── Weight loading ────────────────────────────────────────────────────── */
 
 OcError oc_mm_proj_load_weights(OcMultimodalProjection *proj,
                                   const float *data, size_t data_size)
@@ -178,7 +165,6 @@ OcError oc_mm_proj_set_layer_bias(OcMultimodalProjection *proj,
     return OC_OK;
 }
 
-/* ─── Forward pass ──────────────────────────────────────────────────────── */
 
 float *oc_mm_proj_forward(OcMultimodalProjection *proj,
                             const float *input, size_t n_tokens)
@@ -248,7 +234,6 @@ float *oc_mm_proj_forward(OcMultimodalProjection *proj,
     return (float *)current;
 }
 
-/* ─── Prompt concatenation ───────────────────────────────────────────────── */
 
 float *oc_mm_proj_concat_prompt(OcMultimodalProjection *proj,
                                   const float *text_embeds, size_t n_text,

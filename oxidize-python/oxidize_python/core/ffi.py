@@ -83,8 +83,6 @@ def _ensure_loaded() -> bool:
         return False
 
 
-# ── per-GEMV fast path ────────────────────────────────────────────────────────
-
 _QUANT_TYPES: dict[str, int] = {
     "F32": 0, "F16": 1, "Q4_0": 2, "Q4_1": 3,
     "Q8_0": 6, "Q2_K": 7,
@@ -138,8 +136,6 @@ def gemv_quantized_rust(
         return True
     return False
 
-
-# ── full Rust model (fastest path for Python) ─────────────────────────────────
 
 class RustModel:
     """Full model loaded via Rust FFI — bypasses all Python inference code."""

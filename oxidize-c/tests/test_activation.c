@@ -1,4 +1,3 @@
-/* test_activation.c — Activation function tests (softmax, layer_norm, swiglu, attention, rms_norm_qwen). */
 #include <criterion/criterion.h>
 #include "oxidize/activation.h"
 #include <math.h>
@@ -98,11 +97,7 @@ Test(act, swiglu_non_inplace)
 
 Test(act, scaled_dot_product_attention_basic)
 {
-    /* dim=2, seq_len=2.
-     * query = [1, 0], keys = [[1,0],[0,1]], values = [[10,20],[30,40]].
-     * score0 = 1/sqrt(2) ~ 0.707, score1 = 0.
-     * softmax([0.707, 0]) = [0.669, 0.331].
-     * output = 0.669*[10,20] + 0.331*[30,40] = [16.65, 26.62]. */
+    /* dim=2, seq_len=2. */
     float q[] = {1.0f, 0.0f};
     float k[] = {1.0f, 0.0f, 0.0f, 1.0f};
     float v[] = {10.0f, 20.0f, 30.0f, 40.0f};

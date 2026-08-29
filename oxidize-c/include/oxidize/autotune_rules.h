@@ -1,9 +1,3 @@
-/*
- * autotune_rules.h — Hardware-aware tuning rules.
- *
- * Pure-function planner that maps CPU capabilities + model fingerprint
- * to a concrete tuning plan. Port from oxidize-core/src/autotune/rules.rs.
- */
 #ifndef OXIDIZE_AUTOTUNE_RULES_H
 #define OXIDIZE_AUTOTUNE_RULES_H
 

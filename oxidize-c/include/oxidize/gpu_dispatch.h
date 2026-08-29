@@ -1,11 +1,3 @@
-/*
- * gpu_dispatch.h — GPU task dispatch for inference workloads.
- *
- * Maintains a simple priority work queue of GPU tasks and a registry of
- * detected GPU devices. Since this is the dependency-free C11 port, the
- * device detector returns 0 devices when CUDA is unavailable — the queue
- * still accepts submissions so callers can test the API surface.
- */
 #ifndef OXIDIZE_GPU_DISPATCH_H
 #define OXIDIZE_GPU_DISPATCH_H
 
@@ -19,13 +11,11 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_GPU_MAX_DEVICES   16u
 #define OC_GPU_MAX_QUEUE     1024u
 #define OC_GPU_NAME_LEN      64u
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef enum {
     OC_GPU_TASK_MATMUL    = 0,
@@ -66,7 +56,6 @@ typedef struct OcGpuDispatch {
     uint32_t            n_pending;
 } OcGpuDispatch;
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 /* Initialize config with defaults. */
 OcError oc_gpu_dispatch_config_init(OcGpuDispatchConfig *cfg);
@@ -74,7 +63,6 @@ OcError oc_gpu_dispatch_config_init(OcGpuDispatchConfig *cfg);
 /* Human-readable task type name (e.g. "MATMUL"). Never NULL. */
 const char *oc_gpu_task_type_name(OcGpuTaskType type);
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 /* Allocate a dispatch manager. `config` may be NULL (defaults used).
  * Calls oc_gpu_dispatch_detect internally. Free with oc_gpu_dispatch_free. */
@@ -89,7 +77,6 @@ OcError oc_gpu_dispatch_detect(OcGpuDispatch *dispatch);
 /* Free all owned storage and reset state. Safe on NULL / already-freed. */
 void oc_gpu_dispatch_free(OcGpuDispatch *dispatch);
 
-/* ─── Task queue ────────────────────────────────────────────────────── */
 
 /* Submit a task to the work queue. Tasks are inserted in priority order
  * (higher priority first; stable within the same priority by insertion
@@ -99,7 +86,6 @@ OcError oc_gpu_dispatch_submit(OcGpuDispatch *dispatch, OcGpuTask task);
 /* Number of pending tasks in the queue. */
 uint32_t oc_gpu_dispatch_n_pending(const OcGpuDispatch *dispatch);
 
-/* ─── Device queries ────────────────────────────────────────────────── */
 
 /* Copy the device info for `device_id` into `out_device`. Returns
  * OC_ERR_MODEL if the device is not present. */

@@ -1,4 +1,3 @@
-/* test_moe.c — Mixture-of-Experts routing tests. */
 #include <criterion/criterion.h>
 #include <math.h>
 #include <string.h>
@@ -21,7 +20,6 @@ static OcMoeConfig default_config(void)
     return c;
 }
 
-/* ─── Router init / free ─────────────────────────────────────────────── */
 
 Test(moe, router_init_free)
 {
@@ -77,7 +75,6 @@ Test(moe, router_free_null_safety)
     oc_moe_router_free(NULL);  /* should not crash */
 }
 
-/* ─── Set gate / experts ─────────────────────────────────────────────── */
 
 Test(moe, router_set_gate)
 {
@@ -123,7 +120,6 @@ Test(moe, router_set_gate_null_router)
     cr_assert_neq(oc_moe_router_set_gate(NULL, NULL), OC_OK);
 }
 
-/* ─── Routing ────────────────────────────────────────────────────────── */
 
 Test(moe, route_top_k_basic)
 {
@@ -246,7 +242,6 @@ Test(moe, route_without_temp_buffer)
     oc_moe_router_free(&r);
 }
 
-/* ─── Expert forward ─────────────────────────────────────────────────── */
 
 Test(moe, expert_forward_single_projection)
 {
@@ -288,10 +283,7 @@ Test(moe, expert_forward_swiglu)
     OcMoeRouter r;
     oc_moe_router_init(&r, &cfg);
 
-    /* Expert 0: gate=identity, up=ones, down=identity.
-     *   gate = silu(I @ x) = silu(x)
-     *   up   = I @ x = x
-     *   out  = I @ (silu(x) * x) = silu(x) * x */
+    /* Expert 0: gate=identity, up=ones, down=identity. */
     float gate_proj[16] = {0};  /* [4 experts × 2 es × 2 hd] */
     float up_proj[16]   = {0};
     float down_proj[16]  = {0};
@@ -356,7 +348,6 @@ Test(moe, expert_forward_null_args)
     oc_moe_router_free(&r);
 }
 
-/* ─── Combine ────────────────────────────────────────────────────────── */
 
 Test(moe, combine_weighted_sum)
 {
@@ -419,7 +410,6 @@ Test(moe, combine_mismatched_n)
     cr_assert_neq(oc_moe_combine(&res, outs, 1, 1, combined), OC_OK);
 }
 
-/* ─── Stats tracking ──────────────────────────────────────────────────── */
 
 Test(moe, stats_tracking)
 {
@@ -480,7 +470,6 @@ Test(moe, stats_free_null)
     oc_moe_stats_free(NULL);  /* should not crash */
 }
 
-/* ─── JSON format ─────────────────────────────────────────────────────── */
 
 Test(moe, stats_format_json)
 {
@@ -544,7 +533,6 @@ Test(moe, stats_format_size_query)
     oc_moe_stats_free(&stats);
 }
 
-/* ─── Routing method name ────────────────────────────────────────────── */
 
 Test(moe, routing_method_name)
 {
@@ -554,7 +542,6 @@ Test(moe, routing_method_name)
     cr_assert_str_eq(oc_moe_routing_method_name(99), "unknown");
 }
 
-/* ─── End-to-end: route + expert forward + combine ───────────────────── */
 
 Test(moe, e2e_route_forward_combine)
 {

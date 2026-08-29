@@ -1,10 +1,8 @@
-/* test_vision_encoder.c — vision encoder stub tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include <string.h>
 #include "oxidize/vision_encoder.h"
 
-/* ─── Config ──────────────────────────────────────────────────────── */
 
 Test(vision_encoder, config_init_defaults)
 {
@@ -23,7 +21,6 @@ Test(vision_encoder, config_init_null)
     cr_assert_eq(oc_vision_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Encoder lifecycle ─────────────────────────────────────────────── */
 
 Test(vision_encoder, init_with_default_config)
 {
@@ -90,7 +87,6 @@ Test(vision_encoder, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── Weight loading ───────────────────────────────────────────────── */
 
 Test(vision_encoder, load_weights_copies_data)
 {
@@ -131,7 +127,6 @@ Test(vision_encoder, load_weights_zero_size_clears)
     oc_vision_encoder_free(e);
 }
 
-/* ─── Encoding ─────────────────────────────────────────────────────── */
 
 Test(vision_encoder, encode_returns_features)
 {
@@ -232,7 +227,6 @@ Test(vision_encoder, patch_embed_extracts_real_pixels)
     oc_vision_encoder_free(e);
 }
 
-/* ─── Image patch helpers ──────────────────────────────────────────── */
 
 Test(vision_encoder, image_patch_init_allocates)
 {

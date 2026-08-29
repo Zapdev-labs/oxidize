@@ -1,21 +1,4 @@
-/*
- * quant.h — GGUF quantization types + dequant/pack API.
- *
- * Port of oxidize-core/src/compute/quantization.rs (block-size constants,
- * `quant_block_layout`, `dequantize_scalar`, `quantize_from_f32_scalar`) to
- * C11. Block layouts and bit-stream layouts are bit-exact ports of the Rust
- * reference; numerical parity is a hard invariant (VAL-QUANT-001..015).
- *
- * Scope of the `quant-standard-types` feature: the "standard" GGUF quant
- * types (F32/F16/BF16/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q2_K/Q3_K_S/M/L/Q4_K_S/M/
- * Q5_K_S/M/Q6_K/I8/I16/I32/I64/F64). Custom AL-family, IQ-family, and NVFP4
- * variants are added by the `quant-al-iq-nvfp4` feature; their enum slots
- * exist here so the dispatch table is stable.
- *
- * SIMD dispatch (scalar vs AVX2 vs AVX-512) is layered on top by the
- * `quant-simd-dispatch` feature; this file provides only the scalar reference
- * path. SIMD kernels must produce output byte-identical to the scalar path.
- */
+/* quant.h — GGUF quantization types + dequant/pack API. C11. Block layouts and bit-stream layouts are bit-exact ports of the Rust reference; numerical parity is a hard invariant (VAL-QUANT-001..015). */
 #ifndef OXIDIZE_QUANT_H
 #define OXIDIZE_QUANT_H
 
@@ -29,11 +12,7 @@
 extern "C" {
 #endif
 
-/* ─── Block-size constants (port of quantization.rs) ────────────────────
- *
- * Values MUST match the Rust `QK*` / `BLOCK_*_SIZE` constants bit-exactly
- * (VAL-QUANT-001). Do not change without updating both sides.
- */
+/* ─── Block-size constants (port of quantization.rs) ──────────────────── Values MUST match the Rust `QK*` / `BLOCK_*_SIZE` constants bit-exactly (VAL-QUANT-001). Do not change without updating both sides. */
 #define OC_QK4_0      32u
 #define OC_QK4_1      32u
 #define OC_QK5_0      32u
@@ -58,21 +37,7 @@ extern "C" {
 #define OC_BLOCK_Q5_K_SIZE   176u  /* 2*f16 + 12 + QK_K/2 + QK_K/8 = 4+12+128+32 */
 #define OC_BLOCK_Q6_K_SIZE   210u  /* f16 + QK_K/16 + 3*QK_K/4  = 2+16+192    */
 #define OC_BLOCK_Q8_K_SIZE   292u  /* f32 + QK_K + QK_K/16*i16  = 4+256+32    */
-/* AL-family + IQ-family + NVFP4 block sizes (added by al-iq-nvfp4 feature).
- * Ported bit-exact from oxidize-core/src/compute/quantization.rs:
- *   BLOCK_AL5_XS_SIZE = 2 + QK_AL*3/8 = 2 + 12 = 14
- *   BLOCK_IQ1_S_SIZE  = sizeof_of_f16() + QK_K/8  + QK_K/16  = 2 + 32 + 16 = 50
- *   BLOCK_IQ1_M_SIZE  = QK_K/8 + QK_K/16 + QK_K/32           = 32 + 16 + 8 = 56
- *   BLOCK_IQ2_XXS_SIZE= sizeof_of_f16() + QK_K/4             = 2 + 64      = 66
- *   BLOCK_IQ2_XS_SIZE = sizeof_of_f16() + QK_K/8*2 + QK_K/32 = 2 + 64 + 8  = 74
- *   BLOCK_IQ2_S_SIZE  = sizeof_of_f16() + QK_K/4 + QK_K/32 + QK_K/32 = 2+64+8+8 = 82
- *   BLOCK_IQ3_XXS_SIZE= sizeof_of_f16() + 3*(QK_K/8)         = 2 + 96      = 98
- *   BLOCK_IQ3_S_SIZE  = sizeof_of_f16() + QK_K/4 + QK_K/32 + QK_K/8 + QK_K/64
- *                                                                  = 2+64+8+32+4 = 110
- *   BLOCK_IQ4_NL_SIZE = sizeof_of_f16() + QK4_NL/2            = 2 + 16      = 18
- *   BLOCK_IQ4_XS_SIZE = sizeof_of_f16() + 2 + QK_K/64 + QK_K/2 = 2+2+4+128 = 136
- *   BLOCK_NVFP4_SIZE  = QK_NVFP4/QK_NVFP4_SUB + QK_NVFP4/2    = 4 + 32      = 36
- */
+/* AL-family + IQ-family + NVFP4 block sizes (added by al-iq-nvfp4 feature). Ported bit-exact from oxidize-core/src/compute/quantization.rs: */
 #define OC_BLOCK_AL5_XS_SIZE   14u
 #define OC_BLOCK_IQ1_S_SIZE   50u
 #define OC_BLOCK_IQ1_M_SIZE   56u
@@ -86,10 +51,6 @@ extern "C" {
 #define OC_BLOCK_IQ4_XS_SIZE 136u
 #define OC_BLOCK_NVFP4_SIZE   36u
 
-/* ─── Quantization type enum (port of GgufQuantizationType) ──────────────
- *
- * Order matches architecture.md §3.2. Values are stable and MUST NOT change
- * (GGUF on-disk dtype ids are mapped through `oc_quant_type_from_ggml_id`). */
 typedef enum {
     OC_QUANT_F32      = 0,
     OC_QUANT_F16      = 1,
@@ -135,7 +96,6 @@ typedef enum {
     OC_QUANT_UNKNOWN  = 0xffffffffu,
 } OcGgufQuantizationType;
 
-/* ─── Public API ──────────────────────────────────────────────────────── */
 
 /* `(elements_per_block, bytes_per_block)` for the given quant type, matching
  * Rust `quant_block_layout` bit-exactly. For unknown types returns (0, 0)
@@ -152,33 +112,18 @@ OcQuantBlockLayout oc_quant_block_size(OcGgufQuantizationType qtype);
  * elements_per_block (port of Rust `quantized_size`). */
 size_t oc_quantized_size(OcGgufQuantizationType qtype, size_t value_count);
 
-/* Dequantize `src_len` bytes of `src` (a packed quant buffer of type `qtype`)
- * into `dst` (an f32 array of length `value_count`). `value_count` must equal
- * `src_len / bytes_per_block * elements_per_block`; otherwise returns
- * OC_ERR_INVALID_ARG. Unknown types return OC_ERR_QUANT (no crash).
- *
- * Mirrors Rust `dequantize_scalar(qtype, input, output)`. Output is
- * bit-exact with the Rust reference on integer paths; FP paths match
- * within f32 rounding tolerance (≤1e-7 relative). */
+/* Dequantize `src_len` bytes of `src` (a packed quant buffer of type `qtype`) into `dst` (an f32 array of length `value_count`). */
+/* `src_len / bytes_per_block * elements_per_block`; otherwise returns */
 OcError oc_quant_dequant_row(OcGgufQuantizationType qtype,
                              const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count);
 
-/* Scalar-only dequant (skips the SIMD dispatch). Same semantics as
- * oc_quant_dequant_row otherwise. Used by the SIMD parity tests
- * (tests/test_simd.c) as the reference, and by callers that need
- * bit-deterministic scalar output (e.g. golden-fixture generation). The
- * SIMD path in oc_quant_dequant_row is bit-exact with this scalar
- * reference by contract (VAL-SIMD-001..004). */
+/* Scalar-only dequant (skips the SIMD dispatch). Same semantics as SIMD path in oc_quant_dequant_row is bit-exact with this scalar reference by contract (VAL-SIMD-001..004). */
 OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
                                     const uint8_t *src, size_t src_len,
                                     float *dst, size_t value_count);
 
-/* Quantize `src` (an f32 array of length `value_count`) into `dst` (a packed
- * quant buffer). `dst_len` must equal `oc_quantized_size(qtype, value_count)`.
- * Returns OC_OK, OC_ERR_QUANT (unknown or dequant-only type),
- * OC_ERR_INVALID_ARG (length mismatch), or OC_ERR_OOM. Mirrors Rust
- * `quantize_from_f32_scalar`. */
+/* Quantize `src` (an f32 array of length `value_count`) into `dst` (a packed */
 OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
                           const float *src, size_t value_count,
                           uint8_t *dst, size_t dst_len);

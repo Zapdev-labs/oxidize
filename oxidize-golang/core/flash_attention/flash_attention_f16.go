@@ -3,10 +3,6 @@ package flash_attention
 import "math"
 
 // FlashAttentionDecodeF16 computes single-head decode attention against an
-// f16-stored KV cache laid out as [seq_len][kv_len] row-major (mirroring the
-// oxidize-core layout). Keys and values are uint16 IEEE-754 half bits and are
-// converted to f32 on the fly via the f16c-style helpers, avoiding a separate
-// dequant pass. Mirrors flash_attention_decode_f16 in oxidize-core.
 func FlashAttentionDecodeF16(
 	query []float32,
 	keyLayer, valueLayer []uint16,

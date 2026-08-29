@@ -1,16 +1,9 @@
-/*
- * rotorquant.c — RotorQuant KV-cache compression (PlanarQuant / IsoQuant).
- *
- * See include/oxidize/rotorquant.h for the storage layout and the reason the
- * decode path owns the inverse rotation.
- */
 #include "oxidize/rotorquant.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Deterministic PRNG ─────────────────────────────────────────────── */
 
 /* splitmix64. The exact stream need not match PyTorch's — the only
  * requirement is that the same seed yields the same rotations everywhere, so
@@ -39,22 +32,15 @@ static double rng_normal(uint64_t *state)
     return sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159265358979323846 * u2);
 }
 
-/* ─── Lloyd-Max codebook ─────────────────────────────────────────────── */
 
-/* Coordinate density after a random rotation of a unit vector in R^d.
- * The exact law is Beta-shaped on [-1,1]; N(0, 1/d) is accurate to well
- * under a percent for the d >= 64 head dims we care about, and the reference
- * uses the same approximation. */
+/* Coordinate density after a random rotation of a unit vector in R^d. */
 static double coord_pdf(double x, double sigma)
 {
     double t = x / sigma;
     return exp(-0.5 * t * t) / (sigma * 2.50662827463100050242); /* sqrt(2pi) */
 }
 
-/* Composite Simpson over [a,b] of pdf(x) and x*pdf(x) in one sweep. scipy's
- * adaptive quad is unavailable here; the integrand is smooth and bounded, so
- * a fixed fine panel count converges far below the 1e-10 Lloyd-Max tolerance
- * while staying branch-free. */
+/* Composite Simpson over [a,b] of pdf(x) and x*pdf(x) in one sweep. scipy's */
 #define LM_PANELS 512 /* must be even */
 
 static void simpson_moments(double a, double b, double sigma,
@@ -118,7 +104,6 @@ OcError oc_rotorquant_lloyd_max(size_t d, unsigned bits, float *centroids_out)
     return OC_OK;
 }
 
-/* ─── Rotations ──────────────────────────────────────────────────────── */
 
 /* Hamilton product, [w, x, y, z]. */
 static void quat_mul(const float *a, const float *b, float *out)
@@ -190,7 +175,6 @@ void oc_rotorquant_unrotate(const OcRotorQuant *rq, float *v)
     }
 }
 
-/* ─── Bit packing ────────────────────────────────────────────────────── */
 
 /* Little-endian bit stream: index i lives at bit offset i*bits, LSB first.
  * A 3-bit index costs exactly 3 bits; indices straddle byte boundaries. */
@@ -212,7 +196,6 @@ static unsigned bits_get(const uint8_t *buf, size_t bit_off, unsigned bits)
     return value;
 }
 
-/* ─── Lifecycle ──────────────────────────────────────────────────────── */
 
 OcError oc_rotorquant_init(OcRotorQuant *rq, OcRotorQuantVariant variant,
                            size_t d, unsigned bits, uint64_t seed)
@@ -290,7 +273,6 @@ float oc_rotorquant_compression_ratio(const OcRotorQuant *rq,
     return (float)(rq->d * src_elem_bytes) / (float)rq->bytes_per_vector;
 }
 
-/* ─── Encode / decode ────────────────────────────────────────────────── */
 
 /* Padded scratch lives on the stack for the common head dims and falls back
  * to malloc only for unusually large d, keeping the hot path allocation-free. */

@@ -1,9 +1,3 @@
-/*
- * topology.h — Network topology discovery and mapping.
- *
- * Discovers the network topology of a cluster, including bandwidth
- * and latency between nodes. Port from oxidize-core/src/mesh/topology.rs.
- */
 #ifndef OXIDIZE_TOPOLOGY_H
 #define OXIDIZE_TOPOLOGY_H
 

@@ -1,9 +1,3 @@
-/*
- * mem_util.h — memory usage reporting utilities.
- *
- * Provides cross-platform (Linux/macOS) memory usage reporting for
- * benchmarking and debugging.
- */
 #ifndef OXIDIZE_MEM_UTIL_H
 #define OXIDIZE_MEM_UTIL_H
 

@@ -1,10 +1,3 @@
-/*
- * safetensors_to_gguf.c — SafeTensors to GGUF conversion implementation.
- *
- * Parses SafeTensors header JSON, maps tensor names from HuggingFace
- * convention to GGUF convention, and writes a GGUF v3 file with the
- * tensors re-quantized to the target type (default F32).
- */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/safetensors_to_gguf.h"
 
@@ -18,7 +11,6 @@
 #include <string.h>
 #include <ctype.h>
 
-/* ─── SafeTensors header parsing ──────────────────────────────────────── */
 
 /* SafeTensors format: 8-byte little-endian header length + JSON header + raw tensor data. */
 
@@ -63,7 +55,6 @@ OcError oc_safetensors_parse_header(const char *path,
     return OC_OK;
 }
 
-/* ─── Architecture detection ──────────────────────────────────────────── */
 
 /* Simple substring match helpers. */
 static bool contains(const char *s, const char *sub)
@@ -92,7 +83,6 @@ const char *oc_detect_arch_from_tensors(const char *const *names, size_t n)
     return "unknown"; /* no recognized pattern — surface detection failure */
 }
 
-/* ─── Tensor name mapping ─────────────────────────────────────────────── */
 
 const char *oc_map_tensor_name(const char *st_name, const char *arch)
 {
@@ -173,7 +163,6 @@ const char *oc_map_tensor_name(const char *st_name, const char *arch)
     return st_name; /* unmapped, keep original */
 }
 
-/* ─── Main conversion ──────────────────────────────────────────────────── */
 
 OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg)
 {

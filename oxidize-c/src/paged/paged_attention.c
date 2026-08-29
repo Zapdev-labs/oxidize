@@ -1,19 +1,9 @@
-/*
- * paged_attention.c — vLLM-style paged KV cache management + scheduling.
- *
- * Port of oxidize-core/src/paged_attention/. Implements:
- *   - BlockPool: physical block allocator with ref-counting + prefix cache
- *   - BlockTable: per-sequence logical→physical mapping
- *   - Scheduler: FCFS with prefill chunking, decode, prefix cache, COW
- *   - Paged attention kernel: scatter/gather KV from physical blocks
- */
 #include "oxidize/paged_attention.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static void *xcalloc(size_t n, size_t sz)
 {
@@ -26,7 +16,6 @@ static void *xrealloc(void *ptr, size_t n, size_t sz)
     return realloc(ptr, n * sz);
 }
 
-/* ─── BlockPoolConfig ──────────────────────────────────────────────────── */
 
 size_t oc_block_bytes(const OcBlockPoolConfig *cfg)
 {
@@ -34,7 +23,6 @@ size_t oc_block_bytes(const OcBlockPoolConfig *cfg)
            cfg->num_kv_heads * cfg->head_dim * cfg->dtype_size;
 }
 
-/* ─── BlockPool ────────────────────────────────────────────────────────── */
 
 OcError oc_block_pool_init(OcBlockPool *pool, const OcBlockPoolConfig *cfg)
 {
@@ -247,7 +235,6 @@ bool oc_block_pool_evict_lru(OcBlockPool *pool)
     return true;
 }
 
-/* ─── BlockTable ────────────────────────────────────────────────────────── */
 
 OcError oc_block_table_init(OcBlockTable *bt, uint32_t block_size)
 {
@@ -326,7 +313,6 @@ OcError oc_block_table_truncate(OcBlockTable *bt, size_t n_tokens,
     return OC_OK;
 }
 
-/* ─── Sequence ──────────────────────────────────────────────────────────── */
 
 OcError oc_seq_init(OcPagedSequence *seq, OcSeqId id,
                     const uint32_t *prompt, size_t prompt_len,
@@ -395,7 +381,6 @@ OcError oc_seq_append_token(OcPagedSequence *seq, uint32_t token)
     return OC_OK;
 }
 
-/* ─── Scheduler ─────────────────────────────────────────────────────────── */
 
 OcError oc_scheduler_init(OcScheduler *sched,
                           const OcSchedulerConfig *scfg,
@@ -746,7 +731,6 @@ void oc_scheduler_invalidate_prefix_cache(OcScheduler *sched)
     sched->block_pool.cache_count = 0;
 }
 
-/* ─── Paged attention kernel ────────────────────────────────────────────── */
 
 void oc_paged_attention_head(
     const float *kv_cache,
@@ -760,15 +744,7 @@ void oc_paged_attention_head(
     size_t n_past,
     float *out)
 {
-    /* Online softmax: single pass, numerically stable.
-     * For each past token at position p:
-     *   block = block_table[p / block_size]
-     *   slot  = p % block_size
-     *   k_ptr = kv_cache + block * block_size * n_kv_heads * head_dim
-     *                   + slot * n_kv_heads * head_dim
-     *                   + kv_head * head_dim
-     *   score = dot(q, k_ptr, head_dim) / sqrt(head_dim)
-     * Then softmax over all scores, weighted sum of v_ptr. */
+    /* Online softmax: single pass, numerically stable. */
     size_t block_stride = (size_t)block_size * n_kv_heads * head_dim;
     size_t slot_stride  = (size_t)n_kv_heads * head_dim;
     float inv_sqrt_d = 1.0f / sqrtf((float)head_dim);

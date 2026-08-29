@@ -1,16 +1,3 @@
-/*
- * safetensors.c — HuggingFace SafeTensors file reader implementation.
- *
- * Implements a minimal JSON parser tailored to the SafeTensors header shape:
- *   {"tensor_name":{"dtype":"F32","shape":[1024,1024],
- *                   "data_offsets":[0,4194304]}, ...}
- *
- * The parser is a single-pass state machine that walks the JSON character
- * stream, tracking the current "key path" (top-level tensor name, then the
- * descriptor field name) and emitting values into the in-progress tensor
- * descriptor. It is NOT a general-purpose JSON parser: it assumes the
- * well-formed subset produced by real .safetensors files.
- */
 #include "oxidize/safetensors.h"
 
 #include <ctype.h>
@@ -28,7 +15,6 @@
 #define OC_HAVE_MMAP 0
 #endif
 
-/* ─── Internal: JSON tokenizer state ──────────────────────────────────── */
 
 typedef enum {
     OC_STJ_TOP,         /* expecting '{' or ',' at top level */
@@ -88,10 +74,7 @@ static bool parser_emit(OcStParser *p)
     return true;
 }
 
-/* Copy a JSON string token (without quotes, with escapes unescaped) into a
- * fixed-size NUL-terminated buffer. Returns the decoded length, or -1 on
- * truncation. `src` points at the opening quote; `*endp` is set past the
- * closing quote. */
+/* Copy a JSON string token (without quotes, with escapes unescaped) into a fixed-size NUL-terminated buffer. */
 static int json_decode_string(const char *src, const char **endp,
                               char *dst, size_t dst_cap)
 {
@@ -337,7 +320,6 @@ static OcError parse_header(const char *json, size_t json_len,
     return OC_OK;
 }
 
-/* ─── Public API ──────────────────────────────────────────────────────── */
 
 OcError oc_safetensors_open(const char *path, OcSafetensorsFile *out)
 {

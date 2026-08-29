@@ -1,34 +1,9 @@
-/*
- * quantization.c — scalar GGUF quantization reference path.
- *
- * Port of oxidize-core/src/compute/quantization.rs and the scalar dequant
- * helpers in quantization/{quant_simple.rs,quant_k_blocks.rs,quant_utils.rs}.
- * Bit-exact parity with the Rust scalar reference is a hard invariant
- * (VAL-QUANT-001..015).
- *
- * Scope (quant-standard-types feature):
- *   F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0,
- *   Q2_K, Q3_K_S/M/L, Q4_K_S/M, Q5_K_S/M, Q6_K,
- *   I8, I16, I32, I64, F64.
- *
- * SIMD dispatch (scalar/AVX2/AVX-512/NEON) is layered on by the
- * `quant-simd-dispatch` feature; this file is the scalar reference and the
- * only path used by the standard-types tests.
- *
- * AL-family / IQ-family / NVFP4 packings are added by the
- * `quant-al-iq-nvfp4` feature; their enum slots exist but their dispatch
- * arms return OC_ERR_QUANT here.
- */
+/* quantization.c — scalar GGUF quantization reference path. Bit-exact parity with the Rust scalar reference is a hard invariant (VAL-QUANT-001..015). */
 #include "oxidize/quant.h"
 #include "oxidize/log.h"
 #include "oxidize/simd.h"
 
-/* Bit-exact lookup tables for AL/IQ/NVFP4 dequant (port of
- * oxidize-core/src/compute/quantization{.rs,/iq_grids.rs,
- * /iq1s_grid_fragment.rs, /iq2s_grid_fragment.rs, /iq2xs_grid_fragment.rs}).
- * Generated verbatim from ggml-common.h — do not hand-edit; regenerate via
- * scripts/gen_quant_tables.py. SHA256 of each table matches the Rust source
- * (validated by tests/test_quant.c::al_iq_constant_table_sha256). */
+/* Bit-exact lookup tables for AL/IQ/NVFP4 dequant (port of Generated verbatim from ggml-common.h — do not hand-edit; regenerate via */
 #include "quant_tables.h"
 
 #include <math.h>
@@ -160,7 +135,6 @@ static int32_t nearest_int_f(float fval)
     return (int32_t)(bits & 0x007FFFFFu) - 0x00400000;
 }
 
-/* ─── Layout validation (port of quant_utils.rs::validate_layout) ─────── */
 
 typedef struct {
     size_t input_block_size;
@@ -192,10 +166,7 @@ static LayoutInfo layout_for(OcGgufQuantizationType qtype)
     case OC_QUANT_Q5_K_S:
     case OC_QUANT_Q5_K_M: return (LayoutInfo){ OC_BLOCK_Q5_K_SIZE, OC_QK_K };
     case OC_QUANT_Q6_K:   return (LayoutInfo){ OC_BLOCK_Q6_K_SIZE, OC_QK_K };
-    /* AL-family (ggml ids 240-243). AL5/AL6/AL8 reuse the Q4_0/Q5_0/Q8_0
-     * block layouts (identical byte layout, different encoder); AL5_XS uses
-     * its own 14-byte 3-bit-packed block. Port of
-     * oxidize-core/src/compute/quantization.rs::quant_block_layout. */
+    /* AL-family (ggml ids 240-243). AL5/AL6/AL8 reuse the Q4_0/Q5_0/Q8_0 */
     case OC_QUANT_AL5:    return (LayoutInfo){ OC_BLOCK_Q4_0_SIZE, OC_QK_AL };
     case OC_QUANT_AL5_XS: return (LayoutInfo){ OC_BLOCK_AL5_XS_SIZE, OC_QK_AL };
     case OC_QUANT_AL6:    return (LayoutInfo){ OC_BLOCK_Q5_0_SIZE, OC_QK_AL };
@@ -232,7 +203,6 @@ static bool validate_layout(OcGgufQuantizationType qtype,
     return value_count == expected_output;
 }
 
-/* ─── Plain-storage dequant: F32/F16/BF16/I8/I16/I32/I64/F64 ─────────── */
 
 static OcError dequant_f32(const uint8_t *src, size_t src_len,
                            float *dst, size_t value_count)
@@ -363,13 +333,8 @@ static OcError dequant_f64(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* ─── Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 dequant ────────────────────────── */
 
-/* ggml packs 4/5-bit blocks as interleaved halves: element j takes the LOW
- * nibble of qs[j] and element j + QK/2 the HIGH nibble (see llama.cpp
- * dequantize_row_q4_0). Reading them as sequential pairs is a permutation
- * that cancels out in a pack->dequant round trip but scrambles every real
- * model's weights. */
+/* ggml packs 4/5-bit blocks as interleaved halves: element j takes the LOW */
 
 static OcError dequant_q4_0(const uint8_t *src, size_t src_len,
                             float *dst, size_t value_count)
@@ -490,7 +455,6 @@ static OcError dequant_q8_0(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* ─── K-family dequant (port of quant_k_blocks.rs) ────────────────────── */
 
 static void get_scale_min_k4(size_t j, const uint8_t *scales,
                              uint8_t *out_sc, uint8_t *out_m)
@@ -749,22 +713,7 @@ static OcError dequant_q6_k(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* ─── AL-family / IQ-family / NVFP4 dequant ────────────────────────────
- *
- * Bit-exact port of:
- *   - oxidize-core/src/compute/quantization/al_family.rs (AL5_XS 3-bit
- *     unpack)
- *   - oxidize-core/src/compute/quantization/quant_simple.rs (AL5 dequant ==
- *     Q4_0 dequant)
- *   - oxidize-core/src/compute/quantization/quant_iq_series.rs (IQ1_S,
- *     IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ4_NL)
- *   - oxidize-core/src/compute/quantization/quant_k_blocks.rs (IQ3_S,
- *     IQ4_XS)
- *   - oxidize-core/src/compute/quantization/quant_nvfp4.rs (NVFP4)
- *
- * Hard parity invariant: output must match Rust `dequantize_row_*` byte-for-
- * byte on the same packed input (VAL-QUANT-006/007/009).
- */
+/* ─── AL-family / IQ-family / NVFP4 dequant ──────────────────────────── Bit-exact port of: - oxidize-core/src/compute/quantization/al_family.rs (AL5_XS 3-bit unpack) - oxidize-core/src/compute/quantization/quant_simple.rs (AL5 dequant == Q4_0 dequant) - oxidize-core/src/compute/quantization/quant_iq_series.rs (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ4_NL) - oxidize-core/src/compute/quantization/quant_k_blocks.rs (IQ3_S, IQ4_XS) - oxidize-core/src/compute/quantization/quant_nvfp4.rs (NVFP4) Hard parity invariant: output must match Rust `dequantize_row_*` byte-for- byte on the same packed input (VAL-QUANT-006/007/009). */
 
 /* AL5 dequant: identical to Q4_0 (split-halves 4-bit nibble block). */
 static OcError dequant_al5(const uint8_t *src, size_t src_len,
@@ -820,11 +769,7 @@ static OcError dequant_al5_xs(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ1_S dequant: 20-byte block, 256 values. Port of
- * quant_iq_series.rs::dequantize_iq1_s_scalar. Layout:
- *   d[0..2] (f16), qs[2..34] (32 u8), qh[34..50] (8 u16 LE).
- * Each 32-value sub-block has scale `d * (2*((qh>>12)&7)+1)` and a ±0.125
- * delta from the high bit (qh & 0x8000). 4 sub-blocks × 8 grid entries. */
+/* IQ1_S dequant: 20-byte block, 256 values. */
 #define OC_IQ1S_DELTA 0.125f
 
 static void iq1s_grid_decode(uint16_t index, int8_t *out8)
@@ -1003,13 +948,7 @@ float oc_quant_dot_iq1_xxxs_q8_k(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* IQ1_M dequant: 20-byte block, 256 values. Port of
- * quant_iq_series.rs::dequantize_iq1_m_scalar. Layout:
- *   qs[0..32] (32 u8), qh[32..48] (16 u8), scales[48..56] (8 u8). The d
- * scale is reconstructed from 4 u16 values packed across `scales`:
- *   scale_u16 = (sc0>>12) | ((sc1>>8)&0xf0) | ((sc2>>4)&0xf00) | (sc3&0xf000)
- * Each 32-value sub-block has its own 3-bit scale nibbles packed in
- * `scales[ib/2]` (one nibble pair per ib32). */
+/* IQ1_M dequant: 20-byte block, 256 values. */
 static OcError dequant_iq1_m(const uint8_t *src, size_t src_len,
                             float *dst, size_t value_count)
 {
@@ -1062,11 +1001,7 @@ static OcError dequant_iq1_m(const uint8_t *src, size_t src_len,
 
         size_t out_ptr = 0;
         for (size_t ib = 0; ib < OC_QK_K / 32; ib++) {
-            /* The two 3-bit sub-scales sit at bit offsets 6*(ib%2) and
-             * 6*(ib%2)+3 of the *16-bit* scale word sc[ib/2]. Reading an
-             * 8-bit scales[ib/2] instead made the +3 field of odd `ib`
-             * shift past the end (always 0) and left scales[4] and
-             * scales[6] unread entirely. */
+            /* The two 3-bit sub-scales sit at bit offsets 6*(ib%2) and 6*(ib%2)+3 of the *16-bit* scale word sc[ib/2]. */
             uint16_t sc_ib = sc[ib / 2];
             uint32_t dl1_bits = (sc_ib >> (6u * (ib % 2u))) & 0x7u;
             uint32_t dl2_bits = (sc_ib >> (6u * (ib % 2u) + 3u)) & 0x7u;
@@ -1099,11 +1034,7 @@ static OcError dequant_iq1_m(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ2_XXS dequant: 18-byte block, 256 values. Port of
- * quant_iq_series.rs::dequantize_iq2_xxs_scalar. Layout:
- *   d[0..2] (f16), qs[2..18] (16 bytes = 4 ib32 × 4 bytes). Each ib32 has
- *   8 bytes: aux0 (4 bytes, 4 grid indices) + aux1 (4 bytes, 4 7-bit sign
- *   selectors + 4-bit scale). */
+/* IQ2_XXS dequant: 18-byte block, 256 values. */
 static OcError dequant_iq2_xxs(const uint8_t *src, size_t src_len,
                               float *dst, size_t value_count)
 {
@@ -1119,11 +1050,7 @@ static OcError dequant_iq2_xxs(const uint8_t *src, size_t src_len,
         const uint8_t *qs = &block[2];
         size_t out_ptr = 0;
         for (size_t ib32 = 0; ib32 < OC_QK_K / 32; ib32++) {
-            /* Each 32-element group consumes 8 bytes: 4 grid indices then a
-             * 32-bit word holding four 7-bit sign indices plus the 4-bit
-             * scale. llama.cpp advances `q2` by 4 uint16 (= 8 bytes) per
-             * group — striding 4 bytes here re-read overlapping windows and
-             * left qs[36..63] of every block unused. */
+            /* Each 32-element group consumes 8 bytes: 4 grid indices then a 32-bit word holding four 7-bit sign indices plus the 4-bit scale. */
             const uint8_t *g = &qs[8 * ib32];
             uint32_t aux0 = (uint32_t)g[0]
                           | ((uint32_t)g[1] << 8)
@@ -1158,11 +1085,7 @@ static OcError dequant_iq2_xxs(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ2_XS dequant: 74-byte block, 256 values. Port of
- * quant_iq_series.rs::dequantize_iq2_xs_scalar. Layout:
- *   d[0..2] (f16), qs[2..66] (64 bytes = 8 ib32 × 4 × 2-byte u16 indices),
- *   scales[66..74] (8 bytes, one per ib32). Each ib32 has 4 grid lookups;
- *   scale nibbles sc&0xf and sc>>4 split the 4 lookups into 2 dl values. */
+/* IQ2_XS dequant: 74-byte block, 256 values. */
 static OcError dequant_iq2_xs(const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count)
 {
@@ -1205,11 +1128,7 @@ static OcError dequant_iq2_xs(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ2_S dequant: 82-byte block, 256 values. Port of
- * quant_iq_series.rs::dequantize_iq2_s_scalar. Layout:
- *   d[0..2] (f16), qs[2..66] (64 bytes = QK_K/4), qh[66..74] (8 bytes =
- *   QK_K/32), scales[74..82] (8 bytes = QK_K/32). Signs are stored in the
- *   qs buffer at offsets QK_K/8..QK_K/4 (i.e. the second half of qs). */
+/* IQ2_S dequant: 82-byte block, 256 values. */
 static OcError dequant_iq2_s(const uint8_t *src, size_t src_len,
                             float *dst, size_t value_count)
 {
@@ -1256,12 +1175,7 @@ static OcError dequant_iq2_s(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ3_XXS dequant: 98-byte block, 256 values. Port of
- * quant_iq_series.rs::dequantize_iq3_xxs_scalar. Layout:
- *   d[0..2] (f16), qs[2..66] (64 bytes = QK_K/4), scales_and_signs[66..98]
- *   (32 bytes = 3 * (QK_K/8) — actually 8 ib32 × 4 bytes = 32 bytes).
- *   Each ib32 reads 8 qs bytes (4 grid pairs × 2 bytes) and 4 bytes of
- *   scales/signs (aux32). */
+/* IQ3_XXS dequant: 98-byte block, 256 values. */
 static OcError dequant_iq3_xxs(const uint8_t *src, size_t src_len,
                               float *dst, size_t value_count)
 {
@@ -1304,11 +1218,7 @@ static OcError dequant_iq3_xxs(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ3_S dequant: 110-byte block, 256 values. Port of
- * quant_k_blocks.rs::dequantize_iq3_s_scalar. Layout:
- *   d[0..2] (f16), qs[2..66] (64 bytes = QK_K/4), qh[66..74] (8 bytes =
- *   QK_K/32), signs[74..106] (32 bytes = QK_K/8), scales[106..110] (4 bytes
- *   = QK_K/64). Each ib32 pair shares one scales byte (low/high nibble). */
+/* IQ3_S dequant: 110-byte block, 256 values. */
 static OcError dequant_iq3_s(const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count)
 {
@@ -1382,10 +1292,7 @@ static OcError dequant_iq3_s(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ4_NL dequant: 18-byte block, 32 values. Port of
- * quant_iq_series.rs::dequantize_iq4_nl_scalar. Layout:
- *   d[0..2] (f16), qs[2..18] (16 bytes = QK4_NL/2 nibbles). Each nibble
- *   indexes the 16-entry KVALUES_IQ4NL codebook (nonlinear 4-bit). */
+/* IQ4_NL dequant: 18-byte block, 32 values. */
 static OcError dequant_iq4_nl(const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count)
 {
@@ -1408,12 +1315,7 @@ static OcError dequant_iq4_nl(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* IQ4_XS dequant: 136-byte block, 256 values. Port of
- * quant_k_blocks.rs::dequantize_iq4_xs_scalar. Layout:
- *   d[0..2] (f16), scales_h[2..4] (u16 LE), scales_l[4..8] (4 bytes =
- *   QK_K/64), qs[8..136] (128 bytes = QK_K/2 nibbles). Each of 8 ib32
- *   sub-blocks has a 6-bit signed scale (ls_l 4 bits + ls_h 2 bits) and 16
- *   nibble indices into KVALUES_IQ4NL. */
+/* IQ4_XS dequant: 136-byte block, 256 values. */
 static OcError dequant_iq4_xs(const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count)
 {
@@ -1446,11 +1348,7 @@ static OcError dequant_iq4_xs(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* NVFP4 dequant: 36-byte block, 64 values. Port of
- * quant_nvfp4.rs::dequantize_nvfp4_scalar. Layout:
- *   scales[0..4] (4 UE4M3 scales, one per 16-value sub-block), qs[4..36]
- *   (32 bytes = QK_NVFP4/2 packed E2M1 nibbles). Each nibble indexes
- *   E2M1_DOUBLED_VALUES[16] (nonlinear 4-bit codebook). */
+/* NVFP4 dequant: 36-byte block, 64 values. */
 static float ue4m3_to_f32(uint8_t byte)
 {
     /* Port of quant_nvfp4.rs::ue4m3_to_f32. Unsigned 4-bit exponent + 3-bit
@@ -1492,7 +1390,6 @@ static OcError dequant_nvfp4(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* ─── Pack-from-f32 (port of quant_simple.rs + quant_k_blocks.rs) ────── */
 
 static OcError pack_f32(const float *src, size_t value_count,
                         uint8_t *dst, size_t dst_len)
@@ -1869,7 +1766,6 @@ static OcError pack_q4_k(const float *src, size_t value_count,
     return OC_OK;
 }
 
-/* ─── AL-family pack (MSE-optimized encoders, port of al_family.rs) ──── */
 
 /* al_refine_scale: least-squares optimal d for fixed integer grid [lo,hi].
  * Port of al_family.rs::al_refine_scale. */
@@ -1967,7 +1863,6 @@ static void pack_block_al5(const float *in_block, uint8_t *out_block)
     }
 }
 
-/* ─── K-quant pack encoders (Q2_K, Q3_K, Q5_K, Q6_K) ────────────────── */
 
 /* Value of the block element with the largest magnitude (sign preserved). */
 static float extreme_value(const float *x, size_t n)
@@ -2034,10 +1929,7 @@ static OcError pack_q2_k(const float *src, size_t value_count,
             out_block[i] = (uint8_t)(ls | (lm << 4));
         }
 
-        /* Pack 2-bit values into the 64-byte qs area. Sub-block i sits at
-         * qs[outer * 32 + half * 16 + t] with a (inner * 2) bit shift, where
-         * k = i / 2, half = i % 2, outer = k / 4, inner = k % 4 — the exact
-         * addressing dequant_q2_k walks. */
+        /* Pack 2-bit values into the 64-byte qs area. Sub-block i sits at */
         uint8_t *qs = &out_block[16];
         for (size_t i = 0; i < n_sub; i++) {
             float dl = d * (float)(out_block[i] & 0x0Fu);
@@ -2061,13 +1953,7 @@ static OcError pack_q2_k(const float *src, size_t value_count,
 
 /* Q3_K pack: 3-bit quantization with per-sub-block scale.
  * Block layout (110 bytes): 32 bytes hmask, 64 bytes 3-bit qs, 12 bytes scales, 2 bytes f16 d. */
-/* Write the 16 six-bit Q3_K sub-block scales into the 12-byte packed field,
- * as the exact inverse of the unpacking in dequant_q3_k. Sub-block i lands in
- * group g = i / 4 and lane k = i % 4:
- *   g 0: low nibble of S[k],     high 2 bits at S[8+k] bits 0-1
- *   g 1: low nibble of S[4+k],   high 2 bits at S[8+k] bits 2-3
- *   g 2: high nibble of S[k],    high 2 bits at S[8+k] bits 4-5
- *   g 3: high nibble of S[4+k],  high 2 bits at S[8+k] bits 6-7 */
+/* Write the 16 six-bit Q3_K sub-block scales into the 12-byte packed field, */
 static void q3k_write_scales(uint8_t *s12, const int32_t *mult, size_t n_sub)
 {
     memset(s12, 0, 12);
@@ -2496,16 +2382,6 @@ static OcError pack_al5_xs(const float *src, size_t value_count,
     return OC_OK;
 }
 
-/* ─── IQ4 / NVFP4 pack encoders ───────────────────────────────────────
- *
- * These three types quantize against a fixed 16-entry codebook rather than
- * a learned grid, so encoding is a nearest-codebook search plus a scale
- * choice — no lattice lookup like IQ1/IQ2/IQ3 need.
- *
- * Scale choice, in both IQ4 encoders: map the largest-magnitude element of
- * the block onto KVALUES_IQ4NL[0] == -127, the codebook's extreme entry.
- * That guarantees no element clips, whatever its sign. A least-squares pass
- * over the chosen indices then rescales to minimize squared error. */
 
 /* Index of the KVALUES_IQ4NL entry closest to `v` (v already divided by
  * the block scale). The table is sorted ascending, but a 16-entry linear
@@ -2720,10 +2596,7 @@ static OcError pack_nvfp4(const float *src, size_t value_count,
                 if (ax > amax) amax = ax;
             }
 
-            /* Scale so the largest element lands on the codebook extreme,
-             * then round the scale itself to the UE4M3 grid. Quantizing
-             * against the *decoded* scale keeps encoder and decoder in
-             * agreement even when rounding moved it. */
+            /* Scale so the largest element lands on the codebook extreme, */
             scales[sub] = f32_to_ue4m3(amax / e2m1_max);
             float scale = ue4m3_to_f32(scales[sub]);
 
@@ -2740,7 +2613,6 @@ static OcError pack_nvfp4(const float *src, size_t value_count,
     return OC_OK;
 }
 
-/* ─── Public dispatch ────────────────────────────────────────────────── */
 
 OcQuantBlockLayout oc_quant_block_size(OcGgufQuantizationType qtype)
 {
@@ -2762,11 +2634,7 @@ OcError oc_quant_dequant_row(OcGgufQuantizationType qtype,
                              float *dst, size_t value_count)
 {
     if (src == NULL || dst == NULL) return OC_ERR_INVALID_ARG;
-    /* SIMD fast path: if a kernel is available for this (qtype, host), it
-     * produces output byte-identical to the scalar reference (VAL-SIMD-001..
-     * 004). On false, fall through to the scalar switch. Layout errors are
-     * also reported as false here so the scalar path returns the canonical
-     * OC_ERR_INVALID_ARG. */
+    /* SIMD fast path: if a kernel is available for this (qtype, host), it produces output byte-identical to the scalar reference (VAL-SIMD-001.. */
     if (oc_simd_try_dequant(qtype, src, src_len, dst, value_count)) {
         return OC_OK;
     }
@@ -2885,7 +2753,6 @@ OcError oc_quant_pack_block(OcGgufQuantizationType qtype,
     return oc_quant_pack_row(qtype, src, bs.elements_per_block, dst, bs.bytes_per_block);
 }
 
-/* ─── Naming + ggml-id mapping ────────────────────────────────────────── */
 
 static const struct {
     OcGgufQuantizationType q;

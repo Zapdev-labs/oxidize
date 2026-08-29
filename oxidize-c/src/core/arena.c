@@ -1,17 +1,3 @@
-/* arena.c — OcArena bump-pointer allocator.
- *
- * Strategy: a singly-linked list of fixed-size chunks. Each chunk has a
- * `base` pointer, an `offset` (current bump position), and a `cap`. When the
- * current chunk can't satisfy an allocation, a new chunk is appended. The
- * chunk size grows geometrically (chunk_cap doubles each grow, capped at
- * OC_ARENA_MAX_CHUNK). `oc_arena_free()` walks the list and frees each chunk.
- *
- * This design avoids the need to track per-allocation sizes (the bump pointer
- * is monotonic within a chunk) while still supporting automatic growth.
- *
- * ASan/valgrind-clean: all chunks are malloc'd and freed exactly once in
- * oc_arena_free(). No metadata is stored inside the allocation.
- */
 #include "oxidize/arena.h"
 
 #include <stdarg.h>
@@ -39,10 +25,7 @@ struct OcArena {
     size_t        next_chunk_cap; /* size of the next chunk to allocate  */
 };
 
-/* Return the aligned data base of a chunk. We store the chunk so that the
- * data starts at `(chunk_addr + sizeof(chunk) + OC_ARENA_ALIGN_MAX)` rounded
- * down to OC_ARENA_ALIGN_MAX. A simpler approach: we store an aligned pointer
- * right after the header. */
+/* Return the aligned data base of a chunk. */
 static uint8_t *chunk_data(OcArenaChunk *c)
 {
     /* Place data immediately after the header, aligned up to the max alignment

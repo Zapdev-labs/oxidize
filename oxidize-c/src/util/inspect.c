@@ -1,16 +1,3 @@
-/*
- * inspect.c — Model inspector implementation.
- *
- * Opens a GGUF file (or uses a loaded OcLlamaModel), reads metadata and
- * tensor info, computes parameter count, dominant quant type, file size,
- * estimates RAM usage, suggests thread/NUMA policy, and formats the result
- * as a human-readable table or JSON.
- *
- * The inspection logic mirrors the Rust `--inspect` CLI path: it extracts
- * architecture + dimension metadata, counts tensors, estimates parameter
- * count from tensor shapes, identifies the dominant quantization type by
- * total byte share, and produces memory/threading heuristics.
- */
 #define _POSIX_C_SOURCE 200809L
 /* macOS hides non-POSIX sysconf names (_SC_NPROCESSORS_ONLN) under a strict
  * _POSIX_C_SOURCE; _DARWIN_C_SOURCE restores them. */
@@ -31,7 +18,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ─── Internal helpers ─────────────────────────────────────────────────── */
 
 /* Copy a GGUF metadata string into a fixed-size buffer, NUL-terminated.
  * Truncates if the value is longer than `cap-1`. Safe on NULL value. */
@@ -142,12 +128,7 @@ static uint64_t get_total_ram(void)
     return 0;
 }
 
-/* Suggest a thread count based on model size and core count.
- * Heuristics (from AGENTS.md learned facts):
- *   - Small models (< 4 GB): min(cores, 8)
- *   - Medium models (4-32 GB): min(cores, 16)
- *   - Large models (32-192 GB): min(cores, 16)
- *   - Very large models (> 192 GB): min(cores, 48) */
+/* Suggest a thread count based on model size and core count. */
 static uint32_t suggest_threads(double size_gb, uint32_t cores)
 {
     if (cores == 0) cores = 4;
@@ -179,7 +160,6 @@ static bool suggest_numa_interleave(double size_gb, uint64_t total_ram)
     return size_gb > (total_gb * 0.5);
 }
 
-/* ─── Core inspection from OcGgufFile ──────────────────────────────────── */
 
 /* Fill OcModelInfo from a parsed GGUF file. This is the shared core used by
  * both oc_inspect_model() (which opens the file) and oc_inspect_llama()
@@ -199,16 +179,7 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
     /* General name. */
     copy_meta_str(f, "general.name", out->name, sizeof(out->name));
 
-    /* Core dimensions — try architecture-specific keys.
-     *
-     * The prefix must be the RAW `general.architecture` string, not the
-     * normalized enum name: a qwen3moe GGUF namespaces its keys under
-     * "qwen3moe.", but oc_model_arch_name() folds every Qwen variant to
-     * "qwen", so building the prefix from out->arch missed every lookup and
-     * reported a model with 0 layers, 0 heads and 0 embedding width. Fall
-     * back to the enum name only when the file carries no architecture key.
-     * (llama.c and config.c already key off the raw string; only this
-     * reporting path did not.) */
+    /* Core dimensions — try architecture-specific keys. */
     char arch_prefix[80];
     const char *raw_arch = NULL;
     size_t raw_arch_len = 0;
@@ -232,10 +203,7 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
     snprintf(key_buf, sizeof(key_buf), "%sblock_count", arch_prefix);
     out->n_layer = get_meta_u32(f, key_buf, 0);
 
-    /* GGUF namespaces these under `<arch>.attention.`, not `<arch>.` — the
-     * unqualified spellings below never matched any real file, so head counts
-     * always fell back to their defaults (0, and then n_head_kv = n_head,
-     * which also silently reported GQA models as non-GQA). */
+    /* GGUF namespaces these under `<arch>.attention.`, not `<arch>.` — the unqualified spellings below never matched any real file, so head counts always fell back to their defaults (0, and then n_head_kv = n_head, which also silently reported GQA models as non-GQA). */
     snprintf(key_buf, sizeof(key_buf), "%sattention.head_count", arch_prefix);
     out->n_head = get_meta_u32(f, key_buf, 0);
 
@@ -254,10 +222,7 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
         out->vocab_size = get_meta_u32(f, "general.vocab_size", 0);
     }
     if (out->vocab_size == 0) {
-        /* No scalar key: take it from the length of the token array itself.
-         * (There is no "tokenizer.ggml.tokens.size" key in GGUF — the old
-         * lookup for it always returned 0, so every model whose vocab size
-         * was implicit reported 0 tokens.) */
+        /* No scalar key: take it from the length of the token array itself. */
         const OcGgufMetadataValue *toks =
             oc_gguf_metadata_get(f, "tokenizer.ggml.tokens");
         if (toks != NULL && toks->type == OC_GGUF_MT_ARRAY) {
@@ -343,7 +308,6 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
     (void)add_bos;
     (void)add_eos;
 
-    /* ─── Tensor analysis ──────────────────────────────────────────────── */
 
     out->file_size = file_size;
     out->size_gb = (file_size > 0) ? (double)file_size / 1e9 : 0.0;
@@ -457,7 +421,6 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
                  out->size_gb);
     }
 
-    /* ─── Memory estimates ─────────────────────────────────────────────── */
 
     /* Estimated RAM usage: file_size * 1.3 (for KV cache + overhead). */
     out->estimated_ram_usage = (uint64_t)((double)file_size * 1.3);
@@ -473,7 +436,6 @@ static OcError inspect_from_gguf(const OcGgufFile *f, uint64_t file_size,
     return OC_OK;
 }
 
-/* ─── Public API ────────────────────────────────────────────────────────── */
 
 OcError oc_inspect_model(const char *path, OcModelInfo *out)
 {
@@ -549,7 +511,6 @@ OcError oc_inspect_llama(const OcLlamaModel *model, OcModelInfo *out)
     return OC_OK;
 }
 
-/* ─── Formatting: human-readable table ──────────────────────────────────── */
 
 /* Helper: append a formatted line to buf, advancing the offset. */
 static size_t append_line(char *buf, size_t cap, size_t off, const char *fmt, ...)
@@ -707,7 +668,6 @@ size_t oc_inspect_format(const OcModelInfo *info, char *buf, size_t cap)
     return off;
 }
 
-/* ─── Formatting: JSON ──────────────────────────────────────────────────── */
 
 /* Helper: append a JSON string field (with escaping). */
 static size_t json_str(char *buf, size_t cap, size_t off,
@@ -868,7 +828,6 @@ size_t oc_inspect_format_json(const OcModelInfo *info, char *buf, size_t cap)
     return off;
 }
 
-/* ─── Cleanup ───────────────────────────────────────────────────────────── */
 
 void oc_inspect_free(OcModelInfo *info)
 {

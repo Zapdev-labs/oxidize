@@ -1,20 +1,4 @@
-/*
- * test_matvec_batch.c — does the batched matvec agree with the single one?
- *
- * oc_matvec_quantized_batch() is the primitive prompt prefill runs on: it
- * dots each weight row against a tile of activations while the row is in
- * cache, instead of re-reading the matrix once per token. That reshapes the
- * loops but must not change a single output value — every result is still
- * one row dotted with one activation, accumulated in the same order.
- *
- * The interesting parameter is `cols`, because the activation tile width is
- * derived from it by integer division. A first cut of the sizing helper
- * sampled a few widths and took the max, which is NOT a bound: a NARROWER
- * matrix can need marginally more scratch than a wide one, and the expert
- * down-projection (cols=768, narrower than the 2048/4096 that were sampled)
- * overran the buffer and corrupted the forward pass. Hence the deliberately
- * awkward widths below, and the undersized-scratch case.
- */
+/* test_matvec_batch.c — does the batched matvec agree with the single one? loops but must not change a single output value — every result is still The interesting parameter is `cols`, because the activation tile width is */
 #include <criterion/criterion.h>
 
 #include "oxidize/matvec.h"
@@ -118,15 +102,7 @@ Test(matvec_batch, spans_multiple_tiles)
     check_parity(OC_QUANT_Q4_K_M, 24, 4096, 17, abytes * 4);
 }
 
-/* An undersized or absent buffer must cost speed, not correctness: the
- * kernel clamps its tile to fit and falls back to the dequant path if even
- * one activation does not.
- *
- * Note this compares batch-against-batch, not against oc_matvec_quantized():
- * the dequant path and the fused integer path legitimately disagree (the
- * fused one carries int8 activation error), so a cross-path comparison would
- * be testing the wrong invariant. What must hold is that a batch of N gives
- * the same answers as N batches of one, on whichever path is taken. */
+/* An undersized or absent buffer must cost speed, not correctness: the be testing the wrong invariant. What must hold is that a batch of N gives */
 Test(matvec_batch, undersized_and_absent_scratch)
 {
     const size_t cols = 2048, rows = 32, n_vec = 6;
@@ -236,11 +212,7 @@ Test(matvec_batch, scratch_size_is_a_bound)
     }
 }
 
-/* The prepared-row Q4_K kernel is what the batched path actually runs. It
- * hoists the nibble unpack and scale decode out of the activation loop, so
- * it must agree with the packed kernel to the bit — the integer sums are the
- * same values in a different (associative) order and the per-block float
- * accumulation order is unchanged, so "close" would mean a real bug. */
+/* The prepared-row Q4_K kernel is what the batched path actually runs. It */
 Test(matvec_batch, q4k_prepped_matches_packed)
 {
     uint32_t seed = 31337u;

@@ -143,7 +143,6 @@ pub fn initialize_cuda() -> Result<cust::context::Context, cust::error::CudaErro
     cust::quick_init()
 }
 
-// ---------------------------------------------------------------------------
 // Persistent per-thread GPU state
 //
 // The previous implementation created a fresh CUDA context, JIT-compiled the
@@ -152,7 +151,6 @@ pub fn initialize_cuda() -> Result<cust::context::Context, cust::error::CudaErro
 // — the dominant cost, far larger than the actual math. We now build all of
 // these once and reuse them, and keep static (quantized) weight matrices
 // resident in VRAM so they are uploaded a single time instead of per token.
-// ---------------------------------------------------------------------------
 
 #[path = "cuda/types.rs"]
 mod types;

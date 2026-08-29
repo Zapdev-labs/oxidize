@@ -1,9 +1,3 @@
-/*
- * benchmark_suite.c — Benchmark suite implementation.
- *
- * Runs real GEMV, quantization, and sampling micro-benchmarks
- * instead of simulating work with memset.
- */
 #include "oxidize/benchmark_suite.h"
 #include "oxidize/quant.h"
 #include "oxidize/activation.h"
@@ -53,7 +47,6 @@ OcError oc_bench_suite_add_result(OcBenchSuite *suite,
     return OC_OK;
 }
 
-/* ─── Real benchmark implementations ──────────────────────────────────── */
 
 static OcError bench_matvec_f32(size_t n_iterations, OcBenchResult *result)
 {

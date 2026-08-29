@@ -1,9 +1,3 @@
-/*
- * vision_config.h — Vision model configuration.
- *
- * Configuration for CLIP-style vision encoders and multimodal projections.
- * Port from oxidize-core/src/vision/config.rs.
- */
 #ifndef OXIDIZE_VISION_CONFIG_H
 #define OXIDIZE_VISION_CONFIG_H
 

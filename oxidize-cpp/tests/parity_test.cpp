@@ -70,7 +70,6 @@ void check_close(float got, float want, float tol, const char* what,
 
 constexpr float kTol = 1e-4f;
 
-// ── rms_norm ───────────────────────────────────────────────────────────────
 // x = [1,2,3,4], weight = [1,1,1,1], eps = 0, weight_plus_one = false.
 // mean(x^2) = (1+4+9+16)/4 = 7.5 ; inv_rms = 1/sqrt(7.5).
 // out[i] = x[i] / sqrt(7.5).
@@ -93,7 +92,6 @@ void test_rms_norm() {
   }
 }
 
-// ── apply_rope ──────────────────────────────────────────────────────────────
 // One head, head_dim = 4, full rotation (rope_dim = 0), pos = 1, theta = 10000.
 // half_dim = 2. freq_0 = 1, freq_1 = theta^(-2/4) = theta^-0.5 = 1/100.
 // angle_0 = 1*1 = 1 rad ; angle_1 = 1*0.01 = 0.01 rad.
@@ -135,7 +133,6 @@ void test_rope() {
   CHECK_CLOSE(vp[3], 11.f, kTol);  // untouched
 }
 
-// ── swiglu ───────────────────────────────────────────────────────────────────
 // out = silu(gate) * up, silu(x) = x*sigmoid(x).
 void test_swiglu() {
   std::vector<float> gate = {0.f, 1.f, -1.f, 2.f};
@@ -151,7 +148,6 @@ void test_swiglu() {
   CHECK_CLOSE(out[0], 0.0f, kTol);
 }
 
-// ── matvec (gemv f32) ─────────────────────────────────────────────────────────
 // W = [[1,2,3],[4,5,6]] (2x3 row-major), x = [1,1,1].
 // y = [1+2+3, 4+5+6] = [6, 15].
 void test_matvec() {
@@ -177,7 +173,6 @@ void put_f16(std::vector<uint8_t>& b, uint16_t bits) {
   b.push_back(static_cast<uint8_t>(bits >> 8));
 }
 
-// ── dequant Q8_0 (single block, 34 bytes) ─────────────────────────────────────
 // d = 0.5 ; qs[i] (int8) chosen as a regular ramp; out[i] = qs[i] * d.
 void test_dequant_q8_0() {
   std::vector<uint8_t> blk;
@@ -211,7 +206,6 @@ void ref_scale_min_k4(int j, const uint8_t* sc, uint8_t& s, uint8_t& m) {
   }
 }
 
-// ── dequant Q4_K (single block, 144 bytes) ───────────────────────────────────
 // d = 0.25, min = 0.125. scales[12] chosen with low values so high-bit
 // borrowing (scales[j-4]>>6) is zero, keeping the math hand-traceable. qs[128]
 // is a deterministic nibble pattern. We recompute the full reference here from
@@ -372,7 +366,6 @@ void test_f16() {
   CHECK_CLOSE(oxidize::f16_le_to_f32(half0), 0.0f, 0.0f);
 }
 
-// ── Optional GGUF forward smoke test ─────────────────────────────────────────
 // Guarded by OXIDIZE_TEST_GGUF=<path>. Loads the model, runs one forward step
 // on a single token, and asserts the logits vector is vocab-sized and finite.
 void test_gguf_forward_if_present() {
@@ -417,7 +410,6 @@ void test_gguf_forward_if_present() {
   }
 }
 
-// ── AL5 vs Q4_0 RMSE (same 18-byte layout, MSE-optimal scale) ───────────────
 
 void test_quant_al5() {
   constexpr size_t N = 256;

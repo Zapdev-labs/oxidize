@@ -1,17 +1,4 @@
-/*
- * test_http.c — HTTP server core tests.
- *
- * VAL-HTTP-001..005 cover:
- *   1. oc_http_format_response produces a valid HTTP/1.1 response.
- *   2. oc_http_status_line covers common codes.
- *   3. End-to-end: start a server on a random port, send a GET, verify the
- *      handler is invoked and the response parses correctly.
- *   4. POST with a JSON body reaches the handler intact.
- *   5. Server stop + join cleanly shuts down.
- *
- * The end-to-end test uses a real loopback socket; no mocking. The server
- * runs on port 0 (kernel-assigned) to avoid collisions.
- */
+/* test_http.c — HTTP server core tests. VAL-HTTP-001..005 cover: */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 
@@ -33,7 +20,6 @@ static void http_shutdown(OcHttpServer *srv, int fd)
     oc_http_server_join(srv);
 }
 
-/* ─── Response formatting ──────────────────────────────────────────────── */
 
 Test(http, format_response_basic)
 {
@@ -89,7 +75,6 @@ Test(http, status_line_covers_common_codes)
     cr_assert_str_eq(oc_http_status_line(999), "500 Internal Server Error");
 }
 
-/* ─── Handler for end-to-end tests ─────────────────────────────────────── */
 
 typedef struct TestState {
     int last_status;

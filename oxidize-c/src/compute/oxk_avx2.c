@@ -1,32 +1,13 @@
-/*
- * oxk_avx2.c — AVX2 optimized OXK kernels.
- *
- * Real AVX2 implementations for Q8_0 and Q4_K; Q4_0/Q4_1/Q5_K/Q6_K still
- * forward to scalar. Q4_K matters most in practice — it is what most models
- * ship as — and running it on the scalar path made Q4_K_M slower than the
- * physically larger Q8_0.
- *
- * Every vectorized kernel here must be BIT-EXACT against its scalar
- * counterpart, not merely close; test_oxk_avx2_parity.c enforces that with a
- * raw float comparison.
- *
- * All functions use __attribute__((target("avx2,fma,f16c"))) and are
- * present in every build. Callers must check oc_oxk_caps()->level >=
- * OC_OXK_AVX2 before calling.
- */
+/* oxk_avx2.c — AVX2 optimized OXK kernels. Every vectorized kernel here must be BIT-EXACT against its scalar */
 #include "oxidize/oxk.h"
 
 #include <string.h>
 
-/* AVX2/AVX-512 intrinsics are x86-only. On other targets (e.g. aarch64
- * cross-compile) the real bodies are replaced by scalar-forwarding stubs at
- * the bottom of this file so the OXK symbols still link — the dispatcher in
- * oxk.c never selects them there (oc_simd_caps() reports SCALAR). */
+/* AVX2/AVX-512 intrinsics are x86-only. On other targets (e.g. aarch64 */
 #if defined(__x86_64__) || defined(__i386__)
 
 #include <immintrin.h>
 
-/* ─── AVX2 Q8_0 × Q8_0 dot product ─────────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 float oc_oxk_dot_q8_0_q8_0_avx2(const uint8_t *row, size_t blocks,
@@ -91,7 +72,6 @@ float oc_oxk_dot_q8_0_q8_0_avx2(const uint8_t *row, size_t blocks,
     return _mm_cvtss_f32(sum);
 }
 
-/* ─── AVX2 Q4_0 × Q8_0 dot product ─────────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 float oc_oxk_dot_q4_0_q8_0_avx2(const uint8_t *row, size_t blocks,
@@ -103,7 +83,6 @@ float oc_oxk_dot_q4_0_q8_0_avx2(const uint8_t *row, size_t blocks,
     return oc_oxk_dot_q4_0_q8_0_scalar(row, blocks, q8);
 }
 
-/* ─── AVX2 Q4_1 × Q8_0 dot product ─────────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 float oc_oxk_dot_q4_1_q8_0_avx2(const uint8_t *row, size_t blocks,
@@ -112,7 +91,6 @@ float oc_oxk_dot_q4_1_q8_0_avx2(const uint8_t *row, size_t blocks,
     return oc_oxk_dot_q4_1_q8_0_scalar(row, blocks, q8);
 }
 
-/* ─── AVX2 Q4_K × Q8_K dot product ─────────────────────────────────────── */
 
 /* Horizontal sum of eight int32 lanes. */
 __attribute__((target("avx2,f16c")))
@@ -126,16 +104,7 @@ static inline int32_t hsum_i32_8(__m256i v)
     return _mm_cvtsi128_si32(s);
 }
 
-/* Q4_K is the format most models ship in, so this is the kernel that decides
- * throughput in practice. It was forwarding to scalar, which is why Q4_K_M ran
- * slower than the larger Q8_0 model.
- *
- * The nibble products are computed with _mm256_maddubs_epi16: unsigned first
- * operand (nibbles are 0..15), signed second (the int8 activation), giving
- * int16 pairwise sums, which _mm256_madd_epi16 against ones widens to int32.
- * Everything stays integer until one multiply-add per block, exactly as the
- * scalar reference does since it was restructured to accumulate pos/min_acc —
- * so this is bit-exact against it, not merely close. */
+/* Q4_K is the format most models ship in, so this is the kernel that decides throughput in practice. It was forwarding to scalar, which is why Q4_K_M ran so this is bit-exact against it, not merely close. */
 __attribute__((target("avx2,f16c")))
 float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
@@ -156,16 +125,7 @@ float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
         const int8_t  *q8v   = (const int8_t *)(qb + 4);
         const uint8_t *bsums = qb + 4 + 256;
 
-        /* Scale each group's lane-wise products in vector form and reduce ONCE
-         * per block. Reducing per group instead costs eight horizontal sums
-         * per block, and a horizontal sum is a serial dependency chain that
-         * stalls the pipeline — it was the dominant cost in the first version
-         * of this kernel.
-         *
-         * Summation order still matches the scalar reference exactly: the
-         * lane totals are integers, so regrouping them cannot change the
-         * result the way it would in floating point. That is what keeps this
-         * bit-exact while being reassociated. */
+        /* Scale each group's lane-wise products in vector form and reduce ONCE bit-exact while being reassociated. */
         __m256i pos_v = _mm256_setzero_si256();
         int32_t min_acc = 0;
         for (int gp = 0; gp < 4; gp++) {
@@ -201,7 +161,6 @@ float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── AVX2 k-quants (forward to scalar) ────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 float oc_oxk_dot_q5_k_q8_k_avx2(const uint8_t *row, size_t blocks,
@@ -217,7 +176,6 @@ float oc_oxk_dot_q6_k_q8_k_avx2(const uint8_t *row, size_t blocks,
     return oc_oxk_dot_q6_k_q8_k_scalar(row, blocks, q8);
 }
 
-/* ─── AVX2 matvec (forward to scalar) ──────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 void oc_oxk_matvec_q4_0_f32_avx2(const uint8_t *w, size_t n_rows,
@@ -240,7 +198,6 @@ void oc_oxk_matvec_q8_0_f32_avx2(const uint8_t *w, size_t n_rows,
     oc_oxk_matvec_q8_0_f32_scalar(w, n_rows, row_bytes, x, out);
 }
 
-/* ─── AVX-512 stubs (forward to scalar) ────────────────────────────────── */
 
 __attribute__((target("avx512bw,avx512dq,avx512vnni")))
 float oc_oxk_dot_q4_0_q8_0_avx512(const uint8_t *row, size_t blocks,
@@ -264,20 +221,8 @@ float oc_oxk_dot_q8_0_q8_0_avx512(const uint8_t *row, size_t blocks,
 }
 
 __attribute__((target("avx512bw,avx512dq,avx512vnni")))
-/* AVX-512 hosts run the AVX2 kernel.
- *
- * A VNNI version (dpbusd, which folds the maddubs+madd pair into a single
- * instruction) was written and measured: bit-exact, and about 6% faster on a
- * Cascade Lake Xeon. It is not kept because clang rejects the intrinsic even
- * with a matching target attribute -- it is stricter than GCC about inlining
- * intrinsics whose own target string differs from the caller's -- and a 6%
- * gain on one compiler is not worth failing the clang build. Q4_K is no
- * longer the bottleneck regardless; what remains of the decode gap is in the
- * still-scalar attention, norm and RoPE code, not here.
- *
- * The point of this entry point is that it no longer forwards to *scalar*,
- * which is what it did before and which made an AVX-512 host run the slowest
- * kernel available. */
+/* AVX-512 hosts run the AVX2 kernel. */
+/* instruction) was written and measured: bit-exact, and about 6% faster on a */
 __attribute__((target("avx512bw,avx512dq")))
 float oc_oxk_dot_q4_k_q8_k_avx512(const uint8_t *row, size_t blocks,
                                   const uint8_t *q8)

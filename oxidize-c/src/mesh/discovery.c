@@ -1,8 +1,3 @@
-/*
- * discovery.c — Mesh node discovery protocol implementation.
- *
- * Uses UDP multicast to announce node presence on the mesh.
- */
 #define _POSIX_C_SOURCE 200809L
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1  /* BSD socket opts (IP_MULTICAST_TTL, etc.) on macOS */

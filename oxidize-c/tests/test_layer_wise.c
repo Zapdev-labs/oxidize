@@ -1,4 +1,3 @@
-/* test_layer_wise.c — Layer-wise inference tests. */
 #include <criterion/criterion.h>
 #include "oxidize/layer_wise.h"
 #include "oxidize/inf_model.h"
@@ -297,7 +296,6 @@ Test(lw, free_null)
     oc_lw_state_free(NULL);
 }
 
-/* ─── Forward pass tests ────────────────────────────────────────────── */
 
 Test(lw, forward_single)
 {

@@ -1,28 +1,9 @@
-/*
- * speculative.c — speculative decoding implementation.
- *
- * Port of oxidize-core/src/model/speculative.rs + sampling.rs::speculative_decode.
- *
- * Algorithm:
- *   1. Prefill prompt on both target + draft models, saving the last
- *      token's logits as the "seed" logits for the first step.
- *   2. Per step:
- *      a. Draft generates K tokens autoregressively (forward + sample),
- *         saving K sets of draft logits.
- *      b. Target forwards the K draft tokens, saving K sets of target
- *         logits (plus the saved seed → K+1 total).
- *      c. Verification kernel accepts/rejects draft tokens.
- *      d. Target rewinds + replays accepted tokens, saving last logits.
- *      e. Draft rewinds + replays accepted tokens, saving last logits.
- *      f. Emit accepted + residual/bonus tokens.
- */
 #include "oxidize/speculative.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── RNG helpers ──────────────────────────────────────────────────────── */
 
 static uint64_t xorshift64(uint64_t *state)
 {
@@ -39,7 +20,6 @@ static float xorshift64_uniform(uint64_t *state)
     return (float)(xorshift64(state) >> 11) * (1.0f / 9007199254740992.0f);
 }
 
-/* ─── Softmax + sampling helpers ────────────────────────────────────────── */
 
 static void softmax(float *probs, const float *logits, size_t n, float temp)
 {
@@ -71,7 +51,6 @@ static uint32_t sample_from_probs(const float *probs, size_t n, float r)
     return (uint32_t)(n - 1);
 }
 
-/* ─── Verification kernel ──────────────────────────────────────────────── */
 
 OcError oc_speculative_decode(
     const uint32_t *draft_tokens,
@@ -166,7 +145,6 @@ done:
     return OC_OK;
 }
 
-/* ─── Full speculative generation loop ──────────────────────────────────── */
 
 OcError oc_speculative_generate(
     OcLlamaModel *target, OcLlamaSession *target_sess,
@@ -193,11 +171,7 @@ OcError oc_speculative_generate(
     size_t vocab = target->cfg.vocab_size;
     uint64_t seed = cfg->seed ? cfg->seed : 0x9E3779B97F4A7C15ULL;
 
-    /* Logits scratch: [K+1] arrays of vocab_size for target, [K] for draft.
-     * We use a flat allocation and set up pointer arrays.
-     * target_ptrs[0] is the "seed" logits (from prefill or previous step's
-     * last replay). target_ptrs[1..K] are from forwarding draft tokens.
-     * draft_ptrs[0..K-1] are from draft generation. */
+    /* Logits scratch: [K+1] arrays of vocab_size for target, [K] for draft. */
     float *target_buf = malloc((size_t)(k + 1) * vocab * sizeof(float));
     float *draft_buf  = malloc((size_t)k * vocab * sizeof(float));
     if (!target_buf || !draft_buf) {
@@ -220,8 +194,6 @@ OcError oc_speculative_generate(
     *out_len = 0;
     OcError status = OC_OK;
 
-    /* 1. Prefill prompt on target. Forward all but last with NULL logits,
-     *    then forward last token with logits → target_ptrs[0]. */
     oc_llama_session_reset(target_sess);
     for (size_t i = 0; i < prompt_len - 1; i++) {
         status = oc_llama_forward(target_sess, prompt[i], NULL);
@@ -261,16 +233,12 @@ OcError oc_speculative_generate(
     status = oc_llama_forward(draft_sess, current_token, draft_ptrs[0]);
     if (status != OC_OK) goto cleanup;
 
-    /* 2. Speculative loop. */
     while (*out_len < out_cap) {
         uint32_t max_new = cfg->max_new_tokens;
         if (max_new > 0 && stats && stats->emitted_tokens >= max_new) break;
         if (max_new > 0 && !stats && *out_len >= max_new) break;
 
-        /* --- Draft generation: K tokens autoregressively. ---
-         * draft_ptrs[0] already holds logits from the start position.
-         * Generate draft_tokens[0] from draft_ptrs[0], forward it to get
-         * draft_ptrs[1], etc. */
+        /* --- Draft generation: K tokens autoregressively. --- */
         uint32_t draft_ckpt = (uint32_t)draft_sess->pos;
         for (uint32_t i = 0; i < k; i++) {
             if (cfg->greedy) {
@@ -375,7 +343,6 @@ cleanup:
     return status;
 }
 
-/* ─── Speculative stats accessors ─────────────────────────────────────── */
 
 double oc_speculative_acceptance_rate(const OcSpeculativeStats *stats)
 {
@@ -394,7 +361,6 @@ double oc_speculative_estimated_speedup(const OcSpeculativeStats *stats)
     return oc_speculative_tokens_per_target_forward(stats);
 }
 
-/* ─── Draft model loader ──────────────────────────────────────────────── */
 
 OcError oc_speculative_load_draft(const char *path,
                                     OcLlamaModel **out_model,

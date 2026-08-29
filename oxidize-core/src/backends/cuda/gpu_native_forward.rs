@@ -919,7 +919,6 @@ pub fn gpu_final_head_device_resident(
     })
 }
 
-// ---------------------------------------------------------------------------
 // On-device attention (OX_GPU_ATTN): device-resident F16 KV cache + the
 // rope / kv-append / flash-attention launchers.
 //
@@ -927,7 +926,6 @@ pub fn gpu_final_head_device_resident(
 // NEVER copy to/from host (the host slices passed to `gpu_attn_rope_append_flash`
 // are uploaded into pooled device buffers only). The hidden state therefore
 // stays GPU-resident across the whole layer range.
-// ---------------------------------------------------------------------------
 
 /// Allocate (or reset) the device-resident F16 KV cache.
 ///
@@ -1394,9 +1392,7 @@ pub fn gpu_attn_block_fused_q4k(
             ));
         }
 
-        // ============================================================
         // (A) RMS-norm: hidden → normed  (from gpu_attn_rms_and_qkv_q4k)
-        // ============================================================
         let norm_key = f32_cache_key(attn_norm);
         if !gpu.resident_f32.contains_key(&norm_key) {
             let buf = cust::memory::DeviceBuffer::from_slice(attn_norm).map_err(stringify)?;
@@ -1426,9 +1422,7 @@ pub fn gpu_attn_block_fused_q4k(
             .map_err(stringify)?;
         }
 
-        // ============================================================
         // (B) QKV GEMVs: normed → d_q / d_k / d_v  (device-resident)
-        // ============================================================
         // Detect Q4K vs Q6K from block byte-size (Q4K=144, Q6K=210 bytes / 256-value block).
         let quant_kern_name = |w: &[u8], rows: usize| -> &'static str {
             let bsz = if rows > 0 && blocks_per_row > 0 {
@@ -1563,7 +1557,6 @@ pub fn gpu_attn_block_fused_q4k(
             }
         }
 
-        // ============================================================
         // (B') per-head Q/K RMSNorm (Qwen3-style QK-norm), in-place on d_q/d_k,
         //      applied AFTER the QKV projection and BEFORE RoPE. Reuses the
         //      per-row rms_norm_f32_kernel with one block per head (rows =
@@ -1571,7 +1564,6 @@ pub fn gpu_attn_block_fused_q4k(
         //      norm weight) — numerically equivalent to the CPU rms_norm_f32
         //      applied per head in layers.rs. Inert (skipped) for models without
         //      QK-norm (Llama/Mistral pass empty slices).
-        // ============================================================
         if !q_norm.is_empty() || !k_norm.is_empty() {
             if !q_norm.is_empty() {
                 let qn_key = f32_cache_key(q_norm);
@@ -1615,9 +1607,7 @@ pub fn gpu_attn_block_fused_q4k(
         let d_attn = gpu.get_f32_buffer(q_len)?;
         let d_attn_ptr = d_attn.as_device_ptr();
 
-        // ============================================================
         // (C–E) RoPE + KV append + flash decode (GPH kernels under CUDA graph).
-        // ============================================================
         if super::cuda_decode_graph::decode_graph_use_gph(pos, gpu.kv_context) {
             let d_state = super::cuda_decode_graph::decode_d_state_ptr(gpu)?;
             super::cuda_decode_graph::launch_rope_f32_gph(
@@ -1679,7 +1669,6 @@ pub fn gpu_attn_block_fused_q4k(
             )?;
         }
 
-        // ============================================================
         // (E') Env-gated attention debug dump (OX_ATTN_DUMP), GPU path.
         //
         // Copy the few small device vectors to host ONCE (one-shot, behind the
@@ -1687,7 +1676,6 @@ pub fn gpu_attn_block_fused_q4k(
         // Same labels / order / sizes as the CPU island in layers.rs so the
         // operator can diff the two files. Debug-only: a single stream sync here
         // is acceptable (perf irrelevant; never runs on the default path).
-        // ============================================================
         if crate::attn_dump::should_dump() {
             gpu.stream.synchronize().map_err(stringify)?;
             // `ab.normed` still holds the post-RMSNorm input to QKV at this point.
@@ -1718,10 +1706,8 @@ pub fn gpu_attn_block_fused_q4k(
             );
         }
 
-        // ============================================================
         // (F) Wo GEMV: d_attn → normed, then residual: hidden += normed
         //     (from gpu_wo_residual_q4k — reads d_attn instead of an upload)
-        // ============================================================
         let wo_key = bytes_cache_key(wo);
         gpu.ensure_resident_quant(wo_key, wo)?;
 
@@ -1791,9 +1777,7 @@ pub fn gpu_attn_block_fused_q4k(
             )?;
         }
 
-        // ============================================================
         // (G) Return pooled buffers (no sync, no host copy).
-        // ============================================================
         gpu.return_f32_buffer(d_q);
         gpu.return_f32_buffer(d_k);
         gpu.return_f32_buffer(d_v);
@@ -1802,7 +1786,6 @@ pub fn gpu_attn_block_fused_q4k(
     })
 }
 
-// ===========================================================================
 // Batched device decode forward (OX_GPU_BATCHED, B <= 8).
 //
 // Serves B concurrent decode rows (one token each, distinct sequences) in one
@@ -1813,7 +1796,6 @@ pub fn gpu_attn_block_fused_q4k(
 // (`batched_activation` + `kv_*_batched`) from the single-token path, so the
 // default forward is byte-identical. Reached only via the (out-of-this-stage)
 // `forward_batch_gpu` under `OX_GPU_BATCHED=1`.
-// ===========================================================================
 
 /// Maximum batch the bN kernel (`gemv_q4k_q8kin_bN_kernel`, `ncols` limit)
 /// serves in this MVP. Callers reject larger batches and loop single-seq.
@@ -2637,7 +2619,6 @@ pub fn gpu_batched_final_head(
     })
 }
 
-// ---------------------------------------------------------------------------
 // Numerical-correctness test: batched GPU forward == B single-seq forwards.
 //
 // Runs ONLY on Modal (real CUDA device + a real Q4_K GGUF). `#[ignore]` so it
@@ -2645,7 +2626,6 @@ pub fn gpu_batched_final_head(
 // with `--include-ignored`. The reference is the per-seq CPU `forward_batch`
 // (each sequence decoded alone), which the batched device path must match by
 // argmax for every row.
-// ---------------------------------------------------------------------------
 #[cfg(all(test, feature = "cuda"))]
 mod batched_parity_tests {
     use crate::inference::{InferenceConfig, InferenceModel, SeqKv};

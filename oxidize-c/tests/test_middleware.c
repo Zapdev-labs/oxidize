@@ -1,14 +1,4 @@
-/*
- * test_middleware.c — middleware stack tests.
- *
- * VAL-MW-001..005 cover:
- *   1. Auth: valid key accepted, invalid key rejected (401), missing header
- *      rejected (401).
- *   2. Rate limit: allows burst, rejects when exceeded (429).
- *   3. Metrics: counters increment correctly + JSON format.
- *   4. Audit: entries recorded and retrievable (newest-first).
- *   5. CORS: headers set correctly.
- */
+/* test_middleware.c — middleware stack tests. VAL-MW-001..005 cover: */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 
@@ -16,7 +6,6 @@
 
 #include <string.h>
 
-/* ─── Auth ────────────────────────────────────────────────────────────────── */
 
 Test(middleware, auth_valid_key_accepted)
 {
@@ -97,7 +86,6 @@ Test(middleware, cors_preflight_bypasses_auth)
     oc_middleware_free(&mw);
 }
 
-/* ─── Rate limit ──────────────────────────────────────────────────────────── */
 
 Test(middleware, rate_limit_allows_burst)
 {
@@ -154,7 +142,6 @@ Test(middleware, rate_limit_per_ip_isolation)
     oc_middleware_free(&mw);
 }
 
-/* ─── Metrics ─────────────────────────────────────────────────────────────── */
 
 Test(middleware, metrics_counters_increment)
 {
@@ -190,7 +177,6 @@ Test(middleware, metrics_process_response_increments)
     oc_middleware_free(&mw);
 }
 
-/* ─── Audit ────────────────────────────────────────────────────────────────── */
 
 Test(middleware, audit_entries_recorded_and_retrievable)
 {
@@ -239,7 +225,6 @@ Test(middleware, audit_format_json)
     oc_middleware_free(&mw);
 }
 
-/* ─── CORS ────────────────────────────────────────────────────────────────── */
 
 Test(middleware, cors_headers_set_correctly)
 {

@@ -175,7 +175,6 @@ bool oc_inf_model_batched_decode_enabled(void)
     return false;
 }
 
-/* ─── Forward pass methods ────────────────────────────────────────────── */
 
 void oc_inf_model_embed_token(OcInferenceModel *m, uint32_t token)
 {
@@ -351,7 +350,6 @@ OcError oc_inf_model_final_head_from_workspace(OcInferenceModel *m,
     return OC_OK;
 }
 
-/* ─── Attention head dimension helpers ─────────────────────────────────── */
 
 void oc_attention_head_dims(const OcInferenceConfig *cfg,
                              const OcLayerWeights *layer,
@@ -473,7 +471,6 @@ OcError oc_gemv_weight_head(const OcWeightStorage *ws,
     return e;
 }
 
-/* ─── MLA (DeepSeek2) layer forward ────────────────────────────────────── */
 
 static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
                                   size_t li, size_t pos)
@@ -499,14 +496,12 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     if (n_heads > 0) v_head_dim /= n_heads;
     size_t q_pe_dim = kv_head_dim > k_nope_dim ? kv_head_dim - k_nope_dim : 0;
 
-    /* 1. RMSNorm. */
     float *normed = m->workspace.hidden_b;
     if (layer->attn_norm)
         oc_rms_norm_f32(x, layer->attn_norm, normed, h, eps);
     else
         memcpy(normed, x, h * sizeof(float));
 
-    /* 2. Q low-rank projection: q_a -> q_a_norm -> q_b. */
     float *c_q = m->workspace.intermediate_a;  /* [q_lora] */
     memset(c_q, 0, q_lora * sizeof(float));
     OcError e = oc_gemv_weight(&layer->mla_q_a, q_lora, h, normed, c_q);
@@ -523,7 +518,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     e = oc_gemv_weight(&layer->mla_q_b, q_len, q_lora, c_q, q_vec);
     if (e != OC_OK) return e;
 
-    /* 3. KV low-rank projection: kv_a_mqa -> split into c_kv + k_pe. */
     float *kv_pe = m->workspace.intermediate_c;  /* [kv_out] */
     memset(kv_pe, 0, kv_out * sizeof(float));
     e = oc_gemv_weight(&layer->mla_kv_a_mqa, kv_out, h, normed, kv_pe);
@@ -539,7 +533,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         }
     }
 
-    /* 4. Apply RoPE to k_pe. */
     float *k_pe_rope = m->workspace.flash_q;  /* [kv_pe_dim] */
     if (kv_pe_dim > 0 && k_pe_rope) {
         float rope_amp = -1.0f;
@@ -560,7 +553,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         }
     }
 
-    /* 5. Compute K and V per head from c_kv. */
     size_t total_k = (size_t)n_heads * kv_head_dim;
     size_t total_v = (size_t)n_heads * v_head_dim;
     float *k_store = m->workspace.k_vec;     /* [total_k] */
@@ -583,19 +575,7 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         if (k_pe_rope && k_store)
             memcpy(k_store + rope_off, k_pe_rope, copy * sizeof(float));
 
-        /* V = mla_v_b[head] @ c_kv.
-         *
-         * v_b is laid out exactly like k_b: the converter splits HF's
-         * kv_b_proj [n_heads*(nope+v), kv_lora] by taking rows
-         * [h*256+128, h*256+256) for each head, so head h's block is
-         * `v_head_dim` contiguous rows of `kv_lora` columns — head-major,
-         * which is precisely what oc_gemv_weight_head expects.
-         *
-         * This used to hand-roll the GEMV with a [kv_lora, v_dim, n_heads]
-         * index AND read through oc_weight_storage_f32_data(), which returns
-         * NULL for OC_WEIGHT_MMAP_QUANTIZED. Since BF16 is a quantized type
-         * here, that made V identically zero for every real model, not just
-         * quantized ones — attention returned nothing but its own bias. */
+        /* V = mla_v_b[head] @ c_kv. */
         size_t v_off = (size_t)hd * v_head_dim;
         if (!oc_weight_storage_is_empty(&layer->mla_v_b) && v_store) {
             e = oc_gemv_weight_head(&layer->mla_v_b, v_head_dim, kv_lora,
@@ -626,7 +606,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         }
     }
 
-    /* 6. KV cache: store padded V (v_head_dim -> kv_head_dim). */
     int32_t kv_idx = -1;
     if (li < m->kv_layer_map_len)
         kv_idx = m->kv_layer_map[li];
@@ -647,16 +626,10 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         if (e != OC_OK) return e;
     }
 
-    /* 7. Attention: per-head scaled dot-product. */
     memset(attn_out, 0, (size_t)n_heads * v_head_dim * sizeof(float));
     if (kv_idx >= 0 && k_store && v_padded) {
         uint32_t seq_len = oc_kv_cache_n_tokens(&m->kv_cache);
-        /* deepseek_yarn folds a get_mscale(factor, mscale_all_dim)^2 term
-         * into the attention scale. For LongCat (factor 120, both mscale
-         * terms 1) that is 1.4787^2 = 2.1867, so the plain 1/sqrt(192)
-         * would leave every logit 2.19x too small and flatten the softmax
-         * across all 76 sub-layers. Architectures without deepseek_yarn
-         * leave yarn_mscale_all_dim at 0 and get the usual 1/sqrt(d). */
+        /* deepseek_yarn folds a get_mscale(factor, mscale_all_dim)^2 term */
         float scale = 1.0f / sqrtf((float)kv_head_dim);
         if (cfg->yarn_factor > 1.0f && cfg->yarn_mscale_all_dim > 0.0f) {
             oc_rope_deepseek_yarn_scales(cfg->yarn_factor, cfg->yarn_mscale,
@@ -668,12 +641,7 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         for (uint32_t hd = 0; hd < n_heads; hd++) {
             size_t q_off = (size_t)hd * kv_head_dim;
             float *q_head = q_vec + q_off;
-            /* Q, K and the cached V are strided by kv_head_dim (nope + rope,
-             * 192 for LongCat), but the attention OUTPUT is only v_head_dim
-             * (128) wide per head and o_proj expects it densely packed.
-             * Writing it at the Q stride leaves 64 dead floats per head, so
-             * o_proj reads heads interleaved with padding and runs out of
-             * input 42 heads in — the last 22 heads never reach it. */
+            /* Q, K and the cached V are strided by kv_head_dim (nope + rope, */
             size_t v_off_out = (size_t)hd * v_head_dim;
             float *out_head = attn_out + v_off_out;
 
@@ -723,7 +691,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         }
     }
 
-    /* 8. Attn output projection + residual. */
     if (!oc_weight_storage_is_empty(&layer->attn_output)) {
         size_t attn_in_len = oc_weight_storage_output_dim(&layer->attn_output, h);
         float *proj = m->workspace.hidden_b;
@@ -736,7 +703,6 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
     return OC_OK;
 }
 
-/* ─── ShortConv (LFM2) layer forward ──────────────────────────────────── */
 
 static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *layer,
                                         size_t li, size_t pos)
@@ -754,26 +720,21 @@ static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *laye
     size_t d = oc_weight_storage_output_dim(&layer->shortconv_in_proj, h) / 3;
     if (d == 0) d = h;
 
-    /* 1. RMSNorm. */
     float *normed = m->workspace.hidden_b;
     if (layer->attn_norm)
         oc_rms_norm_f32(x, layer->attn_norm, normed, h, eps);
     else
         memcpy(normed, x, h * sizeof(float));
 
-    /* 2. in_proj: [h] -> [3*d]. */
     float *bcx = m->workspace.shortconv_bcx;  /* [3*d] */
     memset(bcx, 0, 3 * d * sizeof(float));
     OcError e = oc_gemv_weight(&layer->shortconv_in_proj, 3 * d, h, normed, bcx);
     if (e != OC_OK) return e;
 
-    /* 3. Bx = B * x (B = bcx[0..d], C = bcx[d..2d], x_in = bcx[2d..3d]). */
     float *bx = m->workspace.shortconv_bx;  /* [d] */
     for (size_t i = 0; i < d; i++)
         bx[i] = bcx[i] * bcx[2 * d + i];
 
-    /* 4. Causal depthwise conv1d. Weights [d, l_cache] (channel-major, taps per channel).
-     * Last tap = current token. Use SSM conv ring buffer for past frames. */
     float *conv_out = m->workspace.conv_out;  /* [d] */
     bool have_conv = layer->shortconv_conv && layer->n_shortconv_conv == l_cache * d;
     if (have_conv) {
@@ -805,24 +766,20 @@ static OcError forward_shortconv_layer(OcInferenceModel *m, OcLayerWeights *laye
         memcpy(conv_out, bx, d * sizeof(float));
     }
 
-    /* 5. y = C * conv_out. */
     for (size_t i = 0; i < d; i++)
         conv_out[i] *= bcx[d + i];
 
-    /* 6. out_proj: [d] -> [h]. */
     float *attn_out = m->workspace.hidden_a;  /* [h] */
     memset(attn_out, 0, h * sizeof(float));
     e = oc_gemv_weight(&layer->shortconv_out_proj, h, d, conv_out, attn_out);
     if (e != OC_OK) return e;
 
-    /* 7. Residual add. */
     for (size_t i = 0; i < h; i++)
         x[i] += attn_out[i];
 
     return OC_OK;
 }
 
-/* ─── Mamba/SSM layer forward ─────────────────────────────────────────── */
 
 static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
                                     size_t li, size_t pos)
@@ -836,21 +793,18 @@ static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
     /* Mamba: norm -> qkv_proj -> conv1d -> silu -> split(x_ssm, z_gate)
      * -> group_norm(x_ssm) -> selective_scan -> gate -> out_proj -> residual. */
 
-    /* 1. RMSNorm. */
     float *normed = m->workspace.hidden_a;
     if (layer->attn_norm)
         oc_rms_norm_f32(x, layer->attn_norm, normed, h, eps);
     else
         memcpy(normed, x, h * sizeof(float));
 
-    /* 2. QKV projection: [h] -> [qkv_out_len]. */
     size_t qkv_out_len = oc_weight_storage_output_dim(&layer->attn_qkv, h);
     float *x_proj = m->workspace.q_full;
     memset(x_proj, 0, qkv_out_len * sizeof(float));
     OcError e = oc_gemv_weight(&layer->attn_qkv, qkv_out_len, h, normed, x_proj);
     if (e != OC_OK) return e;
 
-    /* 3. Causal conv1d (kernel=4). Use SSM conv ring buffer for past frames. */
     size_t conv_kernel = 4;
     float *conv_out = m->workspace.conv_out;
     memset(conv_out, 0, qkv_out_len * sizeof(float));
@@ -884,18 +838,15 @@ static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
         memcpy(conv_out, x_proj, qkv_out_len * sizeof(float));
     }
 
-    /* 4. SiLU activation. */
     for (size_t i = 0; i < qkv_out_len; i++) {
         float v = conv_out[i];
         conv_out[i] = v * (1.0f / (1.0f + expf(-v)));
     }
 
-    /* 5. Split into x_ssm and z_gate. */
     size_t half = qkv_out_len / 2;
     float *x_ssm = conv_out;          /* [half] */
     float *z_gate = conv_out + half;  /* [half] */
 
-    /* 6. Group RMSNorm on x_ssm. */
     if (layer->ssm_norm && layer->n_ssm_norm > 0 && half > 0 &&
         (half % layer->n_ssm_norm) == 0) {
         size_t group_size = layer->n_ssm_norm;
@@ -909,7 +860,6 @@ static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
         }
     }
 
-    /* 7. Selective scan SSM. */
     size_t state_dim = layer->n_ssm_a;
     float *mamba_out = m->workspace.intermediate_b;  /* [half] */
     memset(mamba_out, 0, half * sizeof(float));
@@ -964,13 +914,11 @@ static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
         }
     }
 
-    /* 8. Apply gate: y *= silu(z_gate). */
     for (size_t i = 0; i < half; i++) {
         float z = z_gate[i];
         mamba_out[i] *= z * (1.0f / (1.0f + expf(-z)));
     }
 
-    /* 9. Output projection + residual. */
     if (!oc_weight_storage_is_empty(&layer->ssm_out)) {
         size_t out_len = oc_weight_storage_output_dim(&layer->ssm_out, half);
         float *projected = m->workspace.hidden_b;  /* [h] */
@@ -988,7 +936,6 @@ static OcError forward_mamba_layer(OcInferenceModel *m, OcLayerWeights *layer,
     return OC_OK;
 }
 
-/* ─── Single-token forward pass ────────────────────────────────────────── */
 
 OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t position)
 {
@@ -1004,7 +951,6 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
     uint32_t rope_len = oc_inference_config_effective_rope_dim(cfg);
     float eps = cfg->rms_norm_eps;
 
-    /* 1. Embed token into workspace.x. */
     oc_inf_model_embed_token(m, token);
 
     float *normed = m->workspace.hidden_a;
@@ -1016,7 +962,6 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
     float *ffn_up = m->workspace.intermediate_b;
     float *ffn_down = m->workspace.hidden_b;
 
-    /* 2. Process each layer. */
     for (size_t li = 0; li < m->n_layers && li < cfg->layer_count; li++) {
         OcLayerWeights *layer = &m->layers[li];
         float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
@@ -1287,7 +1232,6 @@ OcError oc_inf_model_forward_token_logits(OcInferenceModel *m, uint32_t token,
     return oc_inf_model_final_head_from_workspace(m, logits, logits_len);
 }
 
-/* ─── MTP/nextn draft generation ───────────────────────────────────────── */
 
 /* Run one MTP forward step: embed + eh_proj + attn + ffn + lm_head.
  * Writes the next hidden state to out_hidden [hidden_size].
@@ -1310,7 +1254,6 @@ static OcError mtp_forward_one(OcInferenceModel *m,
     if (out_hidden_len < h) return OC_ERR_INVALID_ARG;
     if (out_logits_len < vocab) return OC_ERR_INVALID_ARG;
 
-    /* 1. Token embedding lookup. */
     float *token_emb = m->workspace.hidden_b;  /* [h] */
     if (!token_emb) return OC_ERR_MODEL;
     memset(token_emb, 0, h * sizeof(float));
@@ -1323,7 +1266,6 @@ static OcError mtp_forward_one(OcInferenceModel *m,
     if (tok_idx >= vocab && vocab > 0) tok_idx = vocab - 1;
     oc_weight_storage_lookup_embedding(emb_storage, h, vocab, tok_idx, token_emb);
 
-    /* 2. Embed norm + hidden norm. */
     float *embed_normed = m->workspace.intermediate_a;  /* [h] */
     float *hidden_normed = m->workspace.intermediate_b;  /* [h] */
     if (!embed_normed || !hidden_normed) return OC_ERR_MODEL;
@@ -1339,7 +1281,6 @@ static OcError mtp_forward_one(OcInferenceModel *m,
         memcpy(hidden_normed, prev_hidden, h * sizeof(float));
     }
 
-    /* 3. Concat [embed_normed, hidden_normed] -> eh_proj -> fused [h]. */
     float *concat = m->workspace.shortconv_bcx;  /* [2*h] */
     if (!concat) return OC_ERR_MODEL;
     memcpy(concat, embed_normed, h * sizeof(float));
@@ -1350,7 +1291,6 @@ static OcError mtp_forward_one(OcInferenceModel *m,
     OcError e = oc_gemv_weight(&mtp->eh_proj, h, h * 2, concat, fused);
     if (e != OC_OK) return e;
 
-    /* 4. Run MTP attention + FFN layer in-place on workspace.x. */
     const OcLayerWeights *layer = &mtp->layer;
     uint32_t n_heads = m->config.num_attention_heads;
     uint32_t kvh = m->config.num_key_value_heads;
@@ -1477,7 +1417,6 @@ static OcError mtp_forward_one(OcInferenceModel *m,
             fused[i] += ffn_out[i];
     }
 
-    /* 5. Final norm + lm_head. */
     const float *norm_w = mtp->shared_head_norm ? mtp->shared_head_norm : m->norm_weight;
     const OcWeightStorage *head_w = &mtp->shared_head_head;
     if (oc_weight_storage_is_empty(head_w))
@@ -1563,7 +1502,6 @@ OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
     return OC_OK;
 }
 
-/* ─── Run a range of layers ────────────────────────────────────────────── */
 
 OcError oc_inf_model_run_layer_range(OcInferenceModel *m,
                                        size_t start, size_t end,
@@ -1822,7 +1760,6 @@ OcError oc_inf_model_run_layer_range(OcInferenceModel *m,
     return OC_OK;
 }
 
-/* ─── Batched forward (prefill + cross-sequence decode) ───────────────── */
 
 bool oc_inf_model_layers_supported_for_batched(const OcInferenceModel *m)
 {
@@ -1889,7 +1826,6 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
         return OC_ERR_OOM;
     }
 
-    /* 1. Embedding lookup for each position. */
     for (size_t i = 0; i < batch; i++) {
         uint32_t tok = tokens[i];
         if (tok >= cfg->vocab_size && cfg->vocab_size > 0)
@@ -1924,7 +1860,6 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
         return OC_ERR_OOM;
     }
 
-    /* 2. Process each layer. */
     for (size_t li = 0; li < m->n_layers && li < cfg->layer_count; li++) {
         OcLayerWeights *layer = &m->layers[li];
         float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
@@ -2233,7 +2168,6 @@ OcError oc_inf_model_forward_batch(OcInferenceModel *m,
         return OC_ERR_OOM;
     }
 
-    /* 1. Embedding lookup for each sequence. */
     for (size_t i = 0; i < batch; i++) {
         uint32_t tok = tokens[i];
         if (tok >= cfg->vocab_size && cfg->vocab_size > 0)
@@ -2247,7 +2181,6 @@ OcError oc_inf_model_forward_batch(OcInferenceModel *m,
         }
     }
 
-    /* 2. Process each layer. */
     for (size_t li = 0; li < m->n_layers && li < cfg->layer_count; li++) {
         OcLayerWeights *layer = &m->layers[li];
         float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);

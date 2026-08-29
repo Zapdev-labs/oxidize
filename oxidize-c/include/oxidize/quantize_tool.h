@@ -1,10 +1,3 @@
-/*
- * quantize_tool.h — offline GGUF weight quantization tool.
- *
- * Re-quantizes a GGUF model from one quantization type to another. Reads
- * the input GGUF, dequantizes each tensor to f32, then re-quantizes to
- * the target type and writes a new GGUF file.
- */
 #ifndef OXIDIZE_QUANTIZE_TOOL_H
 #define OXIDIZE_QUANTIZE_TOOL_H
 

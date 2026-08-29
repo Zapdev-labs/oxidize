@@ -1,9 +1,3 @@
-/*
- * args.c — CLI argument parsing (extracted from main.c for testability).
- *
- * OcCliArgs + oc_cli_parse_args live here (no main()) so they link into both
- * the oxidize-c binary (via main.c) and the test_runner (via tests/test_cli.c).
- */
 #include "args.h"
 
 #include "oxidize/cli_commands.h"
@@ -107,14 +101,6 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
     }
 }
 
-/* ─── Subcommand parsing ──────────────────────────────────────────────────
- *
- * `oxidize-c <subcommand> [flags]` populates an OcCliContext directly rather
- * than going through OcCliArgs, which only carries the flags the legacy
- * flag-only invocation needs. The two paths coexist: main() tries the
- * subcommand form first and falls back to the flag form when argv[1] is not
- * a recognized subcommand name, so `oxidize-c --model m.gguf --prompt hi`
- * keeps working unchanged. */
 
 bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
 {

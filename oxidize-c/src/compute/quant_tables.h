@@ -1,10 +1,4 @@
-/* Auto-generated from oxidize-core Rust lookup tables.
- * Bit-exact port of oxidize-core/src/compute/quantization{.rs,/iq_grids.rs,
- * /iq1s_grid_fragment.rs, /iq2s_grid_fragment.rs, /iq2xs_grid_fragment.rs}.
- *
- * Source of truth: ggml-common.h (ggml-org/llama.cpp).
- * Do not hand-edit. Regenerate via scripts/gen_quant_tables.py.
- */
+/* Auto-generated from oxidize-core Rust lookup tables. Bit-exact port of oxidize-core/src/compute/quantization{.rs,/iq_grids.rs, Do not hand-edit. Regenerate via scripts/gen_quant_tables.py. */
 #ifndef OXIDIZE_QUANT_TABLES_H
 #define OXIDIZE_QUANT_TABLES_H
 

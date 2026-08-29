@@ -78,12 +78,6 @@ func GemmF32Cuda(left, right []float32, rows, shared, cols int, output []float32
 }
 
 // GemvQuantizedCuda dequantizes a quantized weight matrix of GGML type ggmlType
-// (rows x cols) and computes output[r] = dot(matrix_row_r, vector). Mirrors
-// gemv_quantized.rs's on-the-fly quantized GEMV dispatch. The optional scratch
-// slice (sized rows*cols) is reused as the dequant target to avoid allocation.
-//
-// The signature is kept stable: (qbytes, ggmlType, vector, rows, cols, output,
-// scratch). Pass nil scratch to allocate internally.
 func GemvQuantizedCuda(qbytes []byte, ggmlType int, vector []float32, rows, cols int, output, scratch []float32) error {
 	if err := ValidateGemvDims(rows, cols); err != nil {
 		return err

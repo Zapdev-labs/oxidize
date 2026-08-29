@@ -2,22 +2,7 @@
  * the first non-comment thing in the file, before any system header. */
 #define _POSIX_C_SOURCE 200809L
 
-/*
- * main.c — oxidize-c CLI entry point.
- *
- * Implements the `cli-flags-modes` feature: flag parsing, prompt/prefill
- * generation, and scaffolds for --serve-api / --print-plan / --auto.
- *
- * Wires oc_llama_load → oc_tokenizer_load_from_gguf → oc_llama_session_init
- * → encode(prompt) → prefill forward loop → sample → decode → print, looping
- * until --n-predict tokens are emitted or EOS is reached.
- *
- * Flag set mirrors the Rust `oxidize-cli` conventions and the learned user
- * preferences (--numa, --auto/--no-auto, --print-plan, --serve-api,
- * --threads). --threads/--numa override the autotune plan and are applied
- * by apply_thread_numa_policy() below.
- */
-#include "oxidize/activation.h"   /* ensure link for forward deps */
+#include "oxidize/activation.h"
 #include "oxidize/autotune.h"
 #include "oxidize/numa.h"
 #include "oxidize/parallel.h"
@@ -50,10 +35,8 @@
  * itself lives in version.h, shared with the server's /openapi.json. */
 #define OC_CLI_VERSION OC_VERSION
 
-/* Apply the context cap to an already-loaded model. `requested` is the --ctx
- * value (0 = use the default cap). Shared by every path in this file that
- * loads a model; the server especially needs it, because a session — and so a
- * full KV cache — is created per request. */
+/* Apply the context cap to an already-loaded model. */
+/* loads a model; the server especially needs it, because a session — and so a */
 static void cap_model_ctx(OcLlamaModel *model, uint32_t requested)
 {
     if (model == NULL || model->cfg.n_ctx == 0) return;
@@ -65,14 +48,7 @@ static void cap_model_ctx(OcLlamaModel *model, uint32_t requested)
     model->cfg.n_ctx = want;
 }
 
-/* Size and start the compute pool. Called once, early, so that every mode —
- * generation, bench, serve, and the subcommands — gets a threaded forward
- * pass; previously only the autotune path touched threading and the forward
- * pass ran on a single core regardless.
- *
- * Default is physical cores, not logical: these kernels are memory-bandwidth
- * bound, so the second SMT thread on a core mostly adds contention. --threads
- * overrides, and --auto may refine it later once the model is fingerprinted. */
+/* Size and start the compute pool. Called once, early, so that every mode — */
 static void init_compute_threads(int requested)
 {
     size_t n;
@@ -144,12 +120,8 @@ static void print_help(void)
     OC_CLI_VERSION);
 }
 
-/* ─── Generation ──────────────────────────────────────────────────────── */
 
-/* Apply the thread + NUMA half of a tuning plan, honoring explicit CLI
- * overrides. NUMA policy binds this process to a socket; the thread count
- * resizes the compute pool (already started by init_compute_threads) and
- * drives the parallel weight prefault. */
+/* Apply the thread + NUMA half of a tuning plan, honoring explicit CLI */
 static void apply_thread_numa_policy(const OcCliArgs *args,
                                      const OcTuningPlan *plan,
                                      const OcCpuInfo *cpu,
@@ -173,10 +145,7 @@ static void apply_thread_numa_policy(const OcCliArgs *args,
      * set_mempolicy applies to future faults and does not migrate pages that
      * already exist. */
     if (numa == OC_NUMA_SINGLE) {
-        /* Bind to node 0: the plan picks SINGLE only when the model fits in
-         * one socket's memory, so any single node works and 0 always exists.
-         * Bind both the threads (affinity) and the pages (mempolicy) — CPU
-         * affinity alone still lets pages land on the far node. */
+        /* Bind to node 0: the plan picks SINGLE only when the model fits in one socket's memory, so any single node works and 0 always exists. */
         if (oc_autotune_bind_to_numa_node(0) == OC_OK) {
             oc_log(OC_LOG_INFO, "autotune: bound to NUMA node 0");
         }
@@ -184,11 +153,7 @@ static void apply_thread_numa_policy(const OcCliArgs *args,
             oc_log(OC_LOG_INFO, "autotune: memory bound to NUMA node 0");
         }
     } else if (numa == OC_NUMA_INTERLEAVE && cpu->numa_nodes > 1) {
-        /* Interleave is NOT the kernel default — MPOL_DEFAULT allocates on
-         * the first-touching thread's local node, so a model faulted in by
-         * threads sitting on one socket lands entirely on that socket and
-         * every read from the other socket crosses the interconnect. Request
-         * it explicitly. */
+        /* Interleave is NOT the kernel default — MPOL_DEFAULT allocates on the first-touching thread's local node, so a model faulted in by threads sitting on one socket lands entirely on that socket and every read from the other socket crosses the interconnect. */
         if (oc_numa_set_policy(OC_NUMA_POLICY_INTERLEAVE, 0) == OC_OK) {
             oc_log(OC_LOG_INFO, "autotune: memory interleaved across %u "
                    "NUMA nodes", cpu->numa_nodes);
@@ -251,15 +216,8 @@ static OcError run_generation(const OcCliArgs *args)
         return e;
     }
 
-    /* Clamp the context before anything sizes a KV cache off it. Models now
-     * advertise context lengths far beyond what their cache can occupy:
-     * Gemma 4 reports 262144, which at its 4096-element KV row needs 515 GB
-     * of f32 cache. Never raise it above the model's own value — the RoPE
-     * tables and the cache indexing both assume positions stay in range. */
-    /* Without --ctx, fall back to OC_CLI_DEFAULT_MAX_CTX rather than the
-     * advertised value. Defaulting to the model's own number means an 8B
-     * Llama-3.1 tries to allocate 34 GB of KV cache before emitting a token,
-     * which is the difference between "slow" and "unusable". */
+    /* Clamp the context before anything sizes a KV cache off it. Models now */
+    /* Without --ctx, fall back to OC_CLI_DEFAULT_MAX_CTX rather than the advertised value. */
     {
         uint32_t want = args->n_ctx > 0 ? args->n_ctx : OC_CLI_DEFAULT_MAX_CTX;
         if (want < model.cfg.n_ctx) {
@@ -290,11 +248,7 @@ static OcError run_generation(const OcCliArgs *args)
         }
     }
 
-    /* Autotune: detect CPU, fingerprint the model, plan, and apply. The
-     * memory-side policy (hugepages/mlock) goes to the mmap'd weights;
-     * thread and NUMA policy are applied here (see apply_thread_numa_policy).
-     * Explicit --threads/--numa always win over the plan, so the policy runs
-     * even without --auto when the user asked for something specific. */
+    /* Autotune: detect CPU, fingerprint the model, plan, and apply. The memory-side policy (hugepages/mlock) goes to the mmap'd weights; */
     if (args->auto_tune || args->threads > 0 ||
         (args->numa && strcmp(args->numa, "none") != 0)) {
         OcCpuInfo cpu;
@@ -376,13 +330,7 @@ static OcError run_generation(const OcCliArgs *args)
     uint32_t recent[RECENT_CAP];
     size_t recent_len = 0;
 
-    /* Prefill. Every prompt token is known up front, so on CPU they go
-     * through oc_llama_prefill(), which pushes a chunk of them through each
-     * weight matrix together instead of sweeping the whole model once per
-     * token. The last token's logits seed the generation loop.
-     *
-     * The CUDA path keeps the per-token loop: its forward already uploads the
-     * weights once and the batched CPU scratch would not help it. */
+    /* Prefill. Every prompt token is known up front, so on CPU they go */
     float *logits = sess.logits;
     uint32_t next_tok = ids[n_ids - 1];
     const double prefill_start = wall_now();
@@ -548,16 +496,12 @@ static void print_metadata_value(const OcGgufMetadataValue *value)
     }
 }
 
-/* ─── Entrypoint ──────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv)
 {
     oc_log_init_from_env();
 
-    /* Subcommand form (`oxidize-c quantize --input ... --output ...`) takes
-     * precedence. Falls through to the flag-only form when argv[1] is not a
-     * known subcommand, so the original `--model/--prompt` invocation and
-     * every existing script keep working. */
+    /* Subcommand form (`oxidize-c quantize --input ... --output ...`) takes */
     OcCliContext ctx;
     if (oc_cli_context_parse(argc, argv, &ctx)) {
         init_compute_threads(ctx.threads);

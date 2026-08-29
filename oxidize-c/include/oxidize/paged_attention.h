@@ -1,20 +1,3 @@
-/*
- * paged_attention.h — vLLM-style paged KV cache management + scheduling.
- *
- * Port of oxidize-core/src/paged_attention/. The Rust module provides block
- * allocation, prefix caching, and FCFS scheduling but no attention kernel.
- * This C port adds a paged attention scatter/gather kernel that uses block
- * tables to compute attention over physically scattered KV cache pages.
- *
- * Design:
- *   - BlockPool: fixed pool of physical KV blocks with ref-counting, free
- *     list, and prefix-cache hash map (FNV-1a cumulative token hash).
- *   - BlockTable: per-sequence logical→physical block mapping.
- *   - Scheduler: FCFS queue with prefill chunking, decode, prefix cache hits,
- *     COW on shared decode blocks, and preemption.
- *   - Paged attention kernel: gathers KV from physical blocks via the block
- *     table, computes online softmax attention per head.
- */
 #ifndef OXIDIZE_PAGED_ATTENTION_H
 #define OXIDIZE_PAGED_ATTENTION_H
 
@@ -29,13 +12,11 @@
 extern "C" {
 #endif
 
-/* ─── Types ────────────────────────────────────────────────────────────── */
 
 typedef uint32_t OcBlockId;    /* physical block identifier (0..num_blocks-1) */
 typedef uint64_t OcBlockHash;  /* FNV-1a cumulative hash                      */
 typedef uint64_t OcSeqId;      /* sequence identifier                         */
 
-/* ─── BlockPool ────────────────────────────────────────────────────────── */
 
 typedef struct OcBlockPoolConfig {
     uint32_t block_size;     /* tokens per block (default 16)               */
@@ -87,7 +68,6 @@ OcBlockId oc_block_pool_lookup_prefix(OcBlockPool *pool, OcBlockHash hash);
 void oc_block_pool_insert_prefix(OcBlockPool *pool, OcBlockHash hash, OcBlockId id);
 bool oc_block_pool_evict_lru(OcBlockPool *pool);
 
-/* ─── BlockTable ───────────────────────────────────────────────────────── */
 
 typedef struct OcBlockTable {
     OcBlockId *logical_to_physical;  /* dynamic array                        */
@@ -107,7 +87,6 @@ size_t  oc_block_table_blocks_needed(const OcBlockTable *bt, size_t n_tokens);
 OcError oc_block_table_truncate(OcBlockTable *bt, size_t n_tokens,
                                 OcBlockId *freed, size_t *n_freed);
 
-/* ─── Sequence ──────────────────────────────────────────────────────────── */
 
 typedef enum {
     OC_SEQ_WAITING = 0,
@@ -140,7 +119,6 @@ bool oc_seq_is_finished(const OcPagedSequence *seq);
 size_t oc_seq_total_tokens(const OcPagedSequence *seq);
 OcError oc_seq_append_token(OcPagedSequence *seq, uint32_t token);
 
-/* ─── Scheduler ────────────────────────────────────────────────────────── */
 
 typedef struct OcSchedulerConfig {
     size_t max_num_batched_tokens;  /* default 512                         */
@@ -187,25 +165,6 @@ OcError oc_scheduler_postprocess(OcScheduler *sched,
 OcError oc_scheduler_preempt(OcScheduler *sched, OcSeqId id);
 void    oc_scheduler_invalidate_prefix_cache(OcScheduler *sched);
 
-/* ─── Paged attention kernel ──────────────────────────────────────────────
- *
- * Computes attention for a single query position, gathering KV cache entries
- * from physical blocks via the block table. Online softmax (numerically
- * stable, single pass).
- *
- *   kv_cache    : flat array containing a complete K region followed by a
- *                 complete V region; each region is
- *                 [num_blocks][block_size][num_kv_heads][head_dim] of f32,
- *                 so allocate 2 * num_blocks * block_size * num_kv_heads *
- *                 head_dim floats
- *   block_table : maps logical → physical blocks
- *   q           : query vector [head_dim]
- *   n_kv_heads  : number of KV heads (for GQA, q_head maps to kv_head = q_head / group_size)
- *   kv_head     : which KV head to attend to
- *   n_past      : number of past tokens to attend to
- *   head_dim    : dimension per head
- *   out         : output [head_dim]
- */
 void oc_paged_attention_head(
     const float *kv_cache,
     const OcBlockId *block_table, /* logical → physical                       */

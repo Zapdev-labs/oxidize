@@ -1,11 +1,3 @@
-/*
- * bytes.h — OcBytes byte buffer utilities for serialization.
- *
- * Owning or borrowing byte buffer with append and read primitives
- * (little-endian). Port concept: oxidize-core/src/util/bytes.rs (the Rust
- * side centralizes mmap + byte reads; here OcBytes provides a growable
- * buffer for serialization / deserialization).
- */
 #ifndef OXIDIZE_BYTES_H
 #define OXIDIZE_BYTES_H
 

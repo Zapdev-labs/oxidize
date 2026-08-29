@@ -44,14 +44,6 @@ func DetectArchitecture(metadata map[string]ggufcore.MetadataValue) Architecture
 }
 
 // MapHFTensorName converts a HuggingFace-style tensor name to the canonical
-// llama.cpp / GGUF naming. The transformation covers:
-//   - `model.layers.N.*` -> `blk.N.*`
-//   - `model.embed_tokens.weight` -> `token_embd.weight`
-//   - `model.norm.weight` -> `output_norm.weight`
-//   - `lm_head.weight` -> `output.weight`
-//   - `model.layers.N.self_attn.*` -> `blk.N.attn_*`
-//   - `model.layers.N.mlp.*` -> `blk.N.ffn_*`
-//   - MoE experts: `model.layers.N.mlp.experts.*` -> `blk.N.ffn_*_exps.*`
 func MapHFTensorName(name string) string {
 	if !strings.HasPrefix(name, "model.") && !strings.HasPrefix(name, "lm_head") {
 		return name
@@ -88,9 +80,6 @@ func MapHFTensorName(name string) string {
 			}
 			child := rest[1]
 			// Preserve the trailing ".weight"/".bias" so attention biases
-			// (present in Qwen2 etc.) map to attn_*.bias instead of colliding
-			// with the weight tensor. Dropping/mis-naming them silently breaks
-			// attention and yields fluent-but-incoherent output.
 			suffix := rest[len(rest)-1]
 			switch child {
 			case "q_proj":

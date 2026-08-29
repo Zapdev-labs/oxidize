@@ -1,10 +1,3 @@
-/*
- * activation_stats.h — per-column activation statistics for Wanda pruning.
- *
- * Collects L2 norms of activations flowing into linear layers during
- * calibration runs. These stats are consumed by the Wanda pruner to
- * compute importance scores = |W| * ||X||_2.
- */
 #ifndef OXIDIZE_ACTIVATION_STATS_H
 #define OXIDIZE_ACTIVATION_STATS_H
 

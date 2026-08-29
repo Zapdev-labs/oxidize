@@ -1,9 +1,3 @@
-/*
- * diffusion.h — Diffusion model support for text-to-image generation.
- *
- * Provides a simple diffusion scheduler and denoising loop for
- * Gemma-based diffusion models. Port from oxidize-core/src/model/diffusion_gemma.rs.
- */
 #ifndef OXIDIZE_DIFFUSION_H
 #define OXIDIZE_DIFFUSION_H
 

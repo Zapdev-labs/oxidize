@@ -1,11 +1,3 @@
-/*
- * bytes.h — byte-level read primitives (little-endian).
- *
- * Port of oxidize-core/src/util/bytes.rs (read_le_i16, etc.) to C. All reads
- * are bounds-checked against `len`; out-of-range reads return 0 and do not
- * crash. The oxidize-core Rust impl relies on the caller bounds-checking;
- * here we centralize it.
- */
 #ifndef OXIDIZE_UTIL_BYTES_H
 #define OXIDIZE_UTIL_BYTES_H
 

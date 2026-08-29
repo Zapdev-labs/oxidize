@@ -1,22 +1,3 @@
-/*
- * http.h — minimal dependency-free HTTP/1.1 server.
- *
- * Implements the `server-http-core` feature: a thread-pooled TCP server that
- * parses HTTP/1.1 requests and dispatches them to a caller-provided handler.
- * Uses only libc + libpthread (no external HTTP library), matching the
- * project's dependency-free convention.
- *
- * Scope: enough to serve the OpenAI-compatible routes (POST JSON, GET
- * /v1/models). NOT a general-purpose HTTP server — no keep-alive pipelining,
- * no chunked transfer-encoding (responses are sent with Content-Length and
- * Connection: close). Sufficient for single-client dev use and the
- * `oxidize run`/`--serve-api` workflow.
- *
- * Thread model: a fixed-size worker pool accepts connections from a listening
- * socket. Each request is handled synchronously in the worker thread. The
- * caller's handler receives the parsed method, path, headers, and body, and
- * writes the response status + JSON body.
- */
 #ifndef OXIDIZE_HTTP_H
 #define OXIDIZE_HTTP_H
 
@@ -46,10 +27,7 @@ typedef enum {
 
 typedef bool (*OcHttpStreamWrite)(void *context, const char *data, size_t len);
 
-/* A parsed HTTP request. `body` is NUL-terminated for convenience (the
- * additional NUL is appended beyond content_length). All string fields
- * alias into the request buffer owned by the server (valid for the duration
- * of the handler call only). */
+/* A parsed HTTP request. */
 typedef struct OcHttpRequest {
     OcHttpMethod method;
     const char *path;             /* e.g. "/v1/chat/completions"            */
@@ -66,10 +44,7 @@ typedef struct OcHttpRequest {
     void             *stream_context;
 } OcHttpRequest;
 
-/* Caller-provided handler. Writes the response status code, Content-Type
- * (defaults to application/json), and JSON body. `body` may be NULL for an
- * empty 204 response. The handler must NOT retain pointers into `req` after
- * returning (the buffer is reused for the next request). */
+/* Caller-provided handler. Writes the response status code, Content-Type empty 204 response. The handler must NOT retain pointers into `req` after */
 typedef void (*OcHttpHandler)(const OcHttpRequest *req,
                               int *out_status,
                               const char **out_content_type,
@@ -95,10 +70,7 @@ typedef struct OcHttpServer {
     bool         joined;        /* true after oc_http_server_join          */
 } OcHttpServer;
 
-/* Start a server bound to `host`:`port` with `n_threads` worker threads.
- * `host` may be NULL (binds to 0.0.0.0) or "127.0.0.1". Returns OC_OK and
- * fills `*out`, or OC_ERR_NETWORK (bind/listen failed), OC_ERR_OOM, or
- * OC_ERR_INVALID_ARG. The server runs until oc_http_server_stop(). */
+/* Start a server bound to `host`:`port` with `n_threads` worker threads. */
 OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
                              OcHttpHandler handler, void *user_data,
                              OcHttpServer *out);
@@ -114,11 +86,7 @@ OcError oc_http_server_start_configured(const char *host, uint16_t port,
 void oc_http_server_set_stream_authorizer(OcHttpServer *s,
                                           OcHttpStreamAuthorize authorize);
 
-/* Extra response headers (typically CORS). Empty string omits them.
- * Configure a zeroed OcHttpServer, then start with
- * oc_http_server_start_configured. oc_http_server_start memsets `out`
- * and drops extra_headers and stream_authorize. Returns
- * OC_ERR_INVALID_ARG if the block does not fit (no silent truncation). */
+/* Extra response headers (typically CORS). Empty string omits them. */
 OcError oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers);
 
 /* Block until the server stops (or returns immediately if already stopped).

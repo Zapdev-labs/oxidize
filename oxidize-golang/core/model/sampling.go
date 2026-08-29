@@ -72,9 +72,6 @@ func (g *GrammarConstraint) AddProduction(name string, body []GrammarSymbol) {
 }
 
 // AllowsToken reports whether the given token is currently allowed by the
-// grammar. This is a simplified check that returns true when the grammar has
-// no productions yet or when the token is listed in the matching production
-// for the start symbol.
 func (g *GrammarConstraint) AllowsToken(token Token, _ []Token) bool {
 	if g == nil {
 		return true
@@ -539,13 +536,6 @@ func residualProbs(target, draft []float32) []float32 {
 }
 
 // SpeculativeDecodeLogits verifies draft tokens against precomputed target
-// logits using the speculative acceptance/rejection rule with residual
-// fallback. It is a faithful port of speculative_decode in sampling.rs.
-//
-//   - draftTokens:  proposed tokens (len = N)
-//   - draftLogits:  draft model logits per proposed token (len = N)
-//   - targetLogits: target model logits (len = N+1; last is the bonus position)
-//   - randoms:      random draws in [0,1) (len >= N+1)
 func SpeculativeDecodeLogits(draftTokens []Token, draftLogits, targetLogits []Logits, cfg SamplingConfig, randoms []float32) (SpeculativeVerifyResult, error) {
 	n := len(draftTokens)
 	if n == 0 || len(draftLogits) != n || len(targetLogits) != n+1 || len(randoms) < n+1 {
@@ -661,9 +651,6 @@ func SampleMirostat(logits Logits, config MirostatConfig, lastSurprise float32) 
 }
 
 // SampleMirostatV2 is a fully-validated Mirostat v2 sampler that mirrors
-// sample_mirostat in sampling.rs: it validates temperature, tau/eta/mu and the
-// random draw, builds a temperature-scaled softmax, picks the token whose
-// surprisal is closest to the running target mu, and returns the updated mu.
 func SampleMirostatV2(logits Logits, temperature float32, config MirostatConfig, mu, random float32) (Token, float32, error) {
 	if len(logits) == 0 {
 		return 0, mu, &SamplingError{Message: "empty logits"}

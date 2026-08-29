@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── ConvRing ─────────────────────────────────────────────────────────── */
 
 OcError oc_ssm_conv_ring_init(OcSsmConvRing *ring, size_t capacity, size_t dim)
 {
@@ -65,7 +64,6 @@ size_t oc_ssm_conv_ring_len(const OcSsmConvRing *ring)
     return ring ? ring->len : 0;
 }
 
-/* ─── Engine ──────────────────────────────────────────────────────────── */
 
 OcError oc_ssm_engine_init(OcSsmEngine *engine, size_t n_layers, size_t state_dim,
                            size_t conv_capacity, size_t conv_dim)

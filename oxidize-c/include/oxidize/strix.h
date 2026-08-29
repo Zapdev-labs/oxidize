@@ -1,9 +1,3 @@
-/*
- * strix.h — Structured output (JSON/regex) constrained generation.
- *
- * Forces model output to conform to JSON schema or regex patterns.
- * Port from oxidize-core/src/model/strix.rs.
- */
 #ifndef OXIDIZE_STRIX_H
 #define OXIDIZE_STRIX_H
 

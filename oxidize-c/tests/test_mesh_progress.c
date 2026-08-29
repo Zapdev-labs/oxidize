@@ -1,13 +1,10 @@
-/* test_mesh_progress.c — Distributed task progress tracking tests. */
 #include <criterion/criterion.h>
 #include "oxidize/mesh_progress.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
-/* ----------------------------------------------------------------- */
 /* init.                                                              */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, init)
 {
@@ -22,9 +19,7 @@ Test(mesh_progress, init_null)
     cr_assert_neq(oc_mesh_progress_init(NULL), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* add.                                                               */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, add_basic)
 {
@@ -58,9 +53,7 @@ Test(mesh_progress, add_duplicate_task)
     cr_assert_eq(t.count, 1u);
 }
 
-/* ----------------------------------------------------------------- */
 /* update.                                                            */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, update_progress)
 {
@@ -105,9 +98,7 @@ Test(mesh_progress, update_null_args)
     cr_assert_neq(oc_mesh_progress_update(&t, "t", OC_PROGRESS__COUNT, 0.5f, "m"), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* progress clamping.                                                 */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, progress_clamp_high)
 {
@@ -139,9 +130,7 @@ Test(mesh_progress, progress_clamp_nan)
     cr_assert_float_eq(e->progress, 0.0f, 1e-6f);
 }
 
-/* ----------------------------------------------------------------- */
 /* get.                                                               */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, get_not_found)
 {
@@ -159,9 +148,7 @@ Test(mesh_progress, get_null)
     cr_assert_null(oc_mesh_progress_get(&t, NULL));
 }
 
-/* ----------------------------------------------------------------- */
 /* overall progress.                                                  */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, overall_empty)
 {
@@ -201,9 +188,7 @@ Test(mesh_progress, overall_null)
     cr_assert_float_eq(oc_mesh_progress_overall(NULL), 0.0f, 1e-6f);
 }
 
-/* ----------------------------------------------------------------- */
 /* state_name + count_by_state.                                       */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, state_name)
 {
@@ -237,9 +222,7 @@ Test(mesh_progress, count_by_state_null)
     cr_assert_eq(oc_mesh_progress_count_by_state(NULL, OC_PROGRESS_PENDING), 0u);
 }
 
-/* ----------------------------------------------------------------- */
 /* cancel_all.                                                        */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, cancel_all)
 {
@@ -265,9 +248,7 @@ Test(mesh_progress, cancel_all_null)
     cr_assert_neq(oc_mesh_progress_cancel_all(NULL), OC_OK);
 }
 
-/* ----------------------------------------------------------------- */
 /* Overflow: max 128 entries.                                         */
-/* ----------------------------------------------------------------- */
 
 Test(mesh_progress, overflow_max_entries)
 {

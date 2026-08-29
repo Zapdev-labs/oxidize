@@ -1,15 +1,3 @@
-/*
- * seq_scheduler.h — vLLM-style sequence scheduler.
- *
- * Manages incoming inference requests, allocates KV cache pages, and
- * schedules batches for processing. Implements the standard vLLM
- * scheduling loop:
- *   - Prefill: process prompts of WAITING sequences if capacity available.
- *   - Decode: generate next token for RUNNING sequences.
- *   - Swap: move sequences to/from SWAPPED based on memory pressure.
- *
- * See include/oxidize/kv_page.h for the underlying page manager.
- */
 #ifndef OXIDIZE_SEQ_SCHEDULER_H
 #define OXIDIZE_SEQ_SCHEDULER_H
 
@@ -24,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ────────────────────────────────────────────────────────── */
 
 #define OC_SEQ_SCHED_DEFAULT_MAX_BATCH_SIZE    32
 #define OC_SEQ_SCHED_DEFAULT_MAX_TOTAL_TOKENS  8192
@@ -32,7 +19,6 @@ extern "C" {
 #define OC_SEQ_SCHED_MAX_PAGES_PER_SEQ         64
 #define OC_SEQ_SCHED_MAX_BATCH                 32
 
-/* ─── Sequence state ───────────────────────────────────────────────────── */
 
 typedef enum {
     OC_SEQ_STATE_WAITING  = 0,
@@ -42,7 +28,6 @@ typedef enum {
     OC_SEQ_STATE_ABORTED  = 4,
 } OcSeqState;
 
-/* ─── Request ──────────────────────────────────────────────────────────── */
 
 /* A single inference request submitted by the caller. The scheduler copies
  * prompt_tokens (caller retains ownership of the input array). */
@@ -54,7 +39,6 @@ typedef struct OcSeqRequest {
     float    temperature;                 /* sampling temperature (>= 0)    */
 } OcSeqRequest;
 
-/* ─── Sequence info ────────────────────────────────────────────────────── */
 
 typedef struct OcSeqInfo {
     OcSeqRequest request;        /* copied request (owns prompt_tokens)    */
@@ -66,7 +50,6 @@ typedef struct OcSeqInfo {
     size_t       n_generated;    /* number of tokens generated so far      */
 } OcSeqInfo;
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 typedef struct OcSeqSchedulerConfig {
     uint32_t max_batch_size;     /* max concurrent running sequences       */
@@ -77,7 +60,6 @@ typedef struct OcSeqSchedulerConfig {
 /* Returns a sensible default config. */
 OcSeqSchedulerConfig oc_seq_sched_config_default(void);
 
-/* ─── Batch ────────────────────────────────────────────────────────────── */
 
 typedef struct OcSeqBatch {
     uint64_t seq_ids[OC_SEQ_SCHED_MAX_BATCH]; /* sequence ids in this batch */
@@ -85,7 +67,6 @@ typedef struct OcSeqBatch {
     size_t   n_seqs;                            /* number of sequences      */
 } OcSeqBatch;
 
-/* ─── Scheduler ────────────────────────────────────────────────────────── */
 
 typedef struct OcSeqScheduler {
     OcSeqSchedulerConfig config;
@@ -98,10 +79,7 @@ typedef struct OcSeqScheduler {
     size_t      total_tokens;    /* total tokens currently in use          */
 } OcSeqScheduler;
 
-/* Allocate and initialize a scheduler. If page_mgr is non-NULL, the
- * scheduler will allocate/free pages from it; otherwise it just tracks
- * token counts. Returns OC_ERR_OOM on failure. The caller owns the result
- * and must call oc_seq_sched_free. */
+/* Allocate and initialize a scheduler. If page_mgr is non-NULL, the scheduler will allocate/free pages from it; otherwise it just tracks */
 OcError oc_seq_sched_init(OcSeqScheduler **out, OcSeqSchedulerConfig config,
                            OcKvPageManager *page_mgr);
 
@@ -109,11 +87,7 @@ OcError oc_seq_sched_init(OcSeqScheduler **out, OcSeqSchedulerConfig config,
  * request is malformed or the id already exists, OC_ERR_OOM if full. */
 OcError oc_seq_sched_add(OcSeqScheduler *sched, const OcSeqRequest *request);
 
-/* Schedule the next batch (prefill + decode).
- *   - Prefill: process prompts of WAITING sequences if capacity available.
- *   - Decode: generate next token for RUNNING sequences.
- *   - Swap: move sequences to/from SWAPPED based on memory pressure.
- * Returns OC_OK even if out_batch.n_seqs == 0 (nothing to do). */
+/* Schedule the next batch (prefill + decode). */
 OcError oc_seq_sched_schedule(OcSeqScheduler *sched, OcSeqBatch *out_batch);
 
 /* Append a generated token to a sequence. Transitions WAITING -> RUNNING

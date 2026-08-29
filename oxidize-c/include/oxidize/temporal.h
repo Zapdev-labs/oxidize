@@ -1,10 +1,3 @@
-/*
- * temporal.h — Video temporal aggregation.
- *
- * Combines per-frame features into video-level representations via pooling
- * (mean / max / last) or learned attention / LSTM stubs. Port concept:
- * oxidize-core/src/video/temporal.rs.
- */
 #ifndef OXIDIZE_TEMPORAL_H
 #define OXIDIZE_TEMPORAL_H
 

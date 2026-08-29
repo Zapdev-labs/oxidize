@@ -1,12 +1,3 @@
-/*
- * quantize_tool.c — offline GGUF weight quantization tool.
- *
- * Reads an input GGUF, dequantizes each weight tensor to f32, re-quantizes
- * to the target type, and writes a new GGUF file.
- *
- * The writer is a minimal GGUF v3 writer that copies metadata from the
- * input file, patches tensor type ids, and writes the re-quantized data.
- */
 #include "oxidize/quantize_tool.h"
 
 #include <stdio.h>
@@ -17,7 +8,6 @@
 #include "oxidize/log.h"
 #include "oxidize/quant.h"
 
-/* ─── Type parsing ────────────────────────────────────────────────────── */
 
 OcError oc_quantize_parse_type(const char *str, OcGgufQuantizationType *out)
 {
@@ -61,16 +51,6 @@ static bool target_type_supported(OcGgufQuantizationType type)
     }
 }
 
-/* ─── Minimal GGUF writer ───────────────────────────────────────────────
- *
- * Writes a GGUF v3 file with:
- *   - Copied metadata KV pairs from the source file
- *   - Patched tensor type ids (to the target quant type)
- *   - Re-quantized tensor data
- *
- * Layout: magic | version | tensor_count | kv_count | KV pairs | tensor info
- *         | padding | tensor data
- */
 
 static void write_u32(FILE *f, uint32_t v) { fwrite(&v, 4, 1, f); }
 static void write_u64(FILE *f, uint64_t v) { fwrite(&v, 8, 1, f); }
@@ -148,7 +128,6 @@ static void discard_output(FILE *out, const char *path)
     remove(path);
 }
 
-/* ─── Main quantize function ──────────────────────────────────────────── */
 
 OcError oc_quantize_model(const OcQuantizeConfig *cfg)
 {

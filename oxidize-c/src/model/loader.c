@@ -1,15 +1,3 @@
-/*
- * loader.c — Universal model loader with architecture detection.
- *
- * Orchestrates the existing OcModelLoader (model_loader.h) and OcGgufFile
- * (gguf.h) to provide a high-level load + architecture-detect API. Port
- * of oxidize-core/src/model/loader.rs.
- *
- * The dependency-free C11 port performs architecture detection from GGUF
- * metadata and reports tensor/layer counts from the GGUF tensor table.
- * No weights are actually materialized — `oc_loader_load()` populates
- * `OcLoaderResult` metadata only.
- */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/loader.h"
 #include "oxidize/gguf.h"
@@ -21,12 +9,6 @@
 #include <string.h>
 #include <sys/stat.h>
 
-/* ─── Supported architectures table ───────────────────────────────────
- *
- * Mirrors the 17 architectures recognized in oc_model_arch_from_str()
- * (arch.c). These are the canonical names returned by oc_model_arch_name()
- * for each recognized OcModelArchitecture variant (excluding UNKNOWN).
- */
 static const char *const OC_LOADER_ARCHS[] = {
     "llama", "mistral", "mixtral", "deepseek", "qwen", "gemma",
     "phi", "falcon", "gpt2", "gptj", "gptneox", "minimax",
@@ -38,7 +20,6 @@ static const char *const OC_LOADER_ARCHS[] = {
 #define OC_LOADER_N_ARCHS \
     (sizeof(OC_LOADER_ARCHS) / sizeof(OC_LOADER_ARCHS[0]))
 
-/* ─── Helpers ───────────────────────────────────────────────────────── */
 
 static void copy_str(char *dst, size_t cap, const char *src)
 {
@@ -61,18 +42,13 @@ static void zero_result(OcLoaderResult *result)
     memset(result, 0, sizeof(*result));
 }
 
-/* ─── Init ──────────────────────────────────────────────────────────── */
 
 OcError oc_loader_init(void)
 {
-    /* In the dependency-free C11 port, loader state is process-wide and
-     * requires no heap allocation. This is a no-op placeholder matching
-     * the Rust loader's lazy initialization. Future registry extensions
-     * would register per-arch loaders here. */
+    /* In the dependency-free C11 port, loader state is process-wide and requires no heap allocation. */
     return OC_OK;
 }
 
-/* ─── Load ──────────────────────────────────────────────────────────── */
 
 OcError oc_loader_load(const char *path, OcLoaderResult *result)
 {
@@ -142,7 +118,6 @@ OcError oc_loader_load_with_arch(const char *path, const char *arch,
     return OC_OK;
 }
 
-/* ─── Arch detection ────────────────────────────────────────────────── */
 
 OcError oc_loader_detect_arch(const char *path, char *out_arch,
                               size_t out_size)
@@ -165,7 +140,6 @@ OcError oc_loader_detect_arch(const char *path, char *out_arch,
     return OC_OK;
 }
 
-/* ─── Supported archs ───────────────────────────────────────────────── */
 
 OcError oc_loader_supported_archs(const char **out, uint32_t *n)
 {
@@ -186,7 +160,6 @@ bool oc_loader_is_supported(const char *arch)
     return a != OC_ARCH_UNKNOWN;
 }
 
-/* ─── Cleanup ───────────────────────────────────────────────────────── */
 
 void oc_loader_unload(OcLoaderResult *result)
 {
@@ -194,7 +167,6 @@ void oc_loader_unload(OcLoaderResult *result)
     zero_result(result);
 }
 
-/* ─── Arch name by index ────────────────────────────────────────────── */
 
 const char *oc_loader_arch_name(uint32_t idx)
 {

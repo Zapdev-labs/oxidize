@@ -146,9 +146,7 @@ pub fn all_profiles() -> Vec<GpuProfile> {
     GpuFamily::all().into_iter().map(profile).collect()
 }
 
-// ---------------------------------------------------------------------------
 // Manifest generation
-// ---------------------------------------------------------------------------
 
 /// A request to size a node pool of a given GPU family.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,9 +433,7 @@ pub fn prometheus_rules_yaml() -> String {
     )
 }
 
-// ---------------------------------------------------------------------------
 // Runtime detection
-// ---------------------------------------------------------------------------
 
 /// A physical GPU discovered at runtime via `nvidia-smi`.
 #[derive(Debug, Clone, PartialEq, Eq)]

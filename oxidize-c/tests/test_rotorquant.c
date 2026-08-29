@@ -1,4 +1,3 @@
-/* test_rotorquant.c — RotorQuant (PlanarQuant / IsoQuant) KV compression. */
 #include <criterion/criterion.h>
 #include "oxidize/rotorquant.h"
 #include <math.h>
@@ -65,7 +64,6 @@ static double roundtrip_rel_error(OcRotorQuantVariant variant, unsigned bits,
     return total / (double)n;
 }
 
-/* ─── Init / config ──────────────────────────────────────────────────── */
 
 Test(rotorquant, init_planar_geometry)
 {
@@ -124,7 +122,6 @@ Test(rotorquant, odd_dimension_pads)
     oc_rotorquant_free(&rq);
 }
 
-/* ─── Lloyd-Max solver ───────────────────────────────────────────────── */
 
 Test(rotorquant, lloyd_max_is_sorted_and_symmetric)
 {
@@ -161,7 +158,6 @@ Test(rotorquant, lloyd_max_matches_reference_gaussian)
         cr_assert_float_eq(c[i], unit_3bit[i] * sigma, 1e-4f);
 }
 
-/* ─── Rotation correctness ───────────────────────────────────────────── */
 
 Test(rotorquant, unrotate_inverts_rotate)
 {
@@ -211,10 +207,7 @@ Test(rotorquant, rotation_preserves_norm)
     }
 }
 
-/* Regression guard for the V-cache bug in the reference: decoding with the
- * FORWARD rotation instead of its inverse still yields a finite, unit-ish
- * vector, so only an explicit error comparison catches it. Here we simulate
- * the wrong decode and assert it is dramatically worse than the real one. */
+/* Regression guard for the V-cache bug in the reference: decoding with the FORWARD rotation instead of its inverse still yields a finite, unit-ish vector, so only an explicit error comparison catches it. */
 Test(rotorquant, inverted_rotation_regression)
 {
     OcRotorQuantVariant variants[2] = {OC_RQ_PLANAR, OC_RQ_ISO};
@@ -267,7 +260,6 @@ Test(rotorquant, inverted_rotation_regression)
     }
 }
 
-/* ─── Round-trip quality ─────────────────────────────────────────────── */
 
 /* Bounds come from the Lloyd-Max Gaussian distortion: rel L2 error ~
  * sqrt(D_b) with D_b = 0.1175 / 0.03454 / 0.009497 for 2/3/4 bits, i.e.
@@ -329,7 +321,6 @@ Test(rotorquant, zero_vector_roundtrips)
     oc_rotorquant_free(&rq);
 }
 
-/* ─── Determinism, batching, packing ─────────────────────────────────── */
 
 Test(rotorquant, same_seed_decodes_other_instance)
 {

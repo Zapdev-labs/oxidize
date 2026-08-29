@@ -1,9 +1,3 @@
-/* bytes.c — byte-level read primitives (little-endian).
- *
- * Port of oxidize-core/src/util/bytes.rs (read_le_i16, read_volatile_byte, etc.)
- * to C. All reads are bounds-checked against `len`; out-of-range reads return
- * 0 and do not crash (no UB).
- */
 #include "oxidize/util/bytes.h"
 
 #include <string.h>

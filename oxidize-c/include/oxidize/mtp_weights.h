@@ -1,11 +1,3 @@
-/*
- * mtp_weights.h — Multi-Token Prediction (MTP/nextn) weight bundle.
- *
- * Port of oxidize-core/src/model/inference.rs::MtpWeights.
- *
- * Contains the weight tensors for the MTP/nextn draft layer that lives
- * after the causal backbone in GGUF (`blk.N.nextn.*`).
- */
 #ifndef OXIDIZE_MTP_WEIGHTS_H
 #define OXIDIZE_MTP_WEIGHTS_H
 

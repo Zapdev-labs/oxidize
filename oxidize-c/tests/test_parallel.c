@@ -1,16 +1,5 @@
-/*
- * test_parallel.c — worker pool + threaded matvec.
- *
- * The load-bearing property is that splitting the matvec row loop across
- * threads does not change the numbers. Each output row is one dot product
- * accumulated by a single thread in ascending order, so the result must be
- * bit-identical to the serial path at any thread count — these tests compare
- * raw float bits, not a tolerance, because a tolerance would hide exactly the
- * reassociation bug they exist to catch.
- *
- * Every test restores the pool to 1 thread on the way out; the rest of the
- * suite assumes the inline default.
- */
+/* test_parallel.c — worker pool + threaded matvec. */
+/* raw float bits, not a tolerance, because a tolerance would hide exactly the */
 #include <criterion/criterion.h>
 
 #include "oxidize/matvec.h"
@@ -28,7 +17,6 @@ static float frand(uint32_t *s)
     return (float)((int32_t)(*s >> 8) % 2000 - 1000) / 1000.0f;
 }
 
-/* ─── pool basics ────────────────────────────────────────────────────── */
 
 Test(parallel, defaults_to_inline)
 {
@@ -94,7 +82,6 @@ Test(parallel, more_threads_than_items)
     cr_assert_eq(hits[1], 1);
 }
 
-/* ─── f32 matvec parity ──────────────────────────────────────────────── */
 
 Test(parallel, matvec_f32_bit_identical_across_thread_counts)
 {
@@ -126,7 +113,6 @@ Test(parallel, matvec_f32_bit_identical_across_thread_counts)
     free(w); free(x); free(serial); free(par);
 }
 
-/* ─── quantized matvec parity ────────────────────────────────────────── */
 
 /* Q8_0 keeps the fixture simple: 32-value blocks, f16 scale + 32 int8. */
 Test(parallel, matvec_quantized_bit_identical_across_thread_counts)

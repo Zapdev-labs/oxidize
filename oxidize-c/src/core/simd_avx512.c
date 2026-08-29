@@ -1,14 +1,4 @@
-/*
- * simd_avx512.c — AVX-512 BW + DQ + VNNI dequant kernels.
- *
- * Compiled into EVERY build; each kernel is annotated
- * `__attribute__((target("avx512f,avx512bw,avx512dq,avx512vnni")))` so the
- * same binary runs on non-AVX512 hosts (dispatcher selects them only on
- * capable CPUs).
- *
- * Processes 16 elements per vector op (vs 8 for AVX2). Bit-exactness contract
- * is identical to simd_avx2.c — see that file's header comment.
- */
+/* simd_avx512.c — AVX-512 BW + DQ + VNNI dequant kernels. Processes 16 elements per vector op (vs 8 for AVX2). Bit-exactness contract */
 #include "oxidize/simd.h"
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -27,7 +17,6 @@ f16_broadcast_f32x16(const uint8_t *p)
     return _mm512_cvtph_ps(wide);                    /* 16×f32 */
 }
 
-/* ─── Q8_0 (block: f16 d, 32×int8) ────────────────────────────────────── */
 
 __attribute__((target("avx512f,avx512bw,avx512dq,avx512vnni")))
 bool oc_simd_dequant_q8_0_avx512(const uint8_t *src, size_t src_len,
@@ -54,7 +43,6 @@ bool oc_simd_dequant_q8_0_avx512(const uint8_t *src, size_t src_len,
     return true;
 }
 
-/* ─── Q4_0 (block: f16 d, 16 packed bytes → 32 outputs) ────────────────── */
 
 __attribute__((target("avx512f,avx512bw,avx512dq,avx512vnni")))
 bool oc_simd_dequant_q4_0_avx512(const uint8_t *src, size_t src_len,
@@ -87,7 +75,6 @@ bool oc_simd_dequant_q4_0_avx512(const uint8_t *src, size_t src_len,
     return true;
 }
 
-/* ─── Q4_1 (block: f16 d, f16 m, 16 packed bytes → 32 outputs) ─────────── */
 
 __attribute__((target("avx512f,avx512bw,avx512dq,avx512vnni")))
 bool oc_simd_dequant_q4_1_avx512(const uint8_t *src, size_t src_len,
@@ -122,7 +109,6 @@ bool oc_simd_dequant_q4_1_avx512(const uint8_t *src, size_t src_len,
     return true;
 }
 
-/* ─── Q4_K ────────────────────────────────────────────────────────────── */
 
 static inline void get_scale_min_k4_scalar_avx512(size_t j, const uint8_t *scales,
                                                    uint8_t *sc, uint8_t *m)

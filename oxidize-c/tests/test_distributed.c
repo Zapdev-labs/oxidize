@@ -1,15 +1,3 @@
-/*
- * test_distributed.c — tests for the distributed inference scheduler.
- *
- * Tests cover:
- *   - Init / free lifecycle
- *   - Config validation (valid + invalid cases)
- *   - Role resolution
- *   - Stats initialization
- *   - Single-node operation (no communication needed)
- *   - Null / edge-case handling
- *   - Stats JSON formatting
- */
 #include <criterion/criterion.h>
 #include <string.h>
 #include <stdio.h>
@@ -26,9 +14,7 @@
 #define OC_TEST_TP_PORT      52932
 #define OC_TEST_TP_PORT_STR "52932"
 
-/* ------------------------------------------------------------------ */
 /* Helpers                                                            */
-/* ------------------------------------------------------------------ */
 
 static OcDistributedConfig make_single_node_config(void)
 {
@@ -52,9 +38,7 @@ static OcDistributedConfig make_multinode_config(uint32_t n_nodes,
     return cfg;
 }
 
-/* ------------------------------------------------------------------ */
 /* Init / Free                                                        */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, init_single_node)
 {
@@ -100,9 +84,7 @@ Test(distributed, init_multi_node_pipeline)
     oc_distributed_free(&sched);
 }
 
-/* ------------------------------------------------------------------ */
 /* Config validation                                                  */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, validate_config_single_node)
 {
@@ -186,9 +168,7 @@ Test(distributed, validate_config_reject_bad_tensor_rank)
     cr_assert_eq(oc_distributed_validate_config(&cfg), OC_ERR_INVALID_ARG);
 }
 
-/* ------------------------------------------------------------------ */
 /* Role resolution                                                    */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, role_single_node_is_master)
 {
@@ -228,9 +208,7 @@ Test(distributed, role_null_config)
     cr_assert_eq(oc_distributed_resolve_role(NULL), OC_NODE_ROLE_NONE);
 }
 
-/* ------------------------------------------------------------------ */
 /* Stats                                                              */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, stats_init_zero)
 {
@@ -261,9 +239,7 @@ Test(distributed, stats_null_scheduler)
     cr_assert_null(oc_distributed_get_stats(NULL));
 }
 
-/* ------------------------------------------------------------------ */
 /* Single-node operation (no communication needed)                    */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, single_node_send_activations_noop)
 {
@@ -349,9 +325,7 @@ Test(distributed, single_node_get_latency)
     oc_distributed_free(&sched);
 }
 
-/* ------------------------------------------------------------------ */
 /* Null handling                                                      */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, null_scheduler_init)
 {
@@ -431,9 +405,7 @@ Test(distributed, operations_on_uninit_scheduler)
     cr_assert_eq(oc_distributed_barrier(&sched), OC_ERR_INVALID_ARG);
 }
 
-/* ------------------------------------------------------------------ */
 /* Stats JSON format                                                  */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, stats_json_basic)
 {
@@ -517,9 +489,7 @@ Test(distributed, stats_json_small_buffer_truncates)
     oc_distributed_free(&sched);
 }
 
-/* ------------------------------------------------------------------ */
 /* Reconnect                                                          */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, reconnect_single_node_no_peers)
 {
@@ -539,9 +509,7 @@ Test(distributed, reconnect_null_scheduler)
     cr_assert_eq(oc_distributed_reconnect(NULL, 0), OC_ERR_INVALID_ARG);
 }
 
-/* ------------------------------------------------------------------ */
 /* Multi-node pipeline edge cases                                     */
-/* ------------------------------------------------------------------ */
 
 Test(distributed, multi_node_init_times_out_without_peers)
 {

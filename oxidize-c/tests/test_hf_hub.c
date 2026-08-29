@@ -1,13 +1,3 @@
-/*
- * test_hf_hub.c — HuggingFace Hub downloader tests.
- *
- * Covers the offline-testable surface: config defaults, cache path
- * construction, model filename parsing, null handling, empty-cache
- * listing, and progress struct initialization. Network-dependent
- * functions (oc_hf_list_models, oc_hf_download, oc_hf_resolve against
- * the real Hub) are not exercised here — they require live connectivity
- * and are validated manually.
- */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 #include <criterion/redirect.h>
@@ -20,7 +10,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* ─── Config defaults ────────────────────────────────────────────────── */
 
 Test(hf_hub, config_init_defaults)
 {
@@ -55,7 +44,6 @@ Test(hf_hub, config_init_preserves_token)
     cr_assert_str_eq(cfg.api_token, "hf_testtoken");
 }
 
-/* ─── Cache path construction ────────────────────────────────────────── */
 
 Test(hf_hub, cache_path_basic)
 {
@@ -120,7 +108,6 @@ Test(hf_hub, cache_path_truncates_long_input)
                  OC_ERR_INVALID_ARG);
 }
 
-/* ─── Model name parsing ────────────────────────────────────────────── */
 
 Test(hf_hub, is_gguf_case_insensitive)
 {
@@ -183,7 +170,6 @@ Test(hf_hub, parse_quant_null_out)
     cr_assert(!oc_hf_parse_quant_type("model.Q4_K_M.gguf", NULL, 0));
 }
 
-/* ─── Repo ID sanitization ───────────────────────────────────────────── */
 
 Test(hf_hub, sanitize_repo_id_replaces_slashes)
 {
@@ -219,7 +205,6 @@ Test(hf_hub, sanitize_repo_id_rejects_empty)
                  OC_ERR_INVALID_ARG);
 }
 
-/* ─── Default cache dir ──────────────────────────────────────────────── */
 
 Test(hf_hub, default_cache_dir_nonempty)
 {
@@ -237,7 +222,6 @@ Test(hf_hub, default_cache_dir_rejects_bad_args)
     cr_assert_eq(oc_hf_default_cache_dir(dir, 0), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Null handling for list/resolve/download ────────────────────────── */
 
 Test(hf_hub, list_models_rejects_null)
 {
@@ -320,7 +304,6 @@ Test(hf_hub, cache_clean_rejects_null)
     cr_assert_eq(oc_hf_cache_clean(NULL, 0, NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Cache listing (empty cache) ────────────────────────────────────── */
 
 Test(hf_hub, cache_list_empty_cache_returns_zero)
 {
@@ -351,7 +334,6 @@ Test(hf_hub, cache_clean_empty_cache_removes_zero)
     cr_assert_eq(removed, 0u, "empty cache clean removes nothing");
 }
 
-/* ─── Cache listing with a real (temporary) cache ────────────────────── */
 
 Test(hf_hub, cache_list_finds_gguf_files)
 {
@@ -456,7 +438,6 @@ Test(hf_hub, cache_clean_removes_all_when_max_age_zero)
     rmdir(repo_dir); rmdir(tmpl);
 }
 
-/* ─── Progress struct initialization ────────────────────────────────── */
 
 Test(hf_hub, progress_struct_zero_init)
 {
@@ -481,7 +462,6 @@ Test(hf_hub, progress_struct_field_assignment)
     cr_assert_eq(prog.eta, 24.0);
 }
 
-/* ─── Model struct initialization ───────────────────────────────────── */
 
 Test(hf_hub, model_struct_zero_init)
 {

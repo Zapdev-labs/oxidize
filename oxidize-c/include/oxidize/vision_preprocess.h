@@ -1,9 +1,3 @@
-/*
- * vision_preprocess.h — Image preprocessing for vision encoder.
- *
- * Resize, normalize, and augment images for vision model input.
- * Port from oxidize-core/src/vision/preprocess.rs.
- */
 #ifndef OXIDIZE_VISION_PREPROCESS_H
 #define OXIDIZE_VISION_PREPROCESS_H
 

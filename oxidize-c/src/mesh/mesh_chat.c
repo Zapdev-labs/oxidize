@@ -1,8 +1,3 @@
-/*
- * mesh_chat.c — Chat message routing over the mesh network.
- *
- * Port from oxidize-core/src/mesh/chat.rs.
- */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mesh_chat.h"
@@ -10,9 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
 /* Helpers.                                                            */
-/* ------------------------------------------------------------------ */
 
 static void copy_str(char *dst, size_t cap, const char *src)
 {
@@ -32,9 +25,7 @@ static bool role_valid(OcMeshChatRole r)
     return (size_t)r < OC_MESH_CHAT_ROLE__COUNT;
 }
 
-/* ------------------------------------------------------------------ */
 /* Public API.                                                         */
-/* ------------------------------------------------------------------ */
 
 OcError oc_mesh_chat_init(OcMeshChatConversation *conv, const char *conversation_id)
 {

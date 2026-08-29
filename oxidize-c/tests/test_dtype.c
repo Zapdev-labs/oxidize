@@ -1,4 +1,3 @@
-/* test_dtype.c — OcDType tests. */
 #include <criterion/criterion.h>
 #include "oxidize/dtype.h"
 
@@ -39,4 +38,3 @@ Test(dtype, unknown)
     cr_assert_eq(oc_dtype_from_str("ZZZ"), OC_DTYPE_UNKNOWN, "unknown parse");
     cr_assert_eq(oc_dtype_from_str(NULL),  OC_DTYPE_UNKNOWN, "NULL parse");
 }
-

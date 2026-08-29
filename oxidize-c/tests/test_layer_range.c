@@ -1,4 +1,3 @@
-/* test_layer_range.c — run_layer_range + speculative stats tests. */
 #include <criterion/criterion.h>
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"
@@ -160,7 +159,6 @@ Test(layer_range, out_of_bounds)
     oc_inf_model_free(&m);
 }
 
-/* ─── Speculative stats accessors ──────────────────────────────────────── */
 
 Test(spec_stats, acceptance_rate)
 {

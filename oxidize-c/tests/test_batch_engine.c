@@ -1,4 +1,3 @@
-/* test_batch_engine.c — Continuous-batching decode engine tests. */
 #include <criterion/criterion.h>
 #include "oxidize/batch_engine.h"
 #include <string.h>
@@ -213,7 +212,6 @@ Test(batch, free_null)
     oc_batch_engine_free(NULL);
 }
 
-/* ─── Forward callback tests ─────────────────────────────────────────── */
 
 static OcError test_forward_fn(void *ctx, uint32_t token, size_t pos,
                                 OcSeqId seq_id, uint32_t *out_token)

@@ -1,17 +1,3 @@
-/*
- * gguf_writer.c — GGUF v3 file writer implementation.
- *
- * See gguf_writer.h for the public API and on-disk layout.
- *
- * All multi-byte integers are written in little-endian byte order, matching
- * the GGUF spec (and the host is assumed LE, consistent with the parser).
- *
- * Tensor data layout: all tensor info entries are written first (streamed
- * during add_tensor), then at finalize() the data section is aligned to a
- * 32-byte boundary and all buffered tensor data is written. Each tensor
- * info's offset field is patched at finalize time once the data section
- * start is known.
- */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -23,11 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Constants ─────────────────────────────────────────────────────────── */
 
 #define GW_ALIGNMENT 32u
 
-/* ─── Low-level LE write helpers ────────────────────────────────────────── */
 
 static void gw_u32(FILE *fp, uint32_t v)
 {
@@ -80,7 +64,6 @@ static void gw_pad(FILE *fp, uint32_t alignment)
     }
 }
 
-/* ─── Buffered tensor data ──────────────────────────────────────────────── */
 
 /* Each pending tensor's data is buffered in memory; at finalize() we write
  * the aligned data section and patch each tensor info's offset field. */
@@ -124,7 +107,6 @@ static void gw_pending_free(GwPendingList *pl)
     pl->cap = 0;
 }
 
-/* ─── Init / free ──────────────────────────────────────────────────────── */
 
 OcError oc_gguf_writer_init(const char *path, const char *arch_name,
                             OcGgufWriter *w)
@@ -161,7 +143,53 @@ OcError oc_gguf_writer_init(const char *path, const char *arch_name,
     return OC_OK;
 }
 
-/* ─── Metadata writers ─────────────────────────────────────────────────── */
+OcError oc_gguf_writer_init_from_file(const char *path, const OcGgufFile *gf,
+                                     OcGgufWriter *w)
+{
+    if (!gf) return OC_ERR_INVALID_ARG;
+    char arch[64] = "llama";
+    const char *arch_p = NULL;
+    size_t arch_len = 0;
+    if (oc_gguf_metadata_get_str(gf, "general.architecture", &arch_p, &arch_len) &&
+        arch_len > 0 && arch_len < sizeof(arch)) {
+        memcpy(arch, arch_p, arch_len);
+        arch[arch_len] = '\0';
+    }
+    OcError e = oc_gguf_writer_init(path, arch, w);
+    if (e != OC_OK) return e;
+
+    for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
+        const OcGgufMetadataKV *kv = &gf->metadata[i];
+        if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
+        switch (kv->value.type) {
+        case OC_GGUF_MT_UINT32:
+            oc_gguf_writer_add_uint32(w, kv->key, kv->value.v.u32);
+            break;
+        case OC_GGUF_MT_UINT64:
+            oc_gguf_writer_add_uint64(w, kv->key, kv->value.v.u64);
+            break;
+        case OC_GGUF_MT_FLOAT32:
+            oc_gguf_writer_add_float32(w, kv->key, kv->value.v.f32);
+            break;
+        case OC_GGUF_MT_STRING: {
+            char *s = malloc(kv->value.v.str.len + 1);
+            if (!s) {
+                oc_gguf_writer_free(w);
+                return OC_ERR_OOM;
+            }
+            memcpy(s, kv->value.v.str.data, kv->value.v.str.len);
+            s[kv->value.v.str.len] = '\0';
+            oc_gguf_writer_add_string(w, kv->key, s);
+            free(s);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return OC_OK;
+}
+
 
 OcError oc_gguf_writer_add_string(OcGgufWriter *w, const char *key,
                                   const char *value)
@@ -235,7 +263,6 @@ OcError oc_gguf_writer_add_array_string(OcGgufWriter *w, const char *key,
     return OC_OK;
 }
 
-/* ─── Tensor writer ────────────────────────────────────────────────────── */
 
 OcError oc_gguf_writer_add_tensor(OcGgufWriter *w, const char *name,
                                   uint32_t n_dims, const uint64_t *dims,
@@ -287,7 +314,6 @@ OcError oc_gguf_writer_add_tensor(OcGgufWriter *w, const char *name,
     return OC_OK;
 }
 
-/* ─── Finalize ──────────────────────────────────────────────────────────── */
 
 OcError oc_gguf_writer_finalize(OcGgufWriter *w)
 {

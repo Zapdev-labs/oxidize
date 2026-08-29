@@ -1,4 +1,3 @@
-/* test_context_cache.c — context cache tests. */
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include "oxidize/context_cache.h"
@@ -9,9 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------ */
 /* Helpers                                                             */
-/* ------------------------------------------------------------------ */
 
 static OcContextCacheConfig make_mem_cfg(void) {
     OcContextCacheConfig c = oc_context_cache_config_default();
@@ -41,9 +38,7 @@ static uint8_t *make_kv(const char *tag, uint64_t *out_size) {
     return buf;
 }
 
-/* ------------------------------------------------------------------ */
 /* config + init/free                                                  */
-/* ------------------------------------------------------------------ */
 
 Test(context_cache, config_default)
 {
@@ -93,9 +88,7 @@ Test(context_cache, free_null_safe)
     oc_context_cache_free(NULL);
 }
 
-/* ------------------------------------------------------------------ */
 /* store / load roundtrip                                              */
-/* ------------------------------------------------------------------ */
 
 Test(context_cache, store_load_roundtrip_mem)
 {
@@ -233,9 +226,7 @@ Test(context_cache, store_replaces_existing)
     oc_context_cache_free(cc);
 }
 
-/* ------------------------------------------------------------------ */
 /* LRU eviction                                                        */
-/* ------------------------------------------------------------------ */
 
 Test(context_cache, lru_evict_on_max_entries)
 {
@@ -339,9 +330,7 @@ Test(context_cache, lru_updates_on_load)
     oc_context_cache_free(cc);
 }
 
-/* ------------------------------------------------------------------ */
 /* stats + clear                                                       */
-/* ------------------------------------------------------------------ */
 
 Test(context_cache, stats_tracking)
 {
@@ -421,9 +410,7 @@ Test(context_cache, clear_removes_disk_files)
     (void)system("rm -rf /tmp/ox_ctx_cache_clear_disk");
 }
 
-/* ------------------------------------------------------------------ */
 /* TTL expiration                                                      */
-/* ------------------------------------------------------------------ */
 
 Test(context_cache, ttl_expiration)
 {
@@ -479,9 +466,7 @@ Test(context_cache, ttl_zero_disables)
     oc_context_cache_free(cc);
 }
 
-/* ------------------------------------------------------------------ */
 /* helpers: model_hash, session_id, format_stats                       */
-/* ------------------------------------------------------------------ */
 
 Test(context_cache, model_hash_stable_and_nonzero)
 {

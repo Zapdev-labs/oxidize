@@ -165,7 +165,6 @@ void add_repeating_bias_batched(float* y, const std::vector<float>& bias,
 
 }  // namespace
 
-// --- backend dispatch -------------------------------------------------------
 // Each helper routes to the CUDA backend when use_cuda_ (weights resident on the
 // GPU, activation vectors transferred per op) or the CPU tensor.hpp kernels.
 
