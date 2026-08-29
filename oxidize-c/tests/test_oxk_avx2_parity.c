@@ -1,5 +1,5 @@
 /* test_oxk_avx2_parity.c — vectorized OXK kernels vs the scalar reference. */
-/* The OXK invariant is bit-exactness, not approximate agreement: a kernel that */
+/* The OXK invariant is bit-exactness, not approximate agreement: a kernel that merely rounds differently would silently change model output depending on CPU. These compare raw float bits over packed blocks. */
 #include <criterion/criterion.h>
 
 #include "oxidize/oxk.h"

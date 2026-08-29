@@ -1,5 +1,5 @@
 /* oxk_avx2.c — AVX2 optimized OXK kernels. */
-/* Every vectorized kernel here must be BIT-EXACT against its scalar */
+/* Every vectorized kernel here must be BIT-EXACT against its scalar counterpart; test_oxk_avx2_parity.c enforces a raw float comparison. */
 #include "oxidize/oxk.h"
 
 #include <string.h>
@@ -105,7 +105,7 @@ static inline int32_t hsum_i32_8(__m256i v)
     return _mm_cvtsi128_si32(s);
 }
 
-/* Q4_K is the format most models ship in, so this is the kernel that decides throughput in practice. It was forwarding to scalar, which is why Q4_K_M ran so this is bit-exact against it, not merely close. */
+/* Q4_K nibble products stay integer until one multiply-add per block, bit-exact against the scalar reference. */
 __attribute__((target("avx2,f16c")))
 float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)

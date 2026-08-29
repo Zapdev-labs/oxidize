@@ -889,7 +889,7 @@ static void oc_oxk_init_once(void)
     g_ctx.caps.has_neon = has_neon;
     g_ctx.caps.name     = name;
 
-    /* Dispatch table. Scalar is the baseline every architecture falls back implement. Each is bit-exact against the scalar reference invariant here, so installing them changes speed and nothing else. */
+    /* Dispatch table. Scalar is the baseline every architecture falls back to; SIMD entries replace what they implement. Each is bit-exact against the scalar reference. */
     g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_scalar;
     g_ctx.dot_q4_1_q8_0 = oc_oxk_dot_q4_1_q8_0_scalar;
     g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_scalar;

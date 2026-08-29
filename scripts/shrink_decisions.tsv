@@ -13,3 +13,5 @@ ts	phase	decision	why	evidence	result
 2026-08-29T03:35:00Z	cubic-docs	completed truncated public C contracts cubic flagged (VAL notes, ownership, error codes) without restoring 8k banner essays	mashed leftovers made API headers unreadable	oxidize-c/include oxidize-c/src/compute/oxk_neon.c	kept, loc still PASS
 2026-08-29T03:35:00Z	loc-skip	loc_count skips cmake build/CMakeFiles so generated .cpp cannot inflate the gate	a local cmake -B oxidize-cpp/build once counted generated files	scripts/loc_count.py scripts/test_loc_count.py	unittest for skip dirs
 2026-08-29T03:35:00Z	fmt	rustfmt oxidize-ffi and oxidize-finetuning after comment strip left extra blanks	generic CI cargo fmt --check fails on master already; these extra blanks were ours	oxidize-ffi/src/lib.rs oxidize-finetuning/src	fmt-clean on those crates
+2026-08-29T03:40:00Z	sicko-follow	completed remaining mashed BIT-EXACT stumps in oxk.c / oxk_avx2.c; Q5_K prep already names oc_oxk_dot_q5_k_q8_k	Comment Sicko MUST KILL was a bare "against"; later polish named the peer	oxidize-c/src/compute/oxk.c oxk_avx2.c	kept
+
