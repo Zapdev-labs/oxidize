@@ -33,13 +33,13 @@ typedef struct {
  *   use_metal=true, model_path="". */
 void oc_mlx_config_init(OcMlxConfig *cfg);
 
-/* Initialize an engine from a config. */
+/* Initialize an engine from a config. Sets `available` from the host; non-macOS still returns OC_OK (engine valid but unavailable). Returns OC_ERR_INVALID_ARG if any pointer is NULL. */
 OcError oc_mlx_engine_init(OcMlxEngine *engine, const OcMlxConfig *cfg);
 
 /* Load a model from `model_path`. NULL or empty path is OC_ERR_INVALID_ARG on every platform; non-macOS (or no Metal) returns OC_ERR_BACKEND without mutating `loaded`. */
 OcError oc_mlx_engine_load(OcMlxEngine *engine, const char *model_path);
 
-/* Generate tokens. */
+/* Generate tokens. NULL pointers, n_tokens==0, or max_new==0 return OC_ERR_INVALID_ARG; an unloaded engine returns OC_ERR_BACKEND. */
 OcError oc_mlx_engine_generate(OcMlxEngine *engine,
                                 const uint32_t *tokens, size_t n_tokens,
                                 size_t max_new,

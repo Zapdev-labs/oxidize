@@ -62,7 +62,7 @@ typedef struct OcCliArgs {
 void oc_cli_args_defaults(OcCliArgs *a);
 void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a);
 
-/* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext. */
+/* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext. True when argv[1] names a known subcommand (ctx filled in for oc_cli_command_run); false otherwise — caller falls back to oc_cli_parse_args. */
 struct OcCliContext;
 bool oc_cli_context_parse(int argc, char **argv, struct OcCliContext *ctx);
 

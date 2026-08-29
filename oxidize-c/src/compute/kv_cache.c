@@ -91,7 +91,7 @@ OcError oc_kv_cache_append(OcKvCache *cache, uint32_t layer,
     size_t row_size     = (size_t)cfg->n_heads * (size_t)cfg->head_dim;
     size_t layer_offset = (size_t)layer * per_layer;
 
-    /* Write position: for layer 0, the current n_tokens (before advance). */
+    /* Write position: for layer 0, the current n_tokens (before advance); other layers were already advanced by the layer-0 call, so back up by n to write the same token step. */
     size_t write_token;
     if (layer == 0) {
         write_token = cache->n_tokens;
