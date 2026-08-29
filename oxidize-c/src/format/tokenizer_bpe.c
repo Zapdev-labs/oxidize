@@ -49,6 +49,8 @@
 
 #include "oxidize/arena.h"
 #include "oxidize/error.h"
+
+#include "tokenizer_common.h"
 #include "oxidize/gguf.h"
 #include "oxidize/hashtable.h"
 #include "oxidize/log.h"
@@ -165,143 +167,6 @@ static bool gpt2_codepoint_to_byte(uint32_t cp, uint8_t *out_byte)
     return false;
 }
 
-/* ─── u64 → u32 open-addressing hash map (for merge ranks / merged ids) ── */
-
-/* FNV-1a 64-bit hash of a u64 key (mixes the bits; the raw key is already
- * well-distributed from token-id pairs so this mainly avoids pathological
- * clustering for sequential ids). */
-static uint64_t fnv1a_u64(uint64_t key)
-{
-    uint64_t h = 1469598103934665603ull;
-    for (int i = 0; i < 8; ++i) {
-        h ^= (key >> (i * 8)) & 0xFF;
-        h *= 1099511628211ull;
-    }
-    return h;
-}
-
-/* Open-addressing u64→u32 map. Stores values in-line (no pointer indirection).
- * Grows when load factor > 0.7. Uses linear probing. Tombstone-free: we
- * never delete entries during the tokenizer's lifetime. */
-typedef struct {
-    uint64_t *keys;     /* malloc'd, OC_U64_EMPTY = UINT64_MAX marks empty */
-    uint32_t *values;   /* malloc'd, parallel to keys */
-    size_t    cap;       /* power of two */
-    size_t    count;     /* live entries */
-} OcU64Map;
-
-#define OC_U64_EMPTY UINT64_MAX
-
-static OcU64Map *u64map_new(size_t initial_cap)
-{
-    OcU64Map *m = (OcU64Map *)calloc(1, sizeof(OcU64Map));
-    if (!m) return NULL;
-    if (initial_cap < 16) initial_cap = 16;
-    /* Round up to power of two. */
-    size_t cap = 1;
-    while (cap < initial_cap) cap <<= 1;
-    m->keys = (uint64_t *)malloc(cap * sizeof(uint64_t));
-    m->values = (uint32_t *)malloc(cap * sizeof(uint32_t));
-    if (!m->keys || !m->values) {
-        free(m->keys); free(m->values); free(m);
-        return NULL;
-    }
-    for (size_t i = 0; i < cap; ++i) m->keys[i] = OC_U64_EMPTY;
-    m->cap = cap;
-    m->count = 0;
-    return m;
-}
-
-static void u64map_free(OcU64Map *m)
-{
-    if (!m) return;
-    free(m->keys);
-    free(m->values);
-    free(m);
-}
-
-static bool u64map_grow(OcU64Map *m, size_t new_cap)
-{
-    uint64_t *old_keys = m->keys;
-    uint32_t *old_values = m->values;
-    size_t old_cap = m->cap;
-
-    m->keys = (uint64_t *)malloc(new_cap * sizeof(uint64_t));
-    m->values = (uint32_t *)malloc(new_cap * sizeof(uint32_t));
-    if (!m->keys || !m->values) {
-        free(m->keys); free(m->values);
-        m->keys = old_keys; m->values = old_values;
-        return false;
-    }
-    for (size_t i = 0; i < new_cap; ++i) m->keys[i] = OC_U64_EMPTY;
-    m->cap = new_cap;
-    m->count = 0;
-    for (size_t i = 0; i < old_cap; ++i) {
-        if (old_keys[i] != OC_U64_EMPTY) {
-            uint64_t key = old_keys[i];
-            uint32_t hash = (uint32_t)fnv1a_u64(key) & (m->cap - 1);
-            while (m->keys[hash] != OC_U64_EMPTY) {
-                hash = (hash + 1) & (m->cap - 1);
-            }
-            m->keys[hash] = key;
-            m->values[hash] = old_values[i];
-            m->count++;
-        }
-    }
-    free(old_keys);
-    free(old_values);
-    return true;
-}
-
-/* Insert key→value. Returns OC_OK or OC_ERR_OOM. */
-static OcError u64map_put(OcU64Map *m, uint64_t key, uint32_t value)
-{
-    if (key == OC_U64_EMPTY) {
-        /* 0xFFFFFFFFFFFFFFFF is reserved as the empty sentinel; remap it
-         * to a safe placeholder (this never happens in practice because
-         * token ids are u32 and packed pairs never reach UINT64_MAX). */
-        return OC_ERR_INVALID_ARG;
-    }
-    if ((m->count + 1) * 10 >= m->cap * 7) {
-        if (!u64map_grow(m, m->cap << 1)) {
-            return OC_ERR_OOM;
-        }
-    }
-    uint32_t hash = (uint32_t)fnv1a_u64(key) & (m->cap - 1);
-    while (m->keys[hash] != OC_U64_EMPTY) {
-        if (m->keys[hash] == key) {
-            m->values[hash] = value;
-            return OC_OK;
-        }
-        hash = (hash + 1) & (m->cap - 1);
-    }
-    m->keys[hash] = key;
-    m->values[hash] = value;
-    m->count++;
-    return OC_OK;
-}
-
-/* Lookup. Returns true and writes `*out` if found, false otherwise. */
-static bool u64map_get(const OcU64Map *m, uint64_t key, uint32_t *out)
-{
-    if (key == OC_U64_EMPTY) return false;
-    uint32_t hash = (uint32_t)fnv1a_u64(key) & (m->cap - 1);
-    while (m->keys[hash] != OC_U64_EMPTY) {
-        if (m->keys[hash] == key) {
-            *out = m->values[hash];
-            return true;
-        }
-        hash = (hash + 1) & (m->cap - 1);
-    }
-    return false;
-}
-
-/* Pack two u32 token ids into a u64 key (left in high 32 bits). */
-static inline uint64_t pair_key(uint32_t left, uint32_t right)
-{
-    return ((uint64_t)left << 32) | (uint64_t)right;
-}
-
 /* ─── BPE tokenizer state ──────────────────────────────────────────────── */
 
 /* A CONTROL / USER_DEFINED special token piece (e.g. `<|im_start|>`). */
@@ -355,7 +220,7 @@ static OcError find_most_frequent_pair(const OcVector *sequences,
 {
     *out_found = false;
     /* Use a temporary u64→u32 map for pair counts. */
-    OcU64Map *counts = u64map_new(64);
+    OcU64Map *counts = oc_u64map_new(64);
     if (!counts) return OC_ERR_OOM;
 
     uint32_t best_count = 0;
@@ -370,13 +235,13 @@ static OcError find_most_frequent_pair(const OcVector *sequences,
         for (size_t i = 0; i + 1 < n; ++i) {
             uint32_t l = *(const uint32_t *)oc_vector_get(seq, i);
             uint32_t r = *(const uint32_t *)oc_vector_get(seq, i + 1);
-            uint64_t key = pair_key(l, r);
+            uint64_t key = oc_pair_key(l, r);
             uint32_t cnt = 0;
-            u64map_get(counts, key, &cnt);
+            oc_u64map_get(counts, key, &cnt);
             cnt += 1;
-            OcError e = u64map_put(counts, key, cnt);
+            OcError e = oc_u64map_put(counts, key, cnt);
             if (e != OC_OK) {
-                u64map_free(counts);
+                oc_u64map_free(counts);
                 return e;
             }
             if (cnt > best_count || (!any && cnt > 0)) {
@@ -386,7 +251,7 @@ static OcError find_most_frequent_pair(const OcVector *sequences,
             }
         }
     }
-    u64map_free(counts);
+    oc_u64map_free(counts);
     if (!any) return OC_OK;
     *out_left = (uint32_t)(best_key >> 32);
     *out_right = (uint32_t)(best_key & 0xFFFFFFFFu);
@@ -441,8 +306,8 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
     if (!bpe) return OC_ERR_OOM;
     memset(bpe, 0, sizeof(*bpe));
     bpe->vocab = oc_hashtable_new(256);
-    bpe->merge_ranks = u64map_new(64);
-    bpe->merged_ids = u64map_new(64);
+    bpe->merge_ranks = oc_u64map_new(64);
+    bpe->merged_ids = oc_u64map_new(64);
     bpe->use_byte_fallback = false;
     if (!bpe->vocab || !bpe->merge_ranks || !bpe->merged_ids) {
         oc_bpe_free(bpe);
@@ -551,9 +416,9 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
             e = OC_ERR_OOM;
             goto fail;
         }
-        e = u64map_put(bpe->merge_ranks, pair_key(left, right), (uint32_t)rank);
+        e = oc_u64map_put(bpe->merge_ranks, oc_pair_key(left, right), (uint32_t)rank);
         if (e != OC_OK) goto fail;
-        e = u64map_put(bpe->merged_ids, pair_key(left, right), merged_id);
+        e = oc_u64map_put(bpe->merged_ids, oc_pair_key(left, right), merged_id);
         if (e != OC_OK) goto fail;
 
         for (size_t s = 0; s < oc_vector_len(&sequences); ++s) {
@@ -643,9 +508,9 @@ static bool find_best_merge(const OcBpeTokenizer *bpe,
      * Rust scans the merges map and filters by `present_pairs`. We do the
      * same: for each adjacent pair in the sequence, look up its rank. */
     for (size_t i = 0; i + 1 < n; ++i) {
-        uint64_t key = pair_key(seq[i], seq[i + 1]);
+        uint64_t key = oc_pair_key(seq[i], seq[i + 1]);
         uint32_t rank;
-        if (u64map_get(bpe->merge_ranks, key, &rank)) {
+        if (oc_u64map_get(bpe->merge_ranks, key, &rank)) {
             if (rank < best_rank) {
                 best_rank = rank;
                 best_key = key;
@@ -655,7 +520,7 @@ static bool find_best_merge(const OcBpeTokenizer *bpe,
     }
     if (!found) return false;
     uint32_t merged_id;
-    if (!u64map_get(bpe->merged_ids, best_key, &merged_id)) {
+    if (!oc_u64map_get(bpe->merged_ids, best_key, &merged_id)) {
         return false;
     }
     *out_left = (uint32_t)(best_key >> 32);
@@ -989,31 +854,6 @@ OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
 
 /* ─── Load from GGUF metadata ─────────────────────────────────────────── */
 
-/* Helper: get a metadata string array as a vector of arena-owned strings.
- * Returns OC_OK, OC_ERR_TOKENIZER (missing/invalid), or OC_ERR_OOM. */
-static OcError get_string_array(const OcGgufFile *gguf, const char *key,
-                                OcArena *arena, OcVector *out)
-{
-    const OcGgufMetadataValue *v = oc_gguf_metadata_get(gguf, key);
-    if (!v || v->type != OC_GGUF_MT_ARRAY) {
-        return OC_ERR_TOKENIZER;
-    }
-    OcError e = oc_vector_init(out, sizeof(char *));
-    if (e != OC_OK) return e;
-    for (size_t i = 0; i < v->v.arr.len; ++i) {
-        const OcGgufMetadataValue *elem = &v->v.arr.values[i];
-        if (elem->type != OC_GGUF_MT_STRING) {
-            oc_vector_free(out);
-            return OC_ERR_TOKENIZER;
-        }
-        char *dup = oc_arena_dup_n(arena, elem->v.str.data, elem->v.str.len);
-        if (!dup) { oc_vector_free(out); return OC_ERR_OOM; }
-        e = oc_vector_push(out, &dup);
-        if (e != OC_OK) { oc_vector_free(out); return e; }
-    }
-    return OC_OK;
-}
-
 /* Load a BPE tokenizer from GGUF metadata. Mirrors Rust `load_bpe`. */
 OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                               OcBpeTokenizer **out)
@@ -1024,13 +864,13 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
 
     /* Read tokenizer.ggml.tokens (required) and tokenizer.ggml.merges (optional). */
     OcVector tokens;
-    OcError e = get_string_array(gguf, "tokenizer.ggml.tokens", arena, &tokens);
+    OcError e = oc_tokenizer_string_array(gguf, "tokenizer.ggml.tokens", arena, &tokens);
     if (e != OC_OK) return e;
 
     OcVector merges;
     const OcGgufMetadataValue *merges_val = oc_gguf_metadata_get(gguf, "tokenizer.ggml.merges");
     if (merges_val && merges_val->type == OC_GGUF_MT_ARRAY) {
-        e = get_string_array(gguf, "tokenizer.ggml.merges", arena, &merges);
+        e = oc_tokenizer_string_array(gguf, "tokenizer.ggml.merges", arena, &merges);
         if (e != OC_OK) { oc_vector_free(&tokens); return e; }
     } else {
         e = oc_vector_init(&merges, sizeof(char *));
@@ -1042,8 +882,8 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     if (!bpe) { oc_vector_free(&tokens); oc_vector_free(&merges); return OC_ERR_OOM; }
     memset(bpe, 0, sizeof(*bpe));
     bpe->vocab = oc_hashtable_new(vocab_size * 2 > 0 ? vocab_size * 2 : 256);
-    bpe->merge_ranks = u64map_new(oc_vector_len(&merges) > 0 ? oc_vector_len(&merges) * 2 : 64);
-    bpe->merged_ids = u64map_new(oc_vector_len(&merges) > 0 ? oc_vector_len(&merges) * 2 : 64);
+    bpe->merge_ranks = oc_u64map_new(oc_vector_len(&merges) > 0 ? oc_vector_len(&merges) * 2 : 64);
+    bpe->merged_ids = oc_u64map_new(oc_vector_len(&merges) > 0 ? oc_vector_len(&merges) * 2 : 64);
     bpe->use_byte_fallback = true;
     bpe->vocab_size = vocab_size;
     bpe->id_to_token = oc_arena_alloc(arena, vocab_size * sizeof(char *), sizeof(void *));
@@ -1102,8 +942,8 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
         uint32_t left_id = (uint32_t)(uintptr_t)lvp;
         uint32_t right_id = (uint32_t)(uintptr_t)rvp;
         uint32_t merged_id = (uint32_t)(uintptr_t)mvp;
-        u64map_put(bpe->merge_ranks, pair_key(left_id, right_id), (uint32_t)rank);
-        u64map_put(bpe->merged_ids, pair_key(left_id, right_id), merged_id);
+        oc_u64map_put(bpe->merge_ranks, oc_pair_key(left_id, right_id), (uint32_t)rank);
+        oc_u64map_put(bpe->merged_ids, oc_pair_key(left_id, right_id), merged_id);
     }
 
     /* Collect CONTROL (3) / USER_DEFINED (4) special pieces. */
@@ -1343,8 +1183,8 @@ void oc_bpe_free(OcBpeTokenizer *bpe)
     if (!bpe) return;
     /* Free the malloc'd u64 maps. All other allocations (strings,
      * id_to_token array, special_pieces) are arena-owned. */
-    u64map_free(bpe->merge_ranks);
-    u64map_free(bpe->merged_ids);
+    oc_u64map_free(bpe->merge_ranks);
+    oc_u64map_free(bpe->merged_ids);
     oc_hashtable_free(bpe->vocab);
     /* Clear the pointers so a double-free is safe. */
     bpe->merge_ranks = NULL;
