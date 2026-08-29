@@ -512,26 +512,12 @@ pub(super) fn ox_gpu_q8kin_splits() -> u32 {
 /// Layer-wise Q8_K path: quantize once per norm, reuse for all Q4_K GEMVs in that
 /// step. OFF by default (slower than f32-in MW on H100 Mistral); `OX_GPU_LAYER_Q8K=1`.
 #[cfg(feature = "cuda")]
-pub(super) fn ox_gpu_layer_q8k_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_GPU_LAYER_Q8K")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
-}
+crate::cuda::ox_env_flag!(ox_gpu_layer_q8k_enabled, "OX_GPU_LAYER_Q8K", false);
 
 /// lm_head only: one quantize + Q8K-in MW for wide vocab (32k rows). ON by default.
 /// Set `OX_GPU_LMHEAD_Q8K=0` to keep f32-in MW on the output projection.
 #[cfg(feature = "cuda")]
-pub(super) fn ox_gpu_lmhead_q8k_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_GPU_LMHEAD_Q8K")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(true)
-    })
-}
+crate::cuda::ox_env_flag!(ox_gpu_lmhead_q8k_enabled, "OX_GPU_LMHEAD_Q8K", true);
 
 /// Batched Q4_K × Q8_K GEMV: `ncols` (batch B ≤ 8) Q8_K activation vectors share
 /// each weight stream. `d_xq8k` holds `ncols` consecutive Q8_K activations
@@ -665,14 +651,7 @@ pub(crate) fn launch_gemv_f32in_device(
 /// Multi-warp-per-row Q4_K F32-in GEMV — default ON for H100-class bandwidth.
 /// Set `OX_GPU_GEMV_MW=0` to force one-warp-per-row.
 #[cfg(feature = "cuda")]
-pub(super) fn ox_gpu_gemv_mw_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_GPU_GEMV_MW")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(true)
-    })
-}
+crate::cuda::ox_env_flag!(ox_gpu_gemv_mw_enabled, "OX_GPU_GEMV_MW", true);
 
 /// Warps-per-row for the multi-warp GEMV (`OX_GEMV_MW_NWARPS`, default 4 per PR
 /// #5394). Clamped to [1, 32] so the cross-warp reduction fits a single warp.
@@ -695,14 +674,7 @@ pub(super) fn ox_gpu_gemv_mw_nwarps() -> u32 {
 /// OFF by default on decode: re-quantizing per projection loses to the tuned
 /// f32-in GEMV path on H100 Mistral-class models. Set `OX_GPU_FUSED_MMQ=1`.
 #[cfg(feature = "cuda")]
-pub(super) fn ox_gpu_fused_mmq_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_GPU_FUSED_MMQ")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
-}
+crate::cuda::ox_env_flag!(ox_gpu_fused_mmq_enabled, "OX_GPU_FUSED_MMQ", false);
 
 #[cfg(feature = "cuda")]
 #[must_use]
@@ -722,25 +694,11 @@ const FUSED_MMQ_MAX_SHMEM: usize = 44 * 1024;
 /// Fused QKV: one global quantize + one Q/K/V launch (shared xq8k, DP4A MW).
 /// OFF by default — f32-in MW wins on H100 Mistral decode; set `OX_GPU_FUSED_QKV=1`.
 #[cfg(feature = "cuda")]
-pub(super) fn ox_gpu_fused_qkv_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_GPU_FUSED_QKV")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
-}
+crate::cuda::ox_env_flag!(ox_gpu_fused_qkv_enabled, "OX_GPU_FUSED_QKV", false);
 
 /// Multi-warp fused MMQ (4 warps/row, blockDim=1024). Opt-in via `OX_GPU_FUSED_MW=1`.
 #[cfg(feature = "cuda")]
-pub(super) fn ox_gpu_fused_mw_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_GPU_FUSED_MW")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
-}
+crate::cuda::ox_env_flag!(ox_gpu_fused_mw_enabled, "OX_GPU_FUSED_MW", false);
 
 /// Pick fused MMQ: single-warp 8-rows/block tile by default; multi-warp tile for
 /// very wide outputs (lm_head) or when `OX_GPU_FUSED_MW=1`.

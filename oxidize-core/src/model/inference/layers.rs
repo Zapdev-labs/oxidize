@@ -20,14 +20,7 @@ pub(super) fn ox_gpu_attn_enabled() -> bool {
 /// future flagged runtime branch, so every existing path stays byte-identical.
 /// CPU/backend-agnostic: when `OX_GPU_ATTN` is set it owns the device KV cache
 /// and takes precedence; `OX_BATCHED_DECODE` only governs the host-side path.
-pub fn ox_batched_decode_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_BATCHED_DECODE")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
-}
+crate::cuda::ox_env_flag!(ox_batched_decode_enabled, "OX_BATCHED_DECODE", false);
 
 impl InferenceModel {
     /// Return the raw quantized byte slice of a Q4K weight matrix, or `None`
