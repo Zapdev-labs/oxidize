@@ -679,7 +679,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
 
     if (setup_failed || completed == 0) {
         if (ctx->output_format == OC_CLI_OUTPUT_JSON)
-            printf("],\"error\":\"setup failed\"}\n");
+            printf("],\"error\":\"benchmark failed\"}\n");
         return OC_ERR_INTERNAL;
     }
 
