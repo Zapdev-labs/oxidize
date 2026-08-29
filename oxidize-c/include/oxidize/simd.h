@@ -36,7 +36,7 @@ typedef struct OcSimdCaps {
  * first call (thread-safe via C11 atomic flag, one-time init). */
 const OcSimdCaps *oc_simd_caps(void);
 
-/* Dispatched dequant entry. Bit-exactness VAL-SIMD-001..004. */
+/* Dispatched dequant entry. Returns false WITHOUT touching `dst` so the caller can fall back to scalar. Bit-exactness VAL-SIMD-001..004. */
 bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
                          const uint8_t *src, size_t src_len,
                          float *dst, size_t value_count);

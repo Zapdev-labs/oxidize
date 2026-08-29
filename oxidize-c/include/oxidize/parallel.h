@@ -18,7 +18,7 @@ extern "C" {
 typedef void (*OcParallelFn)(size_t begin, size_t end, size_t tid,
                              void *user_data);
 
-/* Set the worker count. 1 disables threading entirely (regions run inline). */
+/* Set the worker count. 1 disables threading (regions run inline). 0 means auto (online CPU count). Call once at startup. */
 OcError oc_parallel_set_threads(size_t n_threads);
 
 /* Current worker count, including the calling thread. 1 means inline. */
@@ -29,7 +29,7 @@ size_t oc_parallel_n_threads(void);
  * itself, `fn` is called once inline on the caller. */
 void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data);
 
-/* Per-thread scratch of at least `bytes`, valid until the next call with a larger size on the same `tid`. */
+/* Per-thread scratch of at least `bytes`, valid until the next larger call on the same `tid`. Returns NULL on allocation failure. `tid` must be a value handed to OcParallelFn. */
 void *oc_parallel_scratch(size_t tid, size_t bytes);
 
 /* Join workers and release the pool. Safe to call when not started. Mainly

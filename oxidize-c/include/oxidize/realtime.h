@@ -75,7 +75,7 @@ OcError oc_realtime_handle_session(OcRealtimeSession *sess);
 OcError oc_realtime_send_event(OcRealtimeSession *sess,
                                OcRealtimeEvent ev, const char *data);
 
-/* Process one incoming client message (JSON). */
+/* Process one incoming JSON message. input_text_delta tokenizes and generates; session.update updates cfg; format or generation failures return the WebSocket or model error. */
 OcError oc_realtime_process_message(OcRealtimeSession *sess,
                                     const char *json, size_t len);
 

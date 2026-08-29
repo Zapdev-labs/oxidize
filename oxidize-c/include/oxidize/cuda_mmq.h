@@ -23,9 +23,7 @@ bool oc_cuda_mmq_block_layout(uint32_t qtype, size_t cols,
                               size_t *src_block, size_t *dev_block,
                               size_t *n_blocks);
 
-/* out[row] = dot(dequant(W[row, :]), x[:]) for row in [0, rows).
- * `d_weights` is the packed device buffer; rows are `row_bytes` apart.
- * Returns false on an unsupported type or a launch error. */
+/* out[row] = dot(dequant(W[row, :]), x[:]) for row in [0, rows). Enqueues on `stream` and returns without waiting; the caller must sync before reading `d_out` or reusing buffers. Returns false on an unsupported type or a launch error. */
 bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
                         const float *d_x, float *d_out,
                         size_t rows, size_t cols, void *stream);

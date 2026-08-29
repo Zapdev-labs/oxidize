@@ -61,7 +61,7 @@ OcError oc_backend_detect(OcBackendType type, OcBackendInfo *out);
 OcError oc_backend_detect_all(OcBackendInfo *out, uint32_t *n_out,
                               uint32_t max);
 
-/* Initialize a backend instance for the given type. */
+/* Initialize a backend instance for the given type. Returns OC_ERR_BACKEND if the backend is unavailable, OC_ERR_INVALID_ARG if `backend` is NULL. */
 OcError oc_backend_init(OcBackend *backend, OcBackendType type);
 
 /* Cleanup: release any resources held by the backend. Safe on NULL or

@@ -11,7 +11,7 @@
 extern "C" {
 #endif
 
-/* GPT-2 forward pass for a single token. */
+/* GPT-2 forward pass for a single token. `logits_out` may be NULL to skip the lm_head projection (prefill). */
 OcError oc_arch_forward_gpt2(OcLlamaSession *sess, uint32_t token,
                               float *logits_out);
 

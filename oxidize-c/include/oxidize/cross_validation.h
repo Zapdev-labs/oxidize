@@ -27,7 +27,7 @@ typedef struct {
 } OcValidationResult;
 
 
-/* Compare `expected` and `actual` buffers element-wise for `len` elements. */
+/* Compare `expected` and `actual` element-wise. Returns OC_OK after writing `out` even when `max_abs_diff` fails the suite threshold; OC_ERR_INVALID_ARG on NULL args or an out-of-range suite. */
 OcError oc_cross_validation_compare(OcValidationSuite suite,
                                     const float *expected,
                                     const float *actual,

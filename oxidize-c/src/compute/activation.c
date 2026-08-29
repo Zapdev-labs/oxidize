@@ -77,7 +77,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     }
 }
 
-/* Interleaved ("NORM") RoPE: rotates the pair (2i, 2i+1) rather than (i, i + rope_len/2). */
+/* Interleaved ("NORM") RoPE: rotates (2i, 2i+1) rather than (i, i + rope_len/2). Not interchangeable with split-half RoPE. */
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta)
 {

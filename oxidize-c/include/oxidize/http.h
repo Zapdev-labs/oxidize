@@ -87,7 +87,7 @@ OcError oc_http_server_start_configured(const char *host, uint16_t port,
 void oc_http_server_set_stream_authorizer(OcHttpServer *s,
                                           OcHttpStreamAuthorize authorize);
 
-/* Extra response headers (typically CORS). Empty string omits them. */
+/* Extra response headers (typically CORS). Empty string omits them. Call on a zeroed server before oc_http_server_start_configured. */
 OcError oc_http_server_set_extra_headers(OcHttpServer *s, const char *headers);
 
 /* Block until the server stops (or returns immediately if already stopped).

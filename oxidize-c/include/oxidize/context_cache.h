@@ -88,10 +88,7 @@ OcError oc_context_cache_store(OcContextCache *cc, const char *session_id,
                                uint32_t head_dim, uint8_t *data,
                                uint64_t size_bytes);
 
-/* Load a KV cache snapshot for `session_id`. On success, fills `*out` with a
- * freshly malloc'd copy of the data (caller frees `out->data`). If
- * `model_hash != 0` and the stored hash differs, treated as a miss (`*found`
- * is the canonical miss signal). */
+/* Load a KV cache snapshot for `session_id`. A miss (including hash mismatch) returns OC_OK with `*found` false; inspect `*found` before using `out`. On a hit, fills `*out` with a freshly malloc'd copy (caller frees `out->data`). */
 OcError oc_context_cache_load(OcContextCache *cc, const char *session_id,
                               uint64_t model_hash, OcContextCacheEntry *out,
                               bool *found);
