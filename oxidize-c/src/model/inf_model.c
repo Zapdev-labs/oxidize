@@ -640,7 +640,7 @@ static OcError forward_mla_layer(OcInferenceModel *m, OcLayerWeights *layer,
         for (uint32_t hd = 0; hd < n_heads; hd++) {
             size_t q_off = (size_t)hd * kv_head_dim;
             float *q_head = q_vec + q_off;
-            /* Q, K and the cached V are strided by kv_head_dim (nope + rope, 192 for LongCat), but the attention OUTPUT is only v_head_dim (128) wide per head and o_proj expects it densely packed. */
+            /* Q, K and the cached V are strided by kv_head_dim (nope + rope, 192 for LongCat), but the attention OUTPUT is only v_head_dim (128) wide per head and o_proj expects it densely packed. Writing it at the Q stride leaves 64 dead floats per head, so o_proj reads heads interleaved with padding and runs out of input 42 heads in — the last 22 heads never reach it. */
             size_t v_off_out = (size_t)hd * v_head_dim;
             float *out_head = attn_out + v_off_out;
 
@@ -966,7 +966,7 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
         float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
         uint32_t layer_window = oc_inference_config_layer_sliding_window(cfg, (uint32_t)li);
 
-        /* --- Dispatch to specialized layer types --- */
+        /* MLA layer. */
 
         /* MLA (DeepSeek2): has mla_kv_a_mqa. */
         if (oc_layer_weights_has_mla(layer)) {
@@ -994,7 +994,7 @@ OcError oc_inf_model_forward_token(OcInferenceModel *m, uint32_t token, size_t p
             continue;  /* Mamba layers have no separate FFN block. */
         }
 
-        /* --- Standard attention block --- */
+        /* Standard attention. */
         if (oc_layer_weights_has_attention(layer)) {
             /* Attn RMSNorm. */
             if (layer->attn_norm)
@@ -1864,7 +1864,7 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
         float rope_theta = oc_inference_config_layer_rope_theta(cfg, (uint32_t)li);
         uint32_t layer_window = oc_inference_config_layer_sliding_window(cfg, (uint32_t)li);
 
-        /* --- Attn norm --- */
+        /* Per-sequence: RoPE, KV write to SeqKv, attention. */
         for (size_t i = 0; i < batch; i++) {
             if (layer->attn_norm)
                 oc_rms_norm_f32(x_batch + i * h, layer->attn_norm,
@@ -1873,7 +1873,7 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
                 memcpy(normed_batch + i * h, x_batch + i * h, h * sizeof(float));
         }
 
-        /* --- Batched Q/K/V GEMM --- */
+        /* Batched Q/K/V GEMM. */
         memset(q_batch, 0, batch * q_len * sizeof(float));
         memset(k_batch, 0, batch * kv_len * sizeof(float));
         memset(v_batch, 0, batch * kv_len * sizeof(float));
@@ -1900,7 +1900,7 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
                 oc_add_repeating_bias(v_batch, batch * kv_len, layer->attn_v_bias, kv_len);
         }
 
-        /* --- Per-token: RoPE, KV cache, attention --- */
+        /* Per-sequence: RoPE, KV write to SeqKv, attention. */
         for (size_t i = 0; i < batch; i++) {
             size_t pos = start_pos + i;
             float *q = q_batch + i * q_len;
@@ -1991,7 +1991,7 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
             }
         }
 
-        /* --- Batched attn output projection --- */
+        /* Attn output projection. */
         if (!oc_weight_storage_is_empty(&layer->attn_output)) {
             e = oc_gemm_weight(&layer->attn_output, h, q_len,
                                 attn_batch, proj_batch, batch);
@@ -2018,7 +2018,7 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
         for (size_t i = 0; i < batch * h; i++)
             x_batch[i] += proj_batch[i];
 
-        /* --- FFN --- */
+        /* FFN. */
         float *ffn_norm_w = NULL;
         if (cfg->sandwich_norm)
             ffn_norm_w = layer->ffn_norm;
@@ -2047,7 +2047,7 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
                     oc_swiglu_inplace_f32(gate_batch + i, up_batch + i, 1);
 
             /* Actually need to call swiglu/geglu on full vectors, not per-element. */
-            /* Redo properly: */
+            /* Per-sequence: RoPE, KV write to SeqKv, attention. */
             for (size_t i = 0; i < batch; i++) {
                 if (cfg->gelu_ffn)
                     oc_geglu_inplace_f32(gate_batch + i * i_size,

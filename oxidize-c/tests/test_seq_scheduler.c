@@ -315,7 +315,6 @@ Test(seq_scheduler, can_fit_within_capacity)
     c.max_total_tokens = 100;
     c.water_level = 0.8f;
     oc_seq_sched_init(&s, c, NULL);
-    /* water_mark = 100 * 0.8 = 80 */
     cr_assert(oc_seq_sched_can_fit(s, 80));
     cr_assert(oc_seq_sched_can_fit(s, 50));
     oc_seq_sched_free(s);
@@ -329,7 +328,6 @@ Test(seq_scheduler, can_fit_exceeds_capacity)
     c.max_total_tokens = 100;
     c.water_level = 0.8f;
     oc_seq_sched_init(&s, c, NULL);
-    /* water_mark = 80; 81 tokens should not fit. */
     cr_assert(!oc_seq_sched_can_fit(s, 81));
     oc_seq_sched_free(s);
 }

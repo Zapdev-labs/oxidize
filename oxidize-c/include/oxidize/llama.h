@@ -60,9 +60,9 @@ typedef struct OcLlamaConfig {
      * Gemma 4 uses 30.0; skipping it measurably distorts the sampling
      * distribution, so it is correctness, not a tuning knob. */
     float    logit_softcap;
-    /* Global layers ship no attn_v tensor at all — V is the same projection */
+    /* Global layers ship no attn_v tensor at all — V is the same projection as K (config.json `attention_k_eq_v`). The loader aliases attn_v onto attn_k for those layers, and the KV cache stores one buffer instead of two, halving global-layer cache footprint. */
     bool     k_eq_v;
-    /* Pre-attention score scale. Gemma 4 sets this to 1.0 — it applies NO */
+    /* Pre-attention score scale. Gemma 4 sets this to 1.0 — it applies NO 1/sqrt(head_dim) factor (llama.cpp: hparams.f_attention_scale = 1.0f, "Gemma4 uses self.scaling = 1.0"). 0 means "use the usual 1/sqrt(head_dim)", which is every other architecture. Getting this wrong is not subtle: dividing scores by sqrt(512) flattens the softmax toward uniform, so attention returns roughly the mean of V. */
     float    attn_scale;
     /* Gemma 4 RMS-normalizes V after projection with NO weight tensor —
      * a plain normalization, not a learned one. */
@@ -110,7 +110,7 @@ typedef struct OcLlamaConfig {
     float    post_norm_eps;
     /* Final logits are multiplied by this before the softcap. 0 = 1.0. */
     float    logit_scale;
-    /* RoPE pairs dimensions (2i, 2i+1) instead of (i, i + rope_dim/2) — */
+    /* RoPE pairs dimensions (2i, 2i+1) instead of (i, i + rope_dim/2) — llama.cpp's LLAMA_ROPE_TYPE_NORM. The two conventions assign different frequencies to the same dimension, so this is correctness, not style: with the wrong one the model stays locally fluent and drifts within a couple of dozen tokens. */
     bool     rope_norm_pairs;
 } OcLlamaConfig;
 
@@ -159,7 +159,7 @@ typedef struct OcLlamaLayer {
     OcWeightView mla_v_b;               /* v_b_proj: [n_heads*v_head_dim, kv_lora_dim] */
     float *mla_q_a_norm;                /* owned f32, length q_lora_dim */
     float *mla_kv_a_norm;               /* owned f32, length kv_lora_dim */
-    /* LongCat router bias (`blk.N.exp_probs_b.bias`), owned f32 of length */
+    /* LongCat router bias (`blk.N.exp_probs_b.bias`), owned f32 of length num_experts + zero_expert_count. Added to the router logits for SELECTION only — the gate weight applied to an expert's output is the unbiased probability. NULL when absent. */
     float *exp_probs_b;
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
@@ -386,7 +386,7 @@ OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx,
  * reporting and for deciding whether a context length is affordable. */
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
 
-/* Run one forward step: embed `token`, advance position, write logits_out */
+/* Run one forward step for each active sequence in the batch. `seqs` is an array of `max_seqs` entries. Only sequences with `active=true` are processed; their `logits` will be filled. */
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out);
 
 bool oc_llama_mtp_present(const OcLlamaModel *model);
@@ -402,7 +402,7 @@ OcError oc_llama_mtp_draft_tokens(OcLlamaSession *sess, uint32_t k,
                                   uint32_t *out_tokens, float *out_conf,
                                   uint32_t *n_out);
 
-/* Prefill a whole prompt, processing `chunk` tokens per pass so they share */
+/* Prefill a whole prompt, processing `chunk` tokens per pass so they share one sweep over the weights instead of one sweep each. */
 OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
                          size_t n_tokens, size_t chunk, float *logits_out);
 
@@ -415,7 +415,7 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
  * subsequent forwards). Does NOT zero the cache. */
 void oc_llama_session_reset(OcLlamaSession *sess);
 
-/* Rewind position to `pos` (for speculative decoding cache rollback). and no snapshot of it is kept, so a rewind cannot undo it. That is why */
+/* Rewind position to `pos` (for speculative decoding cache rollback). */
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);

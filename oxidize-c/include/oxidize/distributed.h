@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-/* Limits                                                             */
+/* ------------------------------------------------------------------ Limits ------------------------------------------------------------------ */
 
 #define OC_DIST_MAX_NODES       64   /* max nodes in a distributed job */
 #define OC_DIST_MAX_ADDR        256  /* max "host:port" string length   */
@@ -20,7 +20,7 @@ extern "C" {
 #define OC_DIST_MAX_PIPELINE    32   /* max pipeline stages            */
 #define OC_DIST_MAX_TP          16   /* max tensor-parallel degree     */
 
-/* Config                                                             */
+/* Config */
 
 /* Configuration for a distributed inference scheduler instance. */
 typedef struct OcDistributedConfig {
@@ -56,7 +56,7 @@ typedef struct OcDistributedConfig {
 /* Default peer rendezvous timeout used when connect_timeout_ms == 0. */
 #define OC_DIST_CONNECT_TIMEOUT_MS 30000u
 
-/* Node role                                                          */
+/* ------------------------------------------------------------------ Node role ------------------------------------------------------------------ */
 
 typedef enum {
     OC_NODE_ROLE_NONE            = 0,
@@ -65,7 +65,7 @@ typedef enum {
     OC_NODE_ROLE_TENSOR_PARALLEL = 3, /* participates in TP within a stage   */
 } OcNodeRole;
 
-/* Peer descriptor                                                    */
+/* ------------------------------------------------------------------ Peer descriptor ------------------------------------------------------------------ */
 
 typedef struct OcDistPeer {
     uint32_t rank;                       /* global node rank               */
@@ -77,7 +77,7 @@ typedef struct OcDistPeer {
     uint64_t  bytes_recv_from;           /* bytes received from this peer   */
 } OcDistPeer;
 
-/* Stats                                                              */
+/* ------------------------------------------------------------------ Stats ------------------------------------------------------------------ */
 
 typedef struct OcDistributedStats {
     uint64_t bytes_sent;           /* total bytes sent over network        */
@@ -94,9 +94,9 @@ typedef struct OcDistributedStats {
     uint64_t disconnects;          /* number of peer disconnects detected  */
 } OcDistributedStats;
 
-/* Scheduler                                                          */
+/* Scheduler */
 
-/* The distributed scheduler holds the resolved config, peer table, TCP */
+/* The distributed scheduler holds the resolved config, peer table, TCP sockets for inter-stage communication, reusable send/recv buffers, and accumulated stats. Single-node deployments never open sockets. */
 typedef struct OcDistributedScheduler {
     OcDistributedConfig config;
     OcNodeRole          role;
@@ -119,16 +119,16 @@ typedef struct OcDistributedScheduler {
     OcDistributedStats stats;
 } OcDistributedScheduler;
 
-/* Lifecycle                                                          */
+/* Lifecycle */
 
-/* Initialize a distributed scheduler from `cfg`. In single-node mode */
+/* Initialize a distributed scheduler from `cfg`. */
 OcError oc_distributed_init(OcDistributedScheduler *sched,
                             const OcDistributedConfig *cfg);
 
 /* Release all resources held by the scheduler: close sockets, free buffers. */
 void oc_distributed_free(OcDistributedScheduler *sched);
 
-/* Pipeline parallelism                                               */
+/* Pipeline parallelism */
 
 /* Send hidden-state activations to the next pipeline stage. */
 OcError oc_distributed_send_activations(OcDistributedScheduler *sched,
@@ -138,23 +138,23 @@ OcError oc_distributed_send_activations(OcDistributedScheduler *sched,
 OcError oc_distributed_recv_activations(OcDistributedScheduler *sched,
                                         void *out, size_t count);
 
-/* Tensor parallelism                                                 */
+/* Tensor parallelism */
 
 /* All-reduce: sum `data` (in-place) across all tensor-parallel peers. */
 OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
                                   float *data, size_t count);
 
-/* Synchronization                                                    */
+/* Synchronization */
 
 /* Barrier: block until all nodes have called this. */
 OcError oc_distributed_barrier(OcDistributedScheduler *sched);
 
-/* Latency measurement                                                 */
+/* Latency measurement */
 
 /* Measure round-trip communication latency in milliseconds. */
 double oc_distributed_get_latency(OcDistributedScheduler *sched);
 
-/* Stats access                                                       */
+/* Returns a pointer to the live stats struct, or NULL if NULL scheduler. */
 
 /* Returns a pointer to the live stats struct, or NULL if NULL scheduler. */
 const OcDistributedStats *oc_distributed_get_stats(
@@ -164,7 +164,7 @@ const OcDistributedStats *oc_distributed_get_stats(
 size_t oc_distributed_stats_json(const OcDistributedScheduler *sched,
                                  char *buf, size_t cap);
 
-/* Internals exposed for testing                                      */
+/* ------------------------------------------------------------------ Internals exposed for testing ------------------------------------------------------------------ */
 
 /* Validate a config struct without initializing a scheduler.
  * Returns OC_OK if valid, OC_ERR_INVALID_ARG otherwise. */

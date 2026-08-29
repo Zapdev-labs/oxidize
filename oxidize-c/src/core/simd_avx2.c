@@ -1,4 +1,4 @@
-/* simd_avx2.c — AVX2 + FMA + F16C dequant kernels. Bit-exactness with the scalar reference in src/compute/quantization.c: the scalar reference on randomized inputs (VAL-SIMD-001..004). */
+/* simd_avx2.c — AVX2 + FMA + F16C dequant kernels. Bit-exact with the scalar reference in src/compute/quantization.c on randomized inputs (VAL-SIMD-001..004). */
 #include "oxidize/simd.h"
 
 #if defined(__x86_64__) || defined(__i386__)

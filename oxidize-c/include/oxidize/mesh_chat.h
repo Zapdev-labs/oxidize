@@ -71,7 +71,7 @@ size_t oc_mesh_chat_message_count(const OcMeshChatConversation *conv, OcMeshChat
  * and resetting the timestamp counter to zero. */
 OcError oc_mesh_chat_clear(OcMeshChatConversation *conv);
 
-/* Serialize the conversation into a text format into `out`. Each message */
+/* Serialize the conversation into a text format into `out`. Each message is rendered as "<role>: <content>\n". The conversation_id is included as a header line. Returns OC_ERR_INVALID_ARG if `conv`/`out` is NULL, OC_ERR_INTERNAL if the serialized form does not fit in `out_len`. */
 OcError oc_mesh_chat_serialize(const OcMeshChatConversation *conv,
                                char *out, size_t out_len);
 

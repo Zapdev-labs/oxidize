@@ -75,7 +75,7 @@ bool oc_batch_cancel(OcBatchEngine *engine, OcSeqId id);
  * calls the callback to produce real tokens instead of simulating. */
 OcError oc_batch_set_forward(OcBatchEngine *engine, OcBatchForward forward);
 
-/* Execute one decode step. Outputs up to max_out results in out. otherwise falls back to simulated incrementing tokens. */
+/* Execute one decode step. Outputs up to max_out results in out. Returns OC_OK on success. *n_out is set to the number of outputs produced. If a forward callback is set, uses it for real token generation; otherwise falls back to simulated incrementing tokens. */
 OcError oc_batch_step(OcBatchEngine *engine,
                       OcBatchStepOutput *out, size_t max_out, size_t *n_out);
 

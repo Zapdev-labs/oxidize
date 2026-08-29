@@ -58,7 +58,10 @@ void oc_spec_tree_free(OcSpecTree *tree);
 OcError oc_spec_tree_add_root(OcSpecTree *tree, uint32_t token_id,
                               float logprob, uint32_t *out_idx);
 
-/* Add a child node under `parent_idx`. */
+/* Add a child node under `parent_idx`. Returns the new node index via
+ * out_idx if non-NULL. Fails if the tree is full, the parent does not exist,
+ * the parent already has `max_children`, or the new node's depth would
+ * exceed `max_depth`. */
 OcError oc_spec_tree_add_child(OcSpecTree *tree, int32_t parent_idx,
                                uint32_t token_id, float logprob,
                                uint32_t *out_idx);

@@ -1,9 +1,10 @@
-/* oxk_avx2.c — AVX2 optimized OXK kernels. Every vectorized kernel here must be BIT-EXACT against its scalar */
+/* oxk_avx2.c — AVX2 optimized OXK kernels. */
+/* Every vectorized kernel here must be BIT-EXACT against its scalar */
 #include "oxidize/oxk.h"
 
 #include <string.h>
 
-/* AVX2/AVX-512 intrinsics are x86-only. On other targets (e.g. aarch64 */
+/* AVX2/AVX-512 intrinsics are x86-only. On other targets (e.g. aarch64 cross-compile) the real bodies are replaced by scalar-forwarding stubs at the bottom of this file so the OXK symbols still link — the dispatcher in oxk.c never selects them there (oc_simd_caps() reports SCALAR). */
 #if defined(__x86_64__) || defined(__i386__)
 
 #include <immintrin.h>

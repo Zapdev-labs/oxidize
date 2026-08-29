@@ -339,7 +339,7 @@ size_t oc_wasm_bridge_generate(OcWasmBridge *br,
         produced++;
         br->stats.tokens_generated++;
 
-        /* Append a textual representation of the token to the output */
+        /* Append a textual representation of the token to the output buffer BEFORE consulting the callback, so an early stop still includes the token that was generated and delivered. The stub generator emits ASCII token-id strings for determinism; a real host hook would decode the token to text. */
         if (out_buf && out_cap > 0) {
             char tok_str[16];
             int n = snprintf(tok_str, sizeof(tok_str), "%u ", tok);
@@ -453,7 +453,7 @@ uint32_t oc_wasm_bridge_queue_depth(const OcWasmBridge *br)
 }
 
 
-/* The stub generator produces deterministic tokens derived from the prompt */
+/* ─── Forward declarations for built-in stub hooks ─────────────────────── */
 
 static bool stub_load_model_bytes(const uint8_t *data, size_t len,
                                   const char *path, void *userdata)
@@ -482,7 +482,7 @@ static uint32_t stub_sample_token(const char *prompt,
                                  void *userdata)
 {
     (void)max_tokens; (void)userdata;
-    /* Mirror the Rust stub generator which echoes the last prompt token */
+    /* Mirror the Rust stub generator which echoes the last prompt token (or 1 if empty). To keep the C stub deterministic without a real tokenizer, we derive a token from the prompt hash + index. With temperature ~0 (greedy), the same prompt yields the same sequence. */
     if (temperature <= 0.0f) {
         /* Greedy: always return the same token (the Rust default echoes
          * the last prompt token, e.g. vec![9,9,9] for prompt [7,9]). */
@@ -509,7 +509,7 @@ static void stub_release(void *userdata)
 }
 
 
-/* This string mirrors the Rust `WASM_WORKER_TYPESCRIPT_BINDINGS` literal in oxidize-core/src/util/web_worker.rs, augmented with the C-bridge-specific stats interface. */
+/* This string mirrors the Rust `WASM_WORKER_TYPESCRIPT_BINDINGS` literal in oxidize-core/src/util/web_worker.rs, augmented with the C-bridge-specific stats interface. Stored as a single string literal so callers can paste it into a .ts file verbatim. */
 static const char WASM_INTERFACE_STRING[] =
     "\n"
     "export interface OxidizeWorkerModelConfig {\n"

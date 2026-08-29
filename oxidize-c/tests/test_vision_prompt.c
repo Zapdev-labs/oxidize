@@ -185,7 +185,6 @@ Test(vp, render_tokens_mplug_owl)
     uint32_t tokens[100];
     size_t n;
     cr_assert_eq(oc_vision_prompt_render_tokens(&vp, tokens, 100, &n), OC_OK);
-    /* mPLUG-Owl: text first, then image at end. */
     cr_assert_eq(n, 2);  /* 1 word + 1 image */
     cr_assert(tokens[0] > 0 && tokens[0] <= 32000);  /* word */
     cr_assert(tokens[1] >= 0x7FFFFFF0);  /* image */

@@ -1,4 +1,4 @@
-/* tokenizer_tiktoken.c — raw Tiktoken tokenizer (byte-level, no GPT-2 - No `special_pieces` pre-split (raw tiktoken GGUFs do not carry emit its id, or the `<unk>` id when absent (VAL-TOK-009: */
+/* tokenizer_tiktoken.c — raw Tiktoken tokenizer (byte-level, no GPT-2 byte_to_unicode mapping), for models that declare `tokenizer.ggml.model == "tiktoken"`. */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup */
 
@@ -303,7 +303,6 @@ struct OcTiktokenTokenizer {
     uint8_t **id_to_token_data;
     size_t   *id_to_token_len;
     size_t    vocab_size;
-    /* merge ranks: pair_key → rank (lowest rank wins). */
     TiktU64Map *merge_ranks;
     /* merged ids: pair_key → merged_token_id. */
     TiktU64Map *merged_ids;

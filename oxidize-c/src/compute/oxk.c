@@ -170,12 +170,12 @@ float oc_oxk_dot_q4_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            /* Accumulate the scaled sums in int32 across the whole block and what lets a vectorized kernel be bit-exact against this one: */
+            /* Accumulate the scaled sums in int32 across the whole block and convert once, rather than two float multiply-adds per group. */
             pos     += (int32_t)sc1 * sum1 + (int32_t)sc2 * sum2;
             min_acc += (int32_t)m1  * bs1  + (int32_t)m2  * bs2;
         }
 
-        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the dequantized weight is d*sc*q - dmin*m, so the minimum carries its own scale. */
+        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the dequantized weight is d*sc*q - dmin*m, so the minimum carries its own scale. Multiplying it by dw as well left the positive term right and the correction term wrong by a factor of dw. */
         sum += dw * dq * (float)pos - dmin * dq * (float)min_acc;
     }
     return sum;
@@ -231,7 +231,7 @@ void oc_oxk_q4_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
     }
 }
 
-/* Q5_K prep into the SAME layout as Q4_K: codes are the 5-bit values oc_oxk_dot_q4_k_prepped()/_multi() kernels, bit-exact against */
+/* Q5_K prep into the SAME layout as Q4_K: codes are the 5-bit values (0..31), which still fit an unsigned byte, and the scale/min decode is identical — so a prepared Q5_K row is consumed by the very same oc_oxk_dot_q4_k_prepped()/_multi() kernels, bit-exact against oc_oxk_dot_q5_k_q8_k_scalar(). */
 void oc_oxk_q5_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
 {
     float *d, *dmin;
@@ -364,7 +364,7 @@ static void q2k_unpack_block(const uint8_t *wb, uint8_t *codes, uint8_t *sc,
         sc[g] = (uint8_t)(scales[g] & 0x0Fu);
         mn[g] = (uint8_t)(scales[g] >> 4);
     }
-    /* Groups 2k and 2k+1 are adjacent in `codes` and their source bytes are */
+    /* Groups 2k and 2k+1 are adjacent in `codes` and their source bytes are the same 32-byte run of qs at the same shift, so the decode is 8 contiguous 32-byte passes rather than 16 strided 16-byte ones. Written this way (contiguous, branchless) so the compiler vectorizes it: this loop is the whole cost of a decode-time matvec, where there is no activation tile to amortize it over. */
     for (unsigned outer = 0; outer < 2; outer++) {
         for (unsigned inner = 0; inner < 4; inner++) {
             const uint8_t *q = qs + outer * 32;
@@ -717,12 +717,12 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            /* Accumulate the scaled sums in int32 across the whole block and what lets a vectorized kernel be bit-exact against this one: */
+            /* Accumulate the scaled sums in int32 across the whole block and convert once, rather than two float multiply-adds per group. */
             pos     += (int32_t)sc1 * sum1 + (int32_t)sc2 * sum2;
             min_acc += (int32_t)m1  * bs1  + (int32_t)m2  * bs2;
         }
 
-        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the dequantized weight is d*sc*q - dmin*m, so the minimum carries its own scale. */
+        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the dequantized weight is d*sc*q - dmin*m, so the minimum carries its own scale. Multiplying it by dw as well left the positive term right and the correction term wrong by a factor of dw. */
         sum += dw * dq * (float)pos - dmin * dq * (float)min_acc;
     }
     return sum;
@@ -746,7 +746,7 @@ float oc_oxk_dot_q6_k_q8_k_scalar(const uint8_t *row, size_t blocks,
         const int8_t  *q8v   = (const int8_t *)(qb + 4);
         const uint8_t *bsums = qb + 4 + 256;
 
-        /* Integer accumulation per 16-element scale group, one float accumulation so the SIMD kernels can be bit-exact against this */
+        /* Integer accumulation per 16-element scale group, one float multiply per block. Restructured from per-product float accumulation so the SIMD kernels can be bit-exact against this reference (the same restructure Q4_K got): all sub-group products stay in int32, where reassociation is exact. The -32 value offset is folded out through the activation's stored block sums: sum(sc*(q-32)*a) = sum(sc*q*a) - 32*sum(sc*bsum). */
         int32_t grp[16] = {0};
         for (int n = 0; n < 2; n++) {
             const uint8_t *ql_chunk = ql + n * 64;
@@ -849,7 +849,7 @@ void oc_oxk_matvec_q8_0_f32_scalar(const uint8_t *w, size_t n_rows,
     }
 }
 
-/* AVX2 / AVX-512 implementations are in oxk_avx2.c */
+/* ─── Capability detection + dispatcher ──────────────────────────────────── */
 
 
 static OcOxkContext g_ctx;

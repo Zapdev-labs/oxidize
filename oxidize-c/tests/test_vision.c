@@ -75,7 +75,6 @@ Test(vision, encode_with_weights)
     cr_assert_eq(oc_vision_init(&enc, &cfg), OC_OK);
     cr_assert_eq(enc.config.n_patches, 4); /* (4/2)^2 = 4 */
 
-    /* patch_proj: [4, 2*2*1] = [4, 4] identity-like */
     float proj[16] = { /* row 0 */ 1,0,0,0,
                        /* row 1 */ 0,1,0,0,
                        /* row 2 */ 0,0,1,0,
@@ -96,7 +95,7 @@ Test(vision, encode_with_weights)
     cr_assert_eq(oc_vision_encode(&enc, &img, emb, &out_len), OC_OK);
     cr_assert_eq(out_len, 16);
 
-    /* With uniform 128 pixel values, each pixel is 128/127.5-1 = ~0.004 */
+    /* With uniform 128 pixel values, each pixel is 128/127.5-1 = ~0.004 The projection should produce the same value for each patch dim since all patches have the same input. */
     float expected = 128.0f / 127.5f - 1.0f; /* ~0.004 */
     for (int p = 0; p < 4; p++) {
         cr_assert_float_eq(emb[p * 4], expected, 0.01f, "patch %d dim 0", p);

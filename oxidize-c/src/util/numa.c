@@ -261,7 +261,7 @@ OcError oc_numa_pin_cpu(uint32_t cpu)
 #endif
 }
 
-/* Large allocations go through mmap so mbind() can place them; small ones */
+/* Large allocations go through mmap so mbind() can place them; small ones fall back to malloc, where per-node placement is not worth a syscall. `mode`/`node` are applied with mbind before any page is touched, so the placement takes effect on first fault. */
 static void *numa_alloc_bound(size_t size, int mode, const unsigned long *mask)
 {
     if (size < (1u << 20)) return malloc(size);

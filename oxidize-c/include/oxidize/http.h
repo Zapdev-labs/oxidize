@@ -45,7 +45,7 @@ typedef struct OcHttpRequest {
     void             *stream_context;
 } OcHttpRequest;
 
-/* Caller-provided handler. Writes the response status code, Content-Type empty 204 response. The handler must NOT retain pointers into `req` after */
+/* Caller-provided handler. Writes the response status code, Content-Type (defaults to application/json), and JSON body. `body` may be NULL for an empty 204 response. The handler must NOT retain pointers into `req` after returning (the buffer is reused for the next request). */
 typedef void (*OcHttpHandler)(const OcHttpRequest *req,
                               int *out_status,
                               const char **out_content_type,

@@ -1,4 +1,5 @@
-/* test_realtime.c — Realtime API session tests. VAL-RT-001..003 cover the pure helpers (no socket I/O, no loaded model): */
+/* test_realtime.c — Realtime API session tests. */
+/* VAL-RT-001..003 cover the pure helpers (no socket I/O, no loaded model): */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 

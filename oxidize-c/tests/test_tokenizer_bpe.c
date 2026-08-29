@@ -1,4 +1,6 @@
-/* test_tokenizer_bpe.c — Criterion tests for the byte-level BPE tokenizer. VAL-TOK-001 — BPE encode "Hello, world!" (via trained toy tokenizer + VAL-TOK-002 — BPE round-trip preserves text. */
+/* test_tokenizer_bpe.c — Criterion tests for the byte-level BPE tokenizer. */
+/* VAL-TOK-001 — BPE encode "Hello, world!" (via trained toy tokenizer + */
+/* VAL-TOK-002 — BPE round-trip preserves text. */
 
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 
@@ -20,8 +22,8 @@
  * needed to load a BPE tokenizer. Layout mirrors the GGUF spec. */
 static uint8_t *build_bpe_gguf(size_t *out_len)
 {
-    /* Tokens: the GPT-2 byte-level encoded forms. We include: */
-    /* UTF-8 encodings: */
+    /* Tokens: the GPT-2 byte-level encoded forms. We include: id 0: "a" id 1: "Ġ" (U+0120, the GPT-2 encoding of space 0x20) id 2: "Ġa" (the merged token for " a") Merges: ["Ġ a"] → rank 0, merging (1, 0) → 2. Token types: [1, 1, 1, 1] (all NORMAL). */
+    /* UTF-8 encodings: "a" = 0x61 (1 byte) "Ġ" = U+0120 = 0xC4 0xA0 (2 bytes) "Ġa" = 0xC4 0xA0 0x61 (3 bytes) */
     static const char tok_a[]   = "a";
     static const char tok_g[]   = "\xC4\xA0";       /* Ġ */
     static const char tok_ga[]  = "\xC4\xA0""a";    /* Ġa */
@@ -61,7 +63,7 @@ static uint8_t *build_bpe_gguf(size_t *out_len)
         EMIT(buf, off, model_str, sl);
     }
 
-    /* KV 2: tokenizer.ggml.tokens = ARRAY<STRING> of 3 elements */
+    /* Disallow special: "<|im_start|>" should NOT produce id 0 */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.tokens");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -75,7 +77,7 @@ static uint8_t *build_bpe_gguf(size_t *out_len)
         { uint64_t sl = 3; EMIT_U64(buf, off, sl); EMIT(buf, off, tok_ga, sl); }
     }
 
-    /* KV 3: tokenizer.ggml.merges = ARRAY<STRING> of 1 element */
+    /* Disallow special: "<|im_start|>" should NOT produce id 0 */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.merges");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -142,7 +144,7 @@ Test(tokenizer_bpe, gpt2_byte_mapping_space_to_g_dot)
     /* The space byte (0x20) must map to 'Ġ' (U+0120), matching GPT-2's
      * bytes_to_unicode. A regression here drops spaces during BPE
      * encoding and fuses adjacent words into the wrong tokens. */
-    /* We can't directly call byte_to_gpt2_codepoint (static), but we can verify the behavior through the trained BPE tokenizer's encode path. */
+    /* U+0120 in UTF-8: 0xC4 0xA0 */
     /* U+0120 in UTF-8: 0xC4 0xA0 */
     char expected[3] = { (char)0xC4, (char)0xA0, 0 };
     cr_assert_eq((unsigned char)expected[0], 0xC4, "U+0120 high byte");
@@ -185,7 +187,7 @@ Test(tokenizer_bpe, train_merges_common_pairs)
 
 Test(tokenizer_bpe, byte_level_encodes_leading_space)
 {
-    /* Rust constructs a BpeTokenizer with: */
+    /* Rust constructs a BpeTokenizer with: vocab: {"a":0, "Ġ":1, "Ġa":2} merges: {(1,0): 0} (Ġ + a → Ġa) merged_token_ids: {(1,0): 2} use_byte_fallback: true and asserts bpe.encode(" a") == vec![2]. We replicate this by loading a synthetic GGUF with the same vocab + merges. The synthetic GGUF builder in build_bpe_gguf() creates exactly this configuration. */
     size_t len = 0;
     uint8_t *buf = build_bpe_gguf(&len);
     OcGgufFile gguf;
@@ -279,7 +281,7 @@ Test(tokenizer_bpe, chatml_template_system_user_assistant)
     cr_assert_eq(e, OC_OK, "chat template: %s", oc_error_msg(e));
     cr_assert_not_null(rendered);
 
-    /* Expected: */
+    /* Expected: <|im_start|>system\nYou are helpful.<|im_end|>\n <|im_start|>user\nHello<|im_end|>\n <|im_start|>assistant\n */
     const char *expected =
         "<|im_start|>system\nYou are helpful.<|im_end|>\n"
         "<|im_start|>user\nHello<|im_end|>\n"
@@ -408,7 +410,7 @@ Test(tokenizer_bpe, injection_prevention_disallow_special)
     EMIT_U64(buf, off, 0);  /* tensor_count */
     EMIT_U64(buf, off, 3);  /* kv_count */
 
-    /* KV 1: tokenizer.ggml.model = "gpt2" */
+    /* Disallow special: "<|im_start|>" should NOT produce id 0 */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.model");
         EMIT_U32(buf, off, OC_GGUF_MT_STRING);
@@ -417,7 +419,7 @@ Test(tokenizer_bpe, injection_prevention_disallow_special)
         EMIT(buf, off, v, strlen(v));
     }
 
-    /* KV 2: tokenizer.ggml.tokens = ["<|im_start|>", "a", "Ġ", "Ġa"] */
+    /* Disallow special: "<|im_start|>" should NOT produce id 0 */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.tokens");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -512,7 +514,7 @@ Test(tokenizer_bpe, special_tokens_allow_and_disallow)
     EMIT_U64(buf, off, 0);
     EMIT_U64(buf, off, 4);  /* kv_count = 4 */
 
-    /* tokenizer.ggml.model = "gpt2" */
+    /* Disallow special: "<|im_start|>" should NOT produce id 0 */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.model");
         EMIT_U32(buf, off, OC_GGUF_MT_STRING);
@@ -534,7 +536,7 @@ Test(tokenizer_bpe, special_tokens_allow_and_disallow)
         }
     }
 
-    /* merges: ["Ġ a"] */
+    /* Disallow special: "<|im_start|>" should NOT produce id 0 */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.merges");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -571,7 +573,7 @@ Test(tokenizer_bpe, special_tokens_allow_and_disallow)
     e = oc_tokenizer_load_from_gguf(&gguf, &tok);
     cr_assert_eq(e, OC_OK, "load: %s", oc_error_msg(e));
 
-    /* Allow special: "<|im_start|>" → [0], "<|im_end|>" → [1] */
+    /* Disallow special: "<|im_start|>" should NOT produce id 0 */
     {
         uint32_t *ids = NULL;
         size_t count = 0;
@@ -642,7 +644,7 @@ Test(tokenizer_bpe, empty_input_returns_empty)
     cr_assert_eq(e, OC_OK);
     cr_assert_eq(count, 0, "empty input should produce 0 tokens");
 
-    /* Decode empty ids → empty string */
+    /* Decode id 999 — out of range. */
     char *decoded = NULL;
     e = oc_tokenizer_decode(&tok, NULL, 0, &decoded);
     cr_assert_eq(e, OC_OK);

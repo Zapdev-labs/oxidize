@@ -233,10 +233,9 @@ Test(arch_mapping, qwen2_dense_identical_to_llama)
     check_map(OC_ARCH_QWEN, "model.layers.1.mlp.down_proj.weight",  "blk.1.ffn_down.weight");
 }
 
-/* ─── VAL-FOUND-009: Qwen2-MoE tensor mapping ────────────────────────────── */
+/* ─── VAL-FOUND-007: Llama arch tensor name mapping ──────────────────────── */
 Test(arch_mapping, qwen2moe_block_sparse_moe_experts)
 {
-    /* block_sparse_moe.experts.<M>.<w1|w2|w3>.weight → blk.<N>.ffn_<gate|down|up>.<M>.weight */
     check_map(OC_ARCH_QWEN, "model.layers.4.block_sparse_moe.experts.2.w1.weight",
               "blk.4.ffn_gate.2.weight");
     check_map(OC_ARCH_QWEN, "model.layers.4.block_sparse_moe.experts.2.w2.weight",
@@ -252,12 +251,11 @@ Test(arch_mapping, qwen2moe_block_sparse_moe_experts)
     check_map(OC_ARCH_MIXTRAL, "model.layers.2.block_sparse_moe.experts.3.w3.weight",
               "blk.2.ffn_up.3.weight");
 
-    /* block_sparse_moe.gate.weight → blk.<N>.ffn_gate_inp.weight */
     check_map(OC_ARCH_MIXTRAL, "model.layers.2.block_sparse_moe.gate.weight",
               "blk.2.ffn_gate_inp.weight");
 }
 
-/* ─── VAL-FOUND-010: Qwen3-MoE shared + routed experts ────────────────────── */
+/* ─── VAL-FOUND-012: All 18 architecture strings detected ───────────────── */
 Test(arch_mapping, qwen3moe_shared_and_routed_experts)
 {
     /* Routed experts via mlp.experts.<M>.<gate|up|down>_proj.weight. */
@@ -279,7 +277,7 @@ Test(arch_mapping, qwen3moe_shared_and_routed_experts)
               "blk.1.ffn_gate_inp_shexp.weight");
 }
 
-/* ─── VAL-FOUND-011: DeepSeek MLA tensor mapping ──────────────────────────── */
+/* ─── VAL-FOUND-012: All 18 architecture strings detected ───────────────── */
 Test(arch_mapping, deepseek_mla_attention_tensors)
 {
     /* MLA (Multi-head Latent Attention) compressed KV cache tensors. */

@@ -74,10 +74,10 @@ OcContextCache *oc_context_cache_init(const OcContextCacheConfig *cfg);
  * on NULL. */
 void oc_context_cache_free(OcContextCache *cc);
 
-/* Compute a model hash from a GGUF file size + tensor count. This is a cheap */
+/* Compute a model hash from a GGUF file size + tensor count. This is a cheap identity proxy — not cryptographic. Two models with identical size and tensor count collide; callers needing stronger guarantees should hash weight bytes directly. */
 uint64_t oc_context_cache_model_hash(uint64_t file_size, uint32_t tensor_count);
 
-/* Generate a session id from a prompt + model hash. Writes a NUL-terminated */
+/* Generate a session id from a prompt + model hash. Writes a NUL-terminated hex string into `out` (which MUST be at least OC_CONTEXT_CACHE_SESSION_ID_LEN bytes). Returns OC_OK or OC_ERR_INVALID_ARG if `out` is NULL or `prompt` is NULL. */
 OcError oc_context_cache_session_id(const char *prompt, uint64_t model_hash,
                                     char *out, size_t out_len);
 
@@ -88,7 +88,10 @@ OcError oc_context_cache_store(OcContextCache *cc, const char *session_id,
                                uint32_t head_dim, uint8_t *data,
                                uint64_t size_bytes);
 
-/* Load a KV cache snapshot for `session_id`. */
+/* Load a KV cache snapshot for `session_id`. On success, fills `*out` with a
+ * freshly malloc'd copy of the data (caller frees `out->data`). If
+ * `model_hash != 0` and the stored hash differs, treated as a miss (`*found`
+ * is the canonical miss signal). */
 OcError oc_context_cache_load(OcContextCache *cc, const char *session_id,
                               uint64_t model_hash, OcContextCacheEntry *out,
                               bool *found);

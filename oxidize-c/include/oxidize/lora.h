@@ -47,7 +47,7 @@ OcError oc_lora_set_adapter(OcLoraModel *lm, size_t layer_idx,
                             uint32_t rank, uint32_t rows, uint32_t cols,
                             float alpha);
 
-/* Apply LoRA delta to an activation vector. */
+/* Apply LoRA delta; x is length cols, out is length rows, temp must hold >= rank floats. */
 void oc_lora_apply(const OcLoraAdapter *adapter,
                    const float *x, float *out, float *temp);
 
@@ -89,7 +89,7 @@ typedef enum OcLoraPlanError {
     OC_LORA_PLAN_INVALID_ARG = 4,
 } OcLoraPlanError;
 
-/* Auto-match `.lora_a.weight` / `.lora_b.weight` adapter tensor pairs */
+/* Auto-match `.lora_a.weight` / `.lora_b.weight` adapter pairs; caller must call oc_lora_plan_free when done. */
 OcLoraPlanError oc_lora_plan_application(const char *const *base_tensor_names,
                                           size_t n_base,
                                           const char *const *adapter_tensor_names,

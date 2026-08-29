@@ -379,7 +379,6 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
   // Embeddings are gathered per-token via dequantize_row (not gemv), so keep
   // them in their original layout — never on-the-fly quantized.
   tok_embeddings_ = load_weight(g, embd_name, /*keep_quantized=*/true,
-                                /*allow_quant=*/false);
 
   // ---- Final norm (output_norm / norm / token_embd_norm) ----
   if (g.has_tensor("output_norm.weight")) {
@@ -424,7 +423,6 @@ LlamaModel::LlamaModel(GgufModel gguf, QuantType quantize_to)
     auto opt_w_keepq = [&](const std::string& suffix, LlamaWeight& dst) {
       if (g.has_tensor(p + suffix))
         dst = load_weight(g, p + suffix, /*keep_quantized=*/true,
-                          /*allow_quant=*/false, /*force_keep_quantized=*/true);
     };
 
     opt_vec("attn_norm.weight", layer.attn_norm);

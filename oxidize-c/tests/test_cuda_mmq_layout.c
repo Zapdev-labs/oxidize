@@ -215,7 +215,7 @@ Test(cuda_mmq_layout, iq4_xs_row_dot_matches_reference)
     free(packed); free(ref); free(x);
 }
 
-/* Every IQ4_XS row length in Gemma 4 31B must be a whole number of super-blocks, or oc_cuda_mmq_supported() rejects the tensor and it silently falls back to the f32 upload path — which for this model does not fit in VRAM. */
+/* Every IQ4_XS row length in Gemma 4 31B must be a whole number of super-blocks, or oc_cuda_mmq_supported() rejects the tensor and it silently falls back to the f32 upload path — which for this model does not fit in VRAM. Guard the shapes the loader will actually see. */
 Test(cuda_mmq_layout, gemma4_row_lengths_are_block_aligned)
 {
     /* Row length = ne0 for each IQ4_XS tensor in gemma-4-31B-it-IQ4_XS.gguf:

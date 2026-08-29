@@ -517,7 +517,7 @@ static void *worker_main(void *arg)
                 free(big);
             }
         }
-        /* Free the handler-returned body. Handlers malloc their JSON because free(NULL) is a no-op and we never return a literal */
+        /* Free the handler-returned body. */
         if (body != NULL && body_len > 0) {
             free((void *)body);
         }

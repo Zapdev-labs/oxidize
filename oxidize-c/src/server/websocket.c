@@ -1,4 +1,4 @@
-/* websocket.c — RFC 6455 WebSocket protocol implementation. servers MUST NOT mask frames to clients). */
+/* websocket.c — RFC 6455 WebSocket protocol implementation. */
 #define _POSIX_C_SOURCE 200809L   /* snprintf */
 #include "oxidize/websocket.h"
 

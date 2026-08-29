@@ -11,7 +11,7 @@
 
 Test(websocket, sha1_known_vector)
 {
-    /* FIPS 180-2: SHA-1("abc") = a9993e36 4706816a ba3e2571 7850c26c 9cd0d89d */
+    /* SHA-1("") = da39a3ee 5e6b4b0d 3255bfef 95601890 afd80709 */
     uint8_t out[20];
     oc_sha1((const uint8_t *)"abc", 3, out);
     static const uint8_t expected[20] = {

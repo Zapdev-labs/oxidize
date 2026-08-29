@@ -1,4 +1,4 @@
-/* test_matvec_batch.c — does the batched matvec agree with the single one? loops but must not change a single output value — every result is still The interesting parameter is `cols`, because the activation tile width is */
+/* test_matvec_batch.c — does the batched matvec agree with the single one? oc_matvec_quantized_batch() is the primitive prompt prefill runs on: it dots each weight row against a tile of activations while the row is in cache, instead of re-reading the matrix once per token. */
 #include <criterion/criterion.h>
 
 #include "oxidize/matvec.h"
@@ -102,7 +102,7 @@ Test(matvec_batch, spans_multiple_tiles)
     check_parity(OC_QUANT_Q4_K_M, 24, 4096, 17, abytes * 4);
 }
 
-/* An undersized or absent buffer must cost speed, not correctness: the be testing the wrong invariant. What must hold is that a batch of N gives */
+/* An undersized or absent buffer must cost speed, not correctness: the kernel clamps its tile to fit and falls back to the dequant path if even one activation does not. */
 Test(matvec_batch, undersized_and_absent_scratch)
 {
     const size_t cols = 2048, rows = 32, n_vec = 6;

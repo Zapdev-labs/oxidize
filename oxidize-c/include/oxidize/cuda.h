@@ -43,12 +43,12 @@ typedef struct OcCudaContext {
     OcCudaWeight *d_ffn_down;
     float **d_attn_norm;
     float **d_ffn_norm;
-    /* Gemma-family extra norms, per layer; entry is NULL when the model has */
+    /* Gemma-family extra norms, per layer; entry is NULL when the model has no such tensor. attn_q/k_norm are per-head and are the LAYER's head_dim long (256 on Gemma 4 sliding layers, 512 on global), so they are not interchangeable between layers. */
     float **d_attn_q_norm;
     float **d_attn_k_norm;
     float **d_post_attn_norm;
     float **d_post_ffw_norm;
-    /* MoE (Qwen3-MoE / Mixtral / MiniMax-style). Present only when */
+    /* MoE (Qwen3-MoE / Mixtral / MiniMax-style). Present only when num_experts > 0; the dense d_ffn_* above are then unused. Expert tensors are stacked — expert i occupies rows [i*i_size, (i+1)*i_size) in gate/up and [i*n_embd, (i+1)*n_embd) in down. */
     OcCudaWeight *d_ffn_gate_inp;    /* router: [num_experts, n_embd]      */
     OcCudaWeight *d_ffn_gate_exps;
     OcCudaWeight *d_ffn_up_exps;
@@ -150,7 +150,7 @@ typedef struct OcCudaContext {
     uint32_t n_f32_tensors;     /* tensors that fell back to f32            */
 } OcCudaContext;
 
-/* Initialize the CUDA context: allocate device memory and upload weights from the loaded OcLlamaModel, keeping them packed where a device kernel exists. */
+/* Initialize the CUDA context: allocate device memory and upload weights from the loaded OcLlamaModel, keeping them packed where a device kernel exists. Returns OC_ERR_UNSUPPORTED if CUDA is not available (compiled without OC_CUDA or no GPU). */
 OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model);
 
 /* Run one forward step on GPU: embed token, run all layers, output logits.

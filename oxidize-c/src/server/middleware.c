@@ -61,7 +61,6 @@ static void bucket_refill(OcRateBucket *b, const OcRateLimitConfig *cfg,
         return;
     }
     if (now <= b->last_refill) return;
-    /* tokens per ms = requests_per_minute / 60000 */
     double add = (double)(now - b->last_refill) *
                  (double)cfg->requests_per_minute / 60000.0;
     b->tokens += add;

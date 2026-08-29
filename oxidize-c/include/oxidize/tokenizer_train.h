@@ -46,7 +46,7 @@ typedef struct OcBpeTrainer OcBpeTrainer;
  * Returns NULL on OOM. */
 OcBpeTrainer *oc_bpe_trainer_init(OcBpeTrainConfig config);
 
-/* Train BPE on the given corpus text. The corpus is a NUL-terminated UTF-8 */
+/* Train BPE on the given corpus text. The corpus is a NUL-terminated UTF-8 string (corpus_len is the byte length, or 0 to use strlen(corpus)). After training, the vocab and merge rules are available via the getter functions. Calling train() twice on the same trainer resets the state. Returns OC_OK, OC_ERR_INVALID_ARG (NULL trainer / NULL corpus), OC_ERR_OOM. */
 OcError oc_bpe_trainer_train(OcBpeTrainer *t, const char *corpus, size_t corpus_len);
 
 /* Get the learned vocabulary. Writes a pointer to the internal vocab array

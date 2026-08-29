@@ -41,7 +41,6 @@ enum Command {
     Merge(MergeArgs),
 }
 
-
 #[derive(Debug, Parser)]
 struct SftArgs {
     /// Base model GGUF path.
@@ -99,7 +98,6 @@ struct SftArgs {
     checkpoint_every: usize,
 }
 
-
 #[derive(Debug, Parser)]
 struct DpoArgs {
     /// Base model GGUF path.
@@ -134,7 +132,6 @@ struct DpoArgs {
     #[arg(long, default_value_t = 42)]
     seed: u64,
 }
-
 
 #[derive(Debug, Parser)]
 struct PpoArgs {
@@ -221,7 +218,6 @@ struct SelfTrainArgs {
     #[arg(long)]
     resume_from: Option<PathBuf>,
 }
-
 
 #[derive(Debug, Parser)]
 struct MergeArgs {

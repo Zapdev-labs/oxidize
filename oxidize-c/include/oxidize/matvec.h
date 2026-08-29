@@ -19,7 +19,7 @@ extern "C" {
 void oc_matvec_f32(const float *data, size_t rows, size_t cols,
                    const float *input, float *output);
 
-/* Quantized weight × f32 input → f32 output. Dequantizes one weight row at */
+/* Quantized weight × f32 input → f32 output. Dequantizes one weight row at a time into `temp` (caller-provided, length >= cols) and dots with `input`. `data` is the packed quant buffer; `row_bytes` is the per-row byte stride (must equal `oc_quantized_size(qtype, cols)`). Mirrors the Rust scalar `gemv_dequant_scalar_fallback`. */
 void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
                          size_t rows, size_t cols, size_t row_bytes,
                          const float *input, float *output, float *temp);
@@ -31,7 +31,7 @@ void oc_matvec_quantized_fused(const OcGgufQuantizationType *qtypes,
                                size_t n_outs, const float *input,
                                float *const *outs, float *temp);
 
-/* Multi-input counterpart used by grouped MoE down projections. Each matrix */
+/* Multi-input counterpart used by grouped MoE down projections. Each matrix has its own activation vector, but compatible quantized matrices still run in one worker region. Mixed/unsupported qtypes fall back to the individual matvec path. */
 void oc_matvec_quantized_multi_input(
     const OcGgufQuantizationType *qtypes,
     const uint8_t *const *datas, const size_t *rows, size_t cols,
@@ -58,7 +58,7 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                                size_t n_vec, float *temp,
                                uint8_t *act_scratch, size_t act_bytes);
 
-/* Worst-case `act_scratch` size for ANY oc_matvec_quantized_batch() call whose */
+/* Worst-case `act_scratch` size for ANY oc_matvec_quantized_batch() call whose input width is at most `max_cols`. One buffer sized by this covers every matmul in a forward pass — including narrow ones: the tile count is derived from `cols` by integer division, so a narrower matrix can need marginally MORE scratch than a wide one, and taking the max over a few sampled widths is not a bound. This returns a true bound. */
 size_t oc_matvec_batch_scratch_bytes(size_t max_cols);
 
 void oc_matvec_f32_batch(const float *data, size_t rows, size_t cols,

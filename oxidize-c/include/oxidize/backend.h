@@ -52,7 +52,7 @@ typedef struct OcBackend {
  * enum range. Never returns NULL. */
 const char *oc_backend_type_name(OcBackendType type);
 
-/* Detect if the given backend is available on this system and populate */
+/* Detect if the given backend is available on this system and populate `out` with device info. Returns OC_OK on success (even if the backend is not available — check `out->available`). Returns OC_ERR_INVALID_ARG if `out` is NULL. */
 OcError oc_backend_detect(OcBackendType type, OcBackendInfo *out);
 
 /* Detect all backends. Writes up to `max` entries into `out` and sets
@@ -77,7 +77,7 @@ bool oc_backend_is_available(OcBackendType type);
  * available. */
 OcBackendType oc_backend_best_available(void);
 
-/* Format a human-readable description of the backend info into `out` */
+/* Format a human-readable description of the backend info into `out` (NUL-terminated, up to `out_size-1` chars). Returns the number of bytes written (excluding NUL). If `out` is NULL or `out_size` is 0, returns the length that would have been written. */
 size_t oc_backend_info_print(const OcBackendInfo *info, char *out,
                              size_t out_size);
 

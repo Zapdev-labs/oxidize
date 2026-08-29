@@ -1417,7 +1417,7 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
                  ctx->host, ctx->port);
     }
 
-    /* Middleware stack. Metrics + audit are always on so /metrics has */
+    /* Middleware stack. Metrics + audit are always on so /metrics has something to serve; auth and rate limiting turn on only when the corresponding flag is given, so the default local-dev invocation is unchanged. */
     OcMiddleware mw;
     uint32_t mw_enabled = OC_MW_METRICS | OC_MW_AUDIT;
     if (ctx->api_key != NULL)        mw_enabled |= OC_MW_AUTH;
@@ -1528,7 +1528,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
         return e;
     }
 
-    /* The realtime server uses the HTTP server to upgrade WebSocket */
+    /* The realtime server uses the HTTP server to upgrade WebSocket connections. We start the HTTP server with the realtime handler. The actual WebSocket upgrade + realtime session handling is wired via the realtime module. For now, we start the HTTP server and accept connections at /v1/realtime. */
     OcHttpServer srv;
     memset(&srv, 0, sizeof(srv));
     /* We reuse the OpenAI handler as the base; WebSocket upgrade for

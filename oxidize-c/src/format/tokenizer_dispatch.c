@@ -325,7 +325,7 @@ OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
 
     if (n_ids < 2) return OC_OK;
 
-    /* Re-encode each maximal non-special span (special ids pass through */
+    /* Re-encode each maximal non-special span (special ids pass through unchanged), mirroring the Rust implementation. This reaches the canonical tokenization even for long fragmented suffixes (e.g. five one-byte fragments of "hello"), which a fixed 2/3-token window cannot. Spans that fail to decode/encode are kept verbatim. */
     size_t cap = n_ids + 8;
     uint32_t *result = malloc(cap * sizeof(uint32_t));
     if (!result) return OC_ERR_OOM;

@@ -18,7 +18,7 @@ typedef struct OcArena OcArena;
  * If `initial_cap == 0`, uses OC_ARENA_DEFAULT_CAP. Returns NULL on OOM. */
 OcArena *oc_arena_new(size_t initial_cap);
 
-/* Allocate `n` bytes aligned to `align` (must be a power of two and <= 256). */
+/* Allocate `n` bytes aligned to `align` (must be a power of two and <= 256). `n == 0` returns a non-NULL unique pointer. Returns NULL on OOM. The returned pointer is valid until `oc_arena_free()`. */
 void *oc_arena_alloc(OcArena *a, size_t n, size_t align);
 
 /* Convenience: allocate `n_bytes` bytes with default alignment (16). */

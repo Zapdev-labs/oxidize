@@ -366,12 +366,10 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
             continue;
         }
 
-        /* gate = gate_exps[expert_idx] @ normed  -> [i_size] */
         e = oc_gemv_expert_weight(gate_exps, expert_idx, n_experts,
                                    i_size, h, normed, gate_scratch);
         if (e != OC_OK) return e;
 
-        /* up = up_exps[expert_idx] @ normed -> [i_size] */
         e = oc_gemv_expert_weight(up_exps, expert_idx, n_experts,
                                    i_size, h, normed, up_scratch);
         if (e != OC_OK) return e;
@@ -379,7 +377,6 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
         /* SwiGLU: gate[i] = silu(gate[i]) * up[i] */
         oc_swiglu_inplace_f32(gate_scratch, up_scratch, i_size);
 
-        /* down = down_exps[expert_idx] @ gate -> [h] */
         e = oc_gemv_expert_weight(down_exps, expert_idx, n_experts,
                                    h, i_size, gate_scratch, expert_out);
         if (e != OC_OK) return e;

@@ -99,13 +99,13 @@ OcError oc_batch_scheduler_init(OcBatchScheduler **out, OcBatchConfig config);
  * OC_ERR_OOM if the scheduler is full or allocation fails. */
 OcError oc_batch_scheduler_add(OcBatchScheduler *s, const OcBatchRequest *req);
 
-/* Select the next batch of slots to process. Writes up to max_slots slot */
+/* Select the next batch of slots to process. Writes up to max_slots slot pointers into out_slots (borrowed; owned by scheduler) and the count into out_count. Only WAITING and RUNNING slots are returned. Returns OC_OK even if out_count == 0 (nothing to do). */
 OcError oc_batch_scheduler_next_batch(OcBatchScheduler *s,
                                        OcBatchSlot **out_slots,
                                        size_t max_slots,
                                        size_t *out_count);
 
-/* Append a generated token to the slot matching request_id. Transitions */
+/* Append a generated token to the slot matching request_id. Transitions WAITING -> RUNNING on the first token. Transitions to COMPLETED when n_generated reaches max_tokens. Returns OC_ERR_INVALID_ARG if the request_id is unknown or the slot is already terminal. */
 OcError oc_batch_scheduler_update_token(OcBatchScheduler *s,
                                         uint64_t request_id,
                                         uint32_t token);

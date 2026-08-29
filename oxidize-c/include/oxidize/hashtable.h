@@ -28,7 +28,7 @@ void oc_hashtable_free(OcHashtable *ht);
 /* FNV-1a 64-bit hash of a NUL-terminated string. Exposed for testing. */
 uint64_t oc_fnv1a_hash(const char *s);
 
-/* Insert/replace `key` -> `value`. If `key` already exists, replaces the value */
+/* Insert/replace `key` -> `value`. If `key` already exists, replaces the value and (if `prev_value != NULL`) writes the previous value to `*prev_value`. `key` is NOT copied; caller must keep it alive for the hashtable's lifetime (typically by duping into an OcArena). Returns OC_OK on success, OC_ERR_OOM on allocation failure during grow. */
 OcError oc_hashtable_put(OcHashtable *ht, const char *key, void *value,
                          void **prev_value);
 
@@ -46,7 +46,7 @@ size_t oc_hashtable_size(const OcHashtable *ht);
 /* Number of buckets (capacity). */
 size_t oc_hashtable_capacity(const OcHashtable *ht);
 
-/* Iterator. Caller passes `iter = 0` initially; function writes the next */
+/* Iterator. Caller passes `iter = 0` initially; function writes the next key/value to `*out_key` / `*out_value` and returns true, or returns false when iteration is complete. The order is unspecified. Mutating the hashtable during iteration is undefined. */
 bool oc_hashtable_next(OcHashtable *ht, size_t *iter, const char **out_key,
                        void **out_value);
 

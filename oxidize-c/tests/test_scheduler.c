@@ -261,7 +261,6 @@ Test(scheduler, next_batch_fifo_same_priority)
     uint32_t n = 0;
     oc_sched_next_batch(&sched, ids, 4, &n);
     cr_assert_eq(n, 2u);
-    /* r2 has earlier created_ms, so should be first. */
     cr_assert_eq(ids[0], id2);
     cr_assert_eq(ids[1], id1);
     oc_sched_request_free(&r1);

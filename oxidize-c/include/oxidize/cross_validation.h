@@ -16,7 +16,6 @@ typedef enum {
     OC_VAL_SUITE_VULKAN_DFLASH_CPU = 0,
     OC_VAL_SUITE_FULL_PIPELINE,
     OC_VAL_SUITE_SMOKE_CHECK,
-    /* sentinel for bounds checking; not a valid suite */
     OC_VAL_SUITE__COUNT,
 } OcValidationSuite;
 

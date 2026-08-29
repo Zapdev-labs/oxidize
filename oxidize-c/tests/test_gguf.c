@@ -287,7 +287,6 @@ Test(gguf, all_11_metadata_value_types_round_trip)
         const OcGgufMetadataValue *v = oc_gguf_metadata_get(&f, "k.f32");
         cr_assert_not_null(v, "k.f32 missing");
         cr_assert_eq(v->type, OC_GGUF_MT_FLOAT32, "k.f32 type");
-        /* bit-exact compare avoids FP equality surprises */
         cr_assert_eq(v->v.f32, 3.5f, "k.f32 value");
         float g = 0; cr_assert(oc_gguf_metadata_get_f32(&f, "k.f32", &g), "getter f32");
         cr_assert_eq(g, 3.5f, "getter f32 value");
@@ -595,7 +594,6 @@ static uint8_t *build_minimal_shard(const char *tensor_name,
     size_t header = 24;
     size_t tensor_info = 8 + name_len + 4 + 16 + 4 + 8;
     size_t pre_data = header + tensor_info;
-    /* align to 32 */
     size_t data_start = (pre_data + 31) & ~(size_t)31;
     size_t total = data_start + 4;
 
@@ -609,11 +607,9 @@ static uint8_t *build_minimal_shard(const char *tensor_name,
     memcpy(buf + off, &ver,   4); off += 4;
     memcpy(buf + off, &tc,    8); off += 8;
     memcpy(buf + off, &kvc,   8); off += 8;
-    /* tensor name */
     uint64_t nl = name_len;
     memcpy(buf + off, &nl, 8); off += 8;
     memcpy(buf + off, tensor_name, name_len); off += name_len;
-    /* n_dims = 2 */
     uint32_t nd = 2;
     memcpy(buf + off, &nd, 4); off += 4;
     /* dims = [1, 1] (1 element, 1 row) */
@@ -625,7 +621,6 @@ static uint8_t *build_minimal_shard(const char *tensor_name,
     memcpy(buf + off, &gt, 4); off += 4;
     uint64_t ro = 0;
     memcpy(buf + off, &ro, 8); off += 8;
-    /* pad to data_start */
     while (off < data_start) {
         buf[off++] = 0;
     }

@@ -298,7 +298,6 @@ Test(validation, k_fold_fewer_samples_than_folds)
     add_simple_sample(s, 2, 2, -0.1f, 1.0f);
     OcValidationResult r;
     cr_assert_eq(oc_validation_k_fold(s, &r), OC_OK);
-    /* n_folds is clamped down to the sample count. */
     cr_assert_eq(r.n_folds, 2u);
     oc_validation_free(s);
 }

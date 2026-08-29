@@ -23,7 +23,9 @@ typedef struct OcConvertConfig {
 /* Convert a SafeTensors checkpoint to GGUF format. */
 OcError oc_safetensors_to_gguf(const OcConvertConfig *cfg);
 
-/* Parse SafeTensors metadata header (JSON at the start of the file). */
+/* Parse SafeTensors metadata header (JSON at the start of the file).
+ * On success, `*out_json` is a heap-allocated NUL-terminated buffer the caller
+ * owns and must free(). */
 OcError oc_safetensors_parse_header(const char *path,
                                      char **out_json, size_t *out_len);
 
@@ -32,7 +34,10 @@ OcError oc_safetensors_parse_header(const char *path,
 const char *oc_detect_arch_from_tensors(const char *const *tensor_names,
                                          size_t n_tensors);
 
-/* Map a SafeTensors tensor name to a GGUF canonical name. */
+/* Map a SafeTensors tensor name to a GGUF canonical name.
+ * The returned pointer aliases a thread-local buffer overwritten by the next
+ * call on the same thread — copy it before mapping another name. Unmapped
+ * names return `st_name` itself. */
 const char *oc_map_tensor_name(const char *st_name, const char *arch);
 
 #ifdef __cplusplus

@@ -104,7 +104,6 @@ OcError oc_audio_load_wav(const char *path, OcAudioWav *out)
         fclose(fp);
         return OC_ERR_FORMAT;
     }
-    /* bytes 8-11 should be "WAVE" */
     if (memcmp(riff_hdr + 8, "WAVE", 4) != 0) {
         fclose(fp);
         return OC_ERR_FORMAT;

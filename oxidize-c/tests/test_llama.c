@@ -151,7 +151,7 @@ Test(llama, sessions_reject_unsupported_architecture_paths)
     memset(&model, 0, sizeof(model));
     OcLlamaSession session;
     OcBatchSession batch;
-    /* MLA is no longer rejected — forward_mla_attention handles it, and single-token sessions for DeepSeek/GLM-MoE-DSA/LongCat go through it. */
+    /* MLA is no longer rejected — forward_mla_attention handles it, and single-token sessions for DeepSeek/GLM-MoE-DSA/LongCat go through it. (Batch decode already allocated the MLA workspace; see batch_allocates_mla_workspace below.) uses_geglu is likewise a supported activation. LayerNorm architectures (GPT-2/NeoX/Falcon) are rejected by batch init only — single-token sessions dispatch to arch_forward.c. */
     model.arch = OC_ARCH_GPT2;
     cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
     model.arch = OC_ARCH_GPTJ;
@@ -290,7 +290,6 @@ Test(llama, yarn_identity_within_ctx)
 {
     float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
     float out_yarn[4], out_normal[4];
-    /* yarn_factor=1.0 → no YaRN, should equal normal RoPE. */
     oc_apply_rope_yarn_f32(in, out_yarn, 4, 4, 10, 10000.0f, 1.0f, 4096);
     oc_apply_rope_f32(in, out_normal, 4, 4, 10, 10000.0f);
     for (int i = 0; i < 4; i++) {

@@ -1,4 +1,4 @@
-/* oxk_neon.c — AArch64 Advanced SIMD (NEON) OXK kernels. bit-exactness contract; the short version is that every integer */
+/* oxk_neon.c — AArch64 Advanced SIMD (NEON) OXK kernels. See include/oxidize/oxk_neon.h for the bit-exactness contract; every integer multiply-accumulate is performed in integer arithmetic here too. */
 #include "oxidize/oxk_neon.h"
 
 #if defined(__aarch64__)
@@ -232,8 +232,10 @@ float oc_oxk_dot_q5_k_q8_k_neon(const uint8_t *row, size_t blocks,
 }
 
 
-/* PARITY CAVEAT (the one deviation in this file): the scalar reference adds one f32 term per element. */
-/* accurate of the two (fewer roundings), but it is NOT bit-exact. */
+/* PARITY CAVEAT (the one deviation in this file): the scalar reference adds one
+ * f32 term per element. Here each 16-element scale group is reduced in int32
+ * and contributes a single f32 multiply-add. Results agree to ~1e-6 relative;
+ * the NEON form is more accurate (fewer roundings) but is NOT bit-exact. */
 float oc_oxk_dot_q6_k_q8_k_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {

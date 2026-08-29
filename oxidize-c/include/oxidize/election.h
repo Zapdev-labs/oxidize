@@ -56,11 +56,11 @@ OcError oc_election_init(const OcElectionConfig *config, uint64_t self_id,
 void oc_election_free(OcElectionState *state);
 
 
-/* Periodic tick. If the follower/candidate election timeout has expired */
+/* Periodic tick. If the follower/candidate election timeout has expired (current_ms - last_heartbeat_ms >= election_timeout_ms), transition to CANDIDATE, increment current_term, vote for self, and reset votes. Leaders are unaffected (they send heartbeats via a separate transport). */
 OcError oc_election_tick(OcElectionState *state, uint64_t current_ms);
 
 
-/* Handle a vote request from `candidate_id` at `term`. Grants the vote if: — deterministic tie-break so two candidates never deadlock. */
+/* Handle a vote request from `candidate_id` at `term`. Grants the vote if term >= current_term, voted_for is 0 or already candidate_id, and candidate_priority > self_priority or equal with candidate_id > self_id. Returns true via *granted. */
 OcError oc_election_request_vote(OcElectionState *state,
                                  uint64_t candidate_id, uint64_t term,
                                  bool *granted);

@@ -147,7 +147,7 @@ void oc_oxk_dot_q4_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
                                    size_t n_act, float *out);
 
-/* Q5_K prep into the SAME layout as Q4_K (codes 0..31 fit unsigned bytes; Q4_K prepped dot/multi kernels unchanged — bit-exact against */
+/* Q5_K prep into the SAME layout as Q4_K (codes 0..31 fit unsigned bytes; scale/min decode is shared), so a prepared Q5_K row is consumed by the Q4_K prepped dot/multi kernels unchanged — bit-exact against oc_oxk_dot_q5_k_q8_k(). Scratch: oc_oxk_q4_k_prep_bytes(). */
 void oc_oxk_q5_k_prep_row(const uint8_t *row, size_t blocks, void *scratch);
 
 /* Prepared Q6_K rows: codes stay unsigned 0..63 with 16 signed per-group
@@ -190,7 +190,7 @@ void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
                                    size_t n_act, float *out);
 
-/* Quantized weight × f32-input matvec. `w` is `n_rows` rows of `row_bytes` */
+/* Quantized weight × f32-input matvec. `w` is `n_rows` rows of `row_bytes` each, laid out back-to-back; `x` is the f32 activation vector of length `row_bytes / block_size * elements_per_block`; `out` receives `n_rows` f32 results. */
 void oc_oxk_matvec_q4_0_f32(const uint8_t *w, size_t n_rows, size_t row_bytes,
                             const float *x, float *out);
 void oc_oxk_matvec_q4_k_f32(const uint8_t *w, size_t n_rows, size_t row_bytes,

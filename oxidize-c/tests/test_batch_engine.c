@@ -244,11 +244,10 @@ Test(batch, forward_callback_generates_tokens)
     cr_assert_eq(out[0].token, 64);
     cr_assert(!out[0].finished);  /* generated=2 < max_new=3 */
 
-    /* Second step: forward_fn(64, 4, ...) = 64*2 + 1 + 4 = 133 */
+    /* Third step: no active sequences. */
     oc_batch_step(engine, out, 16, &n_out);
     cr_assert_eq(n_out, 1);
     cr_assert_eq(out[0].token, 133);
-    /* generated=3 == max_new=3 → finished */
     cr_assert(out[0].finished);
 
     /* Third step: no active sequences. */

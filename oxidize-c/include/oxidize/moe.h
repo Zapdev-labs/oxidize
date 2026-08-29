@@ -106,7 +106,7 @@ OcError oc_moe_combine(const OcMoeRouteResult *result,
                        size_t out_len,
                        float *combined);
 
-/* Get a snapshot of the router's stats. Copies into `stats` (which takes */
+/* Get a snapshot of the router's stats. Copies into `stats` (which takes ownership of a freshly-malloc'd `expert_usage_counts` array — caller must free `stats->expert_usage_counts`). Returns OC_ERR_INVALID_ARG on NULL. Returns OC_ERR_OOM on allocation failure. */
 OcError oc_moe_get_stats(const OcMoeRouter *r, OcMoeStats *stats);
 
 /* Free an OcMoeStats snapshot (frees expert_usage_counts). Safe on NULL. */

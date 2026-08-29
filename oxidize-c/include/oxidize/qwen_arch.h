@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-/* Qwen model configuration. Defaults match Qwen2.5-7B: */
+/* Qwen model configuration. Defaults match Qwen2.5-7B: n_layers=28, n_heads=28, n_kv_heads=4, head_dim=128, hidden_dim=3584, intermediate_dim=18944, vocab_size=152064, rope_theta=1000000.0, max_position=32768. For Qwen3-0.6B: n_layers=28, n_heads=16, n_kv_heads=8, head_dim=128, hidden_dim=1024, intermediate_dim=3072, vocab_size=151936, rope_theta=1000000.0 */
 typedef struct OcQwenConfig {
     uint32_t n_layers;
     uint32_t n_heads;

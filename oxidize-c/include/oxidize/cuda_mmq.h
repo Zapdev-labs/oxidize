@@ -1,4 +1,4 @@
-/* cuda_mmq.h — device-resident quantized matvec ("MMQ") entry points. tolerance rather than bit-exactly. */
+/* cuda_mmq.h — device-resident quantized matvec ("MMQ") entry points. Results agree to f32 tolerance rather than bit-exactly. */
 #ifndef OXIDIZE_CUDA_MMQ_H
 #define OXIDIZE_CUDA_MMQ_H
 
@@ -10,10 +10,10 @@
 extern "C" {
 #endif
 
-/* True when `qtype` (an OcGgufQuantizationType) can stay packed on the device */
+/* True when `qtype` (an OcGgufQuantizationType) can stay packed on the device for a row of `cols` elements. Rejects types without a device kernel and shapes whose row length is not a whole number of blocks — notably K-quants need cols % 256 == 0, which e.g. n_embd = 896 does not satisfy. */
 bool oc_cuda_mmq_supported(uint32_t qtype, size_t cols);
 
-/* Device row stride in bytes for a packed row of `cols` elements, or 0 when */
+/* Device row stride in bytes for a packed row of `cols` elements, or 0 when the (qtype, cols) pair is unsupported. This may exceed the on-disk stride: Q6_K blocks are padded from 210 to 224 bytes so that 16-byte vector loads are legal. Use oc_cuda_mmq_block_layout() to drive the upload copy. */
 size_t oc_cuda_mmq_row_bytes(uint32_t qtype, size_t cols);
 
 /* On-disk block size, device block size, and blocks per row. Lets the caller
@@ -30,7 +30,7 @@ bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
                         const float *d_x, float *d_out,
                         size_t rows, size_t cols, void *stream);
 
-/* MoE variant of the above for a stacked expert tensor: expert `e` occupies */
+/* MoE variant of the above for a stacked expert tensor: expert `e` occupies rows [e*rows, (e+1)*rows). The expert index is read on the device from `d_expert_sel[slot]`, so router output never round-trips to the host and the per-token work stays a single asynchronous submission. */
 bool oc_cuda_mmq_matvec_expert(uint32_t qtype, const void *d_weights,
                                const float *d_x, float *d_out,
                                size_t rows, size_t cols,

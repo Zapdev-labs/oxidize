@@ -1,4 +1,4 @@
-/* simd.h — runtime SIMD dispatch for quantization hot paths. scalar). All SIMD kernels are bit-exact with the scalar reference in src/compute/quantization.c (VAL-SIMD-001..004); the dispatch never changes */
+/* simd.h — runtime SIMD dispatch for quantization hot paths. */
 #ifndef OXIDIZE_SIMD_H
 #define OXIDIZE_SIMD_H
 
@@ -36,7 +36,7 @@ typedef struct OcSimdCaps {
  * first call (thread-safe via C11 atomic flag, one-time init). */
 const OcSimdCaps *oc_simd_caps(void);
 
-/* ─── Dispatched dequant entry ────────────────────────────────────────── Bit-exactness (VAL-SIMD-001..004): */
+/* Dispatched dequant entry. Bit-exactness VAL-SIMD-001..004. */
 bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
                          const uint8_t *src, size_t src_len,
                          float *dst, size_t value_count);

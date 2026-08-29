@@ -66,7 +66,7 @@ uint32_t oc_mirostat_v2_sample(const float *logits, size_t vocab_size,
                                float *mu, uint64_t *rng_state);
 
 
-/* Beam search result. tokens is caller-freed. */
+/* ─── Repetition penalties ────────────────────────────────────────────── */
 typedef struct {
     uint32_t *tokens;  /* owned, caller must free */
     size_t    n_tokens;

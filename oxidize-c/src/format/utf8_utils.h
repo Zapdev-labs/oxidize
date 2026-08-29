@@ -72,7 +72,7 @@ static inline size_t oc_utf8_encode_cp(uint32_t cp, char *buf)
     return 4;
 }
 
-/* Lossy UTF-8 validation matching Rust `String::from_utf8_lossy` (WHATWG */
+/* Lossy UTF-8 validation matching Rust `String::from_utf8_lossy` (WHATWG "Encoding" spec): each maximal invalid subsequence (a bad lead byte, or a lead byte plus its longest valid continuation prefix) is replaced by a single U+FFFD (0xEF 0xBF 0xBD). */
 static inline size_t oc_utf8_lossy(const uint8_t *bytes, size_t len, uint8_t *out)
 {
     static const uint8_t REPL[3] = { 0xEF, 0xBF, 0xBD };

@@ -80,7 +80,7 @@ void oc_grammar_init_choice(OcGrammarConstraint *g,
 /* Check if a character is valid in JSON outside a string. */
 static bool json_structural_char(char c)
 {
-    /* Outside strings, JSON allows: { } [ ] : , whitespace, digits, true/false/null */
+    /* After backslash, only specific escapes are valid. */
     switch (c) {
     case '{': case '}': case '[': case ']': case ':': case ',':
     case ' ': case '\t': case '\n': case '\r':

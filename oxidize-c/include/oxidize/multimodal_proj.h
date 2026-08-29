@@ -55,14 +55,14 @@ typedef struct OcMultimodalProjection {
 } OcMultimodalProjection;
 
 
-/* Allocate a projection from a config. Computes per-layer dims: */
+/* Allocate a projection from a config. Computes per-layer dims: layer 0: in = input_dim, out = (n_layers > 1) ? hidden_dim : output_dim layer k: in = prev_out, out = (k == n_layers-1) ? output_dim : hidden_dim If hidden_dim == 0, hidden_dim defaults to input_dim. Returns NULL on OOM or bad config. */
 OcMultimodalProjection *oc_mm_proj_init(const OcMultimodalProjectionConfig *config);
 
 /* Free a projection and all owned weights/biases. Safe on NULL. */
 void oc_mm_proj_free(OcMultimodalProjection *proj);
 
 
-/* Load all weights from a flat buffer. The buffer must contain, for each */
+/* Load all weights from a flat buffer. The buffer must contain, for each layer, the weight matrix (out_dim * in_dim floats, row-major) followed by the bias (out_dim floats). Returns OC_OK on success, OC_ERR_INVALID_ARG if the buffer is too small. */
 OcError oc_mm_proj_load_weights(OcMultimodalProjection *proj,
                                   const float *data, size_t data_size);
 

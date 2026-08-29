@@ -38,7 +38,7 @@ typedef struct OcIqGrid {
  * OC_ERR_INVALID_ARG if `grid` is NULL. */
 OcError oc_iq_grid_init(OcIqGrid *grid, OcIqGridType type);
 
-/* Find the nearest grid entry to `vec` (length `n_dims`). If `importance` */
+/* Find the nearest grid entry to `vec` (length `n_dims`). If `importance` is non-NULL, the distance is weighted: sum_i importance[i] * (vec[i] - entry[i])^2. Writes the index of the nearest entry into `*out_idx`. Returns OC_ERR_INVALID_ARG on NULL/size mismatch. */
 OcError oc_iq_grid_nearest(const OcIqGrid *grid, const float *vec,
                            size_t n_dims, const float *importance,
                            size_t *out_idx);
@@ -58,7 +58,7 @@ void oc_iq_grid_free(OcIqGrid *grid);
  * If importance <= 0, returns error unchanged (no weighting). */
 float oc_iq_grid_importance_weight(float error, float importance);
 
-/* Quantize a block of `n` f32 values using the grid. `n` must be a multiple */
+/* Quantize a block of `n` f32 values using the grid. `n` must be a multiple of grid->n_dims. `importance` may be NULL (uniform weighting). Writes one grid index per sub-block into `out_indices` (length n / n_dims). Returns OC_OK, OC_ERR_INVALID_ARG, or OC_ERR_OOM. */
 OcError oc_iq_quantize_block(const OcIqGrid *grid, const float *input,
                              size_t n, const float *importance,
                              uint32_t *out_indices);

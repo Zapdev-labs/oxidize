@@ -15,14 +15,14 @@
 #include <sys/types.h>
 #include <time.h>
 
-/* Constants                                                           */
+/* ------------------------------------------------------------------ Constants ------------------------------------------------------------------ */
 
 #define OC_CC_MIN_CAP    16u     /* minimum hash table capacity          */
 #define OC_CC_MAX_CAP    (1u << 20)   /* hard cap to avoid pathological allocs */
 #define OC_CC_FNV_OFFSET  0xcbf29ce484222325ULL
 #define OC_CC_FNV_PRIME   0x100000001b3ULL
 
-/* Internal types                                                      */
+/* ------------------------------------------------------------------ Internal types ------------------------------------------------------------------ */
 
 /* A slot in the open-addressing table. `used' distinguishes occupied from
  * empty; tombstones are tracked by `deleted' (set when an entry is removed
@@ -44,7 +44,7 @@ struct OcContextCache {
     pthread_mutex_t       mu;
 };
 
-/* Small helpers                                                       */
+/* ------------------------------------------------------------------ Small helpers ------------------------------------------------------------------ */
 
 static uint64_t oc_cc_now(void) {
     return (uint64_t)time(NULL);
@@ -153,7 +153,7 @@ static int oc_cc_path_for(const char *cache_dir, const char *session_id,
     return 0;
 }
 
-/* Serialization                                                       */
+/* Serialization */
 
 /* All multi-byte fields are written in host byte order (the format is
  * intended for single-host use; cross-host portability would require
@@ -286,7 +286,7 @@ static void oc_cc_unlink_entry(const OcContextCacheConfig *cfg,
     (void)remove(path);
 }
 
-/* Hash table internals                                                */
+/* ------------------------------------------------------------------ Hash table internals ------------------------------------------------------------------ */
 
 /* Find the slot index for `session_id`. If `find_tombstone` is true and the
  * key is absent, returns the index of the first tombstone encountered (for
@@ -308,7 +308,6 @@ static ssize_t oc_cc_find_slot(OcContextCache *cc, const char *session_id,
                     first_tomb = (ssize_t)idx;
                 }
             } else {
-                /* genuinely empty — key absent */
                 if (find_tombstone && first_tomb >= 0) {
                     return first_tomb;
                 }
@@ -387,7 +386,7 @@ static void oc_cc_enforce_limits(OcContextCache *cc) {
     }
 }
 
-/* Public API                                                          */
+/* ------------------------------------------------------------------ Public API ------------------------------------------------------------------ */
 
 OcContextCacheConfig oc_context_cache_config_default(void) {
     OcContextCacheConfig c;
@@ -415,7 +414,6 @@ OcContextCache *oc_context_cache_init(const OcContextCacheConfig *cfg) {
     if (cc->cfg.max_size_bytes == 0) {
         cc->cfg.max_size_bytes = OC_CONTEXT_CACHE_DEFAULT_MAX_SIZE;
     }
-    /* ttl_seconds == 0 means "no TTL" (preserved). */
 
     /* Copy cache_dir if provided. */
     if (cc->cfg.cache_dir != NULL) {

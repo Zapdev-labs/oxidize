@@ -33,7 +33,7 @@ static OcPromptPrefixCache g_prompt_prefix_cache = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
 };
 
-/* The model workspace and persistent compute pool are process-global. HTTP workers must not enter inference concurrently: a second dispatch replaces */
+/* The model workspace and persistent compute pool are process-global. HTTP workers must not enter inference concurrently: a second dispatch replaces the first region's function and stack-backed job pointer while its compute workers are still using them. */
 static pthread_mutex_t g_generation_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define OC_OPENAI_MAX_PROMPT_BYTES (1024u * 1024u)
@@ -152,7 +152,7 @@ static double find_json_double_field(const char *json, const char *key, double d
     return strtod(p, NULL);
 }
 
-/* Extract the content of the LAST "assistant"/"user"/"system" message's */
+/* Extract the content of the LAST "assistant"/"user"/"system" message's "content" field. For chat completions we render the full message array as plain text (a real chat-template renderer is wired by the tokenizer feature — for now we concatenate contents). */
 static bool next_message_object(const char **cursor, const char **start,
                                 const char **end)
 {

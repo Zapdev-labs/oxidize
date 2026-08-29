@@ -48,13 +48,15 @@ typedef struct OcModelConfig {
  * or OC_ERR_INVALID_ARG. */
 OcError oc_model_config_init(OcModelConfig *cfg);
 
-/* Populate `cfg` from a parsed GGUF file's metadata. Reads */
+/* Populate `cfg` from a parsed GGUF file's metadata. Reads architecture-prefixed
+ * keys; missing keys fall back to defaults. Returns OC_OK, OC_ERR_INVALID_ARG,
+ * OC_ERR_FORMAT, or OC_ERR_OOM. */
 OcError oc_model_config_from_gguf(const OcGgufFile *gguf, OcModelConfig *cfg);
 
-/* Validate the config: required fields present (n_layers, n_heads, hidden_dim, vocab_size > 0; head_dim divides hidden_dim; n_kv_heads <= n_heads; n_expert_used <= n_expert when MoE). */
+/* Validate the config: required fields present (n_layers, n_heads, hidden_dim, vocab_size > 0; head_dim divides hidden_dim; n_kv_heads <= n_heads; n_expert_used <= n_expert when MoE). Returns OC_OK or OC_ERR_INVALID_ARG. */
 OcError oc_model_config_validate(const OcModelConfig *cfg);
 
-/* Write a human-readable summary of the config into `out` (up to `out_size-1` */
+/* Write a human-readable summary of the config into `out` (up to `out_size-1` chars, NUL-terminated). Returns the number of bytes written (excluding NUL). If `out` is NULL or out_size==0, returns the length that would have been written. */
 size_t oc_model_config_print(const OcModelConfig *cfg, char *out, size_t out_size);
 
 /* Return a pointer to the config's arch string (convenience accessor; never

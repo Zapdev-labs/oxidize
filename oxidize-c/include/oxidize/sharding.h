@@ -62,7 +62,7 @@ OcError oc_shard_init(const OcShardConfig *config, OcShardManager **out);
 void oc_shard_free(OcShardManager *mgr);
 
 
-/* Compute and store shard assignments for `tensor_name` of shape */
+/* Compute and store shard assignments for `tensor_name` of shape (n_rows, n_cols). Splits into `config.n_shards` parts according to the configured strategy. Each shard's size_bytes is set to (end_row-start_row)*(end_col-start_col)*sizeof(float). Returns OC_ERR_INVALID_ARG if n_shards is 0 or dims are 0. */
 OcError oc_shard_assign(OcShardManager *mgr, const char *tensor_name,
                         uint32_t n_rows, uint32_t n_cols);
 

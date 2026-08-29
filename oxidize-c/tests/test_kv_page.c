@@ -124,7 +124,6 @@ Test(kv_page, get_invalid_returns_null)
     OcKvPageConfig c = small_config();
     oc_kv_page_init(&mgr, c);
     cr_assert_null(oc_kv_page_get(mgr, 999));
-    /* page 0 is free so should also return NULL */
     cr_assert_null(oc_kv_page_get(mgr, 0));
     oc_kv_page_free_mgr(mgr);
 }
@@ -136,7 +135,6 @@ Test(kv_page, write_read_kv)
     oc_kv_page_init(&mgr, c);
     uint32_t pid = 0;
     oc_kv_page_alloc(mgr, 1, 0, &pid);
-    /* head_dim=2, n_heads=2 -> 4 floats per slot */
     float key[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     float val[4] = {5.0f, 6.0f, 7.0f, 8.0f};
     cr_assert_eq(oc_kv_page_write_kv(mgr, pid, 0, 0, key, val), OC_OK);
@@ -203,7 +201,6 @@ Test(kv_page, write_invalid_layer)
     oc_kv_page_alloc(mgr, 1, 0, &pid);
     float key[4] = {0};
     float val[4] = {0};
-    /* n_layers=2 so layer 2 is out of range */
     cr_assert_eq(oc_kv_page_write_kv(mgr, pid, 2, 0, key, val), OC_ERR_INVALID_ARG);
     oc_kv_page_free_mgr(mgr);
 }
@@ -217,7 +214,6 @@ Test(kv_page, write_invalid_token_offset)
     oc_kv_page_alloc(mgr, 1, 0, &pid);
     float key[4] = {0};
     float val[4] = {0};
-    /* page_size=4 so token_offset 4 is out of range */
     cr_assert_eq(oc_kv_page_write_kv(mgr, pid, 0, 4, key, val), OC_ERR_INVALID_ARG);
     oc_kv_page_free_mgr(mgr);
 }

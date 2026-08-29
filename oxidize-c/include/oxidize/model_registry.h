@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-/* Maximum number of entries the registry will hold before refusing new */
+/* Maximum number of entries the registry will hold before refusing new additions. Sized to cover a typical local cache (a handful of quantized variants per base model). The cap is a soft limit: oc_model_registry_scan stops adding entries when it hits the cap rather than erroring. */
 #define OC_MODEL_REGISTRY_MAX_ENTRIES 256
 
 /* Maximum length (including NUL) of a stored path or model name. Paths
@@ -88,11 +88,11 @@ OcError oc_model_registry_add(OcModelRegistry *reg, const char *path);
  * (or NULL args). */
 OcError oc_model_registry_remove(OcModelRegistry *reg, const char *path);
 
-/* Find the first entry whose `name` fuzzy-matches `query`. Fuzzy match: 2. otherwise compute Levenshtein distance to name; return the entry */
+/* Find the first entry whose `name` fuzzy-matches `query`. Fuzzy match: 1. case-insensitive substring of name; if that matches, return it; 2. otherwise compute Levenshtein distance to name; return the entry with the smallest distance provided distance <= strlen(query)/2. Returns a pointer into `reg` (valid until the next mutating call), or NULL if no match. */
 const OcModelEntry *oc_model_registry_find(const OcModelRegistry *reg,
                                            const char *query);
 
-/* List all entries sorted by `key`. Writes pointers to registry entries */
+/* List all entries sorted by `key`. Writes pointers to registry entries (in sorted order) into `out` (cap slots). Returns the number of entries written (min(count, cap)). `out` may be NULL to just retrieve the count. The pointers alias into `reg` and are valid until the next mutating call. */
 size_t oc_model_registry_list(const OcModelRegistry *reg,
                               OcModelSortKey key,
                               const OcModelEntry **out, size_t cap);

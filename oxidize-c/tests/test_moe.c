@@ -266,7 +266,6 @@ Test(moe, expert_forward_single_projection)
     size_t out_len = 0;
     cr_assert_eq(oc_moe_expert_forward(&r, 0, x, out, &out_len, NULL), OC_OK);
     cr_assert_eq(out_len, 3);
-    /* out[0] = 2 * 3 = 6, out[1] = 0, out[2] = 0. */
     cr_assert_float_eq(out[0], 6.0f, 1e-5f);
     cr_assert_float_eq(out[1], 0.0f, 1e-5f);
     cr_assert_float_eq(out[2], 0.0f, 1e-5f);
@@ -317,7 +316,6 @@ Test(moe, expert_forward_invalid_idx)
     float x[4] = {1.0f};
     float out[3] = {0};
     size_t out_len = 0;
-    /* expert_idx 100 >= n_experts(4) → OC_ERR_MODEL */
     cr_assert_eq(oc_moe_expert_forward(&r, 100, x, out, &out_len, NULL),
                  OC_ERR_MODEL);
 
@@ -362,8 +360,6 @@ Test(moe, combine_weighted_sum)
 
     float combined[2] = {0};
     cr_assert_eq(oc_moe_combine(&res, outs, 2, 2, combined), OC_OK);
-    /* combined[0] = 0.75*4 + 0.25*0 = 3.0 */
-    /* combined[1] = 0.75*8 + 0.25*4 = 7.0 */
     cr_assert_float_eq(combined[0], 3.0f, 1e-5f);
     cr_assert_float_eq(combined[1], 7.0f, 1e-5f);
 }
@@ -404,7 +400,6 @@ Test(moe, combine_mismatched_n)
     float e0[1] = {1.0f};
     const float *outs[1] = {e0};
     float combined[1] = {0};
-    /* n_selected=1 but result->n_selected=2 → error. */
     cr_assert_neq(oc_moe_combine(&res, outs, 1, 1, combined), OC_OK);
 }
 
@@ -544,7 +539,6 @@ Test(moe, routing_method_name)
 Test(moe, e2e_route_forward_combine)
 {
     OcMoeConfig cfg = default_config();
-    /* hidden=2, expert_size=2, 3 experts, top-1. */
     cfg.hidden_dim = 2;
     cfg.expert_size = 2;
     cfg.n_experts = 3;

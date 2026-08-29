@@ -15,7 +15,6 @@ use oxidize_core::tensor;
 use std::ffi::{CStr, c_char};
 use std::sync::Once;
 
-
 static RAYON_INIT: Once = Once::new();
 
 /// Configure the Rayon global thread pool once.
@@ -50,14 +49,12 @@ fn init_thread_pool() {
     });
 }
 
-
 static VERSION: &[u8] = b"0.1.0\0";
 
 #[unsafe(no_mangle)]
 pub extern "C" fn oxidize_ffi_version() -> *const c_char {
     VERSION.as_ptr().cast()
 }
-
 
 fn to_gguf_type(t: u32) -> Option<GgufQuantizationType> {
     match t {
@@ -78,7 +75,6 @@ fn to_gguf_type(t: u32) -> Option<GgufQuantizationType> {
         _ => None,
     }
 }
-
 
 /// output[i] = dot(row_i_of_W, vector) for all rows, using AVX2+FMA when available.
 /// Returns 0 on success, -1 on error.
@@ -106,7 +102,6 @@ pub unsafe extern "C" fn oxidize_gemv_quantized(
         Err(_) => -1,
     }
 }
-
 
 struct ModelHandle {
     model: InferenceModel,
@@ -163,7 +158,6 @@ pub unsafe extern "C" fn oxidize_model_vocab_size(handle: *mut std::ffi::c_void)
     h.model.config().vocab_size as u32
 }
 
-
 /// Create a new inference session. Must be freed with oxidize_session_free.
 #[unsafe(no_mangle)]
 pub extern "C" fn oxidize_session_new() -> *mut std::ffi::c_void {
@@ -192,7 +186,6 @@ pub unsafe extern "C" fn oxidize_session_free(session: *mut std::ffi::c_void) {
         unsafe { drop(Box::from_raw(session as *mut Session)) };
     }
 }
-
 
 /// Run one decode step.
 ///

@@ -79,12 +79,12 @@ typedef struct OcWasmStats {
 } OcWasmStats;
 
 
-/* Called for each generated token during oc_wasm_bridge_generate(). `token` */
+/* Called for each generated token during oc_wasm_bridge_generate(). `token` is the sampled token id; `index` is the 0-based position within the current generation; `userdata` is passed through from the caller. The callback may return false to stop generation early (mirrors how the Rust streaming worker breaks on `Poll::Ready(None)`). */
 typedef bool (*OcWasmTokenCallback)(uint32_t token, uint32_t index,
                                     void *userdata);
 
 
-/* A host hook table is invoked by the bridge to perform the actual model */
+/* A host hook table is invoked by the bridge to perform the actual model load and forward pass. In a real WASM deployment the host (JS) registers these via an emscripten addFunction table; when no hooks are installed a built-in stub generator produces deterministic synthetic tokens (tests only). */
 typedef struct OcWasmHostHooks {
     /* Load model bytes into the host. Returns true on success. */
     bool (*load_model_bytes)(const uint8_t *data, size_t len,
@@ -115,7 +115,7 @@ OcWasmBridge *oc_wasm_bridge_init(const OcWasmBridgeConfig *cfg);
 void oc_wasm_bridge_free(OcWasmBridge *br);
 
 
-/* Load a model from `path` (a host path or URL). The bridge records stats */
+/* Load a model from `path` (a host path or URL). The bridge records stats and transitions to `model_loaded == true` on success. Returns OC_OK, OC_ERR_INVALID_ARG if `br`/`path` is NULL, OC_ERR_IO on read failure, or OC_ERR_MODEL on parse failure. Safe to call multiple times (each load replaces the previous model). */
 OcError oc_wasm_bridge_load_model(OcWasmBridge *br, const char *path);
 
 /* Load a model from in-memory `data` (`len` bytes). This mirrors the Rust
@@ -125,7 +125,7 @@ OcError oc_wasm_bridge_load_model_bytes(OcWasmBridge *br,
                                         const uint8_t *data, size_t len);
 
 
-/* Generate text from `prompt`. For each produced token, `on_token` (if not caller the generation did not fit and must not be treated as complete. */
+/* Generate text from `prompt`. */
 size_t oc_wasm_bridge_generate(OcWasmBridge *br,
                                const char *prompt,
                                uint32_t max_tokens,
@@ -142,13 +142,13 @@ OcError oc_wasm_bridge_cancel(OcWasmBridge *br);
 OcError oc_wasm_bridge_get_stats(OcWasmBridge *br, OcWasmStats *out);
 
 
-/* Install a host hook table so model loading and token sampling run the host's real forward-pass implementation instead of the built-in stub. */
+/* Install a host hook table so model loading and token sampling run the host's real forward-pass implementation instead of the built-in stub. The previous hooks' release() is called first. The bridge stores a copy of `*hooks`; `userdata` is passed to every hook. Returns OC_OK or OC_ERR_INVALID_ARG. */
 OcError oc_wasm_bridge_install_hooks(OcWasmBridge *br,
                                      const OcWasmHostHooks *hooks,
                                      void *userdata);
 
 
-/* Enqueue a message onto the bridge's internal queue. The caller retains */
+/* Enqueue a message onto the bridge's internal queue. The caller retains ownership of `msg.payload`. On enqueue, `msg.token_id` is filled with a monotonically increasing sequence number. Returns OC_OK, OC_ERR_INVALID_ARG, or OC_ERR_OOM if the queue is full. */
 OcError oc_wasm_bridge_enqueue(OcWasmBridge *br, OcWasmMessage *msg);
 
 /* Drain one message from the queue and act on it. */
@@ -158,7 +158,7 @@ OcError oc_wasm_bridge_drain_one(OcWasmBridge *br);
 uint32_t oc_wasm_bridge_queue_depth(const OcWasmBridge *br);
 
 
-/* Format the TypeScript interface contract for this bridge into `buf` (up */
+/* Format the TypeScript interface contract for this bridge into `buf` (up to `cap-1` chars + NUL). */
 size_t oc_wasm_bridge_format_interface(char *buf, size_t cap);
 
 /* Returns a pointer to a static, NUL-terminated string containing the full

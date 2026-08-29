@@ -15,7 +15,7 @@ extern "C" {
 /* A read-only memory mapping of a file. */
 typedef struct OcMmap OcMmap;
 
-/* Memory-map `path` for read-only access (PROT_READ, MAP_PRIVATE). (mmap/malloc failure). On error, `*out` is set to NULL. */
+/* Memory-map `path` for read-only access (PROT_READ, MAP_PRIVATE). Returns OC_OK, OC_ERR_IO (open/stat), OC_ERR_INVALID_ARG (NULL args), or OC_ERR_OOM (mmap/malloc failure). On error, `*out` is set to NULL. */
 OcError oc_mmap_open_readonly(const char *path, OcMmap **out);
 
 /* Map an already-open file descriptor for read-only access. Takes ownership
@@ -23,7 +23,7 @@ OcError oc_mmap_open_readonly(const char *path, OcMmap **out);
  * where the caller pre-opens shards for validation. */
 OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out);
 
-/* Apply MADV_HUGEPAGE to the mapping (Linux only). Best-effort: on success */
+/* Apply MADV_HUGEPAGE to the mapping (Linux only). Best-effort: on success sets the internal hugepage flag; on failure logs WARN and leaves it false. No-op (returns OC_OK) on non-Linux platforms. The caller is responsible for headroom policy (only enable THP when model fits in RAM with >= 2x headroom — see Rust `MappedGgufFile::advise_huge_pages`). */
 OcError oc_mmap_advise_hugepage(OcMmap *m);
 
 /* Apply MADV_SEQUENTIAL (best-effort, Linux only). */
@@ -41,10 +41,10 @@ bool oc_mmap_hugepage(const OcMmap *m);
 /* Returns true if mlock() succeeded for this mapping. */
 bool oc_mmap_mlocked(const OcMmap *m);
 
-/* Lock the mapping into physical RAM with `mlock(2)`. Only attempts the lock */
+/* Lock the mapping into physical RAM with `mlock(2)`. */
 bool oc_mmap_mlock_with_headroom(OcMmap *m);
 
-/* Sequential prefault sweep: touch every 4 KiB page via volatile reads so */
+/* Sequential prefault sweep: touch every 4 KiB page via volatile reads so they are faulted into the page cache. Returns a checksum (XOR of all touched bytes) — useful as a sanity check that the mapping is readable. Single-threaded; for parallel prefault use `oc_mmap_prefault_parallel`. */
 uint8_t oc_mmap_prefault(const OcMmap *m);
 
 /* Parallel prefault sweep using `n_threads` pthreads. Each thread faults a

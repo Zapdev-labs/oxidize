@@ -148,7 +148,6 @@ Test(act, rms_norm_qwen_standard)
 
 Test(act, rms_norm_qwen_plus_one)
 {
-    /* weight_plus_one = true -> uses (1+w) instead of w. */
     float x[] = {3.0f, 4.0f};
     float w[] = {0.5f, 0.5f};
     float out[2];

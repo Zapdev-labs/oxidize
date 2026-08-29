@@ -345,7 +345,6 @@ static OcError parse_url(const char *url,
     uint16_t port = OC_HF_DEFAULT_HOST_PORT;
     if (colon) {
         host_len = (size_t)(colon - s);
-        /* parse port after colon up to hostport_len */
         char pb[16];
         size_t plen = hostport_len - host_len - 1;
         if (plen == 0 || plen >= sizeof(pb)) return OC_ERR_INVALID_ARG;
@@ -715,7 +714,6 @@ static bool oc_mkdir_p(const char *path)
         if (buf[i] == '/') {
             buf[i] = '\0';
             if (mkdir(buf, 0755) != 0 && errno != EEXIST) {
-                /* ignore; final mkdir below will report */
             }
             buf[i] = '/';
         }
@@ -1252,7 +1250,7 @@ OcError oc_hf_cache_clean(const OcHfConfig *cfg, uint64_t max_age_seconds,
         int dfd = dirfd(sd);
         while ((sent = readdir(sd)) != NULL) {
             if (sent->d_name[0] == '.') continue;
-            /* Stat and unlink relative to the open directory fd (with AT_SYMLINK_NOFOLLOW) so a concurrent swap of a path component between the check and the unlink cannot redirect the delete outside the cache directory (TOCTOU). */
+            /* If dest exists and matches expected SHA, skip. */
             struct stat st;
             if (dfd < 0 ||
                 fstatat(dfd, sent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||

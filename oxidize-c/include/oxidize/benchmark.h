@@ -65,7 +65,7 @@ typedef struct OcBenchmarkResult {
 OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
                           OcBenchmarkResult *out);
 
-/* Run a throughput scaling benchmark: measure tok/s at multiple context */
+/* Run a throughput scaling benchmark: measure tok/s at multiple context lengths. Fills the throughput_at_* fields. Context lengths larger than the model's n_ctx are skipped (field stays 0); a failed run returns its error instead of reporting success. */
 OcError oc_benchmark_scaling(OcLlamaModel *model,
                               OcBenchmarkResult *out);
 

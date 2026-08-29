@@ -1,4 +1,4 @@
-/* tokenizer.h — LoadedTokenizer (BPE/SP/WP/Tiktoken) public API. Round-trip parity with Rust is a hard invariant (VAL-TOK-006..011): */
+/* tokenizer.h — LoadedTokenizer (BPE/SP/WP/Tiktoken) public API. Round-trip parity with Rust is a hard invariant (VAL-TOK-006..011): SentencePiece Viterbi, WordPiece `##` greedy match, Tiktoken raw byte-level, BPE with GPT-2 byte_to_unicode. */
 #ifndef OXIDIZE_TOKENIZER_H
 #define OXIDIZE_TOKENIZER_H
 
@@ -23,7 +23,7 @@ typedef enum {
     OC_TOK_KIND_TIKTOKEN,
 } OcTokenizerKind;
 
-/* Policy for handling special-token strings in user input. the injection-prevention mode (VAL-TOK-004). For BPE, marker text such (VAL-TOK-007). Used by Llama/Gemma callers that need the leading BOS */
+/* ─── Kinds ────────────────────────────────────────────────────────────── */
 typedef enum {
     OC_TOK_DEFAULT          = 0,
     OC_TOK_ALLOW_SPECIAL    = 1,
@@ -31,7 +31,7 @@ typedef enum {
     OC_TOK_ADD_BOS          = 3,
 } OcSpecialTokenPolicy;
 
-/* Chat template kinds. `OC_TEMPLATE_CHATML` is the fast-path ChatML renderer */
+/* ─── Kinds ────────────────────────────────────────────────────────────── */
 typedef enum {
     OC_TEMPLATE_CHATML = 0,
 } OcTemplateKind;
@@ -95,7 +95,7 @@ typedef struct OcTokenizer {
 } OcTokenizer;
 
 
-/* Load a tokenizer from parsed GGUF metadata. Reads `tokenizer.ggml.model` */
+/* Load a tokenizer from parsed GGUF metadata. Reads `tokenizer.ggml.model` and dispatches to the format-specific loader. On success, `*out` is initialized with `kind`, the implementation pointer, and the special-token ids pulled from `tokenizer.ggml.*_token_id` metadata keys. Returns OC_OK, OC_ERR_TOKENIZER (unknown model string, missing required metadata, or invalid merge entry), OC_ERR_OOM, or OC_ERR_INVALID_ARG. */
 OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out);
 
 /* Free a loaded tokenizer and all its allocations. Safe on NULL or zeroed
@@ -152,7 +152,8 @@ OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
 void oc_streaming_detok_free(OcStreamingDetokenizer *sd);
 
 
-/* Load a BPE tokenizer from parsed GGUF metadata. Reads */
+/* Load a BPE tokenizer from parsed GGUF metadata. Reads tokenizer.ggml.tokens
+ * plus optional merges and token_type. */
 OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                               OcBpeTokenizer **out);
 
@@ -160,7 +161,7 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
  * Used by `oc_tokenizer_load_from_gguf()` after loading the BPE impl. */
 void oc_bpe_fill_special_tokens(const OcBpeTokenizer *bpe, OcTokenizer *out);
 
-/* Train a toy BPE tokenizer from a corpus (mirrors Rust */
+/* Train a toy BPE tokenizer from a corpus (mirrors Rust `BpeTokenizer::train`). Used by the test suite to construct a known vocab + merge table without needing a real Qwen GGUF fixture. The returned tokenizer is owned by `arena`. `use_byte_fallback` is set to false (char-level, matching the Rust `train` constructor). */
 OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
                      size_t merge_limit, OcArena *arena,
                      OcBpeTokenizer **out);
@@ -181,11 +182,12 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
 OcError oc_bpe_decode_raw(const OcBpeTokenizer *bpe, const uint32_t *ids,
                           size_t count, uint8_t **out_bytes, size_t *out_len);
 
-/* Free the malloc'd internals of a BPE tokenizer (vocab hashtable, u64 */
+/* Free the malloc'd internals of a BPE tokenizer (vocab hashtable, u64 maps). Does NOT free the OcBpeTokenizer struct itself (arena-owned) nor the arena. Call before oc_arena_free() when the tokenizer was created via oc_bpe_train(). When the tokenizer was loaded via oc_tokenizer_load_from_gguf(), oc_tokenizer_free() already calls this. */
 void oc_bpe_free(OcBpeTokenizer *bpe);
 
 
-/* Load a SentencePiece unigram tokenizer from GGUF metadata. Reads */
+/* Load a SentencePiece unigram tokenizer from GGUF metadata. Reads
+ * tokenizer.ggml.tokens and tokenizer.ggml.scores. */
 OcError oc_sp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                              OcSentencePieceTokenizer **out);
 
@@ -249,7 +251,8 @@ OcError oc_wp_decode(const OcWordPieceTokenizer *wp, const uint32_t *ids,
 void oc_wp_free(OcWordPieceTokenizer *wp);
 
 
-/* Load a raw Tiktoken tokenizer from GGUF metadata. Reads */
+/* Load a raw Tiktoken tokenizer from GGUF metadata. Reads tokenizer.ggml.tokens
+ * and optional tokenizer.ggml.merges. */
 OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                                   OcTiktokenTokenizer **out);
 

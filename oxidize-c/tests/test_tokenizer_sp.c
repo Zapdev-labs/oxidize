@@ -239,7 +239,7 @@ Test(tokenizer_sp, empty_input_returns_empty)
     oc_arena_free(arena);
 }
 
-/* ─── BOS token handling (VAL-TOK-007) ─────────────────────────────────── */
+/* ─── BOS token handling (VAL-TOK-007) ─────────────────────────────────── Mirrors the BOS prepend behavior. */
 
 Test(tokenizer_sp, add_bos_default_true_for_sp)
 {
@@ -298,7 +298,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
     EMIT_U64(buf, off, 0);   /* tensor_count */
     EMIT_U64(buf, off, 4);   /* kv_count */
 
-    /* KV 1: tokenizer.ggml.model = model_str */
+    /* KV 4: tokenizer.ggml.unknown_token_id = 3 (UINT32) */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.model");
         EMIT_U32(buf, off, OC_GGUF_MT_STRING);
@@ -306,7 +306,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
         EMIT_U64(buf, off, sl);
         EMIT(buf, off, model_str, sl);
     }
-    /* KV 2: tokenizer.ggml.tokens = ARRAY<STRING>[4] */
+    /* KV 4: tokenizer.ggml.unknown_token_id = 3 (UINT32) */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.tokens");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -318,7 +318,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
             EMIT(buf, off, toks[i], sl);
         }
     }
-    /* KV 3: tokenizer.ggml.scores = ARRAY<FLOAT32>[4] */
+    /* KV 4: tokenizer.ggml.unknown_token_id = 3 (UINT32) */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.scores");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -349,7 +349,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
 
 Test(tokenizer_sp, load_from_gguf_llama)
 {
-    /* Mirrors Rust `loads_sentencepiece_tokenizer_from_gguf_metadata`: */
+    /* Mirrors Rust `loads_gemma4_sentencepiece_tokenizer_from_gguf_metadata`. */
     size_t len = 0;
     uint8_t *buf = build_sp_gguf("llama", &len);
     OcGgufFile gguf;

@@ -1,4 +1,5 @@
-/* gguf.c — GGUF v3/v2 binary format parser. logic 1:1 so bit-exact tensor inventory parity holds. Layout (little-endian throughout): */
+/* gguf.c — GGUF v3/v2 binary format parser. */
+/* logic 1:1 so bit-exact tensor inventory parity holds. */
 #include "oxidize/gguf.h"
 
 #include <stdio.h>
@@ -151,7 +152,7 @@ static OcError read_array(ByteReader *r, OcArena *arena,
     if (e != OC_OK) return e;
     OcGgufMetadataType elem_type = oc_gguf_metadata_type_from_u32(et_raw);
     if (elem_type == OC_GGUF_MT_UNKNOWN) return OC_ERR_FORMAT;
-    /* Reject nested ARRAY (ARRAY-of-ARRAY) — non-spec: the GGUF format only */
+    /* Reject nested ARRAY (ARRAY-of-ARRAY) — non-spec: the GGUF format only permits arrays of scalar/string types. Permitting nested arrays would also leave the OcGgufMetadataArray recursion with no terminator and complicate the multi-shard deep-copy (dangling pointer risk on the shared-by-reference value storage). Mirrors Rust oxidize-core which returns Format error on recursive ARRAY. */
     if (elem_type == OC_GGUF_MT_ARRAY) {
         oc_log(OC_LOG_ERROR, "gguf: nested ARRAY metadata type rejected "
                 "(non-spec, element_type=%u)", et_raw);
@@ -636,7 +637,7 @@ void oc_gguf_dump(const OcGgufFile *f)
     }
 }
 
-/* ─── Architecture detection (VAL-FOUND-012) ──────────────────────────────── */
+/* ─── Architecture detection (VAL-FOUND-012) ──────────────────────────────── Mirrors Rust `GgufFile::architecture()`: 1. */
 OcModelArchitecture oc_gguf_arch_from_file(const OcGgufFile *f)
 {
     if (!f) return OC_ARCH_UNKNOWN;
@@ -808,7 +809,6 @@ static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
     }
     if (!prev_dash) return NULL;
 
-    /* base = filename[0 .. prev_dash). */
     size_t base_len = (size_t)(prev_dash - filename);
 
     /* Compose <dir>/<base>. */
@@ -832,7 +832,7 @@ static OcError open_shard(const char *path, OcGgufShard *shard)
     OcError e = oc_mmap_open_readonly(path, &m);
     if (e != OC_OK) return e;
 
-    /* Parse the mmap'd bytes. oc_gguf_parse dups the bytes it needs into the arena, so we can pass mmap'd bytes directly (the parse doesn't hold */
+    /* Parse the mmap'd bytes. oc_gguf_parse dups the bytes it needs into the arena, so we can pass mmap'd bytes directly (the parse doesn't hold a reference to the buffer after return — strings/tensor names are arena-owned copies). */
     OcGgufFile parsed;
     e = oc_gguf_parse(oc_mmap_bytes(m), oc_mmap_len(m), &parsed);
     if (e != OC_OK) {
@@ -1109,7 +1109,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
             return e;
         }
 
-        /* Unified view = shard 0's parsed file, but with the tensor table */
+        /* Unified view = shard 0's parsed file, but with the tensor table deep-copied into a fresh unified arena (so the caller can free via oc_gguf_map_free() which frees the unified arena + each shard's per-shard arena). */
         OcArena *unified_arena = oc_arena_new(0);
         if (!unified_arena) {
             close_shard(&shards[0]);
@@ -1249,7 +1249,7 @@ OcError oc_gguf_map_advise_hugepage(OcGgufMmappedFile *m)
 bool oc_gguf_map_mlock_with_headroom(OcGgufMmappedFile *m)
 {
     if (!m || !m->shards) return false;
-    /* Check the AGGREGATE size against the headroom policy first: each shard's */
+    /* Check the AGGREGATE size against the headroom policy first: each shard's own check only sees its individual length, so several shards could collectively exceed MemAvailable. If the total doesn't fit with >= 30% headroom, skip locking entirely (readahead + prefault only). */
     uint64_t available = 0;
     if (oc_linux_mem_available_bytes(&available)
         && oc_gguf_map_total_bytes(m) >= (available * 7ull) / 10ull) {

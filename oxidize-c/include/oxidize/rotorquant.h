@@ -43,7 +43,7 @@ typedef struct OcRotorQuant {
 } OcRotorQuant;
 
 
-/* Build a quantizer. Solves the Lloyd-Max codebook for (d, bits) and derives */
+/* Build a quantizer. Solves the Lloyd-Max codebook for (d, bits) and derives the fixed rotations from `seed`. Returns OC_ERR_INVALID_ARG for d == 0 or bits outside [OC_RQ_MIN_BITS, OC_RQ_MAX_BITS], OC_ERR_OOM on allocation failure. Free with oc_rotorquant_free(). */
 OcError oc_rotorquant_init(OcRotorQuant *rq, OcRotorQuantVariant variant,
                            size_t d, unsigned bits, uint64_t seed);
 
@@ -82,7 +82,7 @@ OcError oc_rotorquant_decode_many(const OcRotorQuant *rq, const uint8_t *in,
 void oc_rotorquant_rotate(const OcRotorQuant *rq, float *v);
 void oc_rotorquant_unrotate(const OcRotorQuant *rq, float *v);
 
-/* Solve the Lloyd-Max fixed point for the coordinate distribution of a randomly rotated unit vector in R^d, approximated by N(0, 1/d). */
+/* Solve the Lloyd-Max fixed point for the coordinate distribution of a randomly rotated unit vector in R^d, approximated by N(0, 1/d). Writes (1u << bits) ascending centroids to `centroids_out`. This is what oc_rotorquant_init() calls; exposed so tests can verify the solver. */
 OcError oc_rotorquant_lloyd_max(size_t d, unsigned bits, float *centroids_out);
 
 #ifdef __cplusplus

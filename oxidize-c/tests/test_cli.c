@@ -1,4 +1,5 @@
-/* test_cli.c — CLI argument parser tests. VAL-CLI-001..006 cover defaults, value flags, boolean flags, positional */
+/* test_cli.c — CLI argument parser tests. */
+/* VAL-CLI-001..006 cover defaults, value flags, boolean flags, positional */
 #include <criterion/criterion.h>
 
 #include "../src/cli/args.h"

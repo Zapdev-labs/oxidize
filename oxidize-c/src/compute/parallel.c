@@ -233,7 +233,7 @@ void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data)
     atomic_store_explicit(&g_pool.n_remaining, nt, memory_order_relaxed);
     atomic_fetch_add_explicit(&g_pool.generation, 1u, memory_order_seq_cst);
 
-    /* Wake anyone who parked — but only if anyone actually did. is that nothing is parked and the mutex round trip is pure overhead. */
+    /* Wake anyone who parked — but only if anyone actually did; between regions nothing is parked, so the mutex round trip would be pure overhead. */
     if (atomic_load_explicit(&g_pool.n_parked, memory_order_seq_cst) != 0) {
         pthread_mutex_lock(&g_pool.lock);
         pthread_cond_broadcast(&g_pool.wake);

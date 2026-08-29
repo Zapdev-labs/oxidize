@@ -73,7 +73,7 @@ OcError oc_validation_add_sample(OcValidationState *state,
 OcError oc_validation_clear(OcValidationState *state);
 
 
-/* Run k-fold cross-validation over the stored samples. Folds are assigned */
+/* Run k-fold cross-validation over the stored samples. Folds are assigned deterministically from `config.seed`. For each fold, samples in that fold are "held out" — accuracy/loss are computed only over held-out samples (simulating train/test split semantics). Writes per-fold and overall aggregated metrics to `out_result`. */
 OcError oc_validation_k_fold(const OcValidationState *state,
                               OcValidationResult *out_result);
 

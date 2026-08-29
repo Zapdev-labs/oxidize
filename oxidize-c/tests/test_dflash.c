@@ -314,7 +314,6 @@ Test(dflash_model, cache_target_hidden)
     OcDFlashDraftModel m;
     oc_dflash_model_init(&m, &cfg);
 
-    /* target_hidden_width = 4 * 2 = 8 */
     float hidden[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     cr_assert_eq(oc_dflash_cache_target_hidden(&m, hidden, 8), OC_OK);
     cr_assert_eq(m.target_hidden_cache_len, 8);

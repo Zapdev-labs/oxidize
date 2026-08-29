@@ -1,4 +1,6 @@
-/* test_oxk_neon.c — AArch64 NEON ↔ scalar parity for the OXK dot products. The whole file compiles to nothing on x86 (the NEON symbols do not exist - Q4_0, Q4_1, Q8_0, Q4_K, Q5_K → bit-exact (tolerance 0.0f). */
+/* test_oxk_neon.c — AArch64 NEON ↔ scalar parity for the OXK dot products. */
+/* - Q4_0, Q4_1, Q8_0, Q4_K, Q5_K → bit-exact (tolerance 0.0f). */
+/* - Q6_K → not bit-exact by construction (the scalar reference adds one f32 */
 #include <criterion/criterion.h>
 
 #include "oxidize/oxk.h"

@@ -1,4 +1,4 @@
-/* video_decoder.h — Video frame decoding primitives (no FFmpeg). Port of oxidize-core/src/video/decoder.rs. Because the C port stays */
+/* video_decoder.h — Video frame decoding primitives (no FFmpeg). */
 #ifndef OXIDIZE_VIDEO_DECODER_H
 #define OXIDIZE_VIDEO_DECODER_H
 
@@ -47,7 +47,7 @@ OcError oc_video_frame_list_add(OcVideoFrameList *list,
  * caller. Returns OC_ERR_INVALID_ARG on NULL/zero-dim args or OOM. */
 OcError oc_video_frame_list_add_raw(OcVideoFrameList *list, OcVideoFrame *frame);
 
-/* RepetitiveFrameDecoder: synthesize `n_copies` copies of a single */
+/* RepetitiveFrameDecoder: synthesize `n_copies` copies of a single image. Each copy is a freshly-allocated duplicate of `single_frame_data` ([h * w * 3] floats). The output list is initialized by this call; call oc_video_frame_list_free() after. Returns OC_ERR_INVALID_ARG if any pointer/dim is bad, n_copies==0, or OC_ERR_OOM. */
 OcError oc_video_decoder_repetitive(OcVideoFrameList *out,
                                      uint32_t w, uint32_t h,
                                      const float *single_frame_data,

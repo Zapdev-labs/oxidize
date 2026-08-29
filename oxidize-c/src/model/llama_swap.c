@@ -6,7 +6,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* mmap headers */
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>

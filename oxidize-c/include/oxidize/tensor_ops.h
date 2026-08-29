@@ -13,7 +13,6 @@ extern "C" {
 #endif
 
 
-/* out = a + b (element-wise). n elements. */
 void oc_tensor_add_f32(const float *a, const float *b, float *out, size_t n);
 
 /* out = a * b (element-wise). */

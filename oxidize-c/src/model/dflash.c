@@ -316,7 +316,7 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
 
         /* Determine head_dim from q_norm if available. */
         size_t layer_hd = hd;
-        /* q_norm_weight length gives head_dim */
+        /* RMSNorm + lm_head. */
 
         /* Attention branch. */
         float *normed = malloc(h * sizeof(float));

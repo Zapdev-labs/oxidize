@@ -63,7 +63,9 @@ KEEP_LICENSE = re.compile(r"Copyright|SPDX|License", re.IGNORECASE)
 
 NUMBERED_STEP = re.compile(r"^\s*/\*\s*\d+\.\s+.+\*/\s*$")
 
-FILE_TITLE = re.compile(r"^\s*/\* \S+\.\w+")
+FILE_TITLE = re.compile(
+    r"^\s*/\* [\w.-]+\.(?:c|h|rs|go|py|hpp|cpp|cc|hh|cxx)\b"
+)
 MASTER_REF = os.environ.get("OXIDIZE_STRIP_REF", "origin/master")
 
 C_EXTS = {".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx"}
@@ -226,11 +228,31 @@ def opening_title(source: str) -> str | None:
 
 def is_truncated_comment(inner: str) -> bool:
     s = inner.strip()
-    if s.endswith((",", "(", ";", "the", "a", "an", "of", "and", "to", "for")):
+    if not s:
         return True
-    if HANG_END.search(s) and len(s) > 55:
+    if s.endswith((",", "(", ";", "`")):
         return True
+    if HANG_END.search(s):
+        return True
+    if s.count("(") != s.count(")"):
+        return True
+    if re.search(r"\.\s+[a-z]", s) and "VAL-" not in s and "e.g." not in s:
+        return True
+    if not s.endswith((".", "?", "!", ")", "*/")) and len(s) > 40 and "." not in s[-24:]:
+        return True
+    last = re.split(r"(?<=[.!?])\s+", s)[-1]
+    if last and len(last) > 8 and not last.endswith((".", "?", "!", ")", "`")):
+        if not EXTRA_KEEP.search(s) or HANG_END.search(last):
+            return True
     return False
+
+
+def is_mashed_title(inner: str) -> bool:
+    sent = first_sentence(inner)
+    rest = inner[len(sent) :].strip()
+    if not rest:
+        return False
+    return rest[0].islower() or rest.startswith(("scalar", "bit-exact", "the dispatch"))
 
 
 def drop_fragments(lines: list[str]) -> list[str]:
@@ -241,14 +263,38 @@ def drop_fragments(lines: list[str]) -> list[str]:
             out.append(line)
             continue
         inner = match.group(2).strip()
-        if FILE_TITLE.match(line) or EXTRA_KEEP.search(inner):
+        if FILE_TITLE.match(line):
             out.append(line)
             continue
         if inner[:1].islower() and not re.match(r"^[a-z0-9_.]+\.[a-z]{1,3}\b", inner):
-            if len(inner) > 50 or is_truncated_comment(inner):
+            if EXTRA_KEEP.search(inner) and not is_truncated_comment(inner):
+                out.append(line)
+                continue
+            if len(inner) > 40 or is_truncated_comment(inner):
                 continue
         out.append(line)
     return out
+
+
+def opening_keep_notes(source: str) -> list[str]:
+    lines = source.splitlines()
+    if not lines or not lines[0].lstrip().startswith("/*"):
+        return []
+    if "*/" in lines[0]:
+        texts = comment_text_lines([lines[0]])
+    else:
+        block = [lines[0]]
+        for line in lines[1:]:
+            block.append(line)
+            if "*/" in line:
+                break
+        texts = comment_text_lines(block)
+    title = first_sentence(" ".join(texts)) if texts else ""
+    extras = []
+    for text in texts:
+        if EXTRA_KEEP.search(text) and text not in title and text not in extras:
+            extras.append(first_sentence(text))
+    return extras[:2]
 
 
 def restore_title(working: str, master: str) -> str:
@@ -256,35 +302,96 @@ def restore_title(working: str, master: str) -> str:
     if not title:
         return working
     lines = working.splitlines()
-    first = next((line for line in lines if line.strip()), "")
-    if FILE_TITLE.match(first):
+    idx = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if idx is None:
         return working
+    first = lines[idx]
+    if FILE_TITLE.match(first):
+        inner = first.split("/*", 1)[1].rsplit("*/", 1)[0]
+        if not (is_truncated_comment(inner) or is_bad_oneline(inner) or is_mashed_title(inner)):
+            return working
+        lines[idx] = f"/* {title} */"
+        extras = opening_keep_notes(master)
+        insert_at = idx + 1
+        for extra in extras:
+            note = f"/* {extra} */"
+            if note not in lines:
+                lines.insert(insert_at, note)
+                insert_at += 1
+        return "\n".join(lines) + ("\n" if working.endswith("\n") else "")
     if first.startswith("#ifndef") or first.startswith("#define") or first.startswith("#include") or first.startswith("#pragma"):
         return f"/* {title} */\n" + working
     return working
 
 
+def _decl_key(line: str) -> str:
+    return re.sub(r"\s+", " ", line.strip())[:72]
+
+
+def _following_decl(lines: list[str], index: int) -> str:
+    for j in range(index + 1, min(index + 6, len(lines))):
+        s = lines[j].strip()
+        if not s or s.startswith("/*") or s.startswith("//") or s.startswith("*"):
+            continue
+        return _decl_key(s)
+    return ""
+
+
+def _comments_by_decl(source: str) -> dict[str, str]:
+    lines = source.splitlines()
+    found: dict[str, str] = {}
+    pending: list[str] = []
+    for i, line in enumerate(lines):
+        match = ONELINE.match(line)
+        if match:
+            pending.append(" ".join(comment_text_lines([line])))
+            continue
+        if not pending:
+            continue
+        key = _following_decl(lines, i - 1)
+        if key:
+            found[key] = " ".join(t for t in pending if t)
+        pending = []
+    return found
+
+
+def compact_api_comment(joined: str) -> str:
+    text = " ".join(joined.split())
+    if len(text) <= 420:
+        return text
+    return first_sentence(text)
+
+
 def complete_truncated(working: str, master: str) -> str:
+    by_decl = _comments_by_decl(master)
     comments = re.findall(r"/\*.*?\*/", master, re.S)
-    parsed = [(" ".join(comment_text_lines(c.splitlines())), c) for c in comments]
+    parsed = [" ".join(comment_text_lines(c.splitlines())) for c in comments]
+    lines = working.splitlines()
     out = []
-    for line in working.splitlines():
+    for i, line in enumerate(lines):
         match = ONELINE.match(line)
         if not match:
             out.append(line)
             continue
         indent, inner, rest = match.group(1), match.group(2), match.group(3)
-        if not is_truncated_comment(inner):
+        if FILE_TITLE.match(line) and not is_mashed_title(inner) and not is_bad_oneline(inner):
             out.append(line)
             continue
-        prefix = inner.strip()[:32]
-        sentence = None
-        for joined, _comment in parsed:
-            if prefix and joined.startswith(prefix.strip()[:20]):
-                sentence = first_sentence(joined)
-                break
-        if sentence:
-            out.append(f"{indent}/* {sentence} */{rest}")
+        if not (is_truncated_comment(inner) or is_mashed_title(inner) or is_bad_oneline(inner)):
+            out.append(line)
+            continue
+        replacement = None
+        decl = _following_decl(lines, i)
+        if decl and decl in by_decl:
+            replacement = compact_api_comment(by_decl[decl])
+        if not replacement:
+            prefix = inner.strip()[:24]
+            for joined in parsed:
+                if prefix and joined.startswith(prefix.strip()[:16]):
+                    replacement = compact_api_comment(joined)
+                    break
+        if replacement:
+            out.append(f"{indent}/* {replacement} */{rest}")
         else:
             out.append(line)
     return "\n".join(out) + ("\n" if working.endswith("\n") else "")

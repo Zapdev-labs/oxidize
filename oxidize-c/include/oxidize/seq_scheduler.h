@@ -80,7 +80,7 @@ typedef struct OcSeqScheduler {
     size_t      total_tokens;    /* total tokens currently in use          */
 } OcSeqScheduler;
 
-/* Allocate and initialize a scheduler. If page_mgr is non-NULL, the scheduler will allocate/free pages from it; otherwise it just tracks */
+/* Allocate and initialize a scheduler. If page_mgr is non-NULL, the scheduler will allocate/free pages from it; otherwise it just tracks token counts. Returns OC_ERR_OOM on failure. The caller owns the result and must call oc_seq_sched_free. */
 OcError oc_seq_sched_init(OcSeqScheduler **out, OcSeqSchedulerConfig config,
                            OcKvPageManager *page_mgr);
 

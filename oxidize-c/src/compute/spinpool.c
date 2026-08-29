@@ -243,7 +243,7 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
     /* We cannot capture ctx in a plain function pointer easily, so we use
      * a different approach: submit tasks that each run fn(item) and store
      * the result. We use a thread-local-ish approach via the arg. */
-    /* Since the task fn signature is void *(*fn)(void *arg), and we need C function pointers don't capture closures. So we use a static */
+    /* Allocate a results array if caller didn't provide one. */
 
     /* Actually, the simplest correct approach: use the arg as the item, call fn directly, and collect results after wait. */
 

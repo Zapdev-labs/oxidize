@@ -126,16 +126,13 @@ Test(beam, residual_probs_all_zero)
 Test(beam, sample_probabilities_basic)
 {
     float probs[] = {0.0f, 0.5f, 0.5f, 0.0f};
-    /* random=0.0 -> first non-zero cumulative -> index 0 (cumulative 0 <= 0). */
     /* Actually target = 0 * 1.0 = 0, cumulative at 0 = 0, so 0 <= 0 is true. */
     size_t idx = oc_sample_probabilities(probs, 4, 0.0f);
     cr_assert_eq(idx, 0);
 
-    /* random=0.5 -> target = 0.5, cumulative: 0, 0.5 -> 0.5 <= 0.5 -> index 1. */
     idx = oc_sample_probabilities(probs, 4, 0.5f);
     cr_assert_eq(idx, 1);
 
-    /* random=0.99 -> target = 0.99, cumulative: 0, 0.5, 1.0 -> 0.99 <= 1.0 -> index 2. */
     idx = oc_sample_probabilities(probs, 4, 0.99f);
     cr_assert_eq(idx, 2);
 }
@@ -151,7 +148,6 @@ Test(beam, sample_probabilities_argmax_fallback)
 Test(beam, sample_probabilities_weighted)
 {
     float probs[] = {0.1f, 0.9f, 0.0f, 0.0f};
-    /* random=0.5 -> target = 0.5 * 1.0 = 0.5, cumulative: 0.1, 1.0 -> 0.5 <= 1.0 -> index 1. */
     size_t idx = oc_sample_probabilities(probs, 4, 0.5f);
     cr_assert_eq(idx, 1);
 }

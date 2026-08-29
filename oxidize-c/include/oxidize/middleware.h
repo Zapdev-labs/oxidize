@@ -106,7 +106,7 @@ typedef struct OcMiddleware {
     bool             cors_enabled;
 } OcMiddleware;
 
-/* Initialize a middleware stack with the given enabled flags + configs. mutex initialization fails. */
+/* Initialize a middleware stack with the given enabled flags + configs. `api_key` may be NULL (disables auth). `cors_origin` may be NULL (defaults to "*"). Returns OC_OK on success, OC_ERR_INVALID_ARG if `mw` is NULL, OC_ERR_OOM if the API key copy fails, or OC_ERR_INTERNAL if mutex initialization fails. */
 OcError oc_middleware_init(OcMiddleware *mw,
                            uint32_t enabled,
                            const char *api_key,

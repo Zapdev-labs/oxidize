@@ -92,7 +92,7 @@ uint32_t oc_gossip_get_healthy_count(const OcGossipState *state);
 OcError oc_gossip_merge(OcGossipState *state, uint64_t current_time_ms,
                         const OcGossipNode *remote_nodes, uint32_t count);
 
-/* Serialize the node list for network transmission. Writes a compact binary */
+/* Serialize the node list for network transmission. Writes a compact binary representation into `out_buf` (capacity `cap`) and sets *out_len. Format: u32 count, then `count` raw OcGossipNode records (fixed layout). Returns OC_ERR_INVALID_ARG if buf is too small. */
 OcError oc_gossip_serialize(const OcGossipState *state, uint8_t *out_buf,
                             size_t cap, size_t *out_len);
 

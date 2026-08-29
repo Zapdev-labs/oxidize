@@ -341,11 +341,10 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
             result = oc_argmax(logits, vocab_size);
         }
     } else if (cfg->type == OC_SAMPLER_MIROSTAT_V2) {
-        /* Mirostat v2 is inherently stateful across calls (mu is the running */
+        /* Mirostat v2 is inherently stateful across calls (mu is the running surprise estimate). oc_sample is single-shot and takes a const config, so we run one step using cfg->mu as the starting estimate and discard the update. For stateful multi-step decoding, call oc_mirostat_v2_sample directly and persist mu between calls. */
         if (!(cfg->mu > 0.0f)) cfg->mu = 2.0f * cfg->tau;
         result = oc_mirostat_v2_sample(logits, vocab_size, cfg, &cfg->mu, &rng);
     } else if (cfg->type == OC_SAMPLER_MIN_P) {
-        /* min-p: keep only tokens with p >= min_p * max_p. */
         float *probs = malloc(vocab_size * sizeof(float));
         if (probs != NULL) {
             softmax_inplace(logits, vocab_size);
@@ -378,7 +377,7 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
             result = oc_argmax(logits, vocab_size);
         }
     } else if (cfg->type == OC_SAMPLER_TYPICAL_P) {
-        /* Locally typical sampling: compute the negative entropy of each */
+        /* Locally typical sampling: compute the negative entropy of each token's information content, then filter by the typical_p cumulative threshold. Tokens with "typical" surprise (close to the entropy) are preferred. */
         if (cfg->typical_p <= 0.0f) {
             softmax_inplace(logits, vocab_size);
             for (size_t i = 0; i < vocab_size; i++) idx[i] = i;
@@ -754,7 +753,7 @@ OcError oc_beam_search(float * const *logits_per_step, size_t n_steps,
         }
         n_active_beams = take;
 
-        /* The top `take` candidates were moved into `beams` above and are now */
+        /* The top `take` candidates were moved into `beams` above and are now owned there. Everything past `take` lost the cut and still owns a tokens allocation — free it before the memset below erases the pointer, or it leaks once per round. */
         for (size_t bi = take; bi < n_candidates; bi++)
             beam_free(&candidates[bi]);
 

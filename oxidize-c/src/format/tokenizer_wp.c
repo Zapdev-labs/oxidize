@@ -1,5 +1,5 @@
 /* tokenizer_wp.c — WordPiece tokenizer with `##` continuation prefix, for BERT model family. */
-/* `##` continuation (VAL-TOK-008): a token like `##ing` only matches at a */
+/* `##` continuation (VAL-TOK-008): a token like `##ing` only matches at a non-zero offset within a word. On decode, the `##` prefix is stripped so `["play", "##ing"]` decodes to `"playing"`. */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup */
 

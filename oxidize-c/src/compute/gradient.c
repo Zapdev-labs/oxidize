@@ -217,7 +217,6 @@ OcError oc_grad_compute_linear_backward(
         grad_input[i] = acc;
     }
 
-    /* grad_weight[j*in + i] = grad_output[j] * input[i] */
     for (size_t j = 0; j < out_features; j++) {
         float go = grad_output[j];
         float *gw_row = grad_weight + j * in_features;

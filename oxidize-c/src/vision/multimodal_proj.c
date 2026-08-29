@@ -61,7 +61,7 @@ OcMultimodalProjection *oc_mm_proj_init(const OcMultimodalProjectionConfig *conf
         return NULL;
     }
 
-    /* Compute per-layer dims: */
+    /* Compute per-layer dims: layer 0: in = input_dim, out = (n > 1) ? hidden_dim : output_dim layer k: in = prev_out, out = (k == n-1) ? output_dim : hidden_dim */
     for (uint32_t l = 0; l < n; l++) {
         proj->in_dims[l] = (l == 0) ? config->input_dim : proj->out_dims[l - 1];
         if (n == 1) {

@@ -33,12 +33,10 @@ typedef struct OcStParser {
     OcSafetensorsTensor cur;        /* in-progress tensor descriptor */
     bool                cur_valid;  /* true once a name has been captured */
     char                field[32];  /* current descriptor field name */
-    /* shape / data_offsets accumulation buffers */
     uint64_t shape_vals[OC_SAFETENSORS_MAX_DIMS];
     uint32_t shape_count;
     uint64_t offsets[2];
     uint32_t offset_count;
-    /* output collection */
     OcSafetensorsTensor *out_arr;
     size_t               out_cap;
     size_t               out_len;
@@ -156,7 +154,6 @@ static void json_skip_value(const char *src, const char **endp)
         *endp = src;
         return;
     }
-    /* number / true / false / null: skip word chars */
     while (*src && !isspace((unsigned char)*src) && *src != ',' &&
            *src != ']' && *src != '}') {
         src++;

@@ -166,7 +166,7 @@ static LayoutInfo layout_for(OcGgufQuantizationType qtype)
     case OC_QUANT_Q5_K_S:
     case OC_QUANT_Q5_K_M: return (LayoutInfo){ OC_BLOCK_Q5_K_SIZE, OC_QK_K };
     case OC_QUANT_Q6_K:   return (LayoutInfo){ OC_BLOCK_Q6_K_SIZE, OC_QK_K };
-    /* AL-family (ggml ids 240-243). AL5/AL6/AL8 reuse the Q4_0/Q5_0/Q8_0 */
+    /* AL-family (ggml ids 240-243). AL5/AL6/AL8 reuse the Q4_0/Q5_0/Q8_0 block layouts (identical byte layout, different encoder); AL5_XS uses its own 14-byte 3-bit-packed block. Port of oxidize-core/src/compute/quantization.rs::quant_block_layout. */
     case OC_QUANT_AL5:    return (LayoutInfo){ OC_BLOCK_Q4_0_SIZE, OC_QK_AL };
     case OC_QUANT_AL5_XS: return (LayoutInfo){ OC_BLOCK_AL5_XS_SIZE, OC_QK_AL };
     case OC_QUANT_AL6:    return (LayoutInfo){ OC_BLOCK_Q5_0_SIZE, OC_QK_AL };
@@ -711,7 +711,7 @@ static OcError dequant_q6_k(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
-/* ─── AL-family / IQ-family / NVFP4 dequant ──────────────────────────── Bit-exact port of: - oxidize-core/src/compute/quantization/al_family.rs (AL5_XS 3-bit unpack) - oxidize-core/src/compute/quantization/quant_simple.rs (AL5 dequant == Q4_0 dequant) - oxidize-core/src/compute/quantization/quant_iq_series.rs (IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ4_NL) - oxidize-core/src/compute/quantization/quant_k_blocks.rs (IQ3_S, IQ4_XS) - oxidize-core/src/compute/quantization/quant_nvfp4.rs (NVFP4) Hard parity invariant: output must match Rust `dequantize_row_*` byte-for- byte on the same packed input (VAL-QUANT-006/007/009). */
+/* AL5 dequant: identical to Q4_0 (split-halves 4-bit nibble block). */
 
 /* AL5 dequant: identical to Q4_0 (split-halves 4-bit nibble block). */
 static OcError dequant_al5(const uint8_t *src, size_t src_len,
@@ -1926,7 +1926,7 @@ static OcError pack_q2_k(const float *src, size_t value_count,
             out_block[i] = (uint8_t)(ls | (lm << 4));
         }
 
-        /* Pack 2-bit values into the 64-byte qs area. Sub-block i sits at */
+        /* Pack 2-bit values into the 64-byte qs area. Sub-block i sits at qs[outer * 32 + half * 16 + t] with a (inner * 2) bit shift, where k = i / 2, half = i % 2, outer = k / 4, inner = k % 4 — the exact addressing dequant_q2_k walks. */
         uint8_t *qs = &out_block[16];
         for (size_t i = 0; i < n_sub; i++) {
             float dl = d * (float)(out_block[i] & 0x0Fu);
@@ -2631,7 +2631,7 @@ OcError oc_quant_dequant_row(OcGgufQuantizationType qtype,
                              float *dst, size_t value_count)
 {
     if (src == NULL || dst == NULL) return OC_ERR_INVALID_ARG;
-    /* SIMD fast path: if a kernel is available for this (qtype, host), it produces output byte-identical to the scalar reference (VAL-SIMD-001.. */
+    /* SIMD fast path: if a kernel is available for this (qtype, host), it produces output byte-identical to the scalar reference (VAL-SIMD-001.. 004). On false, fall through to the scalar switch. Layout errors are also reported as false here so the scalar path returns the canonical OC_ERR_INVALID_ARG. */
     if (oc_simd_try_dequant(qtype, src, src_len, dst, value_count)) {
         return OC_OK;
     }

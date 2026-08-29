@@ -38,10 +38,10 @@ typedef struct OcVideoConfig {
     uint32_t                max_video_tokens; /* hard cap on emitted tokens  */
 } OcVideoConfig;
 
-/* Initialize a config with sensible defaults: */
+/* Initialize a config with sensible defaults: target_frames=8, UNIFORM sampling, dense_stride=1, MEAN pool, temporal_hidden=768, llm_hidden=4096, max_video_tokens=256, vision via oc_vision_cfg_init. */
 void oc_video_config_init(OcVideoConfig *cfg);
 
-/* Validate a config. Returns: */
+/* Validate a config. Returns OC_OK on success, OC_ERR_INVALID_ARG for a NULL or invalid cfg, OC_ERR_FORMAT for DENSE strategy with dense_stride == 0. */
 OcError oc_video_config_validate(const OcVideoConfig *cfg);
 
 /* Human-readable name for a sampling strategy. Never returns NULL.
@@ -52,7 +52,7 @@ const char *oc_video_sampling_name(OcFrameSamplingStrategy s);
  * Returns "unknown" for out-of-range values. */
 const char *oc_video_pool_name(OcTemporalPool p);
 
-/* Compute the number of video tokens a config would emit for a single */
+/* Compute the number of video tokens a config would emit for a single video given its target_frames. For most pools this is target_frames (one token per frame); ATTENTION/LSTM pools collapse to a single token stream of size max_video_tokens (bounded by target_frames). Returns 0 if cfg is NULL. */
 uint32_t oc_video_config_n_tokens(const OcVideoConfig *cfg);
 
 #ifdef __cplusplus

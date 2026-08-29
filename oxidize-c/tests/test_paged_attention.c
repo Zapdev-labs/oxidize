@@ -467,7 +467,7 @@ Test(paged, attention_kernel_basic)
     kv[0] = 1.0f; kv[1] = 0.0f;
     /* K for block 0, slot 1: [0, 1] */
     kv[8] = 0.0f; /* wait, slot stride = n_kv_heads * head_dim = 2 */
-    /* Actually layout: kv[block * block_stride + slot * slot_stride + kv_head * head_dim + d] */
+    /* K block 0 slot 0 = [1, 0] */
     /* K block 0 slot 0 = [1, 0] */
     kv[0 * 8 + 0 * 2 + 0 * 2 + 0] = 1.0f;
     kv[0 * 8 + 0 * 2 + 0 * 2 + 1] = 0.0f;

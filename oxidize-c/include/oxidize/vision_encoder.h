@@ -87,7 +87,7 @@ OcError oc_vision_encoder_encode(OcVisionEncoder *encoder,
                                  float **out_features,
                                  size_t *out_n_features);
 
-/* Extract patches from an image patch grid. The stub returns a deterministic */
+/* Extract patches from an image patch grid. The stub returns a deterministic vector of size n_patches * (patch_size^2 * channels) filled with a small constant. `*out_patches` is heap-allocated and owned by the caller. `*out_n_patches` is the number of patches. */
 OcError oc_vision_encoder_patch_embed(OcVisionEncoder *encoder,
                                      const OcImagePatch *image,
                                      float **out_patches,

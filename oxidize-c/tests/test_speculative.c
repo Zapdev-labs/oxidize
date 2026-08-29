@@ -39,7 +39,6 @@ Test(speculative, greedy_reject_step0)
     float dl0[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float dl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float *draft_l[] = {dl0, dl1};
-    /* target logits: pos 0 argmax=0 (≠ draft 1) → reject */
     float tl0[] = {10.0f, 0.0f, 0.0f, 0.0f};
     float tl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float tl2[] = {0.0f, 0.0f, 0.0f, 10.0f};
@@ -84,10 +83,8 @@ Test(speculative, greedy_reject_step1)
 Test(speculative, stochastic_accept_high_ratio)
 {
     uint32_t draft_tokens[] = {0};
-    /* draft gives token 0 very low prob */
     float dl0[] = {-100.0f, 10.0f, 0.0f, 0.0f};
     float *draft_l[] = {dl0};
-    /* target gives token 0 high prob */
     float tl0[] = {10.0f, 0.0f, 0.0f, 0.0f};
     float tl1[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float *target_l[] = {tl0, tl1};

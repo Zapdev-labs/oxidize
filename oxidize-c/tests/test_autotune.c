@@ -1,4 +1,5 @@
-/* test_autotune.c — autotune detect + fingerprint + plan tests. VAL-AUTOTUNE-001..006 cover: arch, no dominant qtype) — must not crash. */
+/* test_autotune.c — autotune detect + fingerprint + plan tests. */
+/* VAL-AUTOTUNE-001..006 cover: */
 #include <criterion/criterion.h>
 
 #include "oxidize/autotune.h"
@@ -64,7 +65,7 @@ Test(autotune, plan_threads_match_learned_heuristics)
         cr_assert_eq(p.numa, OC_NUMA_SINGLE, "small model → single-socket");
     }
 
-    /* Large model (>192 GB): interleave across sockets, same thread rule. 48 was previously hardcoded here because that is the physical core */
+    /* Large model (>192 GB): interleave across sockets, same thread rule. 48 was previously hardcoded here because that is the physical core count of the box it was tuned on; deriving it keeps the plan right on other machines. */
     OcModelFingerprint big;
     memset(&big, 0, sizeof(big));
     big.file_bytes = 256ULL << 30;   /* 256 GB */

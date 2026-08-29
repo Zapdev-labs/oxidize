@@ -2,7 +2,7 @@
 """Count product source lines for the shrink refactor gate.
 
 Counted extensions: rs, go, py, c, h, cpp, hpp, cc, cxx, ts, sh
-Skipped directories: VCS/build/vendor/third-party criterion headers.
+Skipped directories: VCS, cargo target, vendor, cmake `build`/`CMakeFiles`, third-party criterion headers.
 Markdown is not counted.
 
 Usage:
@@ -37,6 +37,8 @@ SKIP_DIRS = {
     ".ruff_cache",
     ".mypy_cache",
     "criterion",
+    "build",
+    "CMakeFiles",
 }
 
 EXTS = {

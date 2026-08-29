@@ -41,12 +41,11 @@ Test(act_stats, multiple_observations)
     cr_assert_eq(oc_activation_stats_observe(&stats, 0, a1, 1, 2), OC_OK);
     float a2[] = {1.0f, 1.0f};
     cr_assert_eq(oc_activation_stats_observe(&stats, 0, a2, 1, 2), OC_OK);
-    /* sum_sq = [2, 2], n_samples = 2, L2 = [1, 1] */
+    /* Layer 1: observe once. */
 
     /* Layer 1: observe once. */
     float a3[] = {3.0f, 4.0f};
     cr_assert_eq(oc_activation_stats_observe(&stats, 1, a3, 1, 2), OC_OK);
-    /* sum_sq = [9, 16], n_samples = 1, L2 = [3, 4] */
 
     float norms0[2], norms1[2];
     oc_activation_stats_get_l2_norms(&stats, 0, norms0, 2);

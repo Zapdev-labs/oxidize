@@ -162,7 +162,6 @@ Test(config, from_gguf_no_arch)
     OcGgufFile gf;
     memset(&gf, 0, sizeof(gf));
     OcModelConfig cfg;
-    /* general.architecture lookup returns NULL -> OC_ERR_FORMAT. */
     cr_assert_eq(oc_model_config_from_gguf(&gf, &cfg), OC_ERR_FORMAT);
 }
 

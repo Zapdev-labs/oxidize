@@ -5,7 +5,6 @@ use rayon::prelude::*;
 use crate::config::FinetuneConfig;
 use crate::lora::{LoRAAdapter, LoRATarget};
 
-
 /// A linear scalar reward head: `r(h) = dot(w, h) + b`.
 ///
 /// Weights are Xavier-uniform initialised so the initial reward distribution
@@ -72,7 +71,6 @@ impl RewardModel {
     }
 }
 
-
 /// PPO hyper-parameters.
 #[derive(Debug, Clone)]
 pub struct PpoConfig {
@@ -102,7 +100,6 @@ impl Default for PpoConfig {
         }
     }
 }
-
 
 /// Trajectory storage for a single PPO rollout.
 ///
@@ -219,7 +216,6 @@ pub struct PpoReport {
     pub elapsed_seconds: f32,
 }
 
-
 /// PPO trainer backed by a LoRA actor and a linear reward model.
 ///
 /// Because the `LoRAAdapter` exposes a rayon-parallel batch
@@ -306,7 +302,6 @@ impl PpoTrainer {
         let idx = (action as usize).min(logits.len().saturating_sub(1));
         logits[idx] - log_z
     }
-
 
     /// Run one PPO gradient step over all transitions in `buffer`.
     ///
@@ -505,7 +500,6 @@ impl PpoTrainer {
         }
     }
 
-
     /// Train over a list of rollout buffers (one gradient step per buffer).
     ///
     /// Each buffer should have its `compute_gae` already called.  Buffers with
@@ -564,11 +558,9 @@ fn warmup_lr(base: f32, step: usize, warmup: usize) -> f32 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn reward_model_score_matches_score_batch() {
@@ -673,7 +665,6 @@ mod tests {
             buf.advantages[0]
         );
     }
-
 
     fn tiny_ppo_trainer() -> PpoTrainer {
         let ft = FinetuneConfig {

@@ -9,7 +9,6 @@
 
 static size_t frame_float_count(uint32_t w, uint32_t h)
 {
-    /* channels == 3 */
     return (size_t)w * (size_t)h * 3u;
 }
 

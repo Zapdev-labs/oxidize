@@ -179,7 +179,7 @@ static OcError tokenmap_grow(TokenMap *m)
     /* Rehash all live entries. */
     for (size_t i = 0; i < m->cap; i++) {
         if (m->entries[i].key != NULL && m->entries[i].key[0] != '\0') {
-            /* Skip tombstones (key = "\0__DELETED__" — but we use a single */
+            /* For simplicity, we never insert empty strings as keys. */
             /* For simplicity, we never insert empty strings as keys. */
             uint64_t h = fnv1a(m->entries[i].key);
             size_t idx = (size_t)(h & (ncap - 1));
@@ -420,7 +420,7 @@ static char *build_merged_token(const char *left, const char *right)
     return result;
 }
 
-/* Count the most frequent adjacent pair across all words. Writes the best */
+/* Count the most frequent adjacent pair across all words. */
 static OcError find_best_pair(const OcWordArray *words, uint32_t *best_left,
                              uint32_t *best_right, size_t *best_count)
 {

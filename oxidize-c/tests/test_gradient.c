@@ -268,7 +268,6 @@ Test(grad, activation_tanh_backward)
 
 Test(grad, activation_silu_backward_at_zero)
 {
-    /* silu'(0) = sigmoid(0)*(1 + 0*(1-sigmoid(0))) = 0.5 */
     float go[1] = {1.0f};
     float in_[1] = {0.0f};
     float out[1] = {0};
@@ -279,7 +278,6 @@ Test(grad, activation_silu_backward_at_zero)
 
 Test(grad, activation_gelu_backward_at_zero)
 {
-    /* gelu'(0) = 0.5*(1 + erf(0)) + 0*pdf(0)/sqrt2 = 0.5 */
     float go[1] = {1.0f};
     float in_[1] = {0.0f};
     float out[1] = {0};

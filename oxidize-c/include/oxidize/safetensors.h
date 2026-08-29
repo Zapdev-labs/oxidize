@@ -39,7 +39,7 @@ typedef struct OcSafetensorsFile {
     bool                 mmapped;      /* true if raw_data is mmap-owned */
 } OcSafetensorsFile;
 
-/* Open and parse a .safetensors file from disk. The file is read into a malloc'd buffer (the mmap fast path is used when available). On success */
+/* Open and parse a .safetensors file from disk. The file is read into a malloc'd buffer (the mmap fast path is used when available). On success `*out` is populated and must be released via oc_safetensors_close(). On error `*out` is zeroed. Returns OC_OK, OC_ERR_IO (file open/read/stat failure), OC_ERR_FORMAT (truncated file, bad header length, or malformed JSON), OC_ERR_OOM, or OC_ERR_INVALID_ARG (NULL args). */
 OcError oc_safetensors_open(const char *path, OcSafetensorsFile *out);
 
 /* Find a tensor by name. On success sets `*out` to point into `st->tensors`

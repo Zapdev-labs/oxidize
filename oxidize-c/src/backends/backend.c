@@ -22,7 +22,6 @@ static void fill_info(OcBackendInfo *info, OcBackendType type)
 {
     memset(info, 0, sizeof(*info));
     info->type = type;
-    /* name defaults to the canonical type name. */
     const char *nm = oc_backend_type_name(type);
     size_t n = strlen(nm);
     if (n >= OC_BACKEND_MAX_NAME) n = OC_BACKEND_MAX_NAME - 1;

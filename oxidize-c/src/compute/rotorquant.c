@@ -41,7 +41,7 @@ static double coord_pdf(double x, double sigma)
     return exp(-0.5 * t * t) / (sigma * 2.50662827463100050242); /* sqrt(2pi) */
 }
 
-/* Composite Simpson over [a,b] of pdf(x) and x*pdf(x) in one sweep. scipy's */
+/* Composite Simpson over [a,b] of pdf(x) and x*pdf(x) in one sweep. scipy's adaptive quad is unavailable here; the integrand is smooth and bounded, so a fixed fine panel count converges far below the 1e-10 Lloyd-Max tolerance while staying branch-free. */
 #define LM_PANELS 512 /* must be even */
 
 static void simpson_moments(double a, double b, double sigma,

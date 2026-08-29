@@ -59,7 +59,7 @@ uint32_t oc_lw_current_layer(const OcLayerWiseState *state);
 void oc_lw_state_free(OcLayerWiseState *state);
 
 
-/* Forward a single token through the model, loading/unloading layers */
+/* Forward a single token through the model, loading/unloading layers one at a time to stay within memory budget. */
 OcError oc_lw_forward_single(OcLayerWiseState *state,
                               void *model,
                               uint32_t token,

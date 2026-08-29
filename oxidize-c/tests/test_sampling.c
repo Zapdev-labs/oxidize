@@ -124,7 +124,6 @@ Test(sampling, temperature_scales_logits_before_softmax)
 
 Test(sampling, out_of_range_recent_token_ignored)
 {
-    /* recent token id >= vocab_size must not crash. */
     float logits[] = {0.0f, 1.0f, 2.0f};
     uint32_t recent[] = {999};
     OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;

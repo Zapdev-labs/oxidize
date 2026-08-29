@@ -536,7 +536,6 @@ Test(inf_fwd, attention_head_dims_with_q_norm)
 
     OcLayerWeights layer;
     oc_layer_weights_init(&layer);
-    /* q_norm of len 2 divides q_len=8 -> q_head_dim=2. */
     layer.attn_q_norm = malloc(2 * sizeof(float));
     layer.n_q_norm = 2;
 

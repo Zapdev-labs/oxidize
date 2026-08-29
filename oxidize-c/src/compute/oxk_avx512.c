@@ -23,7 +23,7 @@ static inline int32_t hsum_i32_8_avx512(__m256i v)
     return _mm_cvtsi128_si32(s);
 }
 
-/* Vectorized replacement for the per-(block, activation) scalar loop that folds the activation's 16 block sums against the row's per-group scales. */
+/* ─── VNNI Q5_K × Q8_K dot ──────────────────────────────────────────────── */
 __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 static inline int32_t fold_bsums(__m256i w16, const uint8_t *bsums)
 {

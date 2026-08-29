@@ -98,7 +98,6 @@ void oc_prof_scope_end(OcProfileScope *s);
 #define OC_PROFILE_SCOPE(prof_ptr, event) \
     OcProfileScope _oc_prof_scope; \
     oc_prof_scope_begin(&_oc_prof_scope, prof_ptr, event); \
-    /* end at scope exit via cleanup attribute */ \
     __attribute__((cleanup(oc_prof_scope_end))) OcProfileScope *_oc_prof_scope_ptr \
         __attribute__((unused)) = &_oc_prof_scope
 

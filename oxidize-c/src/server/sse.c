@@ -24,7 +24,7 @@ static bool buf_append(char *buf, size_t cap, size_t *off, const char *s)
     return true;
 }
 
-/* Write all bytes to fd, retrying on EINTR. Returns true if all bytes were */
+/* Write all bytes to fd, retrying on EINTR. Returns true if all bytes were written, false on a hard error (broken pipe, connection reset, etc.). Blocks SIGPIPE around the write so a dead client does not kill the process; instead write() returns -1/EPIPE and we treat it as a disconnect. */
 static bool write_all(int fd, const char *buf, size_t len)
 {
     /* Block SIGPIPE for the lifetime of this process so a dead client
@@ -111,7 +111,6 @@ size_t oc_sse_format_event(const OcSseEvent *ev, char *buf, size_t cap)
         }
     }
 
-    /* id: line (only if id is non-NULL and non-empty). */
     if (ev->id && *ev->id) {
         if (!buf_append(buf, cap, &off, "id: ")) return 0;
         if (!buf_append(buf, cap, &off, ev->id)) return 0;
@@ -135,14 +134,14 @@ size_t oc_sse_format_event_raw(const char *event, const char *data,
 size_t oc_sse_parse_event(const char *buf, size_t len, OcSseEvent *out_event)
 {
     if (!buf || !out_event || len == 0) return 0;
-    /* The parser mutates the caller's buffer in place to NUL-terminate field */
+    /* The parser mutates the caller's buffer in place to NUL-terminate field values and to join multi-line `data:` payloads with '\n'. The buffer is treated as writable per the documented contract (callers pass a writable recv buffer). `buf` is `const char *` in the signature for API ergonomics; we cast away const here. */
     char *wbuf = (char *)buf;
 
     memset(out_event, 0, sizeof(*out_event));
     size_t pos = 0;
     bool have_field = false;
 
-    /* For multi-line `data:` we rewrite the buffer in place: the first */
+    /* For multi-line `data:` we rewrite the buffer in place: the first data value stays where it is, and subsequent values are moved right after it (joined by '\n'). `data_start` is the anchor offset of the joined data region; `data_write` is the current write cursor. */
     size_t data_start = 0;
     char *data_write = NULL;
     bool data_started = false;

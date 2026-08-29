@@ -247,7 +247,6 @@ Test(quant, dequant_q4_0_zero_block, .description = "Q4_0 zero block dequant") {
 
 
 Test(quant, dequant_q8_0_handcrafted, .description = "VAL-QUANT-004: Q8_0 dequant on hand-crafted block") {
-    /* d=0.5 (f16 0x3800), qs[i] = i as i8. Expected: out[i] = (i8)qs[i] * 0.5. */
     uint8_t buf[34];
     buf[0] = 0x00; buf[1] = 0x38;  /* f16 0.5 */
     for (int i = 0; i < 32; i++) buf[2 + i] = (uint8_t)(int8_t)i;
@@ -268,7 +267,6 @@ Test(quant, dequant_q6_k_handcrafted, .description = "VAL-QUANT-004: Q6_K dequan
      * Then verify the output matches the hand-computed expected value. */
     uint8_t buf[210];
     memset(buf, 0, sizeof(buf));
-    /* ql[0..128] = 0, qh[0..64] = 0, sc[0..16] = 1 (i8), d=1.0 at [208..210]. */
     for (int i = 0; i < 128; i++) buf[i] = 0;
     for (int i = 128; i < 192; i++) buf[i] = 0;
     for (int i = 192; i < 208; i++) buf[i] = 1u;  /* sc = 1 as u8 = 1 as i8 */
@@ -334,7 +332,7 @@ Test(quant, dequant_q2_k_zero_block, .description = "Q2_K zero block (d=0) → a
 
 
 Test(quant, dequant_q3_k_handcrafted, .description = "VAL-QUANT-005: Q3_K dequant runs and produces finite output") {
-    /* Q3_K scale decoding is non-trivial (bit-shuffled 6-bit values). For a The bit-exact dequant parity vs Rust is validated by the corpus sweep */
+    /* Q3_K scale decoding is non-trivial (bit-shuffled 6-bit values). For a sanity test, set d=0 so all outputs are 0 regardless of scales — this verifies the dequant runs without crash and produces finite output. The bit-exact dequant parity vs Rust is validated by the corpus sweep on real GGUF fixtures (deferred to integration on .121 where Rust reference is available). */
     uint8_t buf[110];
     memset(buf, 0, sizeof(buf));
     /* d = 0.0 at [108..110]. */
@@ -369,7 +367,7 @@ Test(quant, dequant_q5_k_handcrafted, .description = "VAL-QUANT-004: Q5_K dequan
     for (int i = 0; i < 32; i++) {
         cr_assert_float_eq(dst[i], 1.0f, 0.0f, "Q5_K first-32[%d]: got %f", i, dst[i]);
     }
-    /* Next 32 (group_pair 0, sc2=1, m2=0): qv2 = (qs>>4) + 0 = 1. out = 1*1 - 0 = 1. */
+    /* Next 32: d2 = 1*1 = 1, min2 = 0*0 = 0. qv2 = (qs>>4) = 1. out = 1*1 - 0 = 1. */
     for (int i = 32; i < 64; i++) {
         cr_assert_float_eq(dst[i], 1.0f, 0.0f, "Q5_K next-32[%d]: got %f", i, dst[i]);
     }
@@ -1082,7 +1080,7 @@ Test(quant, nvfp4_zero_block, .description = "VAL-QUANT-009: NVFP4 zero-block (a
 }
 
 Test(quant, nvfp4_handcrafted, .description = "VAL-QUANT-009: NVFP4 dequant with known scales + nibbles") {
-    /* Construct a block where: */
+    /* Construct a block where: - scales[0] = UE4M3 for 1.0 (exp=8, mant=0 → (1+0)*2^(8-7) = 2.0... */
     uint8_t buf[36];
     memset(buf, 0, sizeof(buf));
     buf[0] = 0x38;  /* scale[0] = UE4M3(1.0) */
@@ -1095,7 +1093,7 @@ Test(quant, nvfp4_handcrafted, .description = "VAL-QUANT-009: NVFP4 dequant with
     float dst[64];
     OcError e = oc_quant_dequant_row(OC_QUANT_NVFP4, buf, sizeof(buf), dst, 64);
     cr_assert_eq(e, OC_OK, "NVFP4 dequant");
-    /* Sub-block 0 (16 values): scale=1.0. For each qs byte j (0..7): */
+    /* Sub-block 0 (16 values): scale=1.0. For each qs byte j (0..7): out[j] = scale * E2M1[low] (low nibble) out[j + 8] = scale * E2M1[high] (high nibble) qs bytes alternate: 0x10 (low=0,high=1), 0x32 (low=2,high=3). E2M1 table: [0]=0, [1]=1, [2]=2, [3]=3. So out[0..7] (low nibbles) = {0,2,0,2,0,2,0,2} out[8..15] (high nibbles) = {1,3,1,3,1,3,1,3} */
     for (int j = 0; j < 8; j++) {
         float lo_exp = (j % 2 == 0) ? 0.0f : 2.0f;
         float hi_exp = (j % 2 == 0) ? 1.0f : 3.0f;
@@ -1110,7 +1108,7 @@ Test(quant, nvfp4_handcrafted, .description = "VAL-QUANT-009: NVFP4 dequant with
     }
 }
 
-/* ─── VAL-QUANT-016: AL/IQ constant table SHA256 matches Rust ───────── */
+/* Minimal SHA-256 implementation for table-parity verification. FIPS 180-4. */
 
 /* Minimal SHA-256 implementation for table-parity verification. FIPS 180-4. */
 typedef struct {

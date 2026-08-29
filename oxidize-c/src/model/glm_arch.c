@@ -881,7 +881,6 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
         oc_apply_rope_f32(q_h + q_nope, q_h + q_nope, q_rope, q_rope,
                           s->pos, c->rope_theta);
     }
-    /* kv_pe is the tail of the compressed c_kv. */
     float *kv_pe = s->mla_kv_compressed + kv_lora;
     oc_apply_rope_f32(kv_pe, kv_pe, q_rope, q_rope, s->pos, c->rope_theta);
 

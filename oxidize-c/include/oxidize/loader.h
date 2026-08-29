@@ -30,7 +30,7 @@ typedef struct OcLoaderResult {
 /* Initialize loader state. Idempotent — safe to call before each load. */
 OcError oc_loader_init(void);
 
-/* Load a model from `path`, detecting the architecture automatically. */
+/* Load a model from `path`, detecting the architecture automatically. Returns OC_OK even if the architecture is unknown (check arch_name/loaded). Returns OC_ERR_INVALID_ARG if `path` or `result` is NULL. */
 OcError oc_loader_load(const char *path, OcLoaderResult *result);
 
 /* Load a model with an explicit architecture string. The string is

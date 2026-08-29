@@ -62,7 +62,7 @@ struct OcGgufMetadataArray {
     OcGgufMetadataValue *values;   /* arena-owned array of `len` values       */
 };
 
-/* Tagged union of all GGUF metadata value types. Strings are length-prefixed */
+/* Tagged union of all GGUF metadata value types. Strings are length-prefixed (the spec permits embedded NULs); `str.len` is the byte length and `str.data` is NOT guaranteed to be NUL-terminated. Use the convenience getters below for NUL-terminated access where appropriate. */
 struct OcGgufMetadataValue {
     OcGgufMetadataType type;
     union {
@@ -114,7 +114,7 @@ typedef struct OcGgufFile {
     size_t              backing_len;        /* valid iff backing_buf != NULL     */
 } OcGgufFile;
 
-/* Parse a GGUF file from an in-memory byte buffer. `buf` must remain valid */
+/* Parse a GGUF file from an in-memory byte buffer. */
 OcError oc_gguf_parse(const uint8_t *buf, size_t len, OcGgufFile *out);
 
 /* Read a GGUF file from disk and parse it. */
@@ -161,7 +161,7 @@ OcGgufMetadataType oc_gguf_metadata_type_from_u32(uint32_t raw);
 /* Human-readable name for a metadata type ("U8", "STRING", "ARRAY", ...). */
 const char *oc_gguf_metadata_type_name(OcGgufMetadataType t);
 
-/* ─── Architecture detection (VAL-FOUND-012) ────────────────────────────── */
+/* ─── Architecture detection (VAL-FOUND-012) ────────────────────────────── Mirrors Rust `GgufFile::architecture()`: reads `general.architecture` from metadata, falls back to `detect_architecture_from_metadata_keys()` (which scans metadata keys for an `arch.*` namespace). Returns OC_ARCH_UNKNOWN if neither path yields a recognized architecture. */
 OcModelArchitecture oc_gguf_arch_from_file(const OcGgufFile *f);
 
 /* ─── mmap-backed multi-shard loading (VAL-FOUND-005, 006, 015) ────────── `oc_gguf_map_open()` is the primary entry point for loading real model weights: it mmaps the file (PROT_READ, MAP_PRIVATE) and parses the GGUF header + metadata + tensor table without copying the weight bytes into userspace memory. */
@@ -174,7 +174,7 @@ typedef struct OcGgufShard {
     OcGgufFile  parsed;   /* per-shard parse result (owns per-shard arena)    */
 } OcGgufShard;
 
-/* Unified mmap-backed GGUF view. `unified` is the parsed file the caller */
+/* Unified mmap-backed GGUF view. `unified` is the parsed file the caller interacts with: metadata is from shard 0, tensors is the merged array across all shards (with `shard_index` set per-tensor). `shards` is the array of per-shard mmaps + parsed files; `n_shards` is the count (1 for single-file GGUFs). */
 typedef struct OcGgufMmappedFile {
     /* `unified.backing_buf` is always NULL: the file bytes are mmap-backed
      * and owned by `shards`. Free ONLY via oc_gguf_map_free(); never call
@@ -189,7 +189,7 @@ typedef struct OcGgufMmappedFile {
 /* Open a GGUF file via mmap (PROT_READ, MAP_PRIVATE). */
 OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out);
 
-/* Apply MADV_HUGEPAGE to every shard (Linux only, best-effort). The caller */
+/* Apply MADV_HUGEPAGE to every shard (Linux only, best-effort). The caller is responsible for headroom policy: only enable THP when the model fits in RAM with >= 2x headroom (model_bytes * 2 <= MemAvailable). Sets `out->hugepage_advised = true` if applied to all shards. */
 OcError oc_gguf_map_advise_hugepage(OcGgufMmappedFile *out);
 
 bool oc_gguf_map_mlock_with_headroom(OcGgufMmappedFile *out);
@@ -213,7 +213,7 @@ const uint8_t *oc_gguf_map_tensor_data(const OcGgufMmappedFile *m,
 const OcGgufTensorInfo *oc_gguf_map_tensor_get(const OcGgufMmappedFile *m,
                                               const char *name);
 
-/* Resolve the architecture from the unified metadata and return a freshly */
+/* Resolve the architecture from the unified metadata and return a freshly allocated array of `tensor_count` OcGgufTensorInfo entries with mapped names. */
 OcError oc_gguf_map_mapped_tensor_infos(const OcGgufMmappedFile *m,
                                         OcArena *arena,
                                         OcGgufTensorInfo **out_infos,

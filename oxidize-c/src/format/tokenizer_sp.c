@@ -1,4 +1,5 @@
-/* tokenizer_sp.c — SentencePiece unigram tokenizer with Viterbi best-path `<unk>` fallback (VAL-TOK-006): when no piece starting at the current */
+/* tokenizer_sp.c — SentencePiece unigram tokenizer with Viterbi best-path segmentation, for Llama / Gemma / Gemma4 model families. */
+/* `<unk>` fallback (VAL-TOK-006): when no piece starting at the current */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup */
 
@@ -103,7 +104,7 @@ OcError oc_sp_with_unknown_token(OcSentencePieceTokenizer *sp, OcArena *arena,
     if (oc_hashtable_get(sp->vocab, token, &vp)) {
         id = (uint32_t)(uintptr_t)vp;
     } else {
-        /* Rust allocates a new id = (max existing id) + 1 and grows both */
+        /* Rust allocates a new id = (max existing id) + 1 and grows both the vocab and id_to_token. We can't realloc arena memory, so we allocate a new id_to_token + piece_scores array of size (vocab_size + 1) and copy. */
         id = (uint32_t)sp->vocab_size;
         char *dup = oc_arena_dup(arena, token);
         if (!dup) return OC_ERR_OOM;
@@ -132,7 +133,7 @@ OcError oc_sp_with_unknown_token(OcSentencePieceTokenizer *sp, OcArena *arena,
 }
 
 
-/* Find the best-scoring segmentation of `text` (a UTF-8 string) and write */
+/* Find the best-scoring segmentation of `text` (a UTF-8 string) and write the resulting id sequence to `*out_ids` (malloc'd) and the number of codepoints consumed to `*out_consumed`. */
 static OcError sp_best_segmentation(const OcSentencePieceTokenizer *sp,
                                     const char *text, size_t text_len,
                                     uint32_t **out_ids, size_t *out_count,
@@ -147,7 +148,6 @@ static OcError sp_best_segmentation(const OcSentencePieceTokenizer *sp,
     size_t *boundaries = (size_t *)malloc((text_len + 1) * sizeof(size_t));
     if (!boundaries) return OC_ERR_OOM;
     size_t n_bounds = sp_char_boundaries(text, text_len, boundaries);
-    /* token_count = number of codepoints = n_bounds - 1. */
     size_t token_count = (n_bounds == 0) ? 0 : (n_bounds - 1);
     if (token_count == 0) {
         free(boundaries);

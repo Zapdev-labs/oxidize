@@ -36,7 +36,7 @@ OcError oc_encoder_pipeline_process(OcEncoderPipeline *pipe,
                                      size_t max_features,
                                      size_t *out_n);
 
-/* Batch processing: process n_images images, writing results contiguously */
+/* Batch processing: process n_images images, writing results contiguously into out_features. Each image yields oc_encoder_pipeline_n_output_features floats. Returns OC_ERR_INVALID_ARG on bad args, OC_ERR_OOM if buffer too small. */
 OcError oc_encoder_pipeline_process_batch(OcEncoderPipeline *pipe,
                                            const OcImage *images,
                                            uint32_t n_images,

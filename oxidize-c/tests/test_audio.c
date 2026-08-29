@@ -274,7 +274,6 @@ Test(audio, compute_mel_basic)
 Test(audio, compute_mel_frame_count)
 {
     OcAudioConfig cfg = OC_AUDIO_CONFIG_DEFAULT;
-    /* n_samples = n_fft + 2 * hop → n_frames = 1 + 2 = 3 */
     size_t n_samples = cfg.n_fft + 2 * cfg.hop_length;
     float *samples = calloc(n_samples, sizeof(float));
 
@@ -338,7 +337,7 @@ Test(audio, encode_no_weights_fallback)
     cr_assert_eq(out_len, (size_t)n_frames * 256);
 
     /* Fallback: each hidden value is the mean of mel bins for that frame. */
-    /* Frame 0: mel[0..79], mean = 0.01 * (0+1+...+79) / 80 */
+    /* Fallback: each hidden value is the mean of mel bins for that frame. Frame 0: mel[0..79], mean = 0.01 * (0+1+...+79) / 80 */
     float expected_mean = 0.01f * (0.0f + 79.0f) / 2.0f;
     cr_assert_float_eq(out[0], expected_mean, 0.05f);
 

@@ -15,7 +15,7 @@
 #define OC_TEST_TP_PORT      52932
 #define OC_TEST_TP_PORT_STR "52932"
 
-/* Helpers                                                            */
+/* ------------------------------------------------------------------ Helpers ------------------------------------------------------------------ */
 
 static OcDistributedConfig make_single_node_config(void)
 {
@@ -39,7 +39,7 @@ static OcDistributedConfig make_multinode_config(uint32_t n_nodes,
     return cfg;
 }
 
-/* Init / Free                                                        */
+/* ------------------------------------------------------------------ Init / Free ------------------------------------------------------------------ */
 
 Test(distributed, init_single_node)
 {
@@ -85,7 +85,7 @@ Test(distributed, init_multi_node_pipeline)
     oc_distributed_free(&sched);
 }
 
-/* Config validation                                                  */
+/* ------------------------------------------------------------------ Config validation ------------------------------------------------------------------ */
 
 Test(distributed, validate_config_single_node)
 {
@@ -151,7 +151,6 @@ Test(distributed, validate_config_reject_pp_exceeds_nodes)
 Test(distributed, validate_config_reject_pp_tp_exceeds_nodes)
 {
     OcDistributedConfig cfg = make_multinode_config(4, 0, 2, 4);
-    /* pp * tp = 8 > n_nodes = 4 */
     cr_assert_eq(oc_distributed_validate_config(&cfg), OC_ERR_INVALID_ARG);
 }
 
@@ -169,7 +168,7 @@ Test(distributed, validate_config_reject_bad_tensor_rank)
     cr_assert_eq(oc_distributed_validate_config(&cfg), OC_ERR_INVALID_ARG);
 }
 
-/* Role resolution                                                    */
+/* ------------------------------------------------------------------ Role resolution ------------------------------------------------------------------ */
 
 Test(distributed, role_single_node_is_master)
 {
@@ -209,7 +208,7 @@ Test(distributed, role_null_config)
     cr_assert_eq(oc_distributed_resolve_role(NULL), OC_NODE_ROLE_NONE);
 }
 
-/* Stats                                                              */
+/* ------------------------------------------------------------------ Stats ------------------------------------------------------------------ */
 
 Test(distributed, stats_init_zero)
 {
@@ -326,7 +325,7 @@ Test(distributed, single_node_get_latency)
     oc_distributed_free(&sched);
 }
 
-/* Null handling                                                      */
+/* ------------------------------------------------------------------ Null handling ------------------------------------------------------------------ */
 
 Test(distributed, null_scheduler_init)
 {
@@ -405,7 +404,7 @@ Test(distributed, operations_on_uninit_scheduler)
     cr_assert_eq(oc_distributed_barrier(&sched), OC_ERR_INVALID_ARG);
 }
 
-/* Stats JSON format                                                  */
+/* ------------------------------------------------------------------ Stats JSON format ------------------------------------------------------------------ */
 
 Test(distributed, stats_json_basic)
 {
@@ -489,7 +488,7 @@ Test(distributed, stats_json_small_buffer_truncates)
     oc_distributed_free(&sched);
 }
 
-/* Reconnect                                                          */
+/* ------------------------------------------------------------------ Reconnect ------------------------------------------------------------------ */
 
 Test(distributed, reconnect_single_node_no_peers)
 {
@@ -509,7 +508,7 @@ Test(distributed, reconnect_null_scheduler)
     cr_assert_eq(oc_distributed_reconnect(NULL, 0), OC_ERR_INVALID_ARG);
 }
 
-/* Multi-node pipeline edge cases                                     */
+/* ------------------------------------------------------------------ Multi-node pipeline edge cases ------------------------------------------------------------------ */
 
 Test(distributed, multi_node_init_times_out_without_peers)
 {

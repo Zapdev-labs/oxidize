@@ -120,7 +120,7 @@ static uint64_t read_meminfo_field(const char *key)
     uint64_t val = 0;
     while (fgets(line, sizeof(line), f)) {
         if (strstr(line, key) == line) {
-            /* "Key:    12345 kB" */
+            /* "Key: 12345 kB" */
             sscanf(line + strlen(key), ": %llu kB", (unsigned long long *)&val);
             val *= 1024ULL;   /* kB → bytes */
             break;
@@ -313,7 +313,7 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
     OcTuningPlan p;
     memset(&p, 0, sizeof(p));
     p.simd_level = cpu ? cpu->simd.level : OC_SIMD_SCALAR;
-    /* Tested by equality, not `>=`: OC_SIMD_NEON sorts above the x86 tiers */
+    /* Tested by equality, not `>=`: OC_SIMD_NEON sorts above the x86 tiers numerically but is a different architecture, and there is no NEON dequant kernel — oc_simd_try_dequant() returns false there. An ordered test would promise a SIMD dequant path that silently falls back. */
     p.use_simd_dequant = (p.simd_level == OC_SIMD_AVX2 ||
                           p.simd_level == OC_SIMD_AVX512);
 
@@ -460,7 +460,6 @@ OcError oc_autotune_bind_to_numa_node(uint32_t node)
             for (unsigned long c = lo; c <= hi && c < CPU_SETSIZE; c++) {
                 CPU_SET((int)c, &set);
             }
-            /* skip past the range */
             while (*p && *p != ',' && *p != '\n') p++;
         } else if (sscanf(p, "%lu", &lo) == 1) {
             if (lo < CPU_SETSIZE) CPU_SET((int)lo, &set);

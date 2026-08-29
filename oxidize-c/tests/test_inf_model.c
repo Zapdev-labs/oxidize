@@ -28,7 +28,6 @@ Test(infm, init_bad_config)
 {
     OcInferenceModel m;
     OcInferenceConfig cfg = {0};
-    /* hidden_size=0 -> workspace_for_config will fail */
     cr_assert_neq(oc_inf_model_init(&m, &cfg), OC_OK);
 }
 

@@ -100,7 +100,7 @@ OcError oc_sched_add_request(OcScheduler *sched, const OcSchedRequest *req,
  * Returns OC_ERR_INVALID_ARG for unknown id. */
 OcError oc_sched_cancel_request(OcScheduler *sched, uint64_t id);
 
-/* Get the next batch of request ids to process. Selects PENDING requests */
+/* Get the next batch of request ids to process. Selects PENDING requests (highest priority first, then FIFO) up to max_batch and the token budget. Selected requests transition to RUNNING. Writes up to max_batch ids into out_ids and sets *out_n. */
 OcError oc_sched_next_batch(OcScheduler *sched, uint64_t *out_ids,
                              uint32_t max_batch, uint32_t *out_n);
 

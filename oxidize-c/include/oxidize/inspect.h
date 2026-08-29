@@ -69,7 +69,7 @@ typedef struct OcModelInfo {
     uint32_t sliding_window;
 } OcModelInfo;
 
-/* Inspect a GGUF file on disk: open, parse metadata + tensor table, compute */
+/* Inspect a GGUF file on disk: open, parse metadata + tensor table, compute all summary fields, fill `*out`. Returns OC_OK, OC_ERR_IO (file open), OC_ERR_FORMAT (bad GGUF), OC_ERR_OOM, or OC_ERR_INVALID_ARG (NULL args). On error, `*out` is zeroed. On success, caller owns `out->tensors` and must call `oc_inspect_free(out)` when done. */
 OcError oc_inspect_model(const char *path, OcModelInfo *out);
 
 /* Inspect an already-loaded OcLlamaModel: derive all summary fields from the model's config + GGUF metadata. */
@@ -78,7 +78,7 @@ OcError oc_inspect_llama(const OcLlamaModel *model, OcModelInfo *out);
 /* Format `info` as a human-readable table into `buf` (up to `cap-1` chars, NUL-terminated). */
 size_t oc_inspect_format(const OcModelInfo *info, char *buf, size_t cap);
 
-/* Format `info` as a single-line JSON object into `buf` (up to `cap-1` */
+/* Format `info` as a human-readable table into `buf` (up to `cap-1` chars, NUL-terminated). Returns the full length of the formatted output (excluding NUL), like snprintf: if the return value is >= `cap`, the output was truncated. If `buf` is NULL or `cap` is 0, nothing is written and the required length is returned. */
 size_t oc_inspect_format_json(const OcModelInfo *info, char *buf, size_t cap);
 
 /* Free the heap-allocated fields of `info` (currently `info->tensors`).

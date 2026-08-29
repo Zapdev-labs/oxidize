@@ -208,7 +208,7 @@ Test(rotorquant, rotation_preserves_norm)
     }
 }
 
-/* Regression guard for the V-cache bug in the reference: decoding with the FORWARD rotation instead of its inverse still yields a finite, unit-ish vector, so only an explicit error comparison catches it. */
+/* Regression guard for the V-cache bug in the reference: decoding with the FORWARD rotation instead of its inverse still yields a finite, unit-ish vector, so only an explicit error comparison catches it. Here we simulate the wrong decode and assert it is dramatically worse than the real one. */
 Test(rotorquant, inverted_rotation_regression)
 {
     OcRotorQuantVariant variants[2] = {OC_RQ_PLANAR, OC_RQ_ISO};

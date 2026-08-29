@@ -44,11 +44,9 @@ typedef struct OcWsFrame {
 typedef struct OcWsSession {
     int        fd;
     OcWsState  state;
-    /* receive buffer for partial reads */
     uint8_t   *recv_buf;
     size_t     recv_len;
     size_t     recv_cap;
-    /* fragmentation reassembly */
     uint8_t    frag_opcode;
     bool       frag_in_progress;
     uint8_t   *frag_buf;
@@ -89,7 +87,7 @@ OcError oc_ws_session_init(OcWsSession *sess, int fd);
 void oc_ws_session_free(OcWsSession *sess);
 
 
-/* Read a complete frame from the session's socket (blocking). Returns OC_OK */
+/* Read a complete frame from the session's socket (blocking). Returns OC_OK and fills `frame`; `frame.payload` aliases the session's recv buffer (valid until the next read). Returns OC_ERR_IO on socket error or OC_ERR_FORMAT on a malformed frame. */
 OcError oc_ws_read_frame(OcWsSession *sess, OcWsFrame *frame);
 
 /* Send a frame over the session's socket. Returns OC_OK or OC_ERR_IO. */

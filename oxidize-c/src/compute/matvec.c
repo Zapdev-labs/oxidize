@@ -373,7 +373,7 @@ typedef struct {
     const uint8_t *act;
     size_t         blocks;
     float        (*row_dot)(const uint8_t *row, size_t blocks, const uint8_t *act);
-    /* Prepared-row path: types whose only integer kernel works off a decoded */
+    /* Prepared-row path: types whose only integer kernel works off a decoded row (Q2_K / Q3_K). The row is decoded into per-thread scratch and dotted once — decode has a single activation, so there is nothing to amortize a wider kernel over, but this still beats dequantizing to f32 and doing the dot in floating point. */
     size_t         prep_bytes;
     void         (*prep_fn)(const uint8_t *row, size_t blocks, void *scratch);
     float        (*prep_dot)(const void *prep, size_t blocks,
@@ -565,7 +565,7 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
          * it assumes; a padded or interleaved row would be read wrong. */
         if (act_kind != ACT_NONE &&
             fused_stride_ok(qtype, blocks, row_bytes)) {
-            /* The activation lives in the caller's dequant buffer, not in thread 0's scratch: the prepared-row path below hands every worker — thread 0 included — its scratch for the decoded row, and there is only one scratch per thread, so sharing it would let the row decode overwrite the activation mid-region. */
+            /* The activation lives in the caller's dequant buffer, not in thread 0's scratch: the prepared-row path below hands every worker — thread 0 included — its scratch for the decoded row, and there is only one scratch per thread, so sharing it would let the row decode overwrite the activation mid-region. `temp` is cols floats, always at least the ~1.14 bytes per column a Q8_K/Q8_0 encoding needs. */
             uint8_t *act = (uint8_t *)temp;
             if (act != NULL && temp_bytes >= act_bytes) {
                 if (act_kind == ACT_Q8_K) quantize_act_q8_k(input, cols, act);
@@ -682,7 +682,7 @@ static size_t act_tile_for(size_t abytes, size_t n_vec, size_t budget)
 
 size_t oc_matvec_batch_scratch_bytes(size_t max_cols)
 {
-    /* Largest single-activation encoding at this width, over both Q8 */
+    /* Largest single-activation encoding at this width, over both Q8 flavours. Computed from the block sizes directly rather than from fused_act_kind(), so the bound does not depend on `max_cols` itself being block-aligned. */
     size_t q8k, q80;
     if (!size_mul(max_cols / OC_OXK_QK_K, OC_OXK_BLOCK_Q8_K_SIZE, &q8k) ||
         !size_mul(max_cols / OC_OXK_QK8_0, OC_OXK_BLOCK_Q8_0_SIZE, &q80))
@@ -756,7 +756,7 @@ static void matvec_batch_packed_slice(size_t begin, size_t end, size_t tid,
     }
 }
 
-/* K-quants with the row decode hoisted out of the activation loop. Bit-exact with the packed kernels; see oc_oxk_dot_q4_k_prepped() / */
+/* K-quants with the row decode hoisted out of the activation loop. */
 static void matvec_batch_prep_slice(size_t begin, size_t end, size_t tid,
                                     void *ud)
 {
@@ -923,7 +923,7 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
         return;
     }
 
-    /* Dequant reference path. Pre-reserve worker scratch for the same reason */
+    /* Dequant reference path. Pre-reserve worker scratch for the same reason oc_matvec_quantized() does: a failure inside a slice would silently leave that slice's outputs unwritten, and this function cannot report OOM. Falling back to serial is correct, just slower. */
     const size_t nt = oc_parallel_n_threads();
     bool serial = false;
     if (nt > 1 && rows >= 8) {

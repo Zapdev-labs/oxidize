@@ -35,6 +35,7 @@ typedef struct OcGgufWriter {
     void *pending;
     bool     finalized;        /* true after finalize() — further writes error */
     bool     owns_fp;          /* true when we fopen'd fp (not caller-provided) */
+    uint32_t alignment;       /* data-section padding; power of two, default 32 */
 } OcGgufWriter;
 
 /* Initialize a writer: open `path` for writing, emit the GGUF header (magic, version=3, tensor_count=0, metadata_kv_count=0), and write the `general.architecture` string metadata (as required by the GGUF spec). */
@@ -59,6 +60,9 @@ OcError oc_gguf_writer_add_float32(OcGgufWriter *w, const char *key,
 
 OcError oc_gguf_writer_add_array_string(OcGgufWriter *w, const char *key,
                                         const char *const *values, size_t count);
+
+OcError oc_gguf_writer_add_value(OcGgufWriter *w, const char *key,
+                                 const OcGgufMetadataValue *value);
 
 OcError oc_gguf_writer_add_tensor(OcGgufWriter *w, const char *name,
                                   uint32_t n_dims, const uint64_t *dims,

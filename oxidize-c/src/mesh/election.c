@@ -64,7 +64,7 @@ OcError oc_election_tick(OcElectionState *state, uint64_t current_ms)
         return OC_OK;
     }
 
-    /* Check election timeout. Guard against the initial state where */
+    /* Check election timeout. Guard against the initial state where last_heartbeat_ms == 0: treat the first tick as a heartbeat so a node doesn't immediately start an election at t=0 before it has had a chance to hear from a leader. */
     if (state->last_heartbeat_ms == 0) {
         state->last_heartbeat_ms = current_ms;
         return OC_OK;

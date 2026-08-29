@@ -15,7 +15,7 @@ static const float IQ4_NL_VALUES[16] = {
      53.0f,   69.0f,   89.0f, 113.0f,
 };
 
-/* IQ2_XXS grid: 256 entries × 8 dims. Each byte nibble takes one of three */
+/* IQ2_XXS grid: 256 entries × 8 dims. Each byte nibble takes one of three values: 0x08, 0x19, 0x2b (dequantized as -0.5, 0.0, 0.5 by convention). We generate all combinations procedurally rather than hard-coding 256×8 floats. The three dequant levels: */
 #define IQ2_LEVELS   3
 static const float IQ2_DEQUANT[3] = { -0.5f, 0.0f, 0.5f };
 

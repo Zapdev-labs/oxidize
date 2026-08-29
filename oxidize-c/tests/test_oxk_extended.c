@@ -111,9 +111,7 @@ Test(oxk_ext, dot_q8_0_known_result)
     /* d_w=2.0, d_q=3.0, all weights=4, all activations=5
      * result = 2*3 * sum(4*5) = 6 * 32 * 20 = 6 * 640 = 3840 */
     uint8_t w[34], q[34];
-    /* f16 2.0 = 0x4000 → [0x00, 0x40] */
     w[0] = 0x00; w[1] = 0x40;
-    /* f16 3.0 = 0x4200 → [0x00, 0x42] */
     q[0] = 0x00; q[1] = 0x42;
     for (int i = 0; i < 32; i++) {
         w[2 + i] = 4;
@@ -179,7 +177,6 @@ Test(oxk_ext, dot_q4_0_zero_when_nibble_is_8)
 
 Test(oxk_ext, dot_q4_1_known_result)
 {
-    /* d=1.0, m=2.0, nibbles all 5, q8 all 3, d_q=1.0 */
     uint8_t w[20], q[34];
     w[0] = 0x00; w[1] = 0x3C;  /* d=1.0 */
     w[2] = 0x00; w[3] = 0x40;  /* m=2.0 (f16 0x4000) */
@@ -343,7 +340,6 @@ Test(oxk_ext, dot_q8_0_large_256_blocks)
     cr_assert_not_null(q);
 
     for (size_t b = 0; b < N; b++) {
-        /* d_w = 1.0, d_q = 1.0 */
         w[b * 34] = 0x00; w[b * 34 + 1] = 0x3C;
         q[b * 34] = 0x00; q[b * 34 + 1] = 0x3C;
         for (int i = 0; i < 32; i++) {

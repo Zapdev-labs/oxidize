@@ -455,7 +455,6 @@ fn warmup_lr(base: f32, step: usize, warmup: usize) -> f32 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

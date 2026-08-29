@@ -168,7 +168,6 @@ Test(mesh_progress, overall_calculation)
     oc_mesh_progress_update(&t, "t1", OC_PROGRESS_RUNNING, 0.5f, NULL);
     oc_mesh_progress_update(&t, "t2", OC_PROGRESS_DONE, 1.0f, NULL);
     oc_mesh_progress_update(&t, "t3", OC_PROGRESS_RUNNING, 0.0f, NULL);
-    /* mean of 0.5, 1.0, 0.0 = 0.5 */
     cr_assert_float_eq(oc_mesh_progress_overall(&t), 0.5f, 1e-6f);
 }
 
@@ -180,7 +179,6 @@ Test(mesh_progress, overall_excludes_failed_cancelled)
     oc_mesh_progress_add(&t, "n2", "t2");
     oc_mesh_progress_update(&t, "t1", OC_PROGRESS_RUNNING, 0.5f, NULL);
     oc_mesh_progress_update(&t, "t2", OC_PROGRESS_FAILED, 1.0f, NULL);
-    /* only t1 counts: 0.5 */
     cr_assert_float_eq(oc_mesh_progress_overall(&t), 0.5f, 1e-6f);
 }
 
@@ -237,7 +235,6 @@ Test(mesh_progress, cancel_all)
     oc_mesh_progress_update(&t, "t3", OC_PROGRESS_PENDING, 0.0f, NULL);
 
     cr_assert_eq(oc_mesh_progress_cancel_all(&t), OC_OK);
-    /* t1 and t3 should be cancelled; t2 stays done. */
     cr_assert_eq(oc_mesh_progress_get(&t, "t1")->state, OC_PROGRESS_CANCELLED);
     cr_assert_eq(oc_mesh_progress_get(&t, "t2")->state, OC_PROGRESS_DONE);
     cr_assert_eq(oc_mesh_progress_get(&t, "t3")->state, OC_PROGRESS_CANCELLED);

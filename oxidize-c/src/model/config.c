@@ -263,7 +263,7 @@ uint64_t oc_model_config_n_params(const OcModelConfig *cfg)
     uint64_t total = vocab * hidden;
 
     /* Per-layer parameters. */
-    /* Attention: q_proj (hidden -> n_heads*head_dim), k_proj (hidden -> n_kv_heads*head_dim), v_proj (hidden -> n_kv_heads*head_dim), o_proj (n_heads*head_dim -> hidden). */
+    /* Attention: q_proj (hidden -> n_heads*head_dim), k_proj (hidden -> n_kv_heads*head_dim), v_proj (hidden -> n_kv_heads*head_dim), o_proj (n_heads*head_dim -> hidden). Each with bias counted separately below (set to 0 — biases uncommon in modern LLMs). */
     uint64_t q_out = (uint64_t)cfg->n_heads * head_dim;
     uint64_t kv_out = (uint64_t)cfg->n_kv_heads * head_dim;
     uint64_t attn = hidden * q_out + hidden * kv_out + hidden * kv_out +

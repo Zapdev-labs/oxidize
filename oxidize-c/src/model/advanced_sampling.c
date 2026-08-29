@@ -44,7 +44,7 @@ static float compute_entropy(const float *probs, size_t n)
 
 static uint32_t sample_from_probs(const float *probs, size_t n, float u)
 {
-    /* Inverse CDF sampling. u is a uniform [0,1) random value. */
+    /* Accumulate until p. */
     float cum = 0.0f;
     for (size_t i = 0; i < n; i++) {
         cum += probs[i];
@@ -687,7 +687,7 @@ uint32_t oc_sample_contrastive(const float *logits, size_t vocab_size,
     if (sum == 0.0f) sum = 1.0f;
     for (size_t i = 0; i < top_k; i++) cand_probs[i] /= sum;
 
-    /* Degeneration penalty: max cosine similarity between the current */
+    /* Degeneration penalty: max cosine similarity between the current representation and past keys. ponytail: the API exposes a single current_key, so the similarity term is candidate-independent; per-candidate reps would need an API change. */
     float max_sim = 0.0f;
     if (past_keys && current_key) {
         for (size_t t = 0; t < seq_len; t++) {

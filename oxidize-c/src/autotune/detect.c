@@ -64,7 +64,7 @@ OcError oc_detect_cpu(OcDetectInfo *info)
                            (strstr(info->model_name, "Gold") != NULL ||
                             strstr(info->model_name, "Platinum") != NULL));
 #elif defined(__aarch64__)
-    /* NEON (Advanced SIMD) is mandatory in the AArch64 base architecture, so */
+    /* NEON (Advanced SIMD) is mandatory in the AArch64 base architecture, so this is a compile-time fact rather than a runtime probe. Optional extensions (dotprod / i8mm) would need getauxval(AT_HWCAP); OXK's NEON kernels use only the baseline, so nothing else is probed here. */
     info->has_neon = true;
     strcpy(info->model_name, "aarch64");
 #else

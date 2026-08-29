@@ -1,4 +1,5 @@
-/* tokenizer_bpe.c — byte-level BPE tokenizer (tiktoken-style) for reference exactly (VAL-TOK-001 / VAL-TOK-011 require bit-exact is NOT applied here because the Rust reference does not apply it either. */
+/* tokenizer_bpe.c — byte-level BPE tokenizer (tiktoken-style) for Qwen / GPT-2 / LFM2. */
+/* breaking bit-exact parity with Rust. */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup, strndup */
 
@@ -80,7 +81,7 @@ static void init_byte_to_gpt2_str(void)
     }
 }
 
-/* Reverse map: GPT-2 codepoint → original byte. Returns true and writes 256..=323). Returns false otherwise (caller should emit the char's UTF-8 */
+/* Reverse map: GPT-2 codepoint → original byte. Returns true and writes `*out_byte` if `cp` is in the GPT-2 byte mapping (printable ranges or 256..=323). Returns false otherwise (caller should emit the char's UTF-8 bytes verbatim — mirrors Rust's `None` branch in `gpt2_char_to_byte`). */
 static bool gpt2_codepoint_to_byte(uint32_t cp, uint8_t *out_byte)
 {
     if ((cp >= 33 && cp <= 126)
@@ -467,7 +468,7 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
         /* If the merged token is already in the vocab, skip (mirrors Rust). */
         void *existing;
         if (oc_hashtable_get(bpe->vocab, merged, &existing)) {
-            /* Still apply the merge to the sequences so counts are correct */
+            /* No unknown token: skip this byte (Rust's filter_map drops it). */
             /* Wait — re-reading Rust: when `vocab.contains_key(&merged)`,
              * it `continue`s WITHOUT applying the merge. So the pair stays
              * unmerged in the sequences. Match that exactly. */
@@ -851,7 +852,7 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
     OcError e = oc_bpe_decode_raw(bpe, ids, count, &bytes, &byte_len);
     if (e != OC_OK) return e;
 
-    /* The bytes may not be valid UTF-8 (e.g. mid-multibyte sequences split */
+    /* The bytes may not be valid UTF-8 (e.g. mid-multibyte sequences split across tokens, or placeholder tokens mapping to lone invalid bytes). Apply lossy conversion like Rust's `String::from_utf8_lossy`: each maximal invalid subsequence becomes one U+FFFD. */
     uint8_t *lossy = (uint8_t *)malloc(byte_len * 3 + 1);
     if (!lossy) { free(bytes); return OC_ERR_OOM; }
     size_t lossy_len = oc_utf8_lossy(bytes, byte_len, lossy);
@@ -1165,7 +1166,7 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
     }
     if (e != OC_OK) return e;
 
-    /* Enforce OC_TOK_DISALLOW_SPECIAL for the non-BPE kinds: drop any */
+    /* Enforce OC_TOK_DISALLOW_SPECIAL for the non-BPE kinds: drop any special-token id that surfaced from ordinary vocab lookups. ponytail: dropped rather than re-segmented as ordinary pieces; add per-kind byte-fallback segmentation if fidelity matters. */
     if (policy == OC_TOK_DISALLOW_SPECIAL && t->kind != OC_TOK_KIND_BPE
         && *out_ids) {
         uint32_t *ids = *out_ids;

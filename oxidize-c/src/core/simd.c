@@ -1,4 +1,4 @@
-/* simd.c — runtime SIMD dispatch hub. Bit-exactness contract: the dispatched kernel MUST produce output type (VAL-SIMD-001..004). */
+/* simd.c — runtime SIMD dispatch hub. Bit-exactness: the dispatched kernel MUST produce output byte-identical to the scalar reference in src/compute/quantization.c (VAL-SIMD-001..004). */
 #include "oxidize/simd.h"
 
 #include <stdatomic.h>
@@ -113,7 +113,7 @@ bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
 
     const OcSimdCaps *caps = oc_simd_caps();
     switch (caps->level) {
-/* The AVX kernels are only *defined* on x86 (simd_avx2.c / simd_avx512.c are */
+/* The AVX kernels are only *defined* on x86 (simd_avx2.c / simd_avx512.c are wholly inside an `#if defined(__x86_64__) || defined(__i386__)`). These branches are unreachable elsewhere — caps->level can never report an x86 tier on another architecture — but an unguarded call still needs the symbol at link time, which is what broke the aarch64 link. */
 #if defined(__x86_64__) || defined(__i386__)
     case OC_SIMD_AVX512:
         switch (qtype) {

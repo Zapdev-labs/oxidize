@@ -47,12 +47,11 @@ void oc_oxk_dot_q4_k_prepped_multi_avx512(const void *prep, size_t blocks,
                                           size_t act_stride, size_t n_act,
                                           float *out);
 
-/* sums: sum((q-32)*a) = sum(q*a) - 32*bsum. */
 OC_OXK_AVX512_TARGET
 float oc_oxk_dot_q6_k_q8_k_avx512vnni(const uint8_t *row, size_t blocks,
                                       const uint8_t *q8);
 
-/* Multi-activation dot over a prepared Q6_K row (oc_oxk_q6_k_prep_row */
+/* Multi-activation dot over a prepared Q6_K row (oc_oxk_q6_k_prep_row layout). Same structure as the Q4_K prepped multi kernel, with 16 signed 16-element scale groups per block and the -32 offset folded out through the activation block sums. */
 OC_OXK_AVX512_TARGET
 /* Multi-activation dots over prepared Q3_K / Q2_K rows. */
 /* Single-activation VNNI dots over the prepared rows — what decode uses,

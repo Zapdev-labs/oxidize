@@ -37,7 +37,9 @@ OcError oc_video_encoder_init(OcVideoEncoder *enc,
 /* Free an encoder and its output buffer. Safe on NULL. */
 void oc_video_encoder_free(OcVideoEncoder *enc);
 
-/* Encode frames: takes [n_frames * frame_dim] per-frame embeddings and produces video tokens. */
+/* Encode frames: takes [n_frames * frame_dim] per-frame embeddings and produces
+ * video tokens. frame_dim MUST equal config.vision_hidden. Returns OC_OK,
+ * OC_ERR_INVALID_ARG on bad args or dim mismatch, OC_ERR_OOM on allocation failure. */
 OcError oc_video_encoder_encode(OcVideoEncoder *enc,
                                  const float *frame_embeddings,
                                  size_t n_frames, size_t frame_dim);

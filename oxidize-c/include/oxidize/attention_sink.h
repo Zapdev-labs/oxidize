@@ -51,7 +51,7 @@ OcError oc_attn_sink_init(OcAttentionSink *sink,
                           const OcAttentionSinkConfig *config,
                           uint32_t head_dim, uint32_t n_heads);
 
-/* Append K/V vectors for a token at `seq_pos`. Otherwise stores in window cache (evicting oldest if full). */
+/* Append K/V vectors for a token at `seq_pos`. If seq_pos < sink_size, stores in the sink cache; otherwise stores in the window cache (evicting oldest if full). out_slot receives the combined-cache slot index. */
 OcError oc_attn_sink_append(OcAttentionSink *sink,
                             const float *key, const float *value,
                             uint32_t seq_pos, uint32_t *out_slot);

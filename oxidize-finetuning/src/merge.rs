@@ -337,7 +337,6 @@ fn l2_norm(v: &[f32]) -> f32 {
     v.par_iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

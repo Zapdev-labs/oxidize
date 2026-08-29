@@ -43,7 +43,7 @@ typedef struct OcSseClient {
     bool   in_use;                   /* true if this slot holds a client  */
 } OcSseClient;
 
-/* The SSE server: a fixed-capacity table of clients. The server does not */
+/* The SSE server: a fixed-capacity table of clients. The server does not own the listening socket; the caller accepts HTTP connections, upgrades them (writes the SSE headers), then hands the fd to oc_sse_server_accept(). This keeps the SSE layer decoupled from the HTTP request parser. */
 typedef struct OcSseServer {
     OcSseClient clients[OC_SSE_MAX_CLIENTS];
     size_t      n_clients;            /* count of in_use slots            */
@@ -70,7 +70,7 @@ size_t oc_sse_format_event_raw(const char *event, const char *data,
 /* Parse incoming SSE data (e.g. from a POST body or upstream stream). */
 size_t oc_sse_parse_event(const char *buf, size_t len, OcSseEvent *out_event);
 
-/* Send an SSE event to a connected client by writing the formatted block */
+/* Send an SSE event to a connected client by writing the formatted block to `c->fd`. On success returns OC_OK and updates `c->last_event_id` if `ev->id` is non-NULL/non-empty. On broken pipe / connection reset returns OC_ERR_NETWORK (the caller should call oc_sse_free on the client). `ev` may have NULL fields. */
 OcError oc_sse_send_event(OcSseClient *c, const OcSseEvent *ev);
 
 /* Send a heartbeat comment line (": keepalive\n\n") to keep the connection
@@ -89,7 +89,7 @@ void oc_sse_server_free(OcSseServer *s);
 /* Register an already-accepted fd as a new SSE client. */
 OcError oc_sse_server_accept(OcSseServer *s, int fd);
 
-/* Broadcast an event to all connected clients. Clients that fail to receive */
+/* Broadcast an event to all connected clients. Clients that fail to receive (broken pipe) are disconnected (slot freed; fd NOT closed by this layer — the caller is responsible for closing fds it owns). Returns OC_OK if at least one client received the event, OC_ERR_NETWORK if all clients failed, OC_ERR_INVALID_ARG on NULL args. */
 OcError oc_sse_server_broadcast(OcSseServer *s, const OcSseEvent *ev);
 
 /* Disconnect a client by fd: marks the slot free. Does NOT close `fd`.

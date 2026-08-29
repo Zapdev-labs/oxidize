@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-/* Server-side state shared across requests. The model + tokenizer are */
+/* Server-side state shared across requests. The model + tokenizer are loaded once at startup; the session is created per-request (or pooled by a later feature — for now each request gets a fresh session, which is correct but not optimal for concurrent requests). */
 typedef struct OcOpenaiState {
     OcLlamaModel *model;
     OcTokenizer *tokenizer;

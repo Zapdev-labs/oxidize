@@ -29,7 +29,7 @@ static void assert_ids_eq(const uint32_t *actual, size_t actual_count,
     }
 }
 
-/* ─── Greedy longest match (VAL-TOK-008) ───────────────────────────────── */
+/* ─── Greedy longest match (VAL-TOK-008) ───────────────────────────────── Mirrors Rust `wordpiece_encodes_with_greedy_longest_match`: vocab = ["play", "##ing", "##er", " "] encode("player playing") -> decode -> "player playing" encoded.len() == 5 "player" splits to ["play", "##er"] (greedy longest: "play" (4 chars) matches first, then "##er" (2 chars) matches the suffix). */
 
 Test(tokenizer_wp, greedy_longest_match)
 {

@@ -329,7 +329,7 @@ static const char *map_hf_decoder_name(const char *name, OcArena *arena)
                                 (unsigned long long)expert_idx);
     }
 
-    /* Pattern B: mlp.experts.<M>.<gate_proj|up_proj|down_proj>.weight This is the DeepSeek convention (VAL-FOUND-011 Rust test */
+    /* Pattern B: mlp.experts.<M>.<gate_proj|up_proj|down_proj>.weight → blk.<N>.ffn_<gate|up|down>.<M>.weight This is the DeepSeek convention (VAL-FOUND-011 Rust test `mapped[3].name == "blk.1.ffn_gate.42.weight"`). */
     static const char me_prefix[] = "mlp.experts.";
     const size_t me_len = sizeof(me_prefix) - 1;
     if (strncmp(p, me_prefix, me_len) == 0) {

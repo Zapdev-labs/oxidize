@@ -126,7 +126,6 @@ static OcError grow_if_needed(OcHashtable *ht)
     for (size_t i = 0; i < old_cap; i++) {
         if (old[i].key != NULL && old[i].key != HT_TOMBSTONE) {
             OcHtSlot *s = find_slot(ht, old[i].key, old[i].hash, true);
-            /* new array is empty so find_slot always succeeds */
             s->key   = old[i].key;
             s->value = old[i].value;
             s->hash  = old[i].hash;

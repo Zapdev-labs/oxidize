@@ -44,7 +44,7 @@ typedef struct OcSpeculativeResult {
     bool     used_residual;                   /* last token was residual     */
 } OcSpeculativeResult;
 
-/* Verification kernel: compare draft vs target logits, return accepted */
+/* Verification kernel: compare draft vs target logits, return accepted tokens + one residual/bonus token. */
 OcError oc_speculative_decode(
     const uint32_t *draft_tokens,
     float * const *draft_logits,

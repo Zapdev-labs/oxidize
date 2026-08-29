@@ -17,9 +17,7 @@ extern "C" {
  * is the relative suffix under $HOME). */
 #define OC_HF_DEFAULT_CACHE_SUFFIX ".cache/oxidize/hf"
 
-/* Default HuggingFace API base. Plain HTTP — see file-level comment about
- * TLS. A production caller typically sets api_base to an HTTPS-capable
- * proxy or mirror. */
+/* Default HuggingFace API base. Plain HTTP unless the caller supplies an HTTPS proxy or mirror. */
 #define OC_HF_DEFAULT_API_BASE "https://huggingface.co"
 
 /* Default revision (branch) used when none is specified. */
@@ -81,14 +79,14 @@ typedef int (*OcHfProgressCb)(const OcHfDownloadProgress *prog, void *user);
  * default ~/.cache/oxidize/hf). Returns OC_OK or OC_ERR_INVALID_ARG. */
 OcError oc_hf_config_init(OcHfConfig *cfg, const char *cache_dir);
 
-/* List .gguf models in a HuggingFace repo that match the config's */
+/* List .gguf models in a HuggingFace repo that match the config's quant_type filter. Writes up to *inout_count entries into `out_models` (caller-allocated array). On return *inout_count holds the actual count. Network call: GET {api_base}/api/models/{repo_id}. */
 OcError oc_hf_list_models(const OcHfConfig *cfg,
                           OcHfModel *out_models, size_t *inout_count);
 
 /* Resolve a repo_id + filename to a HuggingFace download URL. If */
 OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model);
 
-/* Get the local cache path for a repo_id + filename. Writes a NUL- */
+/* Get the local cache path for a repo_id + filename. Writes a NUL- terminated path into `out_path` (cap bytes). The path is {cache_dir}/{repo_with_slashes_as_underscores}/{filename} Does not require the file to exist. */
 OcError oc_hf_cache_path(const OcHfConfig *cfg,
                          const char *repo_id, const char *filename,
                          char *out_path, size_t cap);
@@ -114,7 +112,7 @@ OcError oc_hf_cache_clean(const OcHfConfig *cfg, uint64_t max_age_seconds,
                           size_t *out_removed);
 
 
-/* Parse a quant type from a .gguf filename. Looks for the Q\d[_-]\w+ */
+/* Parse a quant type from a .gguf filename. Looks for the Q\d[_-]\w+ pattern (e.g. "Q4_K_M", "Q8_0", "F16"). Writes a NUL-terminated upper- case tag into out (cap bytes); writes "" if none found. Returns true if a quant tag was found. */
 bool oc_hf_parse_quant_type(const char *filename, char *out, size_t cap);
 
 /* True if `filename` ends with ".gguf" (case-insensitive). */

@@ -369,7 +369,6 @@ static int cmp_name(const void *a, const void *b)
 static int cmp_date(const void *a, const void *b)
 {
     const OcModelEntry *ea = a, *eb = b;
-    /* newest first → descending */
     if (ea->loaded_at < eb->loaded_at) return 1;
     if (ea->loaded_at > eb->loaded_at) return -1;
     return 0;
@@ -498,7 +497,6 @@ size_t oc_model_registry_format(const OcModelRegistry *reg,
         if (!append_field(buf, cap, &off, "n_embd", "%u", e->n_embd)) return 0;
         if (!append_field(buf, cap, &off, "vocab_size", "%u", e->vocab_size)) return 0;
         {
-            /* strip trailing comma from prior field */
             if (off > 0 && buf[off - 1] == ',') off--;
             int w2 = snprintf(buf + off, cap - off, ",\"loaded_at\":%lld}",
                               (long long)e->loaded_at);

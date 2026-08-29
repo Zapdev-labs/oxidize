@@ -1,4 +1,6 @@
-/* test_mmap.c — tests for OcMmap (read-only memory mapping). - VAL-FOUND-006 (mmap with MADV_HUGEPAGE): the mmap path is exercised, - VAL-FOUND-015 (mmap/arena lifecycle valgrind-clean): the test_runner */
+/* test_mmap.c — tests for OcMmap (read-only memory mapping). */
+/* - VAL-FOUND-006 (mmap with MADV_HUGEPAGE): the mmap path is exercised, */
+/* - VAL-FOUND-015 (mmap/arena lifecycle valgrind-clean): the test_runner */
 #include <criterion/criterion.h>
 #include "oxidize/arena.h"
 #include "oxidize/error.h"
@@ -152,7 +154,7 @@ Test(mmap, open_fd_succeeds_and_takes_ownership_of_fd)
 
 Test(mmap, open_fd_invalid_args_rejected_without_closing_caller_fd)
 {
-    /* When oc_mmap_open_fd rejects args BEFORE attempting mmap (NULL out, negative fd, zero len), it must NOT close the caller's fd — the caller retains ownership on the validation-failure path. */
+    /* When oc_mmap_open_fd rejects args BEFORE attempting mmap (NULL out, negative fd, zero len), it must NOT close the caller's fd — the caller retains ownership on the validation-failure path. We verify by opening a real fd, passing invalid args, and confirming the fd is still valid (readable) afterwards. */
     int fd = open(FIXTURE("valid-v3.gguf"), O_RDONLY);
     cr_assert_geq(fd, 0, "open() should succeed on the fixture");
 
@@ -287,7 +289,7 @@ Test(gguf_map, tensor_data_accessible_via_mmap)
     const OcGgufTensorInfo *t = &m.unified.tensors[0];
     const uint8_t *data = oc_gguf_map_tensor_data(&m, t);
     cr_assert_not_null(data, "tensor data should be non-NULL");
-    /* The tensor's absolute_offset is 128; the fixture stores [1,2,3,4] */
+    /* The tensor's absolute_offset is 128; the fixture stores [1,2,3,4] there (4 bytes for a 1-element F32 tensor — but the dims say [32000, 4096] which doesn't match the 4 data bytes. That's expected: the fixture is a synthetic minimal GGUF, not a real model. We just verify the pointer arithmetic: data should point at bytes[128]. */
     cr_assert_eq(data, m.shards[0].bytes + 128, "tensor data pointer arithmetic");
     cr_assert_eq(data[0], 1, "data[0]");
     cr_assert_eq(data[1], 2, "data[1]");

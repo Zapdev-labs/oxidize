@@ -6,7 +6,6 @@
 use std::io::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-
 /// A snapshot of training state at a single optimizer step.
 #[derive(Debug, Clone)]
 pub struct TrainingMetrics {
@@ -48,7 +47,6 @@ impl TrainingMetrics {
         }
     }
 }
-
 
 /// Ordered history of training metrics with analysis helpers.
 #[derive(Debug, Default)]
@@ -193,7 +191,6 @@ impl MetricsLog {
     }
 }
 
-
 /// Prints live training progress to stdout using only `print!` / `println!`.
 #[derive(Debug)]
 pub struct ProgressReporter {
@@ -269,7 +266,6 @@ impl ProgressReporter {
     }
 }
 
-
 /// Monitors validation (or training) loss and signals when to stop training
 /// early because no meaningful improvement has occurred for `patience` steps.
 #[derive(Debug)]
@@ -325,7 +321,6 @@ impl EarlyStopping {
         self.no_improve_count = 0;
     }
 }
-
 
 #[cfg(test)]
 mod tests {

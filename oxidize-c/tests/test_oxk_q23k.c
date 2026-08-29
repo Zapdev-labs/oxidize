@@ -1,4 +1,4 @@
-/* test_oxk_q23k.c — Q2_K / Q3_K integer dot kernels. 2. the prepared-row form agrees with the packed form, because the batched */
+/* test_oxk_q23k.c — Q2_K / Q3_K integer dot kernels. */
 #include <criterion/criterion.h>
 
 #include "oxidize/oxk.h"
