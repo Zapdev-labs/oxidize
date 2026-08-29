@@ -189,26 +189,10 @@ impl MlxInferenceModel {
                 metadata_u32(metadata, "llama.expert_used_count").unwrap_or(0) as usize;
         }
 
-        let metadata_u32 = |metadata: &std::collections::BTreeMap<
-            String,
-            crate::gguf::GgufMetadataValue,
-        >,
-                            key: &str|
-         -> Option<u32> {
-            match metadata.get(key) {
-                Some(crate::gguf::GgufMetadataValue::Uint8(v)) => Some((*v).into()),
-                Some(crate::gguf::GgufMetadataValue::Uint16(v)) => Some((*v).into()),
-                Some(crate::gguf::GgufMetadataValue::Uint32(v)) => Some(*v),
-                Some(crate::gguf::GgufMetadataValue::Uint64(v)) => (*v).try_into().ok(),
-                Some(crate::gguf::GgufMetadataValue::Int8(v)) if *v >= 0 => Some((*v as u8).into()),
-                Some(crate::gguf::GgufMetadataValue::Int16(v)) if *v >= 0 => {
-                    Some((*v as u16).into())
-                }
-                Some(crate::gguf::GgufMetadataValue::Int32(v)) if *v >= 0 => (*v).try_into().ok(),
-                Some(crate::gguf::GgufMetadataValue::Int64(v)) if *v >= 0 => (*v).try_into().ok(),
-                _ => None,
-            }
-        };
+        let metadata_u32 =
+            |metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
+             key: &str|
+             -> Option<u32> { metadata.get(key).and_then(|v| v.as_u32()) };
 
         let is_moe = config.architecture.uses_moe();
         let uses_mla = config.architecture.uses_mla();

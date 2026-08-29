@@ -672,17 +672,7 @@ fn metadata_bool(
 }
 
 fn metadata_u32(metadata: &BTreeMap<String, GgufMetadataValue>, key: &'static str) -> Option<u32> {
-    match metadata.get(key) {
-        Some(GgufMetadataValue::Uint8(value)) => Some((*value).into()),
-        Some(GgufMetadataValue::Uint16(value)) => Some((*value).into()),
-        Some(GgufMetadataValue::Uint32(value)) => Some(*value),
-        Some(GgufMetadataValue::Uint64(value)) => (*value).try_into().ok(),
-        Some(GgufMetadataValue::Int8(value)) if *value >= 0 => Some((*value as u8).into()),
-        Some(GgufMetadataValue::Int16(value)) if *value >= 0 => Some((*value as u16).into()),
-        Some(GgufMetadataValue::Int32(value)) if *value >= 0 => (*value).try_into().ok(),
-        Some(GgufMetadataValue::Int64(value)) if *value >= 0 => (*value).try_into().ok(),
-        _ => None,
-    }
+    metadata.get(key).and_then(|v| v.as_u32())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
