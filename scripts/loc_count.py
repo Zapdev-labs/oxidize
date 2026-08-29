@@ -78,7 +78,8 @@ def count(root: Path) -> dict:
     files = []
     for path, lang in iter_files(root):
         try:
-            n = sum(1 for _ in open(path, "rb"))
+            with open(path, "rb") as fh:
+                n = sum(1 for _ in fh)
         except OSError:
             continue
         rel = str(path.relative_to(root))
