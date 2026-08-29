@@ -61,7 +61,7 @@ OcError oc_bpe_trainer_vocab(const OcBpeTrainer *t,
 OcError oc_bpe_trainer_merges(const OcBpeTrainer *t,
                               const OcBpeMerge **out_merges, size_t *out_count);
 
-/* Save the vocab + merge rules to a JSON file at `path`. */
+/* Save vocab+merges JSON: {"vocab":[{"id","token"},...],"merges":[{"left","right","merged"},...]}. Returns OC_OK, OC_ERR_IO, OC_ERR_INVALID_ARG. */
 OcError oc_bpe_trainer_save(const OcBpeTrainer *t, const char *path);
 
 /* Number of vocab entries. Returns 0 if t is NULL or untrained. */

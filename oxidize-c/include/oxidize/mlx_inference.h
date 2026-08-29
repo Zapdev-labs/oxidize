@@ -36,7 +36,7 @@ void oc_mlx_config_init(OcMlxConfig *cfg);
 /* Initialize an engine from a config. */
 OcError oc_mlx_engine_init(OcMlxEngine *engine, const OcMlxConfig *cfg);
 
-/* Load a model from `model_path`. On non-macOS this returns OC_ERR_BACKEND. */
+/* Load a model from `model_path`. NULL or empty path is OC_ERR_INVALID_ARG on every platform; non-macOS (or no Metal) returns OC_ERR_BACKEND without mutating `loaded`. */
 OcError oc_mlx_engine_load(OcMlxEngine *engine, const char *model_path);
 
 /* Generate tokens. */

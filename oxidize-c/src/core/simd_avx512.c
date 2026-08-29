@@ -1,4 +1,4 @@
-/* simd_avx512.c — AVX-512 BW + DQ + VNNI dequant kernels. Processes 16 elements per vector op (vs 8 for AVX2). Bit-exactness contract */
+/* simd_avx512.c — AVX-512 BW + DQ + VNNI dequant kernels. 16 elements per vector (vs 8 for AVX2). Bit-exactness contract is identical to simd_avx2.c. */
 #include "oxidize/simd.h"
 
 #if defined(__x86_64__) || defined(__i386__)

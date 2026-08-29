@@ -70,6 +70,7 @@ float oc_rope_yarn_mscale(float scale);
  * scale <= 1. */
 float oc_rope_yarn_mscale_m(float scale, float m);
 
+/* deepseek_yarn: *rope_attn_factor = get_mscale(f,mscale)/get_mscale(f,mscale_all_dim); *softmax_scale = head_dim^-0.5 * get_mscale(f,mscale_all_dim)^2. Either pointer may be NULL. */
 void oc_rope_deepseek_yarn_scales(float scale_factor, float mscale,
                                   float mscale_all_dim, uint32_t head_dim,
                                   float *rope_attn_factor,

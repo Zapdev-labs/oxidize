@@ -71,7 +71,7 @@ typedef struct OcHttpServer {
     bool         joined;        /* true after oc_http_server_join          */
 } OcHttpServer;
 
-/* Start a server bound to `host`:`port` with `n_threads` worker threads. */
+/* Start a server bound to `host`:`port` with `n_threads` workers. Returns OC_OK, OC_ERR_NETWORK (bind/listen), OC_ERR_OOM, or OC_ERR_INVALID_ARG. */
 OcError oc_http_server_start(const char *host, uint16_t port, size_t n_threads,
                              OcHttpHandler handler, void *user_data,
                              OcHttpServer *out);
