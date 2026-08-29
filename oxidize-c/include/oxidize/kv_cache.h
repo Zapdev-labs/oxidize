@@ -26,7 +26,7 @@ typedef struct OcKvCacheConfig {
     uint32_t n_heads;      /* number of attention heads (default 32)     */
     uint32_t head_dim;     /* dimension per head (default 128)            */
     uint32_t max_seq_len;  /* max tokens storable (default 4096)          */
-    uint32_t dtype;        /* 0=f32, 1=f16 (default 0)                    */
+    uint32_t dtype;        /* 0=f32, 1=f16; only f32 storage is materialized today */
 } OcKvCacheConfig;
 
 

@@ -81,7 +81,7 @@ uint64_t oc_context_cache_model_hash(uint64_t file_size, uint32_t tensor_count);
 OcError oc_context_cache_session_id(const char *prompt, uint64_t model_hash,
                                     char *out, size_t out_len);
 
-/* Store a KV cache snapshot for `session_id`. */
+/* Store a KV cache snapshot for `session_id`. Takes ownership of `data` (freed on eviction or replace). */
 OcError oc_context_cache_store(OcContextCache *cc, const char *session_id,
                                uint64_t model_hash, uint64_t n_tokens,
                                uint32_t n_layers, uint32_t n_head_kv,

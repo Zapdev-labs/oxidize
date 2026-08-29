@@ -35,7 +35,7 @@ float oc_gelu_exact_f32(float x);
 void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
                       size_t rope_len, int64_t position, float theta);
 
-/* Interleaved ("NORM") RoPE — rotates (2i, 2i+1) instead of (i, i+half). llama.cpp's LLAMA_ROPE_TYPE_NORM. Same signature and aliasing rules as oc_apply_rope_f32; see the note there on why the two are not interchangeable. */
+/* Interleaved ("NORM") RoPE — rotates (2i, 2i+1) instead of (i, i+half). Same signature and aliasing rules as oc_apply_rope_f32; the two are not interchangeable. */
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta);
 
