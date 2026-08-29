@@ -55,6 +55,7 @@ typedef struct OcOpenaiState {
     OcTuningPlan   plan;
     OcSchedConfig  sched;
     OcKvCacheType  kv_type;
+    bool           kv_set;     /* true when kv_type is an explicit choice */
 } OcOpenaiState;
 
 /* ─── Operational endpoints ───────────────────────────────────────────────
@@ -93,11 +94,14 @@ bool oc_openai_stream_authorize(const OcHttpRequest *req, int *out_status,
 /* Convenience: build a JSON error response body (malloc'd, caller frees). */
 char *oc_openai_error_json(const char *message, const char *type);
 
-/* Copy a tuning plan onto server state: sizes the paged scheduler
- * (max_decode_batch / chunked prefill) and records the KV type.
- * explicit_prefill_chunk > 0 wins over the plan. */
+/* Copy a tuning plan onto server state and/or explicit CLI overrides.
+ * `plan` may be NULL (overrides only). explicit_prefill_chunk > 0 and
+ * non-NULL explicit_kv win over the plan. Plan KV is applied only when
+ * plan->kv_turboquant is set (Hopper Q8), so a zero-init F32 plan does
+ * not override oc_llama_select_kv_type. */
 OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
-                                      uint32_t explicit_prefill_chunk);
+                                      uint32_t explicit_prefill_chunk,
+                                      const char *explicit_kv);
 
 #ifdef __cplusplus
 }

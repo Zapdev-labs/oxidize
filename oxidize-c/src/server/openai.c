@@ -48,29 +48,40 @@ static OcPromptPrefixCache g_prompt_prefix_cache = {
 
 static OcError openai_session_init(OcOpenaiState *st, OcLlamaSession *sess)
 {
-    if (st != NULL && st->has_plan)
+    if (st != NULL && st->kv_set)
         return oc_llama_session_init_kv(st->model, sess, st->kv_type);
     return oc_llama_session_init(st->model, sess);
 }
 
 static size_t openai_prefill_chunk(const OcOpenaiState *st)
 {
-    if (st != NULL && st->has_plan && st->sched.prefill_chunk_size > 0)
+    if (st != NULL && st->sched.prefill_chunk_size > 0)
         return st->sched.prefill_chunk_size;
     return 0;
 }
 
 OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
-                                      uint32_t explicit_prefill_chunk)
+                                      uint32_t explicit_prefill_chunk,
+                                      const char *explicit_kv)
 {
-    if (st == NULL || plan == NULL) return OC_ERR_INVALID_ARG;
-    st->plan = *plan;
-    st->has_plan = true;
-    oc_sched_config_init(&st->sched);
-    oc_autotune_apply_sched(plan, &st->sched);
+    if (st == NULL) return OC_ERR_INVALID_ARG;
+    if (plan != NULL) {
+        st->plan = *plan;
+        st->has_plan = true;
+        oc_sched_config_init(&st->sched);
+        oc_autotune_apply_sched(plan, &st->sched);
+        if (plan->kv_turboquant) {
+            st->kv_type = plan->kv_cache;
+            st->kv_set = true;
+        }
+    }
     if (explicit_prefill_chunk > 0)
         st->sched.prefill_chunk_size = explicit_prefill_chunk;
-    st->kv_type = plan->kv_cache;
+    if (explicit_kv != NULL) {
+        uint32_t n_ctx = (st->model != NULL) ? st->model->cfg.n_ctx : 0;
+        st->kv_type = oc_llama_select_kv_type(n_ctx, explicit_kv);
+        st->kv_set = true;
+    }
     return OC_OK;
 }
 
@@ -944,10 +955,7 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
 
-    for (size_t i = 0; i < n_ids; i++) {
-        e = oc_llama_forward(&sess, ids[i], NULL);
-        if (e != OC_OK) break;
-    }
+    e = oc_llama_prefill(&sess, ids, n_ids, openai_prefill_chunk(st), NULL);
     if (e != OC_OK) {
         oc_llama_session_free(&sess);
         pthread_mutex_unlock(&g_generation_mutex);
@@ -965,7 +973,10 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         *out_body = oc_openai_error_json("allocation failed", "server_error");
         *out_status = 500; return;
     }
-    for (uint32_t i = 0; i < n_embd; i++) embedding[i] = sess.x[i];
+    {
+        const float *src = (sess.last_hidden != NULL) ? sess.last_hidden : sess.x;
+        for (uint32_t i = 0; i < n_embd; i++) embedding[i] = src[i];
+    }
     oc_llama_session_free(&sess);
     pthread_mutex_unlock(&g_generation_mutex);
     free(ids);

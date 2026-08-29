@@ -316,6 +316,9 @@ static OcError run_generation(const OcCliArgs *args)
         }
     }
 
+    if (have_plan && args->auto_tune && !use_cuda)
+        oc_autotune_clear_gpu_runtime(&plan);
+
     if (have_plan && (args->auto_tune || args->threads > 0 ||
         (args->numa && strcmp(args->numa, "none") != 0))) {
         if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
@@ -334,7 +337,8 @@ static OcError run_generation(const OcCliArgs *args)
 
     OcLlamaSession sess;
     OcKvCacheType kv = oc_llama_select_kv_type(model.cfg.n_ctx, args->kv_type);
-    if (args->auto_tune && args->kv_type == NULL && have_plan)
+    if (args->auto_tune && args->kv_type == NULL && have_plan &&
+        plan.kv_turboquant)
         kv = plan.kv_cache;
     e = oc_llama_session_init_kv(&model, &sess, kv);
     if (e != OC_OK) {
@@ -420,9 +424,6 @@ static OcError run_generation(const OcCliArgs *args)
         }
     } else {
         uint32_t prefill_chunk = args->prefill_chunk_size;
-        if (prefill_chunk == 0 && args->auto_tune && have_plan &&
-            plan.chunked_prefill_tokens > 0)
-            prefill_chunk = plan.chunked_prefill_tokens;
         if (prefill_chunk == 0) prefill_chunk = args->batch_size;
         e = oc_llama_prefill(&sess, ids, n_ids, prefill_chunk, logits);
         if (e != OC_OK) {
@@ -658,9 +659,23 @@ int main(int argc, char **argv)
                     if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
                         oc_autotune_fingerprint_gguf(&model->gguf, &fp) == OC_OK) {
                         OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
+                        /* Serve has no CUDA init; do not apply Hopper knobs
+                         * to CPU OpenAI sessions. */
+                        oc_autotune_clear_gpu_runtime(&plan);
                         oc_autotune_apply(&plan, &model->gguf);
-                        oc_openai_apply_tuning_plan(&st, &plan, args.prefill_chunk_size);
+                        oc_openai_apply_tuning_plan(&st, &plan,
+                                                   args.prefill_chunk_size,
+                                                   args.kv_type);
+                    } else if (args.prefill_chunk_size > 0 ||
+                               args.kv_type != NULL) {
+                        oc_openai_apply_tuning_plan(&st, NULL,
+                                                   args.prefill_chunk_size,
+                                                   args.kv_type);
                     }
+                } else if (args.prefill_chunk_size > 0 || args.kv_type != NULL) {
+                    oc_openai_apply_tuning_plan(&st, NULL,
+                                                 args.prefill_chunk_size,
+                                                 args.kv_type);
                 }
             } else {
                 fprintf(stderr, "error: failed to load model for serve mode\n");

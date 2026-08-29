@@ -374,21 +374,9 @@ static void autotune_set_n_gpu_layers(OcTuningPlan *p,
     uint64_t file_bytes = model ? model->file_bytes : 0;
 
     if (cpu->gpu_vram_bytes > 0 && file_bytes > 0 && n_layer > 0) {
-        uint64_t per_layer = file_bytes / n_layer;
-        if (per_layer == 0) return;
-        if (cpu->gpu_vram_bytes < file_bytes / 4) {
-            p->n_gpu_layers = 0;
-            return;
-        }
         uint64_t usable = (uint64_t)(cpu->gpu_vram_bytes * 0.85);
-        uint64_t n = usable / per_layer;
-        if (n > n_layer) n = n_layer;
-        p->n_gpu_layers = (uint32_t)n;
-        return;
-    }
-
-    if (cpu->gpu_family < OC_GPU_FAMILY__COUNT) {
-        p->n_gpu_layers = n_layer > 0 ? n_layer : UINT32_MAX;
+        if (usable >= file_bytes)
+            p->n_gpu_layers = n_layer;
     }
 }
 
@@ -452,9 +440,6 @@ void oc_autotune_tier9_hopper(const OcCpuInfo *cpu,
         plan->kv_cache = OC_KV_Q8;
         plan->kv_turboquant = true;
     }
-
-    if (plan->weight_plan == OC_WEIGHT_W4A16 && model && model->n_layer >= 48)
-        plan->max_decode_batch = 16u;
 
     plan->rationale_gpu =
         "single H100 throughput profile -> TP=1 PP=1, paged KV, chunked prefill, "
@@ -654,6 +639,17 @@ OcError oc_autotune_apply_sched(const OcTuningPlan *plan, OcSchedConfig *cfg)
     if (plan->chunked_prefill_tokens > 0)
         cfg->prefill_chunk_size = plan->chunked_prefill_tokens;
     return OC_OK;
+}
+
+void oc_autotune_clear_gpu_runtime(OcTuningPlan *plan)
+{
+    if (plan == NULL) return;
+    plan->chunked_prefill_tokens = 0;
+    plan->max_decode_batch = 0;
+    plan->kv_turboquant = false;
+    plan->kv_cache = OC_KV_F32;
+    plan->cuda_graphs = false;
+    plan->persistent_decode_kernels = false;
 }
 
 void oc_autotune_plan_dump(const OcTuningPlan *plan,

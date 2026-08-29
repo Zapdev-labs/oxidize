@@ -167,3 +167,31 @@ Test(cli, context_parses_prefill_chunk_size)
     cr_assert(oc_cli_context_parse(4, argv, &ctx));
     cr_assert_eq(ctx.prefill_chunk_size, 1024u);
 }
+
+Test(cli, rejects_invalid_prefill_chunk_size)
+{
+    char *argv[] = {"oxidize-c", "--prefill-chunk-size", "notanumber"};
+    OcCliArgs a;
+    oc_cli_parse_args(3, argv, &a);
+    cr_assert_eq(a.prefill_chunk_size, 0u);
+
+    char *neg[] = {"oxidize-c", "--prefill-chunk-size", "-1"};
+    oc_cli_parse_args(3, neg, &a);
+    cr_assert_eq(a.prefill_chunk_size, 0u);
+
+    char *partial[] = {"oxidize-c", "--prefill-chunk-size", "1024abc"};
+    oc_cli_parse_args(3, partial, &a);
+    cr_assert_eq(a.prefill_chunk_size, 0u);
+
+    char *overflow[] = {"oxidize-c", "--prefill-chunk-size", "4294967296"};
+    oc_cli_parse_args(3, overflow, &a);
+    cr_assert_eq(a.prefill_chunk_size, 0u);
+}
+
+Test(cli, context_rejects_invalid_prefill_chunk_size)
+{
+    char *argv[] = {"oxidize-c", "serve", "--prefill-chunk-size", "4294967296"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(4, argv, &ctx));
+    cr_assert_eq(ctx.prefill_chunk_size, 0u);
+}

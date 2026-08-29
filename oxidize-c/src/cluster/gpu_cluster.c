@@ -7,6 +7,8 @@
 
 #include "oxidize/gpu_cluster.h"
 
+#include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -334,6 +336,21 @@ static void trim_copy(char *dst, size_t cap, const char *src, size_t len)
     dst[len] = '\0';
 }
 
+static bool parse_csv_u32(const char *s, uint32_t *out)
+{
+    char *end = NULL;
+    unsigned long v;
+
+    if (s == NULL || s[0] == '\0' || s[0] == '+' || s[0] == '-')
+        return false;
+    errno = 0;
+    v = strtoul(s, &end, 10);
+    if (end == s || *end != '\0') return false;
+    if (errno == ERANGE || v > (unsigned long)UINT32_MAX) return false;
+    *out = (uint32_t)v;
+    return true;
+}
+
 OcError oc_gpu_parse_nvidia_smi_csv(const char *output, OcGpuDevice *out,
                                       size_t cap, size_t *out_n)
 {
@@ -383,23 +400,17 @@ OcError oc_gpu_parse_nvidia_smi_csv(const char *output, OcGpuDevice *out,
         else
             migbuf[0] = '\0';
 
-        char *endptr = NULL;
-        unsigned long index = strtoul(idxbuf, &endptr, 10);
-        if (endptr == idxbuf) {
-            line = eol ? eol + 1 : line + linelen;
-            continue;
-        }
-        unsigned long mem = strtoul(membuf, &endptr, 10);
-        if (endptr == membuf) {
+        uint32_t index = 0, mem = 0;
+        if (!parse_csv_u32(idxbuf, &index) || !parse_csv_u32(membuf, &mem)) {
             line = eol ? eol + 1 : line + linelen;
             continue;
         }
 
         OcGpuDevice *d = &out[*out_n];
         memset(d, 0, sizeof(*d));
-        d->index = (uint32_t)index;
+        d->index = index;
         memcpy(d->name, namebuf, strlen(namebuf) + 1);
-        d->memory_total_mib = (uint32_t)mem;
+        d->memory_total_mib = mem;
         d->mig_enabled = (strcasecmp(migbuf, "enabled") == 0);
         d->family = oc_gpu_family_from_nvidia_name(d->name);
         (*out_n)++;
@@ -428,5 +439,12 @@ OcError oc_gpu_detect(OcGpuDevice *out, size_t cap, size_t *out_n)
     }
     int status = pclose(fp);
     if (status != 0 || n == 0) return OC_OK;
+    if (n == sizeof(buf) - 1 && buf[n - 1] != '\n') {
+        char *last_nl = strrchr(buf, '\n');
+        if (last_nl != NULL)
+            last_nl[1] = '\0';
+        else
+            buf[0] = '\0';
+    }
     return oc_gpu_parse_nvidia_smi_csv(buf, out, cap, out_n);
 }

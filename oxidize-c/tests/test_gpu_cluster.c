@@ -344,6 +344,25 @@ Test(gpu_cluster, parse_nvidia_smi_csv)
     cr_assert_eq(gpus[3].memory_total_mib, 16384u);
 }
 
+Test(gpu_cluster, parse_nvidia_smi_csv_skips_malformed)
+{
+    const char *csv =
+        "0, NVIDIA H100 80GB HBM3, 81920, Disabled\n"
+        "abc, NVIDIA H100, 81920, Disabled\n"
+        "1, NVIDIA H100, 81920xyz, Disabled\n"
+        "2, NVIDIA H100, 99999999999999999999, Disabled\n"
+        "-1, NVIDIA H100, 81920, Disabled\n"
+        "3, NVIDIA A100-SXM4-80GB, 40960, Enabled\n";
+    OcGpuDevice gpus[8];
+    size_t n = 0;
+    cr_assert_eq(oc_gpu_parse_nvidia_smi_csv(csv, gpus, 8, &n), OC_OK);
+    cr_assert_eq(n, 2u);
+    cr_assert_eq(gpus[0].family, OC_GPU_FAMILY_H100);
+    cr_assert_eq(gpus[0].memory_total_mib, 81920u);
+    cr_assert_eq(gpus[1].index, 3u);
+    cr_assert_eq(gpus[1].family, OC_GPU_FAMILY_A100);
+}
+
 Test(gpu_cluster, detect_safe_without_hardware)
 {
     OcGpuDevice gpus[8];

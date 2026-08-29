@@ -412,12 +412,90 @@ Test(autotune, openai_apply_tuning_plan)
     hopper_cpu(&cpu, OC_GPU_FAMILY_H100, true);
     hopper_fp_31b(&m, 4096);
     OcTuningPlan p = oc_autotune_plan(&cpu, &m);
-    cr_assert_eq(oc_openai_apply_tuning_plan(&st, &p, 0), OC_OK);
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, &p, 0, NULL), OC_OK);
     cr_assert(st.has_plan);
+    cr_assert(st.kv_set);
+    cr_assert_eq(st.kv_type, OC_KV_Q8);
     cr_assert_eq(st.sched.max_batch_size, 16u);
     cr_assert_eq(st.sched.prefill_chunk_size, 512u);
-    cr_assert_eq(oc_openai_apply_tuning_plan(&st, &p, 2048), OC_OK);
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, &p, 2048, NULL), OC_OK);
     cr_assert_eq(st.sched.prefill_chunk_size, 2048u);
+}
+
+Test(autotune, openai_apply_explicit_kv_wins_over_hopper)
+{
+    OcOpenaiState st;
+    memset(&st, 0, sizeof(st));
+    OcCpuInfo cpu;
+    OcModelFingerprint m;
+    hopper_cpu(&cpu, OC_GPU_FAMILY_H100, true);
+    hopper_fp_31b(&m, 4096);
+    OcTuningPlan p = oc_autotune_plan(&cpu, &m);
+    cr_assert(p.kv_turboquant);
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, &p, 0, "f32"), OC_OK);
+    cr_assert(st.kv_set);
+    cr_assert_eq(st.kv_type, OC_KV_F32);
+}
+
+Test(autotune, openai_apply_non_hopper_does_not_force_f32)
+{
+    OcOpenaiState st;
+    memset(&st, 0, sizeof(st));
+    OcCpuInfo cpu;
+    OcModelFingerprint m;
+    hopper_cpu(&cpu, OC_GPU_FAMILY_A100, true);
+    hopper_fp_31b(&m, 8192);
+    OcTuningPlan p = oc_autotune_plan(&cpu, &m);
+    cr_assert_not(p.kv_turboquant);
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, &p, 0, NULL), OC_OK);
+    cr_assert_not(st.kv_set);
+}
+
+Test(autotune, openai_apply_prefill_without_plan)
+{
+    OcOpenaiState st;
+    memset(&st, 0, sizeof(st));
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, NULL, 256, "q8"), OC_OK);
+    cr_assert_not(st.has_plan);
+    cr_assert_eq(st.sched.prefill_chunk_size, 256u);
+    cr_assert(st.kv_set);
+    cr_assert_eq(st.kv_type, OC_KV_Q8);
+}
+
+Test(autotune, hopper_partial_vram_skips_offload)
+{
+    OcCpuInfo cpu;
+    OcModelFingerprint m;
+    hopper_cpu(&cpu, OC_GPU_FAMILY_H100, true);
+    hopper_fp_31b(&m, 4096);
+    m.file_bytes = 100ULL << 30;
+    OcTuningPlan p = oc_autotune_plan(&cpu, &m);
+    cr_assert_eq(p.n_gpu_layers, 0);
+    cr_assert_neq(p.attention_kernel, OC_ATTN_FLASH_ATTENTION3);
+    cr_assert_not(p.cuda_graphs);
+    cr_assert_not(p.kv_turboquant);
+}
+
+Test(autotune, clear_gpu_runtime_drops_hopper_knobs)
+{
+    OcCpuInfo cpu;
+    OcModelFingerprint m;
+    hopper_cpu(&cpu, OC_GPU_FAMILY_H100, true);
+    hopper_fp_31b(&m, 8192);
+    OcTuningPlan p = oc_autotune_plan(&cpu, &m);
+    cr_assert(p.kv_turboquant);
+    cr_assert_eq(p.chunked_prefill_tokens, 1024u);
+    oc_autotune_clear_gpu_runtime(&p);
+    cr_assert_eq(p.chunked_prefill_tokens, 0);
+    cr_assert_eq(p.max_decode_batch, 0);
+    cr_assert_not(p.kv_turboquant);
+    cr_assert_not(p.cuda_graphs);
+    cr_assert_eq(p.n_gpu_layers, 48);
+    OcOpenaiState st;
+    memset(&st, 0, sizeof(st));
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, &p, 0, NULL), OC_OK);
+    cr_assert_not(st.kv_set);
+    cr_assert_eq(st.sched.prefill_chunk_size, 0);
 }
 
 Test(autotune, plan_and_apply_without_gpu_does_not_crash)

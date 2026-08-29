@@ -1458,9 +1458,19 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
             if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
                 oc_autotune_fingerprint_gguf(&model->gguf, &fp) == OC_OK) {
                 OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
+                /* Serve has no CUDA init; do not apply Hopper knobs
+                 * to CPU OpenAI sessions. */
+                oc_autotune_clear_gpu_runtime(&plan);
                 oc_autotune_apply(&plan, &model->gguf);
-                oc_openai_apply_tuning_plan(&st, &plan, ctx->prefill_chunk_size);
+                oc_openai_apply_tuning_plan(&st, &plan, ctx->prefill_chunk_size,
+                                           ctx->kv_type);
+            } else if (ctx->prefill_chunk_size > 0 || ctx->kv_type != NULL) {
+                oc_openai_apply_tuning_plan(&st, NULL, ctx->prefill_chunk_size,
+                                             ctx->kv_type);
             }
+        } else if (ctx->prefill_chunk_size > 0 || ctx->kv_type != NULL) {
+            oc_openai_apply_tuning_plan(&st, NULL, ctx->prefill_chunk_size,
+                                         ctx->kv_type);
         }
     } else {
         progress(ctx, "serve: no model — starting placeholder server on %s:%d",

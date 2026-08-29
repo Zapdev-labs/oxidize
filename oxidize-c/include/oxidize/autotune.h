@@ -191,6 +191,11 @@ struct OcSchedConfig;
 OcError oc_autotune_apply_sched(const OcTuningPlan *plan,
                                  struct OcSchedConfig *cfg);
 
+/* Drop GPU runtime knobs (chunked prefill, decode batch, turboquant KV,
+ * CUDA-graph flags) so a Hopper plan printed from inventory is not applied
+ * to a CPU session. Leaves n_gpu_layers / weight_plan / TPS for dump. */
+void oc_autotune_clear_gpu_runtime(OcTuningPlan *plan);
+
 const char *oc_autotune_pipeline_name(OcPipelineMode p);
 const char *oc_autotune_weight_plan_name(OcWeightPlan p);
 const char *oc_autotune_attention_kernel_name(OcAttentionKernel k);
