@@ -429,6 +429,46 @@ pub struct GgufMetadataArray {
     pub values: Vec<GgufMetadataValue>,
 }
 
+impl GgufMetadataValue {
+    /// Lossless integer coercion used by every metadata lookup in the
+    /// workspace: unsigned values pass through when they fit, negative
+    /// signed values are rejected (None), oversized values fail try_into.
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::Uint8(v) => Some((*v).into()),
+            Self::Uint16(v) => Some((*v).into()),
+            Self::Uint32(v) => Some(*v),
+            Self::Uint64(v) => (*v).try_into().ok(),
+            Self::Int8(v) if *v >= 0 => Some((*v as u8).into()),
+            Self::Int16(v) if *v >= 0 => Some((*v as u16).into()),
+            Self::Int32(v) if *v >= 0 => (*v).try_into().ok(),
+            Self::Int64(v) if *v >= 0 => (*v).try_into().ok(),
+            _ => None,
+        }
+    }
+
+    /// Any numeric value widens to f32; strings/arrays/bools are None.
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Self::Float32(v) => Some(*v),
+            Self::Float64(v) => Some(*v as f32),
+            Self::Int8(v) => Some(*v as f32),
+            Self::Int16(v) => Some(*v as f32),
+            Self::Int32(v) => Some(*v as f32),
+            Self::Int64(v) => Some(*v as f32),
+            Self::Uint8(v) => Some(*v as f32),
+            Self::Uint16(v) => Some(*v as f32),
+            Self::Uint32(v) => Some(*v as f32),
+            Self::Uint64(v) => Some(*v as f32),
+            _ => None,
+        }
+    }
+
+    pub fn as_usize(&self) -> Option<usize> {
+        self.as_u32().map(|v| v as usize)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum GgufMetadataType {

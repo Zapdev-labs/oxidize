@@ -700,18 +700,7 @@ pub(super) fn metadata_u32_lookup(
     metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
     key: &str,
 ) -> Option<u32> {
-    use crate::gguf::GgufMetadataValue;
-    match metadata.get(key) {
-        Some(GgufMetadataValue::Uint8(v)) => Some((*v).into()),
-        Some(GgufMetadataValue::Uint16(v)) => Some((*v).into()),
-        Some(GgufMetadataValue::Uint32(v)) => Some(*v),
-        Some(GgufMetadataValue::Uint64(v)) => (*v).try_into().ok(),
-        Some(GgufMetadataValue::Int8(v)) if *v >= 0 => Some((*v as u8).into()),
-        Some(GgufMetadataValue::Int16(v)) if *v >= 0 => Some((*v as u16).into()),
-        Some(GgufMetadataValue::Int32(v)) if *v >= 0 => (*v).try_into().ok(),
-        Some(GgufMetadataValue::Int64(v)) if *v >= 0 => (*v).try_into().ok(),
-        _ => None,
-    }
+    metadata.get(key).and_then(|v| v.as_u32())
 }
 
 /// Largest integer value in an array-typed metadata field. Used for LFM2's
@@ -721,45 +710,18 @@ pub(super) fn metadata_u32_array_max(
     metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
     key: &str,
 ) -> Option<u32> {
-    use crate::gguf::GgufMetadataValue;
     let arr = match metadata.get(key) {
-        Some(GgufMetadataValue::Array(a)) => a,
+        Some(crate::gguf::GgufMetadataValue::Array(a)) => a,
         _ => return None,
     };
-    arr.values
-        .iter()
-        .filter_map(|v| match v {
-            GgufMetadataValue::Uint8(x) => Some((*x).into()),
-            GgufMetadataValue::Uint16(x) => Some((*x).into()),
-            GgufMetadataValue::Uint32(x) => Some(*x),
-            GgufMetadataValue::Uint64(x) => (*x).try_into().ok(),
-            GgufMetadataValue::Int8(x) if *x >= 0 => Some((*x as u8).into()),
-            GgufMetadataValue::Int16(x) if *x >= 0 => Some((*x as u16).into()),
-            GgufMetadataValue::Int32(x) if *x >= 0 => (*x).try_into().ok(),
-            GgufMetadataValue::Int64(x) if *x >= 0 => (*x).try_into().ok(),
-            _ => None,
-        })
-        .max()
+    arr.values.iter().filter_map(|v| v.as_u32()).max()
 }
 
 pub(super) fn metadata_f32_lookup(
     metadata: &std::collections::BTreeMap<String, crate::gguf::GgufMetadataValue>,
     key: &str,
 ) -> Option<f32> {
-    use crate::gguf::GgufMetadataValue;
-    match metadata.get(key) {
-        Some(GgufMetadataValue::Float32(v)) => Some(*v),
-        Some(GgufMetadataValue::Float64(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Int8(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Int16(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Int32(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Int64(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Uint8(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Uint16(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Uint32(v)) => Some(*v as f32),
-        Some(GgufMetadataValue::Uint64(v)) => Some(*v as f32),
-        _ => None,
-    }
+    metadata.get(key).and_then(|v| v.as_f32())
 }
 
 pub(super) fn metadata_str_lookup(
