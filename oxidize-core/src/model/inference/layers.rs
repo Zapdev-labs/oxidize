@@ -11,15 +11,15 @@ pub(super) fn ox_gpu_attn_enabled() -> bool {
     })
 }
 
-/// Cached check for true continuous-batching decode (env `OX_BATCHED_DECODE`).
-/// When set, the paged runtime / batched-decode bench may run N decode tokens
-/// (one per running sequence) through [`InferenceModel::forward_batch`] as a
-/// single set of batched GEMMs, amortizing the weight reads across sequences.
-///
-/// OFF by default → `forward_batch` is only reachable through the bench or a
-/// future flagged runtime branch, so every existing path stays byte-identical.
-/// CPU/backend-agnostic: when `OX_GPU_ATTN` is set it owns the device KV cache
-/// and takes precedence; `OX_BATCHED_DECODE` only governs the host-side path.
+// Cached check for true continuous-batching decode (env `OX_BATCHED_DECODE`).
+// When set, the paged runtime / batched-decode bench may run N decode tokens
+// (one per running sequence) through [`InferenceModel::forward_batch`] as a
+// single set of batched GEMMs, amortizing the weight reads across sequences.
+//
+// OFF by default → `forward_batch` is only reachable through the bench or a
+// future flagged runtime branch, so every existing path stays byte-identical.
+// CPU/backend-agnostic: when `OX_GPU_ATTN` is set it owns the device KV cache
+// and takes precedence; `OX_BATCHED_DECODE` only governs the host-side path.
 crate::cuda::ox_env_flag!(ox_batched_decode_enabled, "OX_BATCHED_DECODE", false);
 
 impl InferenceModel {
