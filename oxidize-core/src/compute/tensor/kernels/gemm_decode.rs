@@ -364,55 +364,6 @@ pub(super) unsafe fn dot_f32_avx2(a: *const f32, b: *const f32, len: usize) -> f
     sum
 }
 
-/// Eight dot products that share the `a` load. Writes results to `out[0..8]`.
-/// At eight accumulators we exceed the 16-ymm register file by a few — the
-/// compiler spills the inputs but the load amortization on `a` is the dominant
-/// effect.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2,fma")]
-#[inline]
-#[allow(unsafe_op_in_unsafe_fn, dead_code)]
-pub(super) unsafe fn dot8_f32_avx2(
-    a: *const f32,
-    b: [*const f32; 8],
-    len: usize,
-    out: &mut [f32; 8],
-) {
-    let mut acc = [_mm256_setzero_ps(); 8];
-    let mut i = 0;
-    while i + 8 <= len {
-        let av = _mm256_loadu_ps(a.add(i));
-        acc[0] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[0].add(i)), acc[0]);
-        acc[1] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[1].add(i)), acc[1]);
-        acc[2] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[2].add(i)), acc[2]);
-        acc[3] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[3].add(i)), acc[3]);
-        acc[4] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[4].add(i)), acc[4]);
-        acc[5] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[5].add(i)), acc[5]);
-        acc[6] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[6].add(i)), acc[6]);
-        acc[7] = _mm256_fmadd_ps(av, _mm256_loadu_ps(b[7].add(i)), acc[7]);
-        i += 8;
-    }
-    let hsum = |a: __m256| -> f32 {
-        let lo = _mm256_castps256_ps128(a);
-        let hi = _mm256_extractf128_ps(a, 1);
-        let s = _mm_add_ps(lo, hi);
-        let shuf = _mm_movehdup_ps(s);
-        let sums = _mm_add_ps(s, shuf);
-        let shuf2 = _mm_movehl_ps(shuf, sums);
-        _mm_cvtss_f32(_mm_add_ss(sums, shuf2))
-    };
-    for j in 0..8 {
-        out[j] = hsum(acc[j]);
-    }
-    while i < len {
-        let av = *a.add(i);
-        for j in 0..8 {
-            out[j] += av * *b[j].add(i);
-        }
-        i += 1;
-    }
-}
-
 /// Four dot products that share the `a` load: `(a·b0, a·b1, a·b2, a·b3)`.
 /// Halves the L1 traffic on `a` versus four separate `dot_f32_avx2` calls,
 /// which is the dominant cost in batched quantized GEMM after the per-row
