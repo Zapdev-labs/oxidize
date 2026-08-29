@@ -263,3 +263,68 @@ Test(helix_cache, compression_at_d128)
     free(keys); free(values); free(pos);
     oc_helix_cache_free(&cache);
 }
+
+Test(helix_cache, zero_rho_pairs_are_inactive)
+{
+    OcHelixCacheConfig cfg;
+    OcHelixCache cache;
+    OcHelixColdPageView view;
+    const float keys[] = {
+        1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+    };
+    const float values[8] = {1, 0, 0, 0, 0, 0, 0, 0};
+    const size_t positions[] = {0};
+    const float query[] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float logits[1];
+    size_t n_out = 0;
+    oc_helix_cache_config_init(&cfg);
+    cfg.page_size = 1;
+    cfg.head_dim = 8;
+    cfg.inactive_threshold = 0.0f;
+    cr_assert_eq(oc_helix_cache_init(&cache, &cfg), OC_OK);
+    cr_assert_eq(oc_helix_cache_store_cold_page(&cache, 0, 0, 0, keys, values,
+                                                positions, 1),
+                 OC_OK);
+    cr_assert(oc_helix_cache_cold_page_view(&cache, 0, &view));
+    cr_assert((view.active_mask[0] & 1u) != 0, "nonzero pair stays active");
+    cr_assert((view.active_mask[0] & 0x0Eu) == 0,
+              "zero-magnitude pairs must not be marked active");
+    cr_assert(isfinite(view.log_rho_min[0]));
+    cr_assert(fabsf(view.log_rho_min[1]) < 1.0e-12f);
+    cr_assert_eq(oc_helix_cache_logits(&cache, 0, 0, query, 8, 0, 10000.0f,
+                                       logits, 1, &n_out),
+                 OC_OK);
+    cr_assert_eq(n_out, (size_t)1);
+    cr_assert(isfinite(logits[0]), "zero-rho pairs must not poison logits");
+    oc_helix_cache_free(&cache);
+}
+
+Test(helix_cache, rewind_trims_tokens_inside_page)
+{
+    OcHelixCacheConfig cfg;
+    OcHelixCache cache;
+    OcHelixColdPageView view;
+    const float keys[] = {
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+    };
+    const float values[32] = {0};
+    const size_t positions[] = {0, 1, 2, 3};
+    oc_helix_cache_config_init(&cfg);
+    cfg.page_size = 4;
+    cfg.head_dim = 8;
+    cr_assert_eq(oc_helix_cache_init(&cache, &cfg), OC_OK);
+    cr_assert_eq(oc_helix_cache_store_cold_page(&cache, 0, 0, 0, keys, values,
+                                                positions, 4),
+                 OC_OK);
+    cr_assert_eq(oc_helix_cache_rewind(&cache, 2), OC_OK);
+    cr_assert_eq(oc_helix_cache_page_count(&cache), (size_t)1);
+    cr_assert_eq(oc_helix_cache_n_logits(&cache, 0, 0), (size_t)2);
+    cr_assert(oc_helix_cache_cold_page_view(&cache, 0, &view));
+    cr_assert_eq(view.tokens, (size_t)2);
+    cr_assert_eq(view.positions[0], (size_t)0);
+    cr_assert_eq(view.positions[1], (size_t)1);
+    oc_helix_cache_free(&cache);
+}

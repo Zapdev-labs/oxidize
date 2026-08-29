@@ -11,6 +11,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+int oc_cli_kv_compress_enabled(const char *name)
+{
+    return name && name[0] != '\0' && strcmp(name, "none") != 0;
+}
+
+int oc_cli_cuda_conflicts_kv_compress(const char *backend,
+                                      const char *kv_compress)
+{
+    return backend && strcmp(backend, "cuda") == 0 &&
+           oc_cli_kv_compress_enabled(kv_compress);
+}
+
 void oc_cli_args_defaults(OcCliArgs *a)
 {
     memset(a, 0, sizeof(*a));

@@ -68,6 +68,16 @@ static void page_free(OcRotorQuantPage *p)
     memset(p, 0, sizeof(*p));
 }
 
+static void compact_page_slot(OcRotorQuantCache *cache, size_t idx)
+{
+    if (idx + 1 < cache->n_pages) {
+        memmove(&cache->pages[idx], &cache->pages[idx + 1],
+                (cache->n_pages - idx - 1) * sizeof(cache->pages[0]));
+    }
+    cache->n_pages--;
+    memset(&cache->pages[cache->n_pages], 0, sizeof(cache->pages[0]));
+}
+
 static size_t blocks_per_row(const OcRotorQuantCache *c)
 {
     return (c->config.head_dim + c->config.block_size - 1) / c->config.block_size;
@@ -222,6 +232,7 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
     OcRotorQuantPage *np = NULL;
     OcError e;
     size_t i;
+    size_t page_idx = 0;
     int reused = 0;
     if (!cache || !keys || !values || n_tokens == 0) return OC_ERR_INVALID_ARG;
     for (i = 0; i < cache->n_pages; i++) {
@@ -229,6 +240,7 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
             cache->pages[i].first_position == first_position) {
             page_free(&cache->pages[i]);
             np = &cache->pages[i];
+            page_idx = i;
             reused = 1;
             break;
         }
@@ -251,13 +263,15 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
     np->first_position = first_position;
     e = quantize_rows(cache, keys, n_tokens, &np->key_scales, &np->key_codes);
     if (e != OC_OK) {
-        if (!reused) memset(np, 0, sizeof(*np));
+        page_free(np);
+        if (reused) compact_page_slot(cache, page_idx);
         return e;
     }
     e = quantize_rows(cache, values, n_tokens, &np->value_scales,
                       &np->value_codes);
     if (e != OC_OK) {
         page_free(np);
+        if (reused) compact_page_slot(cache, page_idx);
         return e;
     }
     if (!reused) cache->n_pages += 1;

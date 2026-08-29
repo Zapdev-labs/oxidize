@@ -1523,11 +1523,27 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     return session_init_kv_impl(model, out, kv_type, 0);
 }
 
-static int layer_qualifies_compressed(const OcLlamaModel *m, const OcLlamaLayer *L)
+static int layer_uses_legacy_sliding_window(const OcLlamaModel *m, uint32_t layer)
 {
-    if (!m || !L) return 0;
-    return L->use_rope && m->cfg.yarn_factor <= 0.0f && !m->cfg.uses_mla &&
-           !m->cfg.is_qwen35 && !m->cfg.uses_gemma4 && L->sliding_window == 0;
+    const OcLlamaConfig *c;
+    if (!m) return 0;
+    c = &m->cfg;
+    if (c->uses_gemma4 || c->layer_is_swa != NULL) return 0;
+    if (c->sliding_window == 0 || c->sliding_window_pattern <= 1) return 0;
+    return (layer % c->sliding_window_pattern) == 1;
+}
+
+static int layer_qualifies_compressed(const OcLlamaModel *m, uint32_t layer)
+{
+    const OcLlamaLayer *L;
+    if (!m || !m->layers || layer >= m->cfg.n_layer) return 0;
+    L = &m->layers[layer];
+    if (!L->use_rope || m->cfg.yarn_factor > 0.0f || m->cfg.uses_mla ||
+        m->cfg.is_qwen35 || m->cfg.uses_gemma4)
+        return 0;
+    if (L->sliding_window > 0) return 0;
+    if (layer_uses_legacy_sliding_window(m, layer)) return 0;
+    return 1;
 }
 
 static int model_all_layers_compressed(const OcLlamaModel *m)
@@ -1537,7 +1553,7 @@ static int model_all_layers_compressed(const OcLlamaModel *m)
     if (m->cfg.uses_mla || m->cfg.is_qwen35 || m->cfg.uses_gemma4) return 0;
     if (m->cfg.yarn_factor > 0.0f) return 0;
     for (l = 0; l < m->cfg.n_layer; l++) {
-        if (!layer_qualifies_compressed(m, &m->layers[l])) return 0;
+        if (!layer_qualifies_compressed(m, l)) return 0;
     }
     return 1;
 }
@@ -2016,10 +2032,10 @@ static void attn_decode_kv_slice(size_t begin, size_t end, size_t tid, void *ud)
     }
 }
 
-static int use_compressed_attn(const OcLlamaSession *s, const OcLlamaLayer *L)
+static int use_compressed_attn(const OcLlamaSession *s, uint32_t layer)
 {
-    if (!s || !s->kv_compress || !L || !s->model) return 0;
-    return layer_qualifies_compressed(s->model, L);
+    if (!s || !s->kv_compress || !s->model) return 0;
+    return layer_qualifies_compressed(s->model, layer);
 }
 
 static OcError store_compressed_token(OcLlamaSession *s, uint32_t layer,
@@ -2043,7 +2059,7 @@ static void attention_decode_layer(OcLlamaSession *s, uint32_t layer)
     size_t hd = GL->head_dim ? (size_t)GL->head_dim : (size_t)c->head_dim;
     uint32_t n_kv = GL->n_head_kv ? GL->n_head_kv : c->n_head_kv;
     uint32_t group = c->n_head / n_kv;
-    if (use_compressed_attn(s, GL)) {
+    if (use_compressed_attn(s, layer)) {
         uint32_t kh, g, h;
         for (kh = 0; kh < n_kv; kh++) {
             for (g = 0; g < group; g++) {
@@ -2818,7 +2834,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
          * rope_dim/rope_theta are the layer's: Gemma 4 rotates 256 dims at
          * base 1e4 on sliding layers and 512 at 1e6 on global ones. */
         /* Compressed path stores pre-RoPE K/V; the facade owns RoPE. */
-        if (use_compressed_attn(s, L)) {
+        if (use_compressed_attn(s, layer)) {
             OcError se = store_compressed_token(s, layer, n_kv, hd, s->k, s->v,
                                                 (size_t)s->pos);
             if (se != OC_OK) return se;
@@ -2852,7 +2868,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         }
 
         /* KV cache write at position `pos`. */
-        if (!use_compressed_attn(s, L)) {
+        if (!use_compressed_attn(s, layer)) {
         size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
         if (s->kv_type == OC_KV_Q8) {
             /* One scale per kv head, so each head's row quantizes against its
@@ -3578,7 +3594,7 @@ static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
     (void)tid;
     const AttnJob *j = (const AttnJob *)ud;
     const OcLlamaLayer *GL = layer_for_attn(j->s, j->layer);
-    const int compressed = use_compressed_attn(j->s, GL);
+    const int compressed = use_compressed_attn(j->s, j->layer);
     uint32_t n_kv = 0, group = 1;
     if (compressed) {
         n_kv = GL->n_head_kv ? GL->n_head_kv : j->s->model->cfg.n_head_kv;
@@ -3896,7 +3912,7 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
             }
         }
 
-        if (use_compressed_attn(s, L)) {
+        if (use_compressed_attn(s, layer)) {
             OcError se = store_compressed_token(s, layer, n_kv, hd, kj, vj,
                                                 (size_t)pos);
             if (se != OC_OK) return se;

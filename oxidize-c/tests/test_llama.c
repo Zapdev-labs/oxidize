@@ -751,3 +751,27 @@ Test(llama, init_compressed_skips_dense_cache)
     cr_assert_not_null(s.kv_compress);
     oc_llama_session_free(&s);
 }
+
+Test(llama, mixed_swa_pattern_keeps_dense_kv)
+{
+    TinyBiasModel t;
+    OcLlamaLayer layers[2];
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    layers[0] = t.layer;
+    layers[1] = t.layer;
+    t.model.layers = layers;
+    t.model.cfg.n_layer = 2;
+    t.model.cfg.sliding_window = 1024;
+    t.model.cfg.sliding_window_pattern = 2;
+    cr_assert_eq(oc_llama_session_init_with_compress(&t.model, &s, OC_KV_F32,
+                                                     "rotor"),
+                 OC_OK);
+    cr_assert_not_null(s.kv_k, "legacy SWA layers must keep the dense cache");
+    cr_assert_not_null(s.kv_v);
+    cr_assert_not_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}

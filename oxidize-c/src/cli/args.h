@@ -75,6 +75,12 @@ typedef struct OcCliArgs {
 void oc_cli_args_defaults(OcCliArgs *a);
 void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a);
 
+/* Non-empty name other than "none". */
+int oc_cli_kv_compress_enabled(const char *name);
+/* CUDA forward uses its own dense d_kv_k/d_kv_v and ignores sess compression. */
+int oc_cli_cuda_conflicts_kv_compress(const char *backend,
+                                      const char *kv_compress);
+
 /* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext.
  * Returns true when argv[1] names a known subcommand (ctx is filled in and
  * ready for oc_cli_command_run), false otherwise — in which case the caller

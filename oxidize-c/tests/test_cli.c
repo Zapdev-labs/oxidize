@@ -175,3 +175,16 @@ Test(cli, subcommand_parses_kv_compress)
     cr_assert(oc_cli_context_parse(6, argv, &ctx));
     cr_assert_str_eq(ctx.kv_compress, "helix");
 }
+
+Test(cli, kv_compress_conflicts_with_cuda)
+{
+    cr_assert(oc_cli_cuda_conflicts_kv_compress("cuda", "rotor"));
+    cr_assert(oc_cli_cuda_conflicts_kv_compress("cuda", "helix"));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress("cuda", "none"));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress("cuda", NULL));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress("cpu", "rotor"));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress(NULL, "helix"));
+    cr_assert(oc_cli_kv_compress_enabled("rotor"));
+    cr_assert(!oc_cli_kv_compress_enabled("none"));
+    cr_assert(!oc_cli_kv_compress_enabled(NULL));
+}

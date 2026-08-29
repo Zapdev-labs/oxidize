@@ -19,6 +19,7 @@
  */
 #include "oxidize/cli_commands.h"
 
+#include "args.h"
 #include "oxidize/benchmark.h"
 #include "oxidize/error.h"
 #include "oxidize/finetune.h"
@@ -126,7 +127,10 @@ static void cli_error(const char *fmt, ...)
 static OcError cli_session_init(const OcCliContext *ctx, OcLlamaModel *model,
                                 OcLlamaSession *sess)
 {
-    OcKvCacheType kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
+    OcKvCacheType kv;
+    if (oc_cli_cuda_conflicts_kv_compress(ctx->backend, ctx->kv_compress))
+        return OC_ERR_INVALID_ARG;
+    kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
     return oc_llama_session_init_with_compress(model, sess, kv, ctx->kv_compress);
 }
 
@@ -587,6 +591,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
     double best_tps = 0.0, sum_tps = 0.0;
     double best_pf = 0.0, sum_pf = 0.0;
     int completed = 0;
+    int setup_failed = 0;
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"bench\",\"model\":\"%s\",\"prompt_tokens\":%zu,"
@@ -601,7 +606,12 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         (uint64_t)ctx->bench_warmup + (uint64_t)ctx->bench_iterations;
     for (uint64_t iter = 0; iter < total_iterations; iter++) {
         OcLlamaSession sess;
-        if (cli_session_init(ctx, &model, &sess) != OC_OK) break;
+        OcError se = cli_session_init(ctx, &model, &sess);
+        if (se != OC_OK) {
+            cli_error("benchmark session init failed (%s)", oc_error_msg(se));
+            setup_failed = 1;
+            break;
+        }
         float *logits = sess.logits;
 
         double pf_start = wall_now();
@@ -610,6 +620,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         if (e != OC_OK) {
             cli_error("benchmark prefill failed (%s)", oc_error_msg(e));
             oc_llama_session_free(&sess);
+            setup_failed = 1;
             break;
         }
         double pf_tps = (pf_elapsed > 0)
@@ -666,7 +677,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
     oc_tokenizer_free(&tok);
     oc_llama_free(&model);
 
-    if (completed == 0) return OC_ERR_INTERNAL;
+    if (setup_failed || completed == 0) return OC_ERR_INTERNAL;
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("],\"best_decode\":%.2f,\"avg_decode\":%.2f,"

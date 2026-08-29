@@ -56,21 +56,19 @@ struct OcHelixPage {
     OcHelixPromotion promotion;
 };
 
-static float k_phase_c[16];
-static float k_phase_s[16];
-static int k_phase_ready;
-
-static void ensure_phase_lut(void)
-{
-    int k;
-    if (k_phase_ready) return;
-    for (k = 0; k < 16; k++) {
-        const float a = (float)(k - 8) * OC_HELIX_PHI_STEP;
-        k_phase_c[k] = cosf(a);
-        k_phase_s[k] = sinf(a);
-    }
-    k_phase_ready = 1;
-}
+/* cos/sin of (k-8)*2π/16. k<8 have negative sine (k=1 is sin(-7π/8)). */
+static const float k_phase_c[16] = {
+    -1.00000000f, -0.92387953f, -0.70710678f, -0.38268343f,
+     0.00000000f,  0.38268343f,  0.70710678f,  0.92387953f,
+     1.00000000f,  0.92387953f,  0.70710678f,  0.38268343f,
+     0.00000000f, -0.38268343f, -0.70710678f, -0.92387953f,
+};
+static const float k_phase_s[16] = {
+     0.00000000f, -0.38268343f, -0.70710678f, -0.92387953f,
+    -1.00000000f, -0.92387953f, -0.70710678f, -0.38268343f,
+     0.00000000f,  0.38268343f,  0.70710678f,  0.92387953f,
+     1.00000000f,  0.92387953f,  0.70710678f,  0.38268343f,
+};
 
 static size_t packed_bits_bytes(size_t bit_count)
 {
@@ -274,7 +272,6 @@ OcError oc_helix_cache_init(OcHelixCache *cache, const OcHelixCacheConfig *cfg)
     cache->config = *cfg;
     if (cache->config.rope_dim == 0 || cache->config.rope_dim > cfg->head_dim)
         cache->config.rope_dim = cfg->head_dim;
-    ensure_phase_lut();
     return OC_OK;
 }
 
@@ -411,7 +408,7 @@ OcError oc_helix_cache_store_cold_page(OcHelixCache *cache,
             const float y = row[2 * p + 1];
             const float rho = sqrtf(x * x + y * y);
             const size_t idx = t * pairs + p;
-            if (rho < cache->config.inactive_threshold) continue;
+            if (rho <= 0.0f || rho < cache->config.inactive_threshold) continue;
             set_bit(page->cold_key.active_mask, idx, 1);
             sc_phi[idx] = atan2f(y, x);
             sc_log_rho[idx] = logf(rho + 1.0e-12f);
