@@ -5,7 +5,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   actions: write
@@ -22,15 +22,18 @@ jobs:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.head_ref }}
           PR: ${{ github.event.pull_request.number }}
-          KEEP: ${{ github.event.pull_request.head.sha }}
+          SELF: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          KEEP=$(gh api "repos/${REPO}/pulls/${PR}" --jq .head.sha)
           pr_ref="refs/pull/${PR}/head"
+          echo "keep ${KEEP} self ${SELF}"
           for status in queued in_progress; do
             ids=$(gh run list --repo "$REPO" --status "$status" --limit 100 \
               --json databaseId,headSha,headBranch \
               --jq ".[] | select(.headSha != \"${KEEP}\" and (.headBranch == \"${BRANCH}\" or .headBranch == \"${pr_ref}\")) | .databaseId")
             for id in $ids; do
+              [ "$id" = "$SELF" ] && continue
               echo "cancel $id"
               gh run cancel "$id" --repo "$REPO" || true
             done
