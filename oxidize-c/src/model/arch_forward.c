@@ -90,49 +90,14 @@
 
 #include "oxidize/activation.h"
 #include "oxidize/llama.h"
+
 #include "oxidize/log.h"
 #include "oxidize/matvec.h"
 #include "oxidize/model.h"
 #include "oxidize/quant.h"
 #include "oxidize/tensor_ops.h"
 
-/* ─── Forward declarations of static helpers from llama.c ────────────────
- *
- * The helpers `embed_token` and `matvec` are `static` in llama.c and so
- * are not visible from this translation unit. We re-implement minimal
- * inline equivalents here so this file is self-contained.
- *
- * These reimplementations are byte-identical in behavior to the llama.c
- * versions (both call oc_quant_dequant_row / oc_matvec_f32 /
- * oc_matvec_quantized with the same arguments). Keeping a local copy avoids
- * exposing private helpers in a public header. */
-
-/* Dequantize row `token` of tok_embeddings into `dst` (length n_embd). */
-static void arch_embed_token(OcLlamaSession *s, uint32_t token)
-{
-    OcWeightView *w = &s->model->tok_embeddings;
-    if (token >= s->model->cfg.vocab_size) token = s->model->cfg.vocab_size - 1;
-    if (w->qtype == OC_QUANT_F32) {
-        memcpy(s->x, w->data + (size_t)token * w->row_bytes,
-               s->model->cfg.n_embd * sizeof(float));
-    } else {
-        oc_quant_dequant_row(w->qtype,
-            w->data + (size_t)token * w->row_bytes, w->row_bytes,
-            s->x, s->model->cfg.n_embd);
-    }
-}
-
-/* matvec wrapper: pick f32 or quantized path based on qtype. */
-static void arch_matvec(const OcWeightView *w, const float *in, float *out,
-                        float *temp)
-{
-    if (w->qtype == OC_QUANT_F32) {
-        oc_matvec_f32((const float *)w->data, w->rows, w->cols, in, out);
-    } else {
-        oc_matvec_quantized(w->qtype, w->data, w->rows, w->cols,
-                            w->row_bytes, in, out, temp);
-    }
-}
+#include "llama_session_ops.h"
 
 /* ─── LayerNorm ──────────────────────────────────────────────────────────
  *
@@ -206,44 +171,7 @@ static void arch_gelu_inplace_f32(float *buf, size_t n)
  *   layer    — layer index (selects the KV cache slice)
  *   q_vec    — query vector for this head (length head_dim)
  *   out_vec  — output vector (length head_dim), written in place */
-static void arch_attention_head(const OcLlamaSession *s, uint32_t head,
-                                uint32_t layer, const float *q_vec,
-                                float *out_vec)
-{
-    const OcLlamaConfig *c = &s->model->cfg;
-    size_t hd = c->head_dim;
-    uint32_t group = c->n_head / c->n_head_kv;   /* GQA group size */
-    uint32_t kv_head = head / group;              /* which KV head */
-    size_t kv_off = ((size_t)layer * c->n_ctx + 0) * s->kv_row_floats
-                  + (size_t)kv_head * hd;
-    const float *k_layer = s->kv_k;
-    const float *v_layer = s->kv_v;
-    float scale = 1.0f / sqrtf((float)hd);
 
-    /* Online softmax (Milakov & Gimelshein 2018). seq_len = pos+1. */
-    float run_max = -INFINITY;
-    float run_sum = 0.0f;
-    for (size_t i = 0; i < hd; i++) out_vec[i] = 0.0f;
-
-    int64_t seq_len = s->pos + 1;
-
-    for (int64_t t = 0; t < seq_len; t++) {
-        const float *k_t = k_layer + kv_off + (size_t)t * s->kv_row_floats;
-        float dot = 0.0f;
-        for (size_t i = 0; i < hd; i++) dot += q_vec[i] * k_t[i];
-        float score = dot * scale;
-        float new_max = (score > run_max) ? score : run_max;
-        float exp_factor = expf(run_max - new_max);
-        float exp_score = expf(score - new_max);
-        for (size_t i = 0; i < hd; i++) out_vec[i] *= exp_factor;
-        const float *v_t = v_layer + kv_off + (size_t)t * s->kv_row_floats;
-        for (size_t i = 0; i < hd; i++) out_vec[i] += exp_score * v_t[i];
-        run_sum = run_sum * exp_factor + exp_score;
-        run_max = new_max;
-    }
-    float inv = 1.0f / run_sum;
-    for (size_t i = 0; i < hd; i++) out_vec[i] *= inv;
-}
 
 /* ─── GPT-2 layer forward ────────────────────────────────────────────────
  *
@@ -286,9 +214,9 @@ static void arch_gpt2_layer(OcLlamaSession *s, uint32_t layer)
                     n_embd, c->rms_norm_eps);
 
     /* 2. Q/K/V projections (separate weights in the GGUF). */
-    arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-    arch_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-    arch_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+    oc_llama_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+    oc_llama_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+    oc_llama_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
     /* 3. No RoPE for GPT-2 (learned positional embeddings added before
      *    layer 0; see oc_arch_forward_gpt2). */
@@ -304,12 +232,12 @@ static void arch_gpt2_layer(OcLlamaSession *s, uint32_t layer)
      *    The online-softmax attention_head already handles this because
      *    seq_len = pos+1 (only cached positions up to the current one). */
     for (uint32_t h = 0; h < c->n_head; h++) {
-        arch_attention_head(s, h, layer, s->q + h * hd,
+        oc_llama_attention_head(s, h, layer, s->q + h * hd,
                             s->attn_out + h * hd);
     }
 
     /* 6. Output projection + residual add. */
-    arch_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     /* 7. Pre-FFN LayerNorm (ln_2). */
@@ -318,9 +246,9 @@ static void arch_gpt2_layer(OcLlamaSession *s, uint32_t layer)
 
     /* 8. FFN: up-projection → GeLU → down-projection + residual.
      *    GPT-2 uses the tanh-approx GeLU. */
-    arch_matvec(&L->ffn_up, s->normed, s->ffn_gate, s->dequant_temp);
+    oc_llama_matvec(&L->ffn_up, s->normed, s->ffn_gate, s->dequant_temp);
     arch_gelu_inplace_f32(s->ffn_gate, c->n_ff);
-    arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
 
@@ -335,9 +263,9 @@ static void arch_gptj_layer(OcLlamaSession *s, uint32_t layer)
     arch_layer_norm(s->x, L->attn_norm, L->attn_norm_bias, s->normed,
                     n_embd, c->rms_norm_eps);
 
-    arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-    arch_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-    arch_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+    oc_llama_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+    oc_llama_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+    oc_llama_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
     for (uint32_t h = 0; h < c->n_head; h++) {
         oc_tensor_rope_gptj_f32(s->q + h * hd, hd, s->pos, rope_base);
@@ -352,19 +280,19 @@ static void arch_gptj_layer(OcLlamaSession *s, uint32_t layer)
     memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
 
     for (uint32_t h = 0; h < c->n_head; h++) {
-        arch_attention_head(s, h, layer, s->q + h * hd,
+        oc_llama_attention_head(s, h, layer, s->q + h * hd,
                             s->attn_out + h * hd);
     }
 
-    arch_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     arch_layer_norm(s->x, L->ffn_norm, L->ffn_norm_bias, s->normed,
                     n_embd, c->rms_norm_eps);
 
-    arch_matvec(&L->ffn_up, s->normed, s->ffn_gate, s->dequant_temp);
+    oc_llama_matvec(&L->ffn_up, s->normed, s->ffn_gate, s->dequant_temp);
     arch_gelu_inplace_f32(s->ffn_gate, c->n_ff);
-    arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
 
@@ -407,9 +335,9 @@ static void arch_neox_layer(OcLlamaSession *s, uint32_t layer)
                     n_embd, c->rms_norm_eps);
 
     /* 2. Q/K/V projections. */
-    arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-    arch_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-    arch_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+    oc_llama_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+    oc_llama_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+    oc_llama_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
     /* 3. RoPE on Q (per head) and K (per kv head). */
     for (uint32_t h = 0; h < c->n_head; h++) {
@@ -429,12 +357,12 @@ static void arch_neox_layer(OcLlamaSession *s, uint32_t layer)
 
     /* 5. Attention per head → s->attn_out. */
     for (uint32_t h = 0; h < c->n_head; h++) {
-        arch_attention_head(s, h, layer, s->q + h * hd,
+        oc_llama_attention_head(s, h, layer, s->q + h * hd,
                             s->attn_out + h * hd);
     }
 
     /* Output projection + residual. */
-    arch_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     /* 6. Pre-FFN LayerNorm. */
@@ -446,14 +374,14 @@ static void arch_neox_layer(OcLlamaSession *s, uint32_t layer)
      *    the GeLU path is the default; the gated SwiGLU variant is only
      *    taken when a real ffn_gate tensor was loaded. */
     if (L->ffn_gate.data != NULL) {
-        arch_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
-        arch_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
+        oc_llama_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
         oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
-        arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     } else {
-        arch_matvec(&L->ffn_up, s->normed, s->ffn_up, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_up, s->normed, s->ffn_up, s->dequant_temp);
         arch_gelu_inplace_f32(s->ffn_up, c->n_ff);
-        arch_matvec(&L->ffn_down, s->ffn_up, s->normed, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_down, s->ffn_up, s->normed, s->dequant_temp);
     }
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
@@ -504,9 +432,9 @@ static void arch_falcon_layer(OcLlamaSession *s, uint32_t layer)
                     n_embd, c->rms_norm_eps);
 
     /* 2. Q/K/V projections from the normalized input. */
-    arch_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-    arch_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-    arch_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+    oc_llama_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+    oc_llama_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+    oc_llama_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
     /* 2b. Parallel MLP branch. Falcon's block computes attention and the
      *     MLP from the same layer-normalized input, then adds both to the
@@ -526,14 +454,14 @@ static void arch_falcon_layer(OcLlamaSession *s, uint32_t layer)
                         n_embd, c->rms_norm_eps);
     }
     if (L->ffn_gate.data != NULL) {
-        arch_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
-        arch_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
+        oc_llama_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
         oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
-        arch_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     } else {
-        arch_matvec(&L->ffn_up, s->normed, s->ffn_up, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_up, s->normed, s->ffn_up, s->dequant_temp);
         arch_gelu_inplace_f32(s->ffn_up, c->n_ff);
-        arch_matvec(&L->ffn_down, s->ffn_up, s->normed, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_down, s->ffn_up, s->normed, s->dequant_temp);
     }
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
@@ -556,13 +484,13 @@ static void arch_falcon_layer(OcLlamaSession *s, uint32_t layer)
     /* 5. Attention per head → s->attn_out.
      *    Multi-query: all Q heads attend to the same K/V (kv_head=0). */
     for (uint32_t h = 0; h < c->n_head; h++) {
-        arch_attention_head(s, h, layer, s->q + h * hd,
+        oc_llama_attention_head(s, h, layer, s->q + h * hd,
                             s->attn_out + h * hd);
     }
 
     /* 6. Output projection + attention residual (MLP residual was already
      *    added in step 2b). */
-    arch_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
 
@@ -754,7 +682,7 @@ OcError oc_arch_forward_gpt2(OcLlamaSession *sess, uint32_t token,
     if (e != OC_OK) return e;
 
     /* 1. Token embedding lookup. */
-    arch_embed_token(sess, token);
+    oc_llama_embed_token(sess, token);
 
     /* 2. Add learned positional embedding. */
     arch_gpt2_add_pos_embed(sess, sess->pos);
@@ -781,7 +709,7 @@ OcError oc_arch_forward_gptj(OcLlamaSession *sess, uint32_t token,
     e = arch_validate_layers(sess->model);
     if (e != OC_OK) return e;
 
-    arch_embed_token(sess, token);
+    oc_llama_embed_token(sess, token);
 
     for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++) {
         arch_gptj_layer(sess, l);
@@ -813,7 +741,7 @@ OcError oc_arch_forward_gpt_neox(OcLlamaSession *sess, uint32_t token,
     if (e != OC_OK) return e;
 
     /* 1. Token embedding lookup. */
-    arch_embed_token(sess, token);
+    oc_llama_embed_token(sess, token);
 
     /* 2. No global positional embedding (RoPE is per-layer). */
 
@@ -850,7 +778,7 @@ OcError oc_arch_forward_falcon(OcLlamaSession *sess, uint32_t token,
     if (e != OC_OK) return e;
 
     /* 1. Token embedding lookup. */
-    arch_embed_token(sess, token);
+    oc_llama_embed_token(sess, token);
 
     /* 2. No global positional embedding (RoPE is per-layer). */
 

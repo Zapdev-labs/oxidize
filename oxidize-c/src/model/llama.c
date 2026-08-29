@@ -14,6 +14,8 @@
  * mirror Rust's `x.iter().map(|v| v*v).sum::<f32>()`.
  */
 #include "oxidize/llama.h"
+
+#include "llama_session_ops.h"
 #include "oxidize/rope_scaling.h"
 
 #include "oxidize/activation.h"
@@ -1609,30 +1611,18 @@ void oc_llama_free(OcLlamaModel *model)
 
 /* ─── Forward pass ─────────────────────────────────────────────────────── */
 
-/* Embed one token: dequantize row `token` of tok_embeddings into `dst`. */
+/* Embed one token, applying llama.c-specific embedding post-processing
+ * (Gemma 4 sqrt(n_embd) scaling, Muse Glimmer embedding RMSNorm) that the
+ * shared helper does not know about. */
 static void embed_token_into(OcLlamaSession *s, uint32_t token, float *dst)
 {
-    OcWeightView *w = &s->model->tok_embeddings;
-    if (token >= s->model->cfg.vocab_size) token = s->model->cfg.vocab_size - 1;
-    if (w->qtype == OC_QUANT_F32) {
-        memcpy(dst, w->data + (size_t)token * w->row_bytes,
-               s->model->cfg.n_embd * sizeof(float));
-    } else {
-        oc_quant_dequant_row(w->qtype,
-            w->data + (size_t)token * w->row_bytes, w->row_bytes,
-            dst, s->model->cfg.n_embd);
-    }
-    /* Gemma scales the token embedding by sqrt(n_embd) once, here — it is a
-     * property of the embedding, not of each RMSNorm. The pre-existing
-     * `norm_scale` handling in forward_layer multiplies every normed
-     * activation instead, which is a different (and for Gemma 4, wrong)
-     * computation; uses_gemma4 takes this path and leaves that one alone. */
+    oc_llama_embed_token_into(s, token, dst);
     if (s->model->cfg.uses_gemma4 && s->model->cfg.norm_scale != 1.0f) {
         const float sc = s->model->cfg.norm_scale;
         for (size_t i = 0; i < s->model->cfg.n_embd; i++) dst[i] *= sc;
     }
-    /* Muse Glimmer RMS-normalizes the embedding itself — no weight, no
-     * scale — before layer 0 sees it. */
+    /* Muse Glimmer RMS-normalizes the embedding itself - no weight, no
+     * scale - before layer 0 sees it. */
     if (s->model->cfg.embd_rms_norm) {
         const size_t n = s->model->cfg.n_embd;
         double ss = 0.0;
@@ -1648,24 +1638,13 @@ static void embed_token(OcLlamaSession *s, uint32_t token)
     embed_token_into(s, token, s->x);
 }
 
-/* matvec wrapper: pick f32 or quantized path based on qtype. */
-static void matvec(const OcWeightView *w, const float *in, float *out,
-                   float *temp)
-{
-    if (w->qtype == OC_QUANT_F32) {
-        oc_matvec_f32((const float *)w->data, w->rows, w->cols, in, out);
-    } else {
-        oc_matvec_quantized(w->qtype, w->data, w->rows, w->cols, w->row_bytes,
-                            in, out, temp);
-    }
-}
 
 /* out[0..cols) = W^T @ in, i.e. sum over rows of in[r] * W[r][:].
  *
  * This is the "absorption" step of MLA: folding k_b into the query so that
  * scoring can run against the cached latent directly instead of
  * reconstructing per-head K for every past position. Row-major access, so a
- * quantized W is walked exactly as matvec() walks it. `out` must be `cols`
+ * quantized W is walked exactly as oc_llama_matvec() walks it. `out` must be `cols`
  * long, `in` must be `rows` long. */
 static void matvec_transpose_acc(const OcWeightView *w, const float *in,
                                  float *out, float *temp)
@@ -1946,15 +1925,15 @@ static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
                                   row_bytes, 2, s->normed, outputs,
                                   s->dequant_temp);
     } else {
-        matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
-        matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
+        oc_llama_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
     }
     if (c->uses_geglu) {
         oc_geglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
     } else {
         oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
     }
-    matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     /* Gemma sandwich norm on the FFN branch output, mirroring the attention
      * branch in forward_layer. */
     if (L->post_ffw_norm != NULL) {
@@ -1992,7 +1971,7 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     if (i_size == 0) i_size = c->n_ff;
 
     /* 1. Router logits: ffn_gate_inp @ normed → [n_slots]. */
-    matvec(&L->ffn_gate_inp, s->normed, s->router_logits, s->dequant_temp);
+    oc_llama_matvec(&L->ffn_gate_inp, s->normed, s->router_logits, s->dequant_temp);
 
     /* 2. Gating: softmax (Qwen3-MoE) or sigmoid (DeepSeek). */
     if (!c->expert_gating_sigmoid) {
@@ -2175,10 +2154,10 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
             OcWeightView down_v = L->ffn_down_exps;
             down_v.data += (size_t)idx * c->n_embd * down_row_bytes;
             down_v.rows = c->n_embd;
-            matvec(&gate_v, s->normed, s->expert_gate, s->dequant_temp);
-            matvec(&up_v, s->normed, s->expert_up, s->dequant_temp);
+            oc_llama_matvec(&gate_v, s->normed, s->expert_gate, s->dequant_temp);
+            oc_llama_matvec(&up_v, s->normed, s->expert_up, s->dequant_temp);
             oc_swiglu_inplace_f32(s->expert_gate, s->expert_up, i_size);
-            matvec(&down_v, s->expert_gate, s->shexp_out, s->dequant_temp);
+            oc_llama_matvec(&down_v, s->expert_gate, s->shexp_out, s->dequant_temp);
             for (size_t i = 0; i < c->n_embd; i++)
                 s->expert_out[i] += w * s->shexp_out[i];
         }
@@ -2188,15 +2167,15 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
      *    sigmoid gate via ffn_gate_inp_shexp (Qwen2-MoE shared_expert_gate). */
     if (L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
         L->ffn_down_shexp.data != NULL) {
-        matvec(&L->ffn_gate_shexp, s->normed, s->shexp_gate, s->dequant_temp);
-        matvec(&L->ffn_up_shexp,   s->normed, s->shexp_up,   s->dequant_temp);
+        oc_llama_matvec(&L->ffn_gate_shexp, s->normed, s->shexp_gate, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_up_shexp,   s->normed, s->shexp_up,   s->dequant_temp);
         const size_t shared_size = c->shared_expert_intermediate_size;
         oc_swiglu_inplace_f32(s->shexp_gate, s->shexp_up, shared_size);
-        matvec(&L->ffn_down_shexp, s->shexp_gate, s->shexp_out, s->dequant_temp);
+        oc_llama_matvec(&L->ffn_down_shexp, s->shexp_gate, s->shexp_out, s->dequant_temp);
         /* Optional sigmoid gate. */
         if (L->ffn_gate_inp_shexp.data != NULL) {
             float gate_logit = 0.0f;
-            matvec(&L->ffn_gate_inp_shexp, s->normed, &gate_logit, s->dequant_temp);
+            oc_llama_matvec(&L->ffn_gate_inp_shexp, s->normed, &gate_logit, s->dequant_temp);
             float scale = 1.0f / (1.0f + expf(-gate_logit));
             for (size_t i = 0; i < c->n_embd; i++) s->shexp_out[i] *= scale;
         }
@@ -2230,17 +2209,17 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
     uint32_t q_hd = c->head_dim;
 
     /* 1. Q down-projection: q_a_proj @ normed → c_q [q_lora] */
-    matvec(&L->mla_q_a, s->normed, s->mla_c_q, s->dequant_temp);
+    oc_llama_matvec(&L->mla_q_a, s->normed, s->mla_c_q, s->dequant_temp);
 
     /* 2. RMSNorm c_q with q_a_norm. */
     oc_rms_norm_f32(s->mla_c_q, L->mla_q_a_norm, s->mla_c_q,
                     q_lora, c->rms_norm_eps);
 
     /* 3. Q up-projection: q_b_proj @ c_q → q_full [n_head * q_hd] */
-    matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
+    oc_llama_matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
 
     /* 4. KV down-projection: kv_a_proj_with_mqa @ normed → kv_compressed */
-    matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed, s->dequant_temp);
+    oc_llama_matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed, s->dequant_temp);
 
     /* 5. RMSNorm the kv_lora portion of kv_compressed. */
     oc_rms_norm_f32(s->mla_kv_compressed, L->mla_kv_a_norm,
@@ -2379,11 +2358,11 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         OcWeightView v_b_h = L->mla_v_b;
         v_b_h.data = L->mla_v_b.data + (size_t)h * v_hd * L->mla_v_b.row_bytes;
         v_b_h.rows = v_hd;
-        matvec(&v_b_h, ctx, s->attn_out + (size_t)h * v_hd, s->dequant_temp);
+        oc_llama_matvec(&v_b_h, ctx, s->attn_out + (size_t)h * v_hd, s->dequant_temp);
     }
 
     /* 10. Output projection. */
-    matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    oc_llama_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     oc_attn_add_f32(s->x, s->normed, n_embd);
 }
 
@@ -2428,7 +2407,7 @@ static OcError forward_qwen35_recurrent(OcLlamaSession *s, uint32_t layer)
                                   s->dequant_temp);
     } else {
         for (size_t i = 0; i < 4; i++)
-            matvec(projections[i], s->normed, outputs[i], s->dequant_temp);
+            oc_llama_matvec(projections[i], s->normed, outputs[i], s->dequant_temp);
     }
 
     OcQwen35DeltaParams params = {
@@ -2458,7 +2437,7 @@ static OcError forward_qwen35_recurrent(OcLlamaSession *s, uint32_t layer)
         s->qwen35_conv_output, conv_dim,
         s->qwen35_delta_output, c->ssm_inner_size);
     if (error != OC_OK) return error;
-    matvec(&weights->ssm_out, s->qwen35_delta_output, s->normed,
+    oc_llama_matvec(&weights->ssm_out, s->qwen35_delta_output, s->normed,
            s->dequant_temp);
     oc_attn_add_f32(s->x, s->normed, c->n_embd);
     return OC_OK;
@@ -2494,9 +2473,9 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
                                   row_bytes, 3, s->normed, outputs,
                                   s->dequant_temp);
     } else {
-        matvec(&weights->attn_q, s->normed, s->qwen35_qkv, s->dequant_temp);
-        matvec(&weights->attn_k, s->normed, s->k, s->dequant_temp);
-        matvec(&weights->attn_v, s->normed, s->v, s->dequant_temp);
+        oc_llama_matvec(&weights->attn_q, s->normed, s->qwen35_qkv, s->dequant_temp);
+        oc_llama_matvec(&weights->attn_k, s->normed, s->k, s->dequant_temp);
+        oc_llama_matvec(&weights->attn_v, s->normed, s->v, s->dequant_temp);
     }
     for (uint32_t head = 0; head < c->n_head; head++) {
         const float *packed = s->qwen35_qkv + 2u * head * head_dim;
@@ -2552,7 +2531,7 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
         for (size_t i = 0; i < head_dim; i++)
             head_output[i] *= qwen35_sigmoid(gate[i]);
     }
-    matvec(&weights->attn_output, s->attn_out, s->normed,
+    oc_llama_matvec(&weights->attn_output, s->attn_out, s->normed,
            s->dequant_temp);
     oc_attn_add_f32(s->x, s->normed, c->n_embd);
 }
@@ -2592,14 +2571,14 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         /* Q/K/V projections, plus the optional projection biases that
          * Qwen2-family models carry. The bias is added before RoPE, as in
          * llama.cpp's build_qkv / HF's q_proj(x) + b_q. */
-        matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-        matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-        matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+        oc_llama_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+        oc_llama_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+        oc_llama_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
         /* Muse Glimmer's attention-output gate is projected from the same
          * pre-attention normed hidden state as Q/K/V, so it has to be taken
          * before `normed` is reused as the output-projection buffer below. */
         if (c->attn_out_gate && L->attn_gate.data != NULL) {
-            matvec(&L->attn_gate, s->normed, s->muse_gate, s->dequant_temp);
+            oc_llama_matvec(&L->attn_gate, s->normed, s->muse_gate, s->dequant_temp);
         }
         if (L->attn_q_bias != NULL) {
             size_t nq = (size_t)c->n_head * hd;
@@ -2710,7 +2689,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         }
 
         /* Output projection. */
-        matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+        oc_llama_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
         /* Gemma "sandwich" norm: the attention branch output is normed again
          * before it rejoins the residual stream (HF post_attention_layernorm
          * on the branch, not on the input). Skipped when the tensor is absent,
@@ -2841,7 +2820,7 @@ static OcError mtp_forward_one(OcLlamaSession *sess, uint32_t token,
                     m->cfg.rms_norm_eps);
     oc_rms_norm_f32(prev_hidden, m->mtp.hnorm, sess->mtp_concat + h, h,
                     m->cfg.rms_norm_eps);
-    matvec(&m->mtp.eh_proj, sess->mtp_concat, sess->x, sess->dequant_temp);
+    oc_llama_matvec(&m->mtp.eh_proj, sess->mtp_concat, sess->x, sess->dequant_temp);
 
     const int64_t saved_pos = sess->pos;
     sess->pos = (int64_t)sess->mtp_pos;
@@ -3140,7 +3119,7 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
     return OC_OK;
 }
 
-/* Batched weight × activations. Mirrors matvec()'s f32/quantized dispatch. */
+/* Batched weight × activations. Mirrors oc_llama_matvec()'s f32/quantized dispatch. */
 static void mm_batch(const OcWeightView *w, const float *in, size_t in_stride,
                      float *out, size_t out_stride, size_t n, PrefillBuf *b)
 {
