@@ -3650,6 +3650,7 @@ static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
             if (e != OC_OK) {
                 int expected = OC_OK;
                 atomic_compare_exchange_strong(&j->error, &expected, (int)e);
+                continue;
             }
         } else {
             attention_head_at(j->s, h, j->layer, j->pos0 + (int64_t)tok,

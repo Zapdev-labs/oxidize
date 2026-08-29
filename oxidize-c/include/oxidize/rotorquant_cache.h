@@ -40,13 +40,12 @@ typedef struct OcRotorQuantCacheStats {
     float  total_bits_per_coord;
 } OcRotorQuantCacheStats;
 
-/* Pointers remain valid until the matching page is dropped, replaced by
+/* Pointers remain valid until the matching page is dropped (including
+ * rewind of pages whose first_position >= n_keep), replaced by
  * store_page() for the same (layer, kv_head, first_position), or the
- * cache is freed. Rewind does not free buffers. `tokens` (and the other
- * count fields) are a snapshot from page_view(); rewind may shrink the
- * page's live token count without moving buffers, so a held view can
- * still report rows rewind dropped. Re-fetch the view after rewind or
- * store_page() before iterating. */
+ * cache is freed. Rewind of a straddling page truncates `tokens` without
+ * freeing buffers; a held view's snapshotted `tokens` is then stale.
+ * Re-fetch the view after rewind or store_page() before iterating. */
 typedef struct OcRotorQuantPageView {
     size_t         layer;
     size_t         kv_head;
@@ -117,12 +116,12 @@ OcError oc_rotorquant_cache_stats(const OcRotorQuantCache *cache,
 float oc_rotorquant_cache_compression_ratio(const OcRotorQuantCacheStats *st);
 
 /* Drop pages whose first_position >= n_keep. Pages that straddle n_keep
- * are truncated so tokens at first_position + t >= n_keep are dropped.
- * Backing code/scale buffers keep their original allocation so an
- * OcRotorQuantPageView taken before rewind keeps valid pointers; the
- * view's snapshotted `tokens` is stale. Call page_view() again after
- * rewind before iterating. Unused tail rows are reclaimed on the next
- * store_page of this slot, or when the page is cleared/freed. */
+ * are truncated so tokens at first_position + t >= n_keep are dropped
+ * without reallocating: a view of that page keeps valid pointers, but
+ * its snapshotted `tokens` is stale. Pages wholly past n_keep are freed
+ * and any held view of them dangles. Call page_view() again after rewind
+ * before iterating. Unused tail rows on a truncated page are reclaimed
+ * on the next store_page of this slot, or when the page is cleared/freed. */
 OcError oc_rotorquant_cache_rewind(OcRotorQuantCache *cache, size_t n_keep);
 void oc_rotorquant_cache_clear(OcRotorQuantCache *cache);
 
