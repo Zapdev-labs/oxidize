@@ -85,7 +85,7 @@ OcError oc_grad_set_lr(OcGradientState *state, float lr);
 float     oc_grad_get_lr(const OcGradientState *state);
 
 
-/* Linear layer backward pass. */
+/* Linear backward: `weight` is [out_features, in_features] row-major (`weight[j*in + i]`); `grad_input`/`grad_weight` are caller-allocated. */
 OcError oc_grad_compute_linear_backward(
     const float *input, const float *weight, const float *grad_output,
     size_t in_features, size_t out_features,

@@ -13,13 +13,13 @@ extern "C" {
 #endif
 
 
-/* Mirostat v1: maintains target surprise (entropy) via adaptive k. */
+/* Mirostat v1: maintains target surprise (entropy) via adaptive k. `*mu` is an in/out surprise budget; this function updates it. */
 uint32_t oc_sample_mirostat_v1(const float *logits, size_t vocab_size,
                                 float *mu, float tau, float eta,
                                 uint32_t *state);
 
 /* Mirostat v2: directly estimates surprise and adjusts.
- * Simpler than v1, uses top-p instead of top-k. */
+ * Simpler than v1, uses top-p instead of top-k. `*mu` is in/out; this function updates it. */
 uint32_t oc_sample_mirostat_v2(const float *logits, size_t vocab_size,
                                 float *mu, float tau, float eta,
                                 uint32_t *state);
@@ -90,7 +90,7 @@ const OcBeam *oc_beam_search_best(const OcBeamSearchState *st);
 void oc_beam_search_free(OcBeamSearchState *st);
 
 
-/* Contrastive search: balances similarity to previous tokens with a penalty for repetition. */
+/* Contrastive search: balances similarity to previous tokens with a penalty for repetition. `past_keys` is [seq_len x hidden_dim], `current_key` is [hidden_dim]. */
 uint32_t oc_sample_contrastive(const float *logits, size_t vocab_size,
                                 const float *past_keys,
                                 const float *current_key,
