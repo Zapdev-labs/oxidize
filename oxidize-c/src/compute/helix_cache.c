@@ -8,6 +8,7 @@
  */
 #include "oxidize/helix_cache.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -104,7 +105,8 @@ static float rope_frequency(size_t pair, size_t head_dim, float theta)
 
 static int helix_rope_theta_ok(float theta)
 {
-    return isfinite(theta) && theta > 0.0f;
+    /* Subnormals pass `theta > 0` but powf() overflows on high pairs. */
+    return isfinite(theta) && theta >= FLT_MIN;
 }
 
 static void hadamard8(const float *src, float *dst)
@@ -833,6 +835,10 @@ OcError oc_helix_cache_logits(const OcHelixCache *cache,
         for (p = 0; p < pairs; p++) {
             if (p < rope_pairs) {
                 freq[p] = rope_frequency(p, rope_dim, rope_theta);
+                if (!isfinite(freq[p])) {
+                    free(freq); free(step_c); free(step_s); free(qx); free(qy);
+                    return OC_ERR_INVALID_ARG;
+                }
                 step_c[p] = cosf(freq[p]);
                 step_s[p] = sinf(freq[p]);
             } else {

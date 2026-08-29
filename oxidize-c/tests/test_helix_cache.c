@@ -2,6 +2,7 @@
 #include <criterion/criterion.h>
 #include "oxidize/helix_cache.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -467,6 +468,9 @@ Test(helix_cache, non_positive_rope_theta_is_rejected)
                  OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_helix_cache_attention(&cache, 0, 0, query, 8, 0, INFINITY,
                                           out),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_helix_cache_logits(&cache, 0, 0, query, 8, 0,
+                                       FLT_TRUE_MIN, logits, 1, &n_out),
                  OC_ERR_INVALID_ARG);
     oc_helix_cache_free(&cache);
 }
