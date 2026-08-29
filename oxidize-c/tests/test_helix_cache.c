@@ -57,7 +57,10 @@ Test(helix_cache, cold_page_attention_matches_rope_polar_reference)
     cr_assert_eq(stats.cold_pages, (size_t)1);
     cr_assert(stats.key_bits_per_coord > 0.0f);
     cr_assert(stats.value_bits_per_coord > 3.0f);
-    cr_assert(oc_helix_cache_compression_ratio(&stats) > 0.0f);
+    /* d=8 with rho_lut metadata is not expected to beat f32. Compression
+     * vs baseline is asserted at d=128 in compression_at_d128. */
+    cr_assert(stats.f32_baseline_bytes > 0);
+    cr_assert(stats.key_bytes + stats.value_bytes + stats.metadata_bytes > 0);
     oc_helix_cache_free(&cache);
 }
 
@@ -435,6 +438,12 @@ Test(helix_cache, non_positive_rope_theta_is_rejected)
                                        logits, 1, &n_out),
                  OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_helix_cache_attention(&cache, 0, 0, query, 8, 0, -1.0f,
+                                          out),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_helix_cache_logits(&cache, 0, 0, query, 8, 0, nanf(""),
+                                       logits, 1, &n_out),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_helix_cache_attention(&cache, 0, 0, query, 8, 0, INFINITY,
                                           out),
                  OC_ERR_INVALID_ARG);
     oc_helix_cache_free(&cache);

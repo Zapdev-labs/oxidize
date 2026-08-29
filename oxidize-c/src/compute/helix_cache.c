@@ -102,6 +102,11 @@ static float rope_frequency(size_t pair, size_t head_dim, float theta)
     return powf(theta, -2.0f * (float)pair / (float)head_dim);
 }
 
+static int helix_rope_theta_ok(float theta)
+{
+    return isfinite(theta) && theta > 0.0f;
+}
+
 static void hadamard8(const float *src, float *dst)
 {
     const float a0 = src[0] + src[1];
@@ -809,7 +814,7 @@ OcError oc_helix_cache_logits(const OcHelixCache *cache,
     float *freq = NULL, *step_c = NULL, *step_s = NULL, *qx = NULL, *qy = NULL;
     if (!cache || !query_pre_rope || !n_out) return OC_ERR_INVALID_ARG;
     if (query_n != cache->config.head_dim) return OC_ERR_INVALID_ARG;
-    if (rope_theta <= 0.0f) return OC_ERR_INVALID_ARG;
+    if (!helix_rope_theta_ok(rope_theta)) return OC_ERR_INVALID_ARG;
     d = cache->config.head_dim;
     pairs = d / 2;
     {
@@ -905,7 +910,7 @@ OcError oc_helix_cache_attention(const OcHelixCache *cache,
     OcError e;
     if (!cache || !query_pre_rope || !out) return OC_ERR_INVALID_ARG;
     if (query_n != cache->config.head_dim) return OC_ERR_INVALID_ARG;
-    if (rope_theta <= 0.0f) return OC_ERR_INVALID_ARG;
+    if (!helix_rope_theta_ok(rope_theta)) return OC_ERR_INVALID_ARG;
     d = cache->config.head_dim;
     groups = d / 8;
     for (i = 0; i < d; i++) out[i] = 0.0f;

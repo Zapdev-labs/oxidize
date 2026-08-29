@@ -164,7 +164,9 @@ OcError oc_compressed_kv_store_page(OcCompressedKvCache *cache,
         return e;
     }
     for (t = 0; t < n_tokens; t++) {
-        if (positions[t] != positions[0] + t) return OC_ERR_INVALID_ARG;
+        if (t > (size_t)-1 - positions[0] ||
+            positions[t] != positions[0] + t)
+            return OC_ERR_INVALID_ARG;
     }
     roped = (float *)malloc(n_tokens * cache->head_dim * sizeof(float));
     row = (float *)malloc(cache->head_dim * sizeof(float));

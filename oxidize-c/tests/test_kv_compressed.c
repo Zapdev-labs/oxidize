@@ -274,6 +274,7 @@ Test(kv_compressed, rotor_noncontiguous_positions_rejected)
     OcCompressedKvCache cache;
     float keys[16], values[16];
     size_t positions[2] = {0, 2};
+    size_t wrap[2] = {(size_t)-1, 0};
     size_t i;
     for (i = 0; i < 16; i++) {
         keys[i] = 0.1f;
@@ -284,6 +285,9 @@ Test(kv_compressed, rotor_noncontiguous_positions_rejected)
                  OC_OK);
     cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
                                              positions, 2),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+                                             wrap, 2),
                  OC_ERR_INVALID_ARG);
     oc_compressed_kv_free(&cache);
 }

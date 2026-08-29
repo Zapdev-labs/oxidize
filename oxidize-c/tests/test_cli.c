@@ -199,3 +199,10 @@ Test(cli, kv_compress_valid_names)
     cr_assert(!oc_cli_kv_compress_valid("turbo"));
     cr_assert(!oc_cli_kv_compress_valid("ROTORS"));
 }
+
+Test(cli, command_name_identifies_serve_realtime)
+{
+    cr_assert_str_eq(oc_cli_command_name(OC_CLI_CMD_SERVE), "serve");
+    cr_assert_str_eq(oc_cli_command_name(OC_CLI_CMD_SERVE_REALTIME),
+                     "serve-realtime");
+}

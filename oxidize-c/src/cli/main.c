@@ -575,7 +575,8 @@ int main(int argc, char **argv)
             ctx.command == OC_CLI_CMD_SERVE_REALTIME) {
             if (oc_cli_kv_compress_enabled(ctx.kv_compress)) {
                 fprintf(stderr,
-                        "error: --kv-compress is not supported with serve\n");
+                        "error: --kv-compress is not supported with %s\n",
+                        oc_cli_command_name(ctx.command));
                 return 1;
             }
         }
