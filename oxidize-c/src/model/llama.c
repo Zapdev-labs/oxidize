@@ -1611,6 +1611,48 @@ void oc_llama_free(OcLlamaModel *model)
 
 /* ─── Forward pass ─────────────────────────────────────────────────────── */
 
+/* QK-norm on all attention heads, shared by forward_layer and
+ * prefill_layer. Each head is RMS-normalized through `tmp` then copied
+ * back in place. */
+static void llama_qk_norm_heads(float *q, float *k, uint32_t n_head,
+                               uint32_t n_kv, size_t hd,
+                               const OcLlamaLayer *L, float *tmp,
+                               float eps)
+{
+    if (L->attn_q_norm != NULL) {
+        for (uint32_t h = 0; h < n_head; h++) {
+            oc_rms_norm_f32(q + h * hd, L->attn_q_norm, tmp, hd, eps);
+            memcpy(q + h * hd, tmp, hd * sizeof(float));
+        }
+    }
+    if (L->attn_k_norm != NULL) {
+        for (uint32_t h = 0; h < n_kv; h++) {
+            oc_rms_norm_f32(k + h * hd, L->attn_k_norm, tmp, hd, eps);
+            memcpy(k + h * hd, tmp, hd * sizeof(float));
+        }
+    }
+}
+
+/* 3-way RoPE dispatch (YaRN / norm-pairs / plain) shared by the
+ * single-token forward and the prefill path. Applies to `n` heads of
+ * `hd` floats each, in place. The arithmetic is identical at both call
+ * sites (prefill parity is a hard invariant). */
+static void llama_rope_dispatch(float *vecs, uint32_t n, size_t hd,
+                                size_t rope_dim, size_t pos, float rope_theta,
+                                const OcLlamaConfig *c)
+{
+    for (uint32_t h = 0; h < n; h++) {
+        float *v = vecs + (size_t)h * hd;
+        if (c->yarn_factor > 0.0f)
+            oc_apply_rope_yarn_f32(v, v, hd, rope_dim, pos, rope_theta,
+                                   c->yarn_factor, c->yarn_orig_ctx);
+        else if (c->rope_norm_pairs)
+            oc_apply_rope_norm_f32(v, v, hd, rope_dim, pos, rope_theta);
+        else
+            oc_apply_rope_f32(v, v, hd, rope_dim, pos, rope_theta);
+    }
+}
+
 /* Embed one token, applying llama.c-specific embedding post-processing
  * (Gemma 4 sqrt(n_embd) scaling, Muse Glimmer embedding RMSNorm) that the
  * shared helper does not know about. */
@@ -2595,20 +2637,8 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
 
         /* Gemma Q/K RMSNorm: applied per head, after projection and BEFORE
          * RoPE. The norm weight is the layer's own head_dim long. */
-        if (L->attn_q_norm != NULL) {
-            for (uint32_t h = 0; h < c->n_head; h++) {
-                oc_rms_norm_f32(s->q + h * hd, L->attn_q_norm,
-                                s->dequant_temp, hd, c->rms_norm_eps);
-                memcpy(s->q + h * hd, s->dequant_temp, hd * sizeof(float));
-            }
-        }
-        if (L->attn_k_norm != NULL) {
-            for (uint32_t h = 0; h < n_kv; h++) {
-                oc_rms_norm_f32(s->k + h * hd, L->attn_k_norm,
-                                s->dequant_temp, hd, c->rms_norm_eps);
-                memcpy(s->k + h * hd, s->dequant_temp, hd * sizeof(float));
-            }
-        }
+        llama_qk_norm_heads(s->q, s->k, c->n_head, n_kv, hd, L,
+                            s->dequant_temp, c->rms_norm_eps);
 
         /* Gemma 4 RMS-normalizes V too, with no weight — a plain
          * normalization applied per KV head, before the cache write. V never
@@ -2630,32 +2660,10 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         /* L->use_rope is false only on Muse Glimmer's global (NoPE) layers;
          * their Q/K carry no positional information at all. */
         if (L->use_rope) {
-        for (uint32_t h = 0; h < c->n_head; h++) {
-            if (c->yarn_factor > 0.0f) {
-                oc_apply_rope_yarn_f32(s->q + h * hd, s->q + h * hd, hd,
-                                       rope_dim, s->pos, rope_theta,
-                                       c->yarn_factor, c->yarn_orig_ctx);
-            } else if (c->rope_norm_pairs) {
-                oc_apply_rope_norm_f32(s->q + h * hd, s->q + h * hd, hd,
-                                       rope_dim, s->pos, rope_theta);
-            } else {
-                oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, rope_dim,
-                                  s->pos, rope_theta);
-            }
-        }
-        for (uint32_t h = 0; h < n_kv; h++) {
-            if (c->yarn_factor > 0.0f) {
-                oc_apply_rope_yarn_f32(s->k + h * hd, s->k + h * hd, hd,
-                                       rope_dim, s->pos, rope_theta,
-                                       c->yarn_factor, c->yarn_orig_ctx);
-            } else if (c->rope_norm_pairs) {
-                oc_apply_rope_norm_f32(s->k + h * hd, s->k + h * hd, hd,
-                                       rope_dim, s->pos, rope_theta);
-            } else {
-                oc_apply_rope_f32(s->k + h * hd, s->k + h * hd, hd, rope_dim,
-                                  s->pos, rope_theta);
-            }
-        }
+            llama_rope_dispatch(s->q, c->n_head, hd, rope_dim, s->pos,
+                                rope_theta, c);
+            llama_rope_dispatch(s->k, n_kv, hd, rope_dim, s->pos,
+                                rope_theta, c);
         }
 
         /* KV cache write at position `pos`. */
@@ -3659,20 +3667,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
         if (L->attn_v_bias != NULL)
             for (size_t i = 0; i < b->kv_row; i++) vj[i] += L->attn_v_bias[i];
 
-        if (L->attn_q_norm != NULL) {
-            for (uint32_t h = 0; h < c->n_head; h++) {
-                oc_rms_norm_f32(qj + h * hd, L->attn_q_norm, b->dequant_temp,
-                                hd, c->rms_norm_eps);
-                memcpy(qj + h * hd, b->dequant_temp, hd * sizeof(float));
-            }
-        }
-        if (L->attn_k_norm != NULL) {
-            for (uint32_t h = 0; h < n_kv; h++) {
-                oc_rms_norm_f32(kj + h * hd, L->attn_k_norm, b->dequant_temp,
-                                hd, c->rms_norm_eps);
-                memcpy(kj + h * hd, b->dequant_temp, hd * sizeof(float));
-            }
-        }
+        llama_qk_norm_heads(qj, kj, c->n_head, n_kv, hd, L,
+                            b->dequant_temp, c->rms_norm_eps);
         if (c->v_rms_norm) {
             for (uint32_t h = 0; h < n_kv; h++) {
                 float *vh = vj + (size_t)h * hd;
@@ -3685,30 +3681,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
         }
 
         if (L->use_rope) {
-        for (uint32_t h = 0; h < c->n_head; h++) {
-            if (c->yarn_factor > 0.0f)
-                oc_apply_rope_yarn_f32(qj + h * hd, qj + h * hd, hd, rope_dim,
-                                       pos, rope_theta, c->yarn_factor,
-                                       c->yarn_orig_ctx);
-            else if (c->rope_norm_pairs)
-                oc_apply_rope_norm_f32(qj + h * hd, qj + h * hd, hd, rope_dim,
-                                       pos, rope_theta);
-            else
-                oc_apply_rope_f32(qj + h * hd, qj + h * hd, hd, rope_dim, pos,
-                                  rope_theta);
-        }
-        for (uint32_t h = 0; h < n_kv; h++) {
-            if (c->yarn_factor > 0.0f)
-                oc_apply_rope_yarn_f32(kj + h * hd, kj + h * hd, hd, rope_dim,
-                                       pos, rope_theta, c->yarn_factor,
-                                       c->yarn_orig_ctx);
-            else if (c->rope_norm_pairs)
-                oc_apply_rope_norm_f32(kj + h * hd, kj + h * hd, hd, rope_dim,
-                                       pos, rope_theta);
-            else
-                oc_apply_rope_f32(kj + h * hd, kj + h * hd, hd, rope_dim, pos,
-                                  rope_theta);
-        }
+            llama_rope_dispatch(qj, c->n_head, hd, rope_dim, pos, rope_theta, c);
+            llama_rope_dispatch(kj, n_kv, hd, rope_dim, pos, rope_theta, c);
         }
 
         /* Every token's K/V must land in the cache before ANY token attends:
