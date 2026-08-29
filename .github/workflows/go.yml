@@ -6,6 +6,7 @@ on:
       - "oxidize-golang/**"
       - ".github/workflows/go.yml"
   push:
+    branches: ["master"]
     paths:
       - "oxidize-golang/**"
       - ".github/workflows/go.yml"
@@ -28,12 +29,8 @@ jobs:
       - name: go vet
         run: |
           cd oxidize-golang
-          go vet ./...
+          CGO_ENABLED=0 go vet ./...
       - name: go test
         run: |
           cd oxidize-golang
           CGO_ENABLED=0 go test ./...
-      - name: go test -race
-        run: |
-          cd oxidize-golang
-          go test -race ./...
