@@ -116,6 +116,8 @@ make test                # build + run all tests
 ./test_runner --help      # flag reference
 ./test_runner --filter "error/*"   # run only tests in the "error" suite
 ./test_runner --filter kv_cache_init  # suite/case via underscore
+./test_runner --filter config_init    # exact case name; no config/init* glob
+./test_runner --list --filter error   # list matching tests
 ./test_runner --list      # list all registered tests
 ./test_runner --verbose 1 # print PASS lines
 ./test_runner --xml out.xml  # JUnit (one <testsuite> per suite)

@@ -6,9 +6,11 @@
  *
  *   --filter 'suite/case*'   Criterion-style glob (fnmatch); also accepts
  *                            a bare suite name, a bare case name, and
- *                            underscore form (kv_cache_init → kv_cache/init).
+ *                            underscore form (kv_cache_init → kv_cache/init)
+ *                            when that string is not already a suite or case.
  *   --pattern GLOB           alias for --filter
- *   --list                   Print "suite/case" lines and exit 0.
+ *   --list                   Print matching "suite/case" lines (honours
+ *                            --filter) and exit 0.
  *   --jobs N                 Accepted for compatibility; tests always run
  *                            serially (fork-per-test is the isolation
  *                            boundary).
@@ -17,7 +19,8 @@
  *   --help                   Flag reference.
  *
  * Exit code: 0 iff every enabled selected test passed or skipped (no
- * failures, no crashes). Exit 2 on CLI errors.
+ * failures, no crashes) and --xml (if given) was written. Exit 2 on
+ * CLI errors.
  */
 #if defined(__unix__) || defined(__APPLE__)
 #ifndef _POSIX_C_SOURCE
@@ -223,22 +226,15 @@ static int match_full(const char *pat, const OcTest *t)
     return 0;
 }
 
-static int selected(const OcTest *t)
+static int rewrite_underscore_match(const char *filter, const OcTest *t)
 {
-    if (!g_filter || !g_filter[0])
-        return 1;
-    if (match_full(g_filter, t))
-        return 1;
-    /* TEST_FILTER=test_kv_cache_init (after stripping test_) should match
-     * kv_cache/init. Try each '_' → '/' rewrite; also allow a trailing glob
-     * so test_gguf_v3_header matches gguf/v3_header*. */
-    if (strchr(g_filter, '/') || strpbrk(g_filter, "*?["))
+    if (strchr(filter, '/') || strpbrk(filter, "*?["))
         return 0;
-    size_t n = strlen(g_filter);
+    size_t n = strlen(filter);
     if (n == 0 || n >= 255)
         return 0;
     char alt[256];
-    memcpy(alt, g_filter, n + 1);
+    memcpy(alt, filter, n + 1);
     for (char *p = alt; *p; p++) {
         if (*p != '_')
             continue;
@@ -254,6 +250,35 @@ static int selected(const OcTest *t)
     return 0;
 }
 
+int oc_filter_use_underscore_rewrite(const char *filter, const OcTest *head)
+{
+    if (!filter || !filter[0] || strchr(filter, '/') || strpbrk(filter, "*?["))
+        return 0;
+    for (const OcTest *t = head; t; t = t->next) {
+        if (match_full(filter, t))
+            return 0;
+    }
+    return 1;
+}
+
+int oc_filter_selects(const char *filter, const OcTest *t, int rewrite_underscores)
+{
+    if (!filter || !filter[0])
+        return 1;
+    if (match_full(filter, t))
+        return 1;
+    if (!rewrite_underscores)
+        return 0;
+    return rewrite_underscore_match(filter, t);
+}
+
+static int g_rewrite_underscores;
+
+static int selected(const OcTest *t)
+{
+    return oc_filter_selects(g_filter, t, g_rewrite_underscores);
+}
+
 /* ─── Fork-per-test runner ───────────────────────────────────────────── */
 
 typedef enum {
@@ -263,11 +288,8 @@ typedef enum {
     RESULT_CRASH
 } OcResult;
 
-static volatile sig_atomic_t g_child_sig;
-
 static void child_signal_handler(int sig)
 {
-    g_child_sig = sig;
     _exit(128 + sig);
 }
 
@@ -295,7 +317,6 @@ static OcResult run_one(OcTest *t)
         sigaction(SIGABRT, &sa, NULL);
 #else
         (void)child_signal_handler;
-        (void)g_child_sig;
 #endif
 
         oc_test_failed = 0;
@@ -390,14 +411,14 @@ static int suite_already_emitted(const OcRunRecord *runs, size_t i)
     return 0;
 }
 
-static void write_xml(const char *path, const OcStats *s,
+static int write_xml(const char *path, const OcStats *s,
                       const OcRunRecord *runs, size_t n_runs)
 {
     FILE *f = fopen(path, "w");
     if (!f) {
         fprintf(stderr, "failed to write XML to %s: %s\n", path,
                 strerror(errno));
-        return;
+        return -1;
     }
     fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     fprintf(f, "<testsuites tests=\"%zu\" failures=\"%zu\" "
@@ -447,7 +468,17 @@ static void write_xml(const char *path, const OcStats *s,
         fprintf(f, "  </testsuite>\n");
     }
     fprintf(f, "</testsuites>\n");
-    fclose(f);
+    if (ferror(f)) {
+        fprintf(stderr, "failed to write XML to %s: %s\n", path,
+                strerror(errno));
+        fclose(f);
+        return -1;
+    }
+    if (fclose(f) != 0) {
+        fprintf(stderr, "failed to close XML %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 /* ─── main ───────────────────────────────────────────────────────────── */
@@ -495,13 +526,11 @@ int main(int argc, char **argv)
 {
     const char *xml_path = NULL;
     int jobs = 1;
+    int list_only = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--list") == 0) {
-            for (OcTest *t = oc_tests_head; t; t = t->next)
-                printf("%s/%s%s\n", t->suite, t->case_name,
-                       t->disabled ? " (disabled)" : "");
-            return 0;
+            list_only = 1;
         } else if (strcmp(argv[i], "--help") == 0 ||
                    strcmp(argv[i], "-h") == 0) {
             usage(stdout);
@@ -521,7 +550,6 @@ int main(int argc, char **argv)
             const char *v = require_arg(argc, argv, &i, argv[i]);
             if (!v)
                 return 2;
-            jobs = 0;
             if (parse_nonneg_int(v, argv[i - 1], &jobs) != 0)
                 return 2;
             (void)jobs;
@@ -545,8 +573,29 @@ int main(int argc, char **argv)
         }
     }
 
+    g_rewrite_underscores =
+        oc_filter_use_underscore_rewrite(g_filter, oc_tests_head);
+
+    if (list_only) {
+        for (OcTest *t = oc_tests_head; t; t = t->next) {
+            if (!selected(t))
+                continue;
+            printf("%s/%s%s\n", t->suite, t->case_name,
+                   t->disabled ? " (disabled)" : "");
+        }
+        return 0;
+    }
+
     OcStats stats = {0};
-    OcRunRecord *runs = calloc(oc_test_count(), sizeof(OcRunRecord));
+    size_t n_registered = oc_test_count();
+    OcRunRecord *runs = NULL;
+    if (n_registered > 0) {
+        runs = calloc(n_registered, sizeof(OcRunRecord));
+        if (!runs) {
+            fprintf(stderr, "out of memory\n");
+            return 1;
+        }
+    }
     size_t n_runs = 0;
     for (OcTest *t = oc_tests_head; t; t = t->next) {
         if (!selected(t))
@@ -557,11 +606,9 @@ int main(int argc, char **argv)
         }
         stats.tested++;
         OcResult r = run_one(t);
-        if (runs) {
-            runs[n_runs].test = t;
-            runs[n_runs].result = r;
-            n_runs++;
-        }
+        runs[n_runs].test = t;
+        runs[n_runs].result = r;
+        n_runs++;
         switch (r) {
         case RESULT_PASS:
             stats.passing++;
@@ -585,8 +632,11 @@ int main(int argc, char **argv)
     }
 
     print_synthesis(&stats);
+    int xml_ok = 1;
     if (xml_path)
-        write_xml(xml_path, &stats, runs, n_runs);
+        xml_ok = write_xml(xml_path, &stats, runs, n_runs) == 0;
     free(runs);
-    return (stats.failing || stats.crashing) ? 1 : 0;
+    if (stats.failing || stats.crashing)
+        return 1;
+    return xml_ok ? 0 : 1;
 }

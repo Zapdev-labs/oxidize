@@ -77,7 +77,14 @@ void oc_test_fail_cmp(const char *file, int line, const char *lhs,
     __attribute__((noreturn, format(printf, 8, 9)));
 void oc_test_soft_fail_cmp(const char *file, int line, const char *lhs,
                            const char *op, const char *rhs, const char *sa,
-                           const char *sb, const char *fmt, ...);
+                           const char *sb, const char *fmt, ...)
+    __attribute__((format(printf, 8, 9)));
+
+/* Filter matching, also exercised by test_framework.c. A slash-less
+ * filter that already names a suite or case does not rewrite '_' → '/'. */
+int oc_filter_use_underscore_rewrite(const char *filter, const OcTest *head);
+int oc_filter_selects(const char *filter, const OcTest *t,
+                      int rewrite_underscores);
 
 /* Used by the value-printing assert macros; not for direct calls. */
 const char *oc_test_vstr(const void *p);

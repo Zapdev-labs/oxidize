@@ -101,6 +101,8 @@ src/%.o: src/%.c
 #   * a suite name (error, kv_cache) → runs that suite
 #   * test_<suite>_<case>            → test_ prefix stripped; each '_' may
 #     stand in for the suite/case slash (test_kv_cache_init → kv_cache/init)
+#     unless the stripped name already matches a suite or case exactly
+#     (test_config_init → */config_init, not config/init*)
 # When TEST_FILTER is empty (default), all tests run.
 TEST_FILTER ?=
 # --jobs is accepted by the runner but runs stay serial. Fork-per-test is
