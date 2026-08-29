@@ -291,12 +291,23 @@ Test(rotorquant_cache, rewind_truncates_mid_page)
     cr_assert_eq(oc_rotorquant_cache_store_page(&cache, 0, 0, keys, values,
                                                 4, 0),
                  OC_OK);
-    cr_assert_eq(oc_rotorquant_cache_rewind(&cache, 2), OC_OK);
-    cr_assert_eq(oc_rotorquant_cache_page_count(&cache), (size_t)1);
-    cr_assert_eq(oc_rotorquant_cache_n_logits(&cache, 0, 0), (size_t)2);
     cr_assert(oc_rotorquant_cache_page_view(&cache, 0, &view));
-    cr_assert_eq(view.tokens, (size_t)2);
-    cr_assert_eq(view.first_position, (size_t)0);
+    {
+        const uint8_t *kc = view.key_codes;
+        const uint8_t *vc = view.value_codes;
+        const float *ks = view.key_scales;
+        const float *vs = view.value_scales;
+        cr_assert_eq(oc_rotorquant_cache_rewind(&cache, 2), OC_OK);
+        cr_assert_eq(oc_rotorquant_cache_page_count(&cache), (size_t)1);
+        cr_assert_eq(oc_rotorquant_cache_n_logits(&cache, 0, 0), (size_t)2);
+        cr_assert(oc_rotorquant_cache_page_view(&cache, 0, &view));
+        cr_assert_eq(view.tokens, (size_t)2);
+        cr_assert_eq(view.first_position, (size_t)0);
+        cr_assert_eq(view.key_codes, kc);
+        cr_assert_eq(view.value_codes, vc);
+        cr_assert_eq(view.key_scales, ks);
+        cr_assert_eq(view.value_scales, vs);
+    }
     oc_rotorquant_cache_free(&cache);
 }
 
