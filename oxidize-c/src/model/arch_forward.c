@@ -868,36 +868,3 @@ OcError oc_arch_forward_falcon(OcLlamaSession *sess, uint32_t token,
     return OC_OK;
 }
 
-/* ─── Test stubs (compile-time sanity checks) ───────────────────────────
- *
- * These are not real tests — they just ensure the functions are callable
- * and the header includes cleanly. Real tests live in tests/test_arch.c
- * (future). The stubs are guarded by OC_ARCH_FORWARD_TEST_STUBS so they
- * don't pollute the production binary. */
-#ifdef OC_ARCH_FORWARD_TEST_STUBS
-#include <stdio.h>
-
-static void arch_forward_test_stubs(void)
-{
-    /* Just reference the functions to ensure they're not optimized away. */
-    (void)oc_arch_forward_gpt2;
-    (void)oc_arch_forward_gptj;
-    (void)oc_arch_forward_gpt_neox;
-    (void)oc_arch_forward_falcon;
-    (void)arch_layer_norm;
-    (void)arch_gelu_inplace_f32;
-    (void)arch_attention_head;
-    (void)arch_gpt2_layer;
-    (void)arch_gptj_layer;
-    (void)arch_neox_layer;
-    (void)arch_falcon_layer;
-    (void)arch_final_norm_and_logits;
-    (void)arch_gpt2_get_pos_embed;
-    (void)arch_gpt2_add_pos_embed;
-    (void)arch_embed_token;
-    (void)arch_matvec;
-    (void)arch_validate_session;
-    (void)arch_validate_layers;
-    printf("arch_forward test stubs OK\n");
-}
-#endif /* OC_ARCH_FORWARD_TEST_STUBS */

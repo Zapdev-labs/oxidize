@@ -98,25 +98,6 @@ __attribute__((target("avx512bw,avx512dq,avx512vl,avx512vnni")))
 float oc_oxk_dot_q8_0_q8_0_avx512_vnni(const uint8_t *row, size_t blocks,
                                         const uint8_t *q8)
 {
-    int32_t isum = 0;
-    (void)isum; /* VNNI dot products computed in second loop for scaling. */
-    for (size_t b = 0; b < blocks; b++) {
-        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q8_0_SIZE;
-        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_0_SIZE;
-
-        /* Load f16 scales. */
-        float dw = oc_oxk_f16_le_to_f32(wb);
-        float dq = oc_oxk_f16_le_to_f32(qb);
-
-        /* VNNI dot product of 32 signed int8 values. */
-        int32_t dot = vnni_dot_s8x32((const int8_t *)(wb + 2),
-                                     (const int8_t *)(qb + 2));
-        isum += dot;
-
-        /* Scale: f32 multiply matches scalar path. */
-        (void)dw; (void)dq;
-    }
-
     /* Compute weighted sum. */
     float result = 0.0f;
     for (size_t b = 0; b < blocks; b++) {

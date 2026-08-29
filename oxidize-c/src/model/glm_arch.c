@@ -1218,36 +1218,3 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
     return OC_OK;
 }
 
-/* ─── Test stubs (compile-time sanity checks) ─────────────────────────── */
-#ifdef OC_GLM_ARCH_TEST_STUBS
-#include <stdio.h>
-
-static void glm_arch_test_stubs(void)
-{
-    (void)oc_arch_forward_glm;
-    (void)oc_arch_forward_hunyuan;
-    (void)oc_glm_config_parse;
-    (void)oc_hunyuan_config_parse;
-    (void)oc_glm_version_from_str;
-    (void)oc_glm_config_defaults;
-    (void)oc_hunyuan_config_defaults;
-    (void)glm_embed_token;
-    (void)glm_matvec;
-    (void)glm_attention_head;
-    (void)glm_validate_session;
-    (void)glm_validate_layers;
-    (void)glm_final_norm_and_logits;
-    (void)glm_apply_qk_norm;
-    (void)glm_layer;
-    (void)hunyuan_topk_experts;
-    (void)hunyuan_expert_forward;
-    (void)hunyuan_shared_expert_forward;
-    (void)hunyuan_dense_layer;
-    (void)hunyuan_moe_layer;
-    (void)hunyuan_mla_attention;
-    (void)glm_cfg_u32;
-    (void)glm_cfg_f32;
-    (void)glm_cfg_bool;
-    printf("glm_arch test stubs OK\n");
-}
-#endif /* OC_GLM_ARCH_TEST_STUBS */
