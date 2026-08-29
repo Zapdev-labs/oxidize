@@ -1958,67 +1958,6 @@ pub(super) unsafe fn q6_k_row_dot_avx2(row: &[u8], blocks_per_row: usize, vector
 }
 
 #[allow(clippy::too_many_arguments, dead_code)]
-pub(super) fn gemv_qk_f32_fused(
-    quantized_matrix: &[u8],
-    rows: usize,
-    cols: usize,
-    vector: &[f32],
-    output: &mut [f32],
-    block_size: usize,
-    bits: usize,
-    zero_point: f32,
-) -> Result<(), GemvError> {
-    let blocks_per_row = cols / QK_K;
-    let expected_matrix_len = rows * blocks_per_row * block_size;
-    if quantized_matrix.len() != expected_matrix_len {
-        return Err(GemvError::InvalidMatrixLength {
-            expected: expected_matrix_len,
-            actual: quantized_matrix.len(),
-        });
-    }
-    if vector.len() != cols {
-        return Err(GemvError::InvalidVectorLength {
-            expected: cols,
-            actual: vector.len(),
-        });
-    }
-    if output.len() != rows {
-        return Err(GemvError::InvalidOutputLength {
-            expected: rows,
-            actual: output.len(),
-        });
-    }
-
-    let compute_row = |row_idx: usize| {
-        let mut sum = 0.0_f32;
-        let row_start = row_idx * blocks_per_row * block_size;
-        let row_blocks = &quantized_matrix[row_start..row_start + (blocks_per_row * block_size)];
-        for (block_idx, block) in row_blocks.chunks_exact(block_size).enumerate() {
-            let d = f16_le_to_f32([block[0], block[1]]);
-            let bitstream = &block[2..];
-            let vector_offset = block_idx * QK_K;
-            for idx in 0..QK_K {
-                let q = extract_bits(bitstream, idx, bits) as f32;
-                sum += (q - zero_point) * d * vector[vector_offset + idx];
-            }
-        }
-        sum
-    };
-
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_iter_mut()
-            .with_min_len(32)
-            .enumerate()
-            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
-    } else {
-        for (row_idx, out) in output.iter_mut().enumerate() {
-            *out = compute_row(row_idx);
-        }
-    }
-    Ok(())
-}
-
 pub fn extract_bits(bitstream: &[u8], index: usize, bits: usize) -> u32 {
     let bit_offset = index * bits;
     let byte_index = bit_offset / 8;
