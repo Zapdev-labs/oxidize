@@ -8,6 +8,85 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Stop-sequence + stop-token tracking shared by every generation stream.
+/// Keeps a bounded ring of recent tokens sized to the longest stop sequence
+/// and checks every emitted token against it.
+struct StopTracker {
+    recent_tokens: Vec<Token>,
+    max_len: usize,
+}
+
+impl StopTracker {
+    fn new(stop_sequences: &[Vec<Token>]) -> Self {
+        let max_len = stop_sequences.iter().map(Vec::len).max().unwrap_or(0);
+        Self {
+            recent_tokens: Vec::with_capacity(max_len),
+            max_len,
+        }
+    }
+
+    /// Record an emitted token; returns true when generation should stop.
+    fn push(
+        &mut self,
+        token: Token,
+        stop_token: Option<Token>,
+        stop_sequences: &[Vec<Token>],
+    ) -> bool {
+        if self.max_len > 0 {
+            self.recent_tokens.push(token);
+            if self.recent_tokens.len() > self.max_len {
+                let to_drop = self.recent_tokens.len() - self.max_len;
+                self.recent_tokens.drain(..to_drop);
+            }
+        }
+        let matched_stop_sequence = stop_sequences
+            .iter()
+            .filter(|sequence| !sequence.is_empty())
+            .any(|sequence| self.recent_tokens.ends_with(sequence));
+        stop_token == Some(token) || matched_stop_sequence
+    }
+}
+
+/// Speculative-decoding health bookkeeping shared by the DFlash / MTP /
+/// EAGLE-3 streams: drafted/accepted totals, zero-acceptance streak, and
+/// the disable decision (2 zero rounds, or ≥4 steps of samples below 0.2).
+struct SpeculationHealth {
+    drafted_tokens: usize,
+    accepted_draft_tokens: usize,
+    zero_acceptance_rounds: usize,
+    speculation_disabled: bool,
+}
+
+impl SpeculationHealth {
+    fn new() -> Self {
+        Self {
+            drafted_tokens: 0,
+            accepted_draft_tokens: 0,
+            zero_acceptance_rounds: 0,
+            speculation_disabled: false,
+        }
+    }
+
+    fn update(&mut self, drafted: usize, accepted: usize, cap: usize) {
+        self.drafted_tokens = self.drafted_tokens.saturating_add(drafted);
+        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted);
+        if accepted == 0 {
+            self.zero_acceptance_rounds = self.zero_acceptance_rounds.saturating_add(1);
+        } else {
+            self.zero_acceptance_rounds = 0;
+        }
+        let enough_samples = self.drafted_tokens >= cap.max(1) * 4;
+        let acceptance_rate = if self.drafted_tokens == 0 {
+            1.0
+        } else {
+            self.accepted_draft_tokens as f32 / self.drafted_tokens as f32
+        };
+        if self.zero_acceptance_rounds >= 2 || (enough_samples && acceptance_rate < 0.2) {
+            self.speculation_disabled = true;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenerationConfig {
     pub max_new_tokens: usize,
@@ -90,8 +169,7 @@ pub struct SpeculativeGenerationStream<'a, T: Model + ?Sized> {
     config: SpeculativeGenerationConfig,
     generated: usize,
     last_token: Option<Token>,
-    recent_tokens: Vec<Token>,
-    max_stop_sequence_len: usize,
+    stops: StopTracker,
     random: Box<dyn FnMut() -> f32 + 'a>,
     /// Buffer for draft tokens generated in the current speculative step.
     draft_token_buffer: Vec<Token>,
@@ -101,10 +179,7 @@ pub struct SpeculativeGenerationStream<'a, T: Model + ?Sized> {
     last_token_pending_kv: bool,
     /// Target logits for the token immediately after the committed prefix.
     pending_target_logits: Option<Vec<f32>>,
-    drafted_tokens: usize,
-    accepted_draft_tokens: usize,
-    zero_acceptance_rounds: usize,
-    speculation_disabled: bool,
+    health: SpeculationHealth,
 }
 
 impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
@@ -116,14 +191,8 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
         config: SpeculativeGenerationConfig,
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
-        let max_stop_sequence_len = config
-            .generation
-            .stop_sequences
-            .iter()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0);
         let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let stops = StopTracker::new(&config.generation.stop_sequences);
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -133,38 +202,24 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             config,
             generated: 0,
             last_token: None,
-            recent_tokens: Vec::with_capacity(max_stop_sequence_len),
-            max_stop_sequence_len,
+            stops,
             random: Box::new(random),
             draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
             emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             last_token_pending_kv: false,
             pending_target_logits: None,
-            drafted_tokens: 0,
-            accepted_draft_tokens: 0,
-            zero_acceptance_rounds: 0,
-            speculation_disabled: false,
+            health: SpeculationHealth::new(),
         }
     }
 
     fn emit_token(&mut self, token: Token) -> Option<Result<Token, GenerationError>> {
         self.generated = self.generated.saturating_add(1);
         self.last_token = Some(token);
-        if self.max_stop_sequence_len > 0 {
-            self.recent_tokens.push(token);
-            if self.recent_tokens.len() > self.max_stop_sequence_len {
-                let to_drop = self.recent_tokens.len() - self.max_stop_sequence_len;
-                self.recent_tokens.drain(..to_drop);
-            }
-        }
-        let matched_stop_sequence = self
-            .config
-            .generation
-            .stop_sequences
-            .iter()
-            .filter(|sequence| !sequence.is_empty())
-            .any(|sequence| self.recent_tokens.ends_with(sequence));
-        if self.config.generation.stop_token == Some(token) || matched_stop_sequence {
+        let stop_token = self.config.generation.stop_token;
+        if self
+            .stops
+            .push(token, stop_token, &self.config.generation.stop_sequences)
+        {
             self.state = GenerationState::Done;
         }
         Some(Ok(token))
@@ -207,24 +262,8 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
     }
 
     fn update_speculation_health(&mut self, drafted: usize, accepted: usize) {
-        self.drafted_tokens = self.drafted_tokens.saturating_add(drafted);
-        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted);
-        if accepted == 0 {
-            self.zero_acceptance_rounds = self.zero_acceptance_rounds.saturating_add(1);
-        } else {
-            self.zero_acceptance_rounds = 0;
-        }
-
-        let enough_samples =
-            self.drafted_tokens >= self.config.capped_draft_tokens_per_step().max(1) * 4;
-        let acceptance_rate = if self.drafted_tokens == 0 {
-            1.0
-        } else {
-            self.accepted_draft_tokens as f32 / self.drafted_tokens as f32
-        };
-        if self.zero_acceptance_rounds >= 2 || (enough_samples && acceptance_rate < 0.2) {
-            self.speculation_disabled = true;
-        }
+        let cap = self.config.capped_draft_tokens_per_step();
+        self.health.update(drafted, accepted, cap);
     }
 
     fn run_speculative_step(&mut self) -> Result<(), GenerationError> {
@@ -393,7 +432,7 @@ impl<T: Model + ?Sized> Stream for SpeculativeGenerationStream<'_, T> {
                 Poll::Ready(self.emit_token(token))
             }
             GenerationState::Decode => {
-                let result = if self.speculation_disabled {
+                let result = if self.health.speculation_disabled {
                     self.run_target_step()
                 } else {
                     self.run_speculative_step()
@@ -426,16 +465,12 @@ pub struct MtpGenerationStream<'a> {
     config: SpeculativeGenerationConfig,
     generated: usize,
     last_token: Option<Token>,
-    recent_tokens: Vec<Token>,
-    max_stop_sequence_len: usize,
+    stops: StopTracker,
     random: Box<dyn FnMut() -> f32 + 'a>,
     draft_token_buffer: Vec<Token>,
     emit_buffer: VecDeque<Token>,
     pending_target_logits: Option<Vec<f32>>,
-    drafted_tokens: usize,
-    accepted_draft_tokens: usize,
-    zero_acceptance_rounds: usize,
-    speculation_disabled: bool,
+    health: SpeculationHealth,
 }
 
 impl<'a> MtpGenerationStream<'a> {
@@ -446,14 +481,8 @@ impl<'a> MtpGenerationStream<'a> {
         config: SpeculativeGenerationConfig,
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
-        let max_stop_sequence_len = config
-            .generation
-            .stop_sequences
-            .iter()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0);
         let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let stops = StopTracker::new(&config.generation.stop_sequences);
         Self {
             target_model: Some(target_model),
             session: Some(session),
@@ -462,61 +491,31 @@ impl<'a> MtpGenerationStream<'a> {
             config,
             generated: 0,
             last_token: None,
-            recent_tokens: Vec::with_capacity(max_stop_sequence_len),
-            max_stop_sequence_len,
+            stops,
             random: Box::new(random),
             draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
             emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             pending_target_logits: None,
-            drafted_tokens: 0,
-            accepted_draft_tokens: 0,
-            zero_acceptance_rounds: 0,
-            speculation_disabled: false,
+            health: SpeculationHealth::new(),
         }
     }
 
     fn emit_token(&mut self, token: Token) -> Option<Result<Token, GenerationError>> {
         self.generated = self.generated.saturating_add(1);
         self.last_token = Some(token);
-        if self.max_stop_sequence_len > 0 {
-            self.recent_tokens.push(token);
-            if self.recent_tokens.len() > self.max_stop_sequence_len {
-                let to_drop = self.recent_tokens.len() - self.max_stop_sequence_len;
-                self.recent_tokens.drain(..to_drop);
-            }
-        }
-        let matched_stop_sequence = self
-            .config
-            .generation
-            .stop_sequences
-            .iter()
-            .filter(|sequence| !sequence.is_empty())
-            .any(|sequence| self.recent_tokens.ends_with(sequence));
-        if self.config.generation.stop_token == Some(token) || matched_stop_sequence {
+        let stop_token = self.config.generation.stop_token;
+        if self
+            .stops
+            .push(token, stop_token, &self.config.generation.stop_sequences)
+        {
             self.state = GenerationState::Done;
         }
         Some(Ok(token))
     }
 
     fn update_speculation_health(&mut self, drafted: usize, accepted: usize) {
-        self.drafted_tokens = self.drafted_tokens.saturating_add(drafted);
-        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted);
-        if accepted == 0 {
-            self.zero_acceptance_rounds = self.zero_acceptance_rounds.saturating_add(1);
-        } else {
-            self.zero_acceptance_rounds = 0;
-        }
-
-        let enough_samples =
-            self.drafted_tokens >= self.config.capped_draft_tokens_per_step().max(1) * 4;
-        let acceptance_rate = if self.drafted_tokens == 0 {
-            1.0
-        } else {
-            self.accepted_draft_tokens as f32 / self.drafted_tokens as f32
-        };
-        if self.zero_acceptance_rounds >= 2 || (enough_samples && acceptance_rate < 0.2) {
-            self.speculation_disabled = true;
-        }
+        let cap = self.config.capped_draft_tokens_per_step();
+        self.health.update(drafted, accepted, cap);
     }
 
     fn run_target_step(&mut self) -> Result<(), GenerationError> {
@@ -692,7 +691,7 @@ impl Stream for MtpGenerationStream<'_> {
             return Poll::Ready(Some(Err(e)));
         }
 
-        let result = if self.speculation_disabled {
+        let result = if self.health.speculation_disabled {
             self.run_target_step()
         } else {
             self.run_mtp_step()
@@ -720,17 +719,13 @@ pub struct Eagle3GenerationStream<'a> {
     config: SpeculativeGenerationConfig,
     generated: usize,
     last_token: Option<Token>,
-    recent_tokens: Vec<Token>,
-    max_stop_sequence_len: usize,
+    stops: StopTracker,
     random: Box<dyn FnMut() -> f32 + 'a>,
     draft_token_buffer: Vec<Token>,
     emit_buffer: VecDeque<Token>,
     last_token_pending_kv: bool,
     pending_target_logits: Option<Vec<f32>>,
-    drafted_tokens: usize,
-    accepted_draft_tokens: usize,
-    zero_acceptance_rounds: usize,
-    speculation_disabled: bool,
+    health: SpeculationHealth,
 }
 
 impl<'a> Eagle3GenerationStream<'a> {
@@ -743,14 +738,8 @@ impl<'a> Eagle3GenerationStream<'a> {
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
         target_model.set_eagle3_capture_layers(draft_model.config.extract_layers.clone());
-        let max_stop_sequence_len = config
-            .generation
-            .stop_sequences
-            .iter()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0);
         let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let stops = StopTracker::new(&config.generation.stop_sequences);
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -760,61 +749,32 @@ impl<'a> Eagle3GenerationStream<'a> {
             config,
             generated: 0,
             last_token: None,
-            recent_tokens: Vec::with_capacity(max_stop_sequence_len),
-            max_stop_sequence_len,
+            stops,
             random: Box::new(random),
             draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
             emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             last_token_pending_kv: false,
             pending_target_logits: None,
-            drafted_tokens: 0,
-            accepted_draft_tokens: 0,
-            zero_acceptance_rounds: 0,
-            speculation_disabled: false,
+            health: SpeculationHealth::new(),
         }
     }
 
     fn emit_token(&mut self, token: Token) -> Option<Result<Token, GenerationError>> {
         self.generated = self.generated.saturating_add(1);
         self.last_token = Some(token);
-        if self.max_stop_sequence_len > 0 {
-            self.recent_tokens.push(token);
-            if self.recent_tokens.len() > self.max_stop_sequence_len {
-                let to_drop = self.recent_tokens.len() - self.max_stop_sequence_len;
-                self.recent_tokens.drain(..to_drop);
-            }
-        }
-        let matched_stop_sequence = self
-            .config
-            .generation
-            .stop_sequences
-            .iter()
-            .filter(|sequence| !sequence.is_empty())
-            .any(|sequence| self.recent_tokens.ends_with(sequence));
-        if self.config.generation.stop_token == Some(token) || matched_stop_sequence {
+        let stop_token = self.config.generation.stop_token;
+        if self
+            .stops
+            .push(token, stop_token, &self.config.generation.stop_sequences)
+        {
             self.state = GenerationState::Done;
         }
         Some(Ok(token))
     }
 
     fn update_speculation_health(&mut self, drafted: usize, accepted: usize) {
-        self.drafted_tokens = self.drafted_tokens.saturating_add(drafted);
-        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted);
-        if accepted == 0 {
-            self.zero_acceptance_rounds = self.zero_acceptance_rounds.saturating_add(1);
-        } else {
-            self.zero_acceptance_rounds = 0;
-        }
-        let enough_samples =
-            self.drafted_tokens >= self.config.capped_draft_tokens_per_step().max(1) * 4;
-        let acceptance_rate = if self.drafted_tokens == 0 {
-            1.0
-        } else {
-            self.accepted_draft_tokens as f32 / self.drafted_tokens as f32
-        };
-        if self.zero_acceptance_rounds >= 2 || (enough_samples && acceptance_rate < 0.2) {
-            self.speculation_disabled = true;
-        }
+        let cap = self.config.capped_draft_tokens_per_step();
+        self.health.update(drafted, accepted, cap);
     }
 
     fn run_target_step(&mut self) -> Result<(), GenerationError> {
@@ -1028,7 +988,7 @@ impl Stream for Eagle3GenerationStream<'_> {
             GenerationState::Decode => {
                 self.target_model = Some(target_model);
                 self.session = Some(session);
-                let result = if self.speculation_disabled {
+                let result = if self.health.speculation_disabled {
                     self.run_target_step()
                 } else {
                     self.run_eagle3_step()
@@ -1062,8 +1022,7 @@ pub struct GenerationStream<'a, M: Model + ?Sized> {
     config: GenerationConfig,
     generated: usize,
     last_token: Option<Token>,
-    recent_tokens: Vec<Token>,
-    max_stop_sequence_len: usize,
+    stops: StopTracker,
     random: Box<dyn FnMut() -> f32 + 'a>,
 }
 
@@ -1075,12 +1034,7 @@ impl<'a, M: Model + ?Sized> GenerationStream<'a, M> {
         config: GenerationConfig,
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
-        let max_stop_sequence_len = config
-            .stop_sequences
-            .iter()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(0);
+        let stops = StopTracker::new(&config.stop_sequences);
         Self {
             model: Some(model),
             session: Some(session),
@@ -1089,8 +1043,7 @@ impl<'a, M: Model + ?Sized> GenerationStream<'a, M> {
             config,
             generated: 0,
             last_token: None,
-            recent_tokens: Vec::with_capacity(max_stop_sequence_len),
-            max_stop_sequence_len,
+            stops,
             random: Box::new(random),
         }
     }
@@ -1187,20 +1140,9 @@ impl<M: Model + ?Sized> Stream for GenerationStream<'_, M> {
         self.session = Some(session);
         self.generated = self.generated.saturating_add(1);
         self.last_token = Some(token);
-        if self.max_stop_sequence_len > 0 {
-            self.recent_tokens.push(token);
-            if self.recent_tokens.len() > self.max_stop_sequence_len {
-                let to_drop = self.recent_tokens.len() - self.max_stop_sequence_len;
-                self.recent_tokens.drain(..to_drop);
-            }
-        }
-        let matched_stop_sequence = self
-            .config
-            .stop_sequences
-            .iter()
-            .filter(|sequence| !sequence.is_empty())
-            .any(|sequence| self.recent_tokens.ends_with(sequence));
-        if self.config.stop_token == Some(token) || matched_stop_sequence {
+        let stop_token = self.config.stop_token;
+        let stop_sequences = self.config.stop_sequences.clone();
+        if self.stops.push(token, stop_token, &stop_sequences) {
             self.state = GenerationState::Done;
         }
 
