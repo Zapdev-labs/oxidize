@@ -812,41 +812,22 @@ pub(super) unsafe fn accumulate_q4_k_block_avx2(block: *const u8, factor: f32, o
     }
 }
 
-pub(super) fn gemv_q4_k_f32_fused(
-    quantized_matrix: &[u8],
-    rows: usize,
-    cols: usize,
-    vector: &[f32],
-    output: &mut [f32],
-) -> Result<(), GemvError> {
-    let blocks_per_row = cols / QK_K;
-    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q4_K_SIZE;
-    if quantized_matrix.len() != expected_matrix_len {
-        return Err(GemvError::InvalidMatrixLength {
-            expected: expected_matrix_len,
-            actual: quantized_matrix.len(),
-        });
-    }
-    if vector.len() != cols {
-        return Err(GemvError::InvalidVectorLength {
-            expected: cols,
-            actual: vector.len(),
-        });
-    }
-    if output.len() != rows {
-        return Err(GemvError::InvalidOutputLength {
-            expected: rows,
-            actual: output.len(),
-        });
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    let use_avx2 = false;
-
-    let row_bytes = blocks_per_row * BLOCK_Q4_K_SIZE;
-    let compute_row = |row_idx: usize| -> f32 {
+oc_gemv_dispatch!(
+    gemv_q4_k_f32_fused,
+    BLOCK_Q4_K_SIZE,
+    QK_K,
+    rows,
+    cols,
+    quantized_matrix,
+    vector,
+    output,
+    [
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        let use_avx2 = false;
+    ]
+    |row_bytes, row_idx, blocks_per_row| -> f32 {
         let row_start = row_idx * row_bytes;
         let row = &quantized_matrix[row_start..row_start + row_bytes];
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -862,21 +843,8 @@ pub(super) fn gemv_q4_k_f32_fused(
             sum += q4_k_dot_scalar(block, &vector[v_off..v_off + QK_K]);
         }
         sum
-    };
-
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_iter_mut()
-            .with_min_len(32)
-            .enumerate()
-            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
-    } else {
-        for (row_idx, out) in output.iter_mut().enumerate() {
-            *out = compute_row(row_idx);
-        }
     }
-    Ok(())
-}
+);
 
 /// Whole-row Q4_K dot product. Accumulates over all `blocks_per_row` blocks
 /// into four independent AVX2 registers (broken-up dependency chain so the
@@ -1663,36 +1631,22 @@ pub(super) fn iq4_xs_dot(block: &[u8], vector: &[f32]) -> f32 {
 }
 
 /// IQ4_XS GEMV: per row, decode each 136-byte block and dot against the input.
-pub(super) fn gemv_iq4_xs_f32(
-    quantized_matrix: &[u8],
-    rows: usize,
-    cols: usize,
-    vector: &[f32],
-    output: &mut [f32],
-) -> Result<(), GemvError> {
-    let blocks_per_row = cols / QK_K;
-    let expected_matrix_len = rows * blocks_per_row * BLOCK_IQ4_XS_SIZE;
-    if quantized_matrix.len() != expected_matrix_len {
-        return Err(GemvError::InvalidMatrixLength {
-            expected: expected_matrix_len,
-            actual: quantized_matrix.len(),
-        });
-    }
-    if vector.len() != cols {
-        return Err(GemvError::InvalidVectorLength {
-            expected: cols,
-            actual: vector.len(),
-        });
-    }
-    if output.len() != rows {
-        return Err(GemvError::InvalidOutputLength {
-            expected: rows,
-            actual: output.len(),
-        });
-    }
-
-    let row_bytes = blocks_per_row * BLOCK_IQ4_XS_SIZE;
-    let compute_row = |row_idx: usize| -> f32 {
+oc_gemv_dispatch!(
+    gemv_iq4_xs_f32,
+    BLOCK_IQ4_XS_SIZE,
+    QK_K,
+    rows,
+    cols,
+    quantized_matrix,
+    vector,
+    output,
+    [
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        let use_avx2 = false;
+    ]
+    |row_bytes, row_idx, blocks_per_row| -> f32 {
         let row_start = row_idx * row_bytes;
         let row = &quantized_matrix[row_start..row_start + row_bytes];
         let mut sum = 0.0_f32;
@@ -1701,21 +1655,8 @@ pub(super) fn gemv_iq4_xs_f32(
             sum += iq4_xs_dot(block, &vector[v_off..v_off + QK_K]);
         }
         sum
-    };
-
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_iter_mut()
-            .with_min_len(32)
-            .enumerate()
-            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
-    } else {
-        for (row_idx, out) in output.iter_mut().enumerate() {
-            *out = compute_row(row_idx);
-        }
     }
-    Ok(())
-}
+);
 
 /// Quantize `vector` (length `n_blocks * QK4_NL`) into Q8_0 blocks for fused IQ4_NL GEMV.
 pub(crate) fn quantize_vector_q8_0_into(vector: &[f32], n_blocks: usize, out: &mut [u8]) {
@@ -1761,7 +1702,6 @@ pub(super) fn iq4_nl_q8_dot(iq_block: &[u8], q8_block: &[u8]) -> f32 {
     d_w * d_a * isum as f32
 }
 
-/// IQ4_NL × Q8_0 fused GEMV: quantize activations once, LUT lookup + int dot per block.
 pub(super) fn gemv_iq4_nl_q8_fused(
     quantized_matrix: &[u8],
     rows: usize,
@@ -1820,41 +1760,22 @@ pub(super) fn gemv_iq4_nl_q8_fused(
     Ok(())
 }
 
-pub(super) fn gemv_q6_k_f32_fused(
-    quantized_matrix: &[u8],
-    rows: usize,
-    cols: usize,
-    vector: &[f32],
-    output: &mut [f32],
-) -> Result<(), GemvError> {
-    let blocks_per_row = cols / QK_K;
-    let expected_matrix_len = rows * blocks_per_row * BLOCK_Q6_K_SIZE;
-    if quantized_matrix.len() != expected_matrix_len {
-        return Err(GemvError::InvalidMatrixLength {
-            expected: expected_matrix_len,
-            actual: quantized_matrix.len(),
-        });
-    }
-    if vector.len() != cols {
-        return Err(GemvError::InvalidVectorLength {
-            expected: cols,
-            actual: vector.len(),
-        });
-    }
-    if output.len() != rows {
-        return Err(GemvError::InvalidOutputLength {
-            expected: rows,
-            actual: output.len(),
-        });
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    let use_avx2 = false;
-
-    let row_bytes = blocks_per_row * BLOCK_Q6_K_SIZE;
-    let compute_row = |row_idx: usize| -> f32 {
+oc_gemv_dispatch!(
+    gemv_q6_k_f32_fused,
+    BLOCK_Q6_K_SIZE,
+    QK_K,
+    rows,
+    cols,
+    quantized_matrix,
+    vector,
+    output,
+    [
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        let use_avx2 = false;
+    ]
+    |row_bytes, row_idx, blocks_per_row| -> f32 {
         let row_start = row_idx * row_bytes;
         let row = &quantized_matrix[row_start..row_start + row_bytes];
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -1870,21 +1791,8 @@ pub(super) fn gemv_q6_k_f32_fused(
             sum += q6_k_dot_scalar(block, &vector[v_off..v_off + QK_K]);
         }
         sum
-    };
-
-    if rows.saturating_mul(cols) >= PARALLEL_GEMV_MIN_OPS {
-        output
-            .par_iter_mut()
-            .with_min_len(32)
-            .enumerate()
-            .for_each(|(row_idx, out)| *out = compute_row(row_idx));
-    } else {
-        for (row_idx, out) in output.iter_mut().enumerate() {
-            *out = compute_row(row_idx);
-        }
     }
-    Ok(())
-}
+);
 
 /// Whole-row Q6_K dot product. Same idea as `q4_k_row_dot_avx2`: one final
 /// horizontal reduce instead of one per block.

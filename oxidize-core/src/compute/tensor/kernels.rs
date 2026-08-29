@@ -22,6 +22,80 @@ const E2M1_DOUBLED_VALUES: [f32; 16] = [
 const FLASH_ATTENTION_BLOCK_TOKENS: usize = 64;
 const PARALLEL_GEMV_MIN_OPS: usize = 1 << 20;
 
+/// Stamp a quantized GEMV wrapper: shape validation (blocks per row from
+/// `$qk` elements, `$block_size` bytes per block), then row-parallel or
+/// serial dispatch above/below `PARALLEL_GEMV_MIN_OPS`. `$compute_row`
+/// receives `(row_bytes, blocks_per_row)` and returns the row's dot
+/// product; it must close over the input vector.
+///
+/// The generated function is the exact shape every hand-written wrapper
+/// in q_kernels.rs / gemv.rs used before this macro existed.
+#[allow(unused_macros)]
+macro_rules! oc_gemv_dispatch {
+    // With prologue statements (cfg-detected flags etc.): $([prologue])?
+    ($name:ident, $block_size:expr, $qk:expr, $rows:ident, $cols:ident,
+     $matrix:ident, $vector:ident, $output:ident,
+     [$($prologue:tt)*]
+     $compute_row:expr) => {
+        oc_gemv_dispatch! { @impl $name, $block_size, $qk, $rows, $cols,
+            $matrix, $vector, $output, [$($prologue)*], $compute_row }
+    };
+    ($name:ident, $block_size:expr, $qk:expr, $rows:ident, $cols:ident,
+     $matrix:ident, $vector:ident, $output:ident,
+     $compute_row:expr) => {
+        oc_gemv_dispatch! { @impl $name, $block_size, $qk, $rows, $cols,
+            $matrix, $vector, $output, [], $compute_row }
+    };
+    (@impl $name:ident, $block_size:expr, $qk:expr, $rows:ident, $cols:ident,
+     $matrix:ident, $vector:ident, $output:ident,
+     [$($prologue:tt)*], $compute_row:expr) => {
+        pub(super) fn $name(
+            $matrix: &[u8],
+            $rows: usize,
+            $cols: usize,
+            $vector: &[f32],
+            $output: &mut [f32],
+        ) -> Result<(), GemvError> {
+            let blocks_per_row = $cols / $qk;
+            let expected_matrix_len = $rows * blocks_per_row * $block_size;
+            if $matrix.len() != expected_matrix_len {
+                return Err(GemvError::InvalidMatrixLength {
+                    expected: expected_matrix_len,
+                    actual: $matrix.len(),
+                });
+            }
+            if $vector.len() != $cols {
+                return Err(GemvError::InvalidVectorLength {
+                    expected: $cols,
+                    actual: $vector.len(),
+                });
+            }
+            if $output.len() != $rows {
+                return Err(GemvError::InvalidOutputLength {
+                    expected: $rows,
+                    actual: $output.len(),
+                });
+            }
+            $($prologue)*
+            let row_bytes = blocks_per_row * $block_size;
+            let compute_row = $compute_row;
+            if $rows.saturating_mul($cols) >= PARALLEL_GEMV_MIN_OPS {
+                $output
+                    .par_iter_mut()
+                    .with_min_len(32)
+                    .enumerate()
+                    .for_each(|(row_idx, out)| *out = compute_row(row_bytes, row_idx, blocks_per_row));
+            } else {
+                for (row_idx, out) in $output.iter_mut().enumerate() {
+                    *out = compute_row(row_bytes, row_idx, blocks_per_row);
+                }
+            }
+            Ok(())
+        }
+    };
+}
+pub(super) use oc_gemv_dispatch;
+
 /// Rows per spin-pool dispatch chunk. Small chunks cost nothing under static
 /// partitioning (no claim contention) and cut straggler imbalance on
 /// mid-sized regions; 8 still holds two 4-row kernel quads.
