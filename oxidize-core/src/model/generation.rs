@@ -65,7 +65,12 @@ pub struct SpeculativeGenerationConfig {
 
 impl SpeculativeGenerationConfig {
     fn capped_draft_tokens_per_step(&self) -> usize {
-        self.draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP)
+        let n = self.draft_tokens_per_step;
+        if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        }
     }
 }
 
@@ -123,7 +128,12 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let n = config.draft_tokens_per_step;
+        let draft_tokens_per_step = if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        };
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -136,9 +146,7 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             recent_tokens: Vec::with_capacity(max_stop_sequence_len),
             max_stop_sequence_len,
             random: Box::new(random),
-            draft_token_buffer: Vec::with_capacity(
-                draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP),
-            ),
+            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
             emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             last_token_pending_kv: false,
             pending_target_logits: None,
@@ -452,7 +460,12 @@ impl<'a> MtpGenerationStream<'a> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let n = config.draft_tokens_per_step;
+        let draft_tokens_per_step = if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        };
         Self {
             target_model: Some(target_model),
             session: Some(session),
@@ -464,9 +477,7 @@ impl<'a> MtpGenerationStream<'a> {
             recent_tokens: Vec::with_capacity(max_stop_sequence_len),
             max_stop_sequence_len,
             random: Box::new(random),
-            draft_token_buffer: Vec::with_capacity(
-                draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP),
-            ),
+            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
             emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             pending_target_logits: None,
             drafted_tokens: 0,
@@ -751,7 +762,12 @@ impl<'a> Eagle3GenerationStream<'a> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let n = config.draft_tokens_per_step;
+        let draft_tokens_per_step = if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        };
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -764,9 +780,7 @@ impl<'a> Eagle3GenerationStream<'a> {
             recent_tokens: Vec::with_capacity(max_stop_sequence_len),
             max_stop_sequence_len,
             random: Box::new(random),
-            draft_token_buffer: Vec::with_capacity(
-                draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP),
-            ),
+            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
             emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
             last_token_pending_kv: false,
             pending_target_logits: None,
