@@ -181,20 +181,6 @@ typedef struct OcHunyuanConfig {
     bool        tied_embeddings;         /* true = output.weight == tok_emb      */
 } OcHunyuanConfig;
 
-/* ─── Forward declarations ────────────────────────────────────────────────
- *
- * The forward passes operate on an OcLlamaSession (reusing its workspace
- * scratch buffers, KV cache, and position counter). They are drop-in
- * replacements for `oc_llama_forward` when the model is a GLM or Hunyuan.
- *
- * `logits_out` may be NULL to skip the lm_head projection (used for
- * prefill where only the KV cache matters). */
-OcError oc_arch_forward_glm(OcLlamaSession *sess, uint32_t token,
-                             float *logits_out);
-
-OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
-                                 float *logits_out);
-
 /* ─── Config parsing ──────────────────────────────────────────────────────
  *
  * Parse GLM/Hunyuan config from GGUF metadata. The `arch_str` is the raw
