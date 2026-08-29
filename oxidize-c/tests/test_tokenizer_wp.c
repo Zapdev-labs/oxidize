@@ -16,6 +16,7 @@
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 
 #include "framework.h"
+#include "gguf_emitter.h"
 
 #include "oxidize/tokenizer.h"
 #include "oxidize/arena.h"
@@ -280,15 +281,6 @@ Test(tokenizer_wp, load_from_gguf_bert)
     uint8_t *buf = calloc(cap, 1);
     cr_assert_not_null(buf);
     size_t off = 0;
-#define EMIT(buf, off, src, n) do { memcpy((buf) + (off), (src), (n)); (off) += (n); } while (0)
-#define EMIT_U32(buf, off, v) do { uint32_t _x = (uint32_t)(v); EMIT(buf, off, &_x, 4); } while (0)
-#define EMIT_U64(buf, off, v) do { uint64_t _x = (uint64_t)(v); EMIT(buf, off, &_x, 8); } while (0)
-#define EMIT_KV_STR_KEY(buf, off, key_str) do { \
-        const char *k = (key_str); \
-        uint64_t kl = strlen(k); \
-        EMIT_U64(buf, off, kl); \
-        EMIT(buf, off, k, kl); \
-    } while (0)
 
     EMIT_U32(buf, off, OC_GGUF_MAGIC);
     EMIT_U32(buf, off, 3);
@@ -309,10 +301,6 @@ Test(tokenizer_wp, load_from_gguf_bert)
     { EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.unknown_token_id");
       EMIT_U32(buf, off, OC_GGUF_MT_UINT32); EMIT_U32(buf, off, 4); }
 
-#undef EMIT
-#undef EMIT_U32
-#undef EMIT_U64
-#undef EMIT_KV_STR_KEY
 
     OcGgufFile gguf;
     size_t padded_len = (off + 31) & ~(size_t)31;
@@ -353,15 +341,6 @@ Test(tokenizer_wp, dispatch_by_model_key_bert)
     uint8_t *buf = calloc(cap, 1);
     cr_assert_not_null(buf);
     size_t off = 0;
-#define EMIT(buf, off, src, n) do { memcpy((buf) + (off), (src), (n)); (off) += (n); } while (0)
-#define EMIT_U32(buf, off, v) do { uint32_t _x = (uint32_t)(v); EMIT(buf, off, &_x, 4); } while (0)
-#define EMIT_U64(buf, off, v) do { uint64_t _x = (uint64_t)(v); EMIT(buf, off, &_x, 8); } while (0)
-#define EMIT_KV_STR_KEY(buf, off, key_str) do { \
-        const char *k = (key_str); \
-        uint64_t kl = strlen(k); \
-        EMIT_U64(buf, off, kl); \
-        EMIT(buf, off, k, kl); \
-    } while (0)
 
     EMIT_U32(buf, off, OC_GGUF_MAGIC);
     EMIT_U32(buf, off, 3);
@@ -374,10 +353,6 @@ Test(tokenizer_wp, dispatch_by_model_key_bert)
       EMIT_U32(buf, off, OC_GGUF_MT_ARRAY); EMIT_U32(buf, off, OC_GGUF_MT_STRING);
       EMIT_U64(buf, off, 1);
       const char *t = "a"; uint64_t sl = 1; EMIT_U64(buf, off, sl); EMIT(buf, off, t, sl); }
-#undef EMIT
-#undef EMIT_U32
-#undef EMIT_U64
-#undef EMIT_KV_STR_KEY
 
     OcGgufFile gguf;
     size_t padded_len = (off + 31) & ~(size_t)31;

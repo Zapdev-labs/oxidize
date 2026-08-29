@@ -29,6 +29,7 @@
 #endif
 
 #include "framework.h"
+#include "gguf_emitter.h"
 
 #include "oxidize/gguf.h"
 
@@ -163,10 +164,6 @@ static uint8_t *build_all_types_gguf(size_t *out_len)
     cr_assert_not_null(buf, "calloc");
     size_t off = 0;
 
-#define EMIT(buf, off, src, n) do { memcpy((buf) + (off), (src), (n)); (off) += (n); } while (0)
-#define EMIT_U8(buf, off, v)  do { uint8_t _x = (uint8_t)(v); EMIT(buf, off, &_x, 1); } while (0)
-#define EMIT_U32(buf, off, v) do { uint32_t _x = (uint32_t)(v); EMIT(buf, off, &_x, 4); } while (0)
-#define EMIT_U64(buf, off, v) do { uint64_t _x = (uint64_t)(v); EMIT(buf, off, &_x, 8); } while (0)
 
     /* Header: magic, version=3, tensor_count=0, kv_count=11. */
     EMIT_U32(buf, off, OC_GGUF_MAGIC);
@@ -248,10 +245,6 @@ static uint8_t *build_all_types_gguf(size_t *out_len)
     *out_len = cap;   /* return full cap so data_section_start fits */
     return buf;
 
-#undef EMIT
-#undef EMIT_U8
-#undef EMIT_U32
-#undef EMIT_U64
 }
 
 Test(gguf, all_11_metadata_value_types_round_trip)

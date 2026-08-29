@@ -19,6 +19,7 @@
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 
 #include "framework.h"
+#include "gguf_emitter.h"
 
 #include "oxidize/tokenizer.h"
 #include "oxidize/arena.h"
@@ -334,16 +335,6 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
     cr_assert_not_null(buf);
     size_t off = 0;
 
-#define EMIT(buf, off, src, n) do { memcpy((buf) + (off), (src), (n)); (off) += (n); } while (0)
-#define EMIT_U32(buf, off, v) do { uint32_t _x = (uint32_t)(v); EMIT(buf, off, &_x, 4); } while (0)
-#define EMIT_U64(buf, off, v) do { uint64_t _x = (uint64_t)(v); EMIT(buf, off, &_x, 8); } while (0)
-#define EMIT_F32(buf, off, v) do { float _x = (float)(v); EMIT(buf, off, &_x, 4); } while (0)
-#define EMIT_KV_STR_KEY(buf, off, key_str) do { \
-        const char *k = (key_str); \
-        uint64_t kl = strlen(k); \
-        EMIT_U64(buf, off, kl); \
-        EMIT(buf, off, k, kl); \
-    } while (0)
 
     EMIT_U32(buf, off, OC_GGUF_MAGIC);
     EMIT_U32(buf, off, 3);
@@ -387,11 +378,6 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
         EMIT_U32(buf, off, 3);
     }
 
-#undef EMIT
-#undef EMIT_U32
-#undef EMIT_U64
-#undef EMIT_F32
-#undef EMIT_KV_STR_KEY
 
     size_t aligned = (off + 31) & ~(size_t)31;
     if (aligned > cap) aligned = cap;
@@ -488,16 +474,6 @@ Test(tokenizer_sp, load_from_gguf_with_bos_metadata)
     uint8_t *buf = calloc(cap, 1);
     cr_assert_not_null(buf);
     size_t off = 0;
-#define EMIT(buf, off, src, n) do { memcpy((buf) + (off), (src), (n)); (off) += (n); } while (0)
-#define EMIT_U32(buf, off, v) do { uint32_t _x = (uint32_t)(v); EMIT(buf, off, &_x, 4); } while (0)
-#define EMIT_U64(buf, off, v) do { uint64_t _x = (uint64_t)(v); EMIT(buf, off, &_x, 8); } while (0)
-#define EMIT_F32(buf, off, v) do { float _x = (float)(v); EMIT(buf, off, &_x, 4); } while (0)
-#define EMIT_KV_STR_KEY(buf, off, key_str) do { \
-        const char *k = (key_str); \
-        uint64_t kl = strlen(k); \
-        EMIT_U64(buf, off, kl); \
-        EMIT(buf, off, k, kl); \
-    } while (0)
 
     EMIT_U32(buf, off, OC_GGUF_MAGIC);
     EMIT_U32(buf, off, 3);
@@ -528,11 +504,6 @@ Test(tokenizer_sp, load_from_gguf_with_bos_metadata)
     { EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.add_bos_token");
       EMIT_U32(buf, off, OC_GGUF_MT_BOOL); uint8_t b = 1; EMIT(buf, off, &b, 1); }
 
-#undef EMIT
-#undef EMIT_U32
-#undef EMIT_U64
-#undef EMIT_F32
-#undef EMIT_KV_STR_KEY
 
     OcGgufFile gguf;
     size_t padded_len = (off + 31) & ~(size_t)31;
