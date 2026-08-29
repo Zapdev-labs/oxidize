@@ -505,8 +505,23 @@ OcError oc_rotorquant_cache_rewind(OcRotorQuantCache *cache, size_t n_keep)
             page_free(&cache->pages[i]);
             continue;
         }
-        if (cache->pages[i].first_position + cache->pages[i].tokens > n_keep)
-            cache->pages[i].tokens = n_keep - cache->pages[i].first_position;
+        if (cache->pages[i].first_position + cache->pages[i].tokens > n_keep) {
+            OcRotorQuantPage *p = &cache->pages[i];
+            size_t keep = n_keep - p->first_position;
+            size_t cb = code_bytes_row(cache);
+            size_t bpr = blocks_per_row(cache);
+            uint8_t *kc = (uint8_t *)realloc(p->key_codes, keep * cb);
+            uint8_t *vc = (uint8_t *)realloc(p->value_codes, keep * cb);
+            float *ks = (float *)realloc(p->key_scales,
+                                         keep * bpr * sizeof(float));
+            float *vs = (float *)realloc(p->value_scales,
+                                         keep * bpr * sizeof(float));
+            if (kc) p->key_codes = kc;
+            if (vc) p->value_codes = vc;
+            if (ks) p->key_scales = ks;
+            if (vs) p->value_scales = vs;
+            p->tokens = keep;
+        }
         if (w != i) {
             cache->pages[w] = cache->pages[i];
             memset(&cache->pages[i], 0, sizeof(cache->pages[i]));

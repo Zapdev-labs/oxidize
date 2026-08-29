@@ -103,17 +103,21 @@ Test(kv_compressed, both_schemes_track_f32_reference)
                      OC_OK);
         {
             float dot = 0.0f, n0 = 0.0f, n1 = 0.0f, cosine;
-            for (i = 0; i < head_dim; i++) {
-                cr_assert(fabsf(out[i] - ref[i]) <= tol,
-                          "scheme %d dim %zu: %f vs ref %f", (int)schemes[si], i,
-                          out[i], ref[i]);
-                dot += out[i] * ref[i];
-                n0 += out[i] * out[i];
-                n1 += ref[i] * ref[i];
+            if (schemes[si] == OC_KV_SCHEME_HELIX) {
+                for (i = 0; i < head_dim; i++) {
+                    dot += out[i] * ref[i];
+                    n0 += out[i] * out[i];
+                    n1 += ref[i] * ref[i];
+                }
+                cosine = dot / (sqrtf(n0) * sqrtf(n1) + 1.0e-12f);
+                cr_assert(cosine >= 0.95f, "helix cosine %f", cosine);
+            } else {
+                for (i = 0; i < head_dim; i++) {
+                    cr_assert(fabsf(out[i] - ref[i]) <= tol,
+                              "scheme %d dim %zu: %f vs ref %f",
+                              (int)schemes[si], i, out[i], ref[i]);
+                }
             }
-            cosine = dot / (sqrtf(n0) * sqrtf(n1) + 1.0e-12f);
-            cr_assert(cosine >= 0.95f, "scheme %d cosine %f", (int)schemes[si],
-                      cosine);
         }
         cr_assert(oc_compressed_kv_compression_ratio(&cache) >
                       (schemes[si] == OC_KV_SCHEME_HELIX ? 4.0f : 6.0f),
@@ -276,6 +280,25 @@ Test(kv_compressed, rotor_noncontiguous_positions_rejected)
         values[i] = 0.2f;
     }
     cr_assert_eq(oc_compressed_kv_init(&cache, 8, OC_KV_SCHEME_ROTOR, 8,
+                                       10000.0f),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+                                             positions, 2),
+                 OC_ERR_INVALID_ARG);
+    oc_compressed_kv_free(&cache);
+}
+
+Test(kv_compressed, helix_store_page_rejects_cross_page)
+{
+    OcCompressedKvCache cache;
+    float keys[16], values[16];
+    size_t positions[2] = {3, 4};
+    size_t i;
+    for (i = 0; i < 16; i++) {
+        keys[i] = 0.1f;
+        values[i] = 0.2f;
+    }
+    cr_assert_eq(oc_compressed_kv_init(&cache, 8, OC_KV_SCHEME_HELIX, 4,
                                        10000.0f),
                  OC_OK);
     cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,

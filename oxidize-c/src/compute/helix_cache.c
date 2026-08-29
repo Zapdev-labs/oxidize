@@ -699,7 +699,9 @@ OcError oc_helix_cache_append(OcHelixCache *cache,
         OcError e;
         if (!page) {
             OcHelixPage *existing = find_page(cache, layer, kv_head, page_id);
-            if (existing && existing->n_tokens < cache->config.page_size) {
+            if (existing) {
+                if (existing->n_tokens >= cache->config.page_size)
+                    return OC_ERR_INVALID_ARG;
                 e = thaw_page_for_append(cache, existing);
                 if (e != OC_OK) return e;
                 page = existing;

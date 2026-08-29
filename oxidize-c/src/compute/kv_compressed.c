@@ -151,6 +151,10 @@ OcError oc_compressed_kv_store_page(OcCompressedKvCache *cache,
         return OC_ERR_INVALID_ARG;
     if (cache->has_helix) {
         size_t page_id = positions[0] / cache->page_size;
+        for (t = 0; t < n_tokens; t++) {
+            if (positions[t] / cache->page_size != page_id)
+                return OC_ERR_INVALID_ARG;
+        }
         e = remap_rows_to_helix(cache, pre_rope_keys, n_tokens, &helix_keys);
         if (e != OC_OK) return e;
         keys = helix_keys ? helix_keys : pre_rope_keys;

@@ -111,7 +111,8 @@ OcError oc_rotorquant_cache_stats(const OcRotorQuantCache *cache,
 float oc_rotorquant_cache_compression_ratio(const OcRotorQuantCacheStats *st);
 
 /* Drop pages whose first_position >= n_keep. Pages that straddle n_keep
- * are truncated so tokens at first_position + t >= n_keep are dropped. */
+ * are truncated so tokens at first_position + t >= n_keep are dropped,
+ * and their quantized buffers are realloc'd to the kept token count. */
 OcError oc_rotorquant_cache_rewind(OcRotorQuantCache *cache, size_t n_keep);
 void oc_rotorquant_cache_clear(OcRotorQuantCache *cache);
 

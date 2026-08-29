@@ -29,6 +29,7 @@
 #include "oxidize/sampling.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -3608,7 +3609,7 @@ typedef struct {
     /* Muse Glimmer: a separate n_qo-wide gate per token, laid out exactly
      * like `q`. NULL on every other architecture. */
     const float    *mgate;
-    OcError         error;
+    _Atomic int     error;
 } AttnJob;
 
 static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
@@ -3634,7 +3635,10 @@ static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
                 j->s->kv_compress, j->layer, kv_head,
                 j->b->q + tok * j->b->n_qo + h * j->hd, j->hd,
                 (size_t)(j->pos0 + (int64_t)tok), out);
-            if (e != OC_OK) j->error = e;
+            if (e != OC_OK) {
+                int expected = OC_OK;
+                atomic_compare_exchange_strong(&j->error, &expected, (int)e);
+            }
         } else {
             attention_head_at(j->s, h, j->layer, j->pos0 + (int64_t)tok,
                               j->b->q + tok * j->b->n_qo + h * j->hd, out);
@@ -4005,7 +4009,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
                      c->attn_out_gate ? b->mgate : NULL, OC_OK };
     oc_parallel_for(n * c->n_head, attention_slice, &ajob);
     g_pf_t.attn += pf_now() - t0;
-    if (ajob.error != OC_OK) return ajob.error;
+    if (atomic_load(&ajob.error) != OC_OK)
+        return (OcError)atomic_load(&ajob.error);
 
     /* Output projection + residual. */
     double t_pr0 = pf_now();

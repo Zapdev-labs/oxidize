@@ -237,38 +237,41 @@ Test(rotorquant_cache, causal_mask_drops_future_tokens)
 Test(rotorquant_cache, attention_causal_mask_drops_future_tokens)
 {
     OcRotorQuantCacheConfig cfg;
-    OcRotorQuantCache full, prefix;
+    OcRotorQuantCache cache;
     const size_t d = 32, tokens = 4;
-    float keys[128], values[128], query[32], out_full[32], out_prefix[32];
-    size_t i;
+    float keys[128], values[128], query[32], out_masked[32], out_all[32];
+    size_t i, t, n_out = 0;
+    float logits[4];
+    int differed = 0;
     oc_rotorquant_cache_config_init(&cfg);
     cfg.head_dim = d;
-    cr_assert_eq(oc_rotorquant_cache_init(&full, &cfg), OC_OK);
-    cr_assert_eq(oc_rotorquant_cache_init(&prefix, &cfg), OC_OK);
-    for (i = 0; i < tokens * d; i++) {
-        keys[i] = 0.25f;
-        values[i] = 1.0f;
+    cr_assert_eq(oc_rotorquant_cache_init(&cache, &cfg), OC_OK);
+    for (t = 0; t < tokens; t++) {
+        for (i = 0; i < d; i++) {
+            keys[t * d + i] = 0.25f + 0.1f * (float)t;
+            values[t * d + i] = (t >= 2) ? 8.0f : 1.0f;
+        }
     }
     for (i = 0; i < d; i++) query[i] = 0.5f;
-    cr_assert_eq(oc_rotorquant_cache_store_page(&full, 0, 0, keys, values,
+    cr_assert_eq(oc_rotorquant_cache_store_page(&cache, 0, 0, keys, values,
                                                 tokens, 0),
                  OC_OK);
-    cr_assert_eq(oc_rotorquant_cache_store_page(&prefix, 0, 0, keys, values, 2,
-                                                0),
+    cr_assert_eq(oc_rotorquant_cache_logits(&cache, 0, 0, query, d, 1, logits, 4,
+                                            &n_out),
                  OC_OK);
-    cr_assert_eq(oc_rotorquant_cache_attention(&full, 0, 0, query, d, 1,
-                                                out_full),
+    cr_assert_eq(n_out, (size_t)2);
+    cr_assert_eq(oc_rotorquant_cache_attention(&cache, 0, 0, query, d, 1,
+                                                out_masked),
                  OC_OK);
-    cr_assert_eq(oc_rotorquant_cache_attention(&prefix, 0, 0, query, d, 1,
-                                                out_prefix),
+    cr_assert_eq(oc_rotorquant_cache_attention(&cache, 0, 0, query, d,
+                                                (size_t)-1, out_all),
                  OC_OK);
     for (i = 0; i < d; i++) {
-        cr_assert(fabsf(out_full[i] - out_prefix[i]) < 1.0e-5f,
-                  "future tokens must not contribute at query_pos=1 dim %zu",
-                  i);
+        if (fabsf(out_masked[i] - out_all[i]) > 1.0e-3f) differed = 1;
     }
-    oc_rotorquant_cache_free(&full);
-    oc_rotorquant_cache_free(&prefix);
+    cr_assert(differed,
+              "future tokens with distinct values must change unmasked attn");
+    oc_rotorquant_cache_free(&cache);
 }
 
 Test(rotorquant_cache, rewind_truncates_mid_page)

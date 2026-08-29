@@ -384,6 +384,34 @@ Test(helix_cache, append_at_next_page_does_not_extend_page0)
     oc_helix_cache_free(&cache);
 }
 
+Test(helix_cache, append_to_full_page_is_rejected)
+{
+    OcHelixCacheConfig cfg;
+    OcHelixCache cache;
+    const float keys[] = {
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f,
+    };
+    const float values[32] = {0};
+    const float extra[8] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+    const size_t positions[] = {0, 1, 2, 3};
+    const size_t overflow = 3;
+    oc_helix_cache_config_init(&cfg);
+    cfg.page_size = 4;
+    cfg.head_dim = 8;
+    cr_assert_eq(oc_helix_cache_init(&cache, &cfg), OC_OK);
+    cr_assert_eq(oc_helix_cache_store_cold_page(&cache, 0, 0, 0, keys, values,
+                                                positions, 4),
+                 OC_OK);
+    cr_assert_eq(oc_helix_cache_append(&cache, 0, 0, extra, extra, &overflow, 1),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_helix_cache_page_count(&cache), (size_t)1);
+    cr_assert_eq(oc_helix_cache_n_logits(&cache, 0, 0), (size_t)4);
+    oc_helix_cache_free(&cache);
+}
+
 Test(helix_cache, non_positive_rope_theta_is_rejected)
 {
     OcHelixCacheConfig cfg;
