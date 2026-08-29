@@ -96,6 +96,125 @@ macro_rules! oc_gemv_dispatch {
 }
 pub(super) use oc_gemv_dispatch;
 
+/// Stamp a batched decode-once GEMM wrapper (gemm_*_decode_once): shape
+/// validation, AVX2 fast-path dispatch to `$avx2`, then the generic
+/// row-major + transpose epilogue. `$compute_row` receives
+/// `(row_idx, partial)` where partial is the batch-long output slice.
+#[allow(unused_macros)]
+macro_rules! oc_gemm_decode_dispatch {
+    // With a hoisted AVX2 fast-path body.
+    ($name:ident, $avx2:ident, $block_size:expr, $qk:expr, $compute_row:expr) => {
+        pub(super) fn $name(
+            quantized_matrix: &[u8],
+            rows: usize,
+            cols: usize,
+            inputs: &[f32],
+            outputs: &mut [f32],
+            batch: usize,
+        ) -> Result<(), GemvError> {
+            let blocks_per_row = cols / $qk;
+            let expected_matrix_len = rows
+                .saturating_mul(blocks_per_row)
+                .saturating_mul($block_size);
+            if quantized_matrix.len() != expected_matrix_len {
+                return Err(GemvError::InvalidMatrixLength {
+                    expected: expected_matrix_len,
+                    actual: quantized_matrix.len(),
+                });
+            }
+
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                    return unsafe {
+                        $avx2(
+                            quantized_matrix,
+                            rows,
+                            cols,
+                            inputs,
+                            outputs,
+                            batch,
+                            blocks_per_row,
+                        )
+                    };
+                }
+            }
+
+            let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
+            let compute_row = $compute_row;
+            row_major
+                .par_chunks_mut(batch)
+                .enumerate()
+                .for_each(|(row_idx, slice)| {
+                    compute_row(
+                        quantized_matrix,
+                        inputs,
+                        cols,
+                        blocks_per_row,
+                        batch,
+                        row_idx,
+                        slice,
+                    )
+                });
+
+            for r in 0..rows {
+                let src = &row_major[r * batch..(r + 1) * batch];
+                for (t, &val) in src.iter().enumerate() {
+                    outputs[t * rows + r] = val;
+                }
+            }
+            Ok(())
+        }
+    };
+    // Scalar/inline-AVX2 closure only: no hoisted fast-path function.
+    ($name:ident, $block_size:expr, $qk:expr, $compute_row:expr) => {
+        pub(super) fn $name(
+            quantized_matrix: &[u8],
+            rows: usize,
+            cols: usize,
+            inputs: &[f32],
+            outputs: &mut [f32],
+            batch: usize,
+        ) -> Result<(), GemvError> {
+            let blocks_per_row = cols / $qk;
+            let expected_matrix_len = rows
+                .saturating_mul(blocks_per_row)
+                .saturating_mul($block_size);
+            if quantized_matrix.len() != expected_matrix_len {
+                return Err(GemvError::InvalidMatrixLength {
+                    expected: expected_matrix_len,
+                    actual: quantized_matrix.len(),
+                });
+            }
+            let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
+            let compute_row = $compute_row;
+            row_major
+                .par_chunks_mut(batch)
+                .enumerate()
+                .for_each(|(row_idx, slice)| {
+                    compute_row(
+                        quantized_matrix,
+                        inputs,
+                        cols,
+                        blocks_per_row,
+                        batch,
+                        row_idx,
+                        slice,
+                    )
+                });
+
+            for r in 0..rows {
+                let src = &row_major[r * batch..(r + 1) * batch];
+                for (t, &val) in src.iter().enumerate() {
+                    outputs[t * rows + r] = val;
+                }
+            }
+            Ok(())
+        }
+    };
+}
+pub(super) use oc_gemm_decode_dispatch;
+
 /// Rows per spin-pool dispatch chunk. Small chunks cost nothing under static
 /// partitioning (no claim contention) and cut straggler imbalance on
 /// mid-sized regions; 8 still holds two 4-row kernel quads.
