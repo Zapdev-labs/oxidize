@@ -31,7 +31,7 @@ float oc_gelu_approx_f32(float x);
 /* Exact GeLU: 0.5 * x * (1 + erf(x / sqrt(2))). */
 float oc_gelu_exact_f32(float x);
 
-/* Apply RoPE (Rotary Positional Embedding) to one head of length `head_dim` at absolute `position`. */
+/* Apply RoPE to one head of length `head_dim` at absolute `position`. Frequency is theta^(-2i/rope_len) over the rotary sub-block, not head_dim — partial RoPE (qwen35 rotates 64 of 256) must not be "corrected" to head_dim. `in` may alias `out`; dims >= rope_len are copied through. */
 void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
                       size_t rope_len, int64_t position, float theta);
 
@@ -39,7 +39,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta);
 
-/* YaRN RoPE with explicit cos/sin amplitude. attn_factor < 0 selects the standard mscale (1 + 0.1*ln(factor)); oc_apply_rope_yarn_f32 passes -1. */
+/* YaRN RoPE with explicit cos/sin amplitude. attn_factor < 0 selects the standard mscale (1 + 0.1*ln(factor)); oc_apply_rope_yarn_f32 passes -1. deepseek_yarn must pass the explicit value from oc_rope_deepseek_yarn_scales (LongCat both-1 is 1.0; baking 1.4787 here double-counts mscale_all_dim^2 already in the attention scale). */
 void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
                                     size_t rope_len, int64_t position,
                                     float theta, float yarn_factor,

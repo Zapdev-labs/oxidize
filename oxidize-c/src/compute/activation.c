@@ -61,7 +61,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
     }
     if (rope_len == 0) return;
     size_t half = rope_len / 2;
-    float freq_mul = powf(theta, -2.0f / (float)rope_len);
+    float freq_mul = powf(theta, -2.0f / (float)rope_len); /* rope_len, not head_dim (partial RoPE). */
     float freq = 1.0f;
     /* If in/out alias, we must read both halves before writing. Use a local
      * copy of the low half to avoid clobbering reads of the high half. */
@@ -256,10 +256,10 @@ void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
     for (size_t i = rope_len; i < head_dim; i++) out[i] = in[i];
 
     size_t half = rope_len / 2;
-    float freq_mul = powf(theta, -2.0f / (float)rope_len);
+    float freq_mul = powf(theta, -2.0f / (float)rope_len); /* same rope_len ladder as oc_apply_rope_f32. */
     float freq = 1.0f;
 
-    /* YaRN parameters (matching Rust apply_rope_f32_yarn). */
+    /* YaRN parameters (matching Rust apply_rope_f32_yarn). attn_factor < 0 is the standard mscale; deepseek_yarn passes an explicit value so LongCat 1.0 is not replaced by 1.4787. */
     float freq_scale = 1.0f / yarn_factor;
     /* Compute correction range.
      * corr_dim(n_dims, orig_ctx, n_rot, base) =
