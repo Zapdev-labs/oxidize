@@ -40,6 +40,8 @@
 
 #include "oxidize/arena.h"
 #include "oxidize/error.h"
+
+#include "tokenizer_common.h"
 #include "oxidize/gguf.h"
 #include "oxidize/log.h"
 #include "oxidize/vector.h"
@@ -218,122 +220,6 @@ static bool tikt_bytemap_get(const OcByteMap *m, const uint8_t *key, size_t key_
     return false;
 }
 
-/* ─── u64 → u32 open-addressing map (merge ranks / merged ids) ────────
- * Duplicated from tokenizer_bpe.c (the BPE u64map is file-static there).
- * Kept local so this file is self-contained. */
-
-static uint64_t tikt_fnv1a_u64(uint64_t key)
-{
-    uint64_t h = 1469598103934665603ull;
-    for (int i = 0; i < 8; ++i) {
-        h ^= (key >> (i * 8)) & 0xFF;
-        h *= 1099511628211ull;
-    }
-    return h;
-}
-
-typedef struct {
-    uint64_t *keys;
-    uint32_t *values;
-    size_t    cap;
-    size_t    count;
-} TiktU64Map;
-
-#define TIKT_U64_EMPTY UINT64_MAX
-
-static TiktU64Map *tikt_u64map_new(size_t initial_cap)
-{
-    if (initial_cap < 16) initial_cap = 16;
-    size_t cap = 1;
-    while (cap < initial_cap) cap <<= 1;
-    TiktU64Map *m = (TiktU64Map *)calloc(1, sizeof(TiktU64Map));
-    if (!m) return NULL;
-    m->keys = (uint64_t *)malloc(cap * sizeof(uint64_t));
-    m->values = (uint32_t *)malloc(cap * sizeof(uint32_t));
-    if (!m->keys || !m->values) {
-        free(m->keys); free(m->values); free(m);
-        return NULL;
-    }
-    for (size_t i = 0; i < cap; ++i) m->keys[i] = TIKT_U64_EMPTY;
-    m->cap = cap; m->count = 0;
-    return m;
-}
-
-static void tikt_u64map_free(TiktU64Map *m)
-{
-    if (!m) return;
-    free(m->keys); free(m->values); free(m);
-}
-
-static bool tikt_u64map_grow(TiktU64Map *m, size_t new_cap)
-{
-    uint64_t *old_keys = m->keys;
-    uint32_t *old_values = m->values;
-    size_t old_cap = m->cap;
-    m->keys = (uint64_t *)malloc(new_cap * sizeof(uint64_t));
-    m->values = (uint32_t *)malloc(new_cap * sizeof(uint32_t));
-    if (!m->keys || !m->values) {
-        free(m->keys); free(m->values);
-        m->keys = old_keys; m->values = old_values;
-        return false;
-    }
-    for (size_t i = 0; i < new_cap; ++i) m->keys[i] = TIKT_U64_EMPTY;
-    m->cap = new_cap; m->count = 0;
-    for (size_t i = 0; i < old_cap; ++i) {
-        if (old_keys[i] != TIKT_U64_EMPTY) {
-            uint64_t key = old_keys[i];
-            uint32_t hash = (uint32_t)tikt_fnv1a_u64(key) & (m->cap - 1);
-            while (m->keys[hash] != TIKT_U64_EMPTY) {
-                hash = (hash + 1) & (m->cap - 1);
-            }
-            m->keys[hash] = key;
-            m->values[hash] = old_values[i];
-            m->count++;
-        }
-    }
-    free(old_keys); free(old_values);
-    return true;
-}
-
-static OcError tikt_u64map_put(TiktU64Map *m, uint64_t key, uint32_t value)
-{
-    if (key == TIKT_U64_EMPTY) return OC_ERR_INVALID_ARG;
-    if ((m->count + 1) * 10 >= m->cap * 7) {
-        if (!tikt_u64map_grow(m, m->cap << 1)) return OC_ERR_OOM;
-    }
-    uint32_t hash = (uint32_t)tikt_fnv1a_u64(key) & (m->cap - 1);
-    while (m->keys[hash] != TIKT_U64_EMPTY) {
-        if (m->keys[hash] == key) {
-            m->values[hash] = value;
-            return OC_OK;
-        }
-        hash = (hash + 1) & (m->cap - 1);
-    }
-    m->keys[hash] = key;
-    m->values[hash] = value;
-    m->count++;
-    return OC_OK;
-}
-
-static bool tikt_u64map_get(const TiktU64Map *m, uint64_t key, uint32_t *out)
-{
-    if (key == TIKT_U64_EMPTY) return false;
-    uint32_t hash = (uint32_t)tikt_fnv1a_u64(key) & (m->cap - 1);
-    while (m->keys[hash] != TIKT_U64_EMPTY) {
-        if (m->keys[hash] == key) {
-            *out = m->values[hash];
-            return true;
-        }
-        hash = (hash + 1) & (m->cap - 1);
-    }
-    return false;
-}
-
-static inline uint64_t tikt_pair_key(uint32_t left, uint32_t right)
-{
-    return ((uint64_t)left << 32) | (uint64_t)right;
-}
-
 /* ─── Tiktoken tokenizer state ─────────────────────────────────────── */
 
 struct OcTiktokenTokenizer {
@@ -344,9 +230,9 @@ struct OcTiktokenTokenizer {
     size_t   *id_to_token_len;
     size_t    vocab_size;
     /* merge ranks: pair_key → rank (lowest rank wins). */
-    TiktU64Map *merge_ranks;
+    OcU64Map *merge_ranks;
     /* merged ids: pair_key → merged_token_id. */
-    TiktU64Map *merged_ids;
+    OcU64Map *merged_ids;
     /* Fast single-byte lookup: byte → id (or UINT32_MAX if absent).
      * Built at load time so the hot encode path avoids hash lookups. */
     uint32_t single_byte_id[256];
@@ -376,8 +262,8 @@ OcError oc_tiktoken_new(const OcByteSlice *vocab_tokens, size_t n_vocab,
     memset(t, 0, sizeof(*t));
 
     t->vocab = tikt_bytemap_new(n_vocab * 2 > 0 ? n_vocab * 2 : 16);
-    t->merge_ranks = tikt_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
-    t->merged_ids = tikt_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
+    t->merge_ranks = oc_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
+    t->merged_ids = oc_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
     t->vocab_size = n_vocab;
     t->id_to_token_data = oc_arena_alloc(arena, n_vocab * sizeof(uint8_t *), sizeof(void *));
     t->id_to_token_len = oc_arena_alloc(arena, n_vocab * sizeof(size_t), sizeof(void *));
@@ -426,8 +312,8 @@ OcError oc_tiktoken_new(const OcByteSlice *vocab_tokens, size_t n_vocab,
         free(merged);
         if (!found) continue;
 
-        tikt_u64map_put(t->merge_ranks, tikt_pair_key(left_id, right_id), (uint32_t)rank);
-        tikt_u64map_put(t->merged_ids, tikt_pair_key(left_id, right_id), merged_id);
+        oc_u64map_put(t->merge_ranks, oc_pair_key(left_id, right_id), (uint32_t)rank);
+        oc_u64map_put(t->merged_ids, oc_pair_key(left_id, right_id), merged_id);
     }
 
     *out = t;
@@ -481,9 +367,9 @@ static bool tikt_find_best_merge(const OcTiktokenTokenizer *t,
     bool found = false;
     uint64_t best_key = 0;
     for (size_t i = 0; i + 1 < n; ++i) {
-        uint64_t key = tikt_pair_key(seq[i], seq[i + 1]);
+        uint64_t key = oc_pair_key(seq[i], seq[i + 1]);
         uint32_t rank;
-        if (tikt_u64map_get(t->merge_ranks, key, &rank)) {
+        if (oc_u64map_get(t->merge_ranks, key, &rank)) {
             if (rank < best_rank) {
                 best_rank = rank;
                 best_key = key;
@@ -493,7 +379,7 @@ static bool tikt_find_best_merge(const OcTiktokenTokenizer *t,
     }
     if (!found) return false;
     uint32_t merged_id;
-    if (!tikt_u64map_get(t->merged_ids, best_key, &merged_id)) return false;
+    if (!oc_u64map_get(t->merged_ids, best_key, &merged_id)) return false;
     *out_left = (uint32_t)(best_key >> 32);
     *out_right = (uint32_t)(best_key & 0xFFFFFFFFu);
     *out_merged_id = merged_id;
@@ -697,8 +583,8 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     memset(t, 0, sizeof(*t));
 
     t->vocab = tikt_bytemap_new(vocab_size * 2 > 0 ? vocab_size * 2 : 16);
-    t->merge_ranks = tikt_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
-    t->merged_ids = tikt_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
+    t->merge_ranks = oc_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
+    t->merged_ids = oc_u64map_new(n_merges > 0 ? n_merges * 2 : 64);
     t->vocab_size = vocab_size;
     t->id_to_token_data = oc_arena_alloc(arena, vocab_size * sizeof(uint8_t *), sizeof(void *));
     t->id_to_token_len = oc_arena_alloc(arena, vocab_size * sizeof(size_t), sizeof(void *));
@@ -776,10 +662,10 @@ OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
         free(merged);
         if (!found) continue;
 
-        tikt_u64map_put(t->merge_ranks,
-                       tikt_pair_key(left_id, right_id), (uint32_t)rank);
-        tikt_u64map_put(t->merged_ids,
-                       tikt_pair_key(left_id, right_id), merged_id);
+        oc_u64map_put(t->merge_ranks,
+                       oc_pair_key(left_id, right_id), (uint32_t)rank);
+        oc_u64map_put(t->merged_ids,
+                       oc_pair_key(left_id, right_id), merged_id);
     }
 
     oc_vector_free(&tokens);
@@ -831,8 +717,8 @@ void oc_tiktoken_free(OcTiktokenTokenizer *t)
 {
     if (!t) return;
     tikt_bytemap_free(t->vocab);
-    tikt_u64map_free(t->merge_ranks);
-    tikt_u64map_free(t->merged_ids);
+    oc_u64map_free(t->merge_ranks);
+    oc_u64map_free(t->merged_ids);
     t->vocab = NULL;
     t->merge_ranks = NULL;
     t->merged_ids = NULL;
