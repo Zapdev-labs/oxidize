@@ -232,136 +232,112 @@ static bool validate_layout(OcGgufQuantizationType qtype,
     return value_count == expected_output;
 }
 
+
+/* LE raw-word load/store used by the plain-type pack/dequant templates. */
+static uint32_t f32_le_load(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void f32_le_store(uint8_t *p, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    p[0] = (uint8_t)(bits & 0xFFu);
+    p[1] = (uint8_t)((bits >> 8) & 0xFFu);
+    p[2] = (uint8_t)((bits >> 16) & 0xFFu);
+    p[3] = (uint8_t)((bits >> 24) & 0xFFu);
+}
+
+static float f32_le_load_as_f32(const uint8_t *p)
+{
+    uint32_t bits = f32_le_load(p);
+    float out;
+    memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+static void u32_le_store_bits(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8) & 0xFFu);
+    p[2] = (uint8_t)((v >> 16) & 0xFFu);
+    p[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static uint64_t u64_le_load(const uint8_t *p)
+{
+    uint64_t v = 0;
+    for (int k = 0; k < 8; k++)
+        v |= (uint64_t)p[k] << (8 * k);
+    return v;
+}
+
+static void u64_le_store(uint8_t *p, uint64_t v)
+{
+    for (int k = 0; k < 8; k++)
+        p[k] = (uint8_t)((v >> (8 * k)) & 0xFFu);
+}
+
+static double u64_le_load_as_f64(const uint8_t *p)
+{
+    uint64_t v = u64_le_load(p);
+    double d;
+    memcpy(&d, &v, sizeof(d));
+    return d;
+}
+
+static void u64_le_store_as_f64(uint8_t *p, double d)
+{
+    uint64_t uv;
+    memcpy(&uv, &d, sizeof(uv));
+    u64_le_store(p, uv);
+}
+
+static float bf16_le_to_f32(const uint8_t *p)
+{
+    /* BF16 = upper 16 bits of f32; widening is exact (left-shift by 16). */
+    uint32_t bits = (uint32_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8)) << 16;
+    float out;
+    memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
 /* ─── Plain-storage dequant: F32/F16/BF16/I8/I16/I32/I64/F64 ─────────── */
 
-static OcError dequant_f32(const uint8_t *src, size_t src_len,
-                           float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_F32, src_len, value_count, 4, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < value_count; i++) {
-        uint32_t bits = (uint32_t)src[4 * i]
-                      | ((uint32_t)src[4 * i + 1] << 8)
-                      | ((uint32_t)src[4 * i + 2] << 16)
-                      | ((uint32_t)src[4 * i + 3] << 24);
-        memcpy(&dst[i], &bits, sizeof(bits));
-    }
-    return OC_OK;
+/* Every plain type is a fixed-width little-endian element; only the width
+ * and the value expression differ. value_count is validated against
+ * src_len / width first (validate_layout). */
+#define DEFINE_PLAIN_DEQUANT(name, qtype, width, expr)                      \
+static OcError name(const uint8_t *src, size_t src_len,                    \
+                    float *dst, size_t value_count)                        \
+{                                                                          \
+    if (!validate_layout(qtype, src_len, value_count, (width), 1))          \
+        return OC_ERR_INVALID_ARG;                                          \
+    for (size_t i = 0; i < value_count; i++) {                               \
+        const uint8_t *e = src + (width) * i;                               \
+        dst[i] = (expr);                                                    \
+    }                                                                      \
+    return OC_OK;                                                          \
 }
 
-static OcError dequant_f16(const uint8_t *src, size_t src_len,
-                           float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_F16, src_len, value_count, 2, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < value_count; i++) {
-        dst[i] = f16_le_to_f32(src[2 * i], src[2 * i + 1]);
-    }
-    return OC_OK;
-}
-
-static OcError dequant_bf16(const uint8_t *src, size_t src_len,
-                             float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_BF16, src_len, value_count, 2, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    /* BF16 = upper 16 bits of f32; widening is exact (left-shift by 16). */
-    for (size_t i = 0; i < value_count; i++) {
-        uint32_t bits = (uint32_t)((uint16_t)src[2 * i]
-                                   | ((uint16_t)src[2 * i + 1] << 8)) << 16;
-        memcpy(&dst[i], &bits, sizeof(bits));
-    }
-    return OC_OK;
-}
-
-static OcError dequant_i8(const uint8_t *src, size_t src_len,
-                          float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_I8, src_len, value_count, 1, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < value_count; i++) {
-        dst[i] = (float)((int8_t)src[i]);
-    }
-    return OC_OK;
-}
-
-static OcError dequant_i16(const uint8_t *src, size_t src_len,
-                           float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_I16, src_len, value_count, 2, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < value_count; i++) {
-        int16_t v = (int16_t)((uint16_t)src[2 * i]
-                              | ((uint16_t)src[2 * i + 1] << 8));
-        dst[i] = (float)v;
-    }
-    return OC_OK;
-}
-
-static OcError dequant_i32(const uint8_t *src, size_t src_len,
-                           float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_I32, src_len, value_count, 4, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < value_count; i++) {
-        int32_t v = (int32_t)((uint32_t)src[4 * i]
-                              | ((uint32_t)src[4 * i + 1] << 8)
-                              | ((uint32_t)src[4 * i + 2] << 16)
-                              | ((uint32_t)src[4 * i + 3] << 24));
-        dst[i] = (float)v;
-    }
-    return OC_OK;
-}
-
-static OcError dequant_i64(const uint8_t *src, size_t src_len,
-                           float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_I64, src_len, value_count, 8, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < value_count; i++) {
-        uint64_t v = (uint64_t)src[8 * i]
-                   | ((uint64_t)src[8 * i + 1] << 8)
-                   | ((uint64_t)src[8 * i + 2] << 16)
-                   | ((uint64_t)src[8 * i + 3] << 24)
-                   | ((uint64_t)src[8 * i + 4] << 32)
-                   | ((uint64_t)src[8 * i + 5] << 40)
-                   | ((uint64_t)src[8 * i + 6] << 48)
-                   | ((uint64_t)src[8 * i + 7] << 56);
-        int64_t sv;
-        memcpy(&sv, &v, sizeof(sv));
-        dst[i] = (float)sv;
-    }
-    return OC_OK;
-}
-
-static OcError dequant_f64(const uint8_t *src, size_t src_len,
-                           float *dst, size_t value_count)
-{
-    if (!validate_layout(OC_QUANT_F64, src_len, value_count, 8, 1)) {
-        return OC_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < value_count; i++) {
-        uint64_t v = (uint64_t)src[8 * i]
-                   | ((uint64_t)src[8 * i + 1] << 8)
-                   | ((uint64_t)src[8 * i + 2] << 16)
-                   | ((uint64_t)src[8 * i + 3] << 24)
-                   | ((uint64_t)src[8 * i + 4] << 32)
-                   | ((uint64_t)src[8 * i + 5] << 40)
-                   | ((uint64_t)src[8 * i + 6] << 48)
-                   | ((uint64_t)src[8 * i + 7] << 56);
-        double d;
-        memcpy(&d, &v, sizeof(d));
-        dst[i] = (float)d;
-    }
-    return OC_OK;
-}
+DEFINE_PLAIN_DEQUANT(dequant_f32, OC_QUANT_F32, 4,
+    f32_le_load_as_f32(e))
+DEFINE_PLAIN_DEQUANT(dequant_f16, OC_QUANT_F16, 2,
+    f16_le_to_f32(e[0], e[1]))
+DEFINE_PLAIN_DEQUANT(dequant_bf16, OC_QUANT_BF16, 2,
+    bf16_le_to_f32(e))
+DEFINE_PLAIN_DEQUANT(dequant_i8, OC_QUANT_I8, 1,
+    (float)((int8_t)e[0]))
+DEFINE_PLAIN_DEQUANT(dequant_i16, OC_QUANT_I16, 2,
+    (float)(int16_t)((uint16_t)e[0] | ((uint16_t)e[1] << 8)))
+DEFINE_PLAIN_DEQUANT(dequant_i32, OC_QUANT_I32, 4,
+    (float)(int32_t)f32_le_load(e))
+DEFINE_PLAIN_DEQUANT(dequant_i64, OC_QUANT_I64, 8,
+    (float)(int64_t)u64_le_load(e))
+DEFINE_PLAIN_DEQUANT(dequant_f64, OC_QUANT_F64, 8,
+    (float)u64_le_load_as_f64(e))
 
 /* ─── Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 dequant ────────────────────────── */
 
@@ -1494,109 +1470,39 @@ static OcError dequant_nvfp4(const uint8_t *src, size_t src_len,
 
 /* ─── Pack-from-f32 (port of quant_simple.rs + quant_k_blocks.rs) ────── */
 
-static OcError pack_f32(const float *src, size_t value_count,
-                        uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count * 4) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        uint32_t bits;
-        memcpy(&bits, &src[i], sizeof(bits));
-        dst[4 * i + 0] = (uint8_t)(bits & 0xFFu);
-        dst[4 * i + 1] = (uint8_t)((bits >> 8) & 0xFFu);
-        dst[4 * i + 2] = (uint8_t)((bits >> 16) & 0xFFu);
-        dst[4 * i + 3] = (uint8_t)((bits >> 24) & 0xFFu);
-    }
-    return OC_OK;
+/* Plain-type packing mirrors dequant: fixed-width LE element, value
+ * expression, and a dst_len check of value_count * width. */
+#define DEFINE_PLAIN_PACK(name, qtype, width, expr)                         \
+static OcError name(const float *src, size_t value_count,                  \
+                    uint8_t *dst, size_t dst_len)                          \
+{                                                                          \
+    if (dst_len != value_count * (width)) return OC_ERR_INVALID_ARG;       \
+    for (size_t i = 0; i < value_count; i++) {                               \
+        uint8_t *e = dst + (width) * i;                                     \
+        const float v = src[i];                                             \
+        (void)v; (void)e;                                                  \
+        (expr);                                                             \
+    }                                                                      \
+    return OC_OK;                                                          \
 }
 
-static OcError pack_f16(const float *src, size_t value_count,
-                        uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count * 2) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        f16_le_write(&dst[2 * i], src[i]);
-    }
-    return OC_OK;
-}
-
-static OcError pack_bf16(const float *src, size_t value_count,
-                         uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count * 2) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        bf16_le_write(&dst[2 * i], src[i]);
-    }
-    return OC_OK;
-}
-
-static OcError pack_i8(const float *src, size_t value_count,
-                       uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        int8_t v = (int8_t)(int32_t)src[i];
-        dst[i] = (uint8_t)v;
-    }
-    return OC_OK;
-}
-
-static OcError pack_i16(const float *src, size_t value_count,
-                        uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count * 2) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        int16_t v = (int16_t)(int32_t)src[i];
-        dst[2 * i + 0] = (uint8_t)((uint16_t)v & 0xFFu);
-        dst[2 * i + 1] = (uint8_t)(((uint16_t)v >> 8) & 0xFFu);
-    }
-    return OC_OK;
-}
-
-static OcError pack_i32(const float *src, size_t value_count,
-                        uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count * 4) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        int32_t v = (int32_t)src[i];
-        uint32_t uv;
-        memcpy(&uv, &v, sizeof(uv));
-        dst[4 * i + 0] = (uint8_t)(uv & 0xFFu);
-        dst[4 * i + 1] = (uint8_t)((uv >> 8) & 0xFFu);
-        dst[4 * i + 2] = (uint8_t)((uv >> 16) & 0xFFu);
-        dst[4 * i + 3] = (uint8_t)((uv >> 24) & 0xFFu);
-    }
-    return OC_OK;
-}
-
-static OcError pack_i64(const float *src, size_t value_count,
-                        uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count * 8) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        int64_t v = (int64_t)src[i];
-        uint64_t uv;
-        memcpy(&uv, &v, sizeof(uv));
-        for (int k = 0; k < 8; k++) {
-            dst[8 * i + k] = (uint8_t)((uv >> (8 * k)) & 0xFFu);
-        }
-    }
-    return OC_OK;
-}
-
-static OcError pack_f64(const float *src, size_t value_count,
-                        uint8_t *dst, size_t dst_len)
-{
-    if (dst_len != value_count * 8) return OC_ERR_INVALID_ARG;
-    for (size_t i = 0; i < value_count; i++) {
-        double d = (double)src[i];
-        uint64_t uv;
-        memcpy(&uv, &d, sizeof(uv));
-        for (int k = 0; k < 8; k++) {
-            dst[8 * i + k] = (uint8_t)((uv >> (8 * k)) & 0xFFu);
-        }
-    }
-    return OC_OK;
-}
+DEFINE_PLAIN_PACK(pack_f32, OC_QUANT_F32, 4,
+    f32_le_store(e, v))
+DEFINE_PLAIN_PACK(pack_f16, OC_QUANT_F16, 2,
+    f16_le_write(e, v))
+DEFINE_PLAIN_PACK(pack_bf16, OC_QUANT_BF16, 2,
+    bf16_le_write(e, v))
+DEFINE_PLAIN_PACK(pack_i8, OC_QUANT_I8, 1,
+    (e[0] = (uint8_t)(int8_t)(int32_t)v))
+DEFINE_PLAIN_PACK(pack_i16, OC_QUANT_I16, 2,
+    (e[0] = (uint8_t)((uint16_t)(int16_t)(int32_t)v & 0xFFu),               \
+     e[1] = (uint8_t)(((uint16_t)(int16_t)(int32_t)v >> 8) & 0xFFu)))
+DEFINE_PLAIN_PACK(pack_i32, OC_QUANT_I32, 4,
+    u32_le_store_bits(e, (uint32_t)(int32_t)v))
+DEFINE_PLAIN_PACK(pack_i64, OC_QUANT_I64, 8,
+    u64_le_store(e, (uint64_t)(int64_t)v))
+DEFINE_PLAIN_PACK(pack_f64, OC_QUANT_F64, 8,
+    u64_le_store_as_f64(e, (double)v))
 
 static OcError pack_q4_0(const float *src, size_t value_count,
                          uint8_t *dst, size_t dst_len)
