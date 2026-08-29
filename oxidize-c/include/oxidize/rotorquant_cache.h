@@ -40,12 +40,13 @@ typedef struct OcRotorQuantCacheStats {
     float  total_bits_per_coord;
 } OcRotorQuantCacheStats;
 
-/* Pointers remain valid until the matching page is dropped or the cache
- * is freed. `tokens` (and the other count fields) are a snapshot from
- * page_view(); rewind may shrink the page's live token count without
- * moving buffers, so a held view can still report rows rewind dropped.
- * Re-fetch the view after rewind before iterating, or read `tokens`
- * from a fresh page_view(). */
+/* Pointers remain valid until the matching page is dropped, replaced by
+ * store_page() for the same (layer, kv_head, first_position), or the
+ * cache is freed. Rewind does not free buffers. `tokens` (and the other
+ * count fields) are a snapshot from page_view(); rewind may shrink the
+ * page's live token count without moving buffers, so a held view can
+ * still report rows rewind dropped. Re-fetch the view after rewind or
+ * store_page() before iterating. */
 typedef struct OcRotorQuantPageView {
     size_t         layer;
     size_t         kv_head;
@@ -76,7 +77,8 @@ void oc_rotorquant_cache_free(OcRotorQuantCache *cache);
 
 /* `first_position` is the upsert key and the position of token 0. It must
  * be distinct per page for the same (layer, kv_head). Token t lives at
- * first_position + t. */
+ * first_position + t. Replacing an existing page frees the previous
+ * code/scale buffers and invalidates any OcRotorQuantPageView of it. */
 OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
                                        size_t layer, size_t kv_head,
                                        const float *keys, const float *values,
