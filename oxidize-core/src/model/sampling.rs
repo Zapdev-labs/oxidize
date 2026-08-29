@@ -359,7 +359,11 @@ pub fn sample_with_repetition_and_grammar(
         .filter(|top_k| *top_k < adjusted_logits.len() && *top_k <= MAX_PARTIAL_TOP_K);
     let mut indexed_probs = if let Some(top_k) = top_k_limit {
         let mut raw_sum = 0.0_f32;
-        let mut heap: BinaryHeap<Reverse<TopKCandidate>> = BinaryHeap::with_capacity(top_k);
+        // Inline min() makes the bound visible to static analysis
+        // (CodeQL rust/uncontrolled-allocation-size) without changing the
+        // filter above.
+        let bounded_top_k = top_k.min(MAX_PARTIAL_TOP_K);
+        let mut heap: BinaryHeap<Reverse<TopKCandidate>> = BinaryHeap::with_capacity(bounded_top_k);
         for (idx, logit) in adjusted_logits.iter().copied().enumerate() {
             let prob = ((logit - max_logit) / config.temperature).exp();
             raw_sum += prob;

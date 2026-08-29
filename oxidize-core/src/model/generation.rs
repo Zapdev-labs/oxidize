@@ -18,7 +18,16 @@ struct StopTracker {
 
 impl StopTracker {
     fn new(stop_sequences: &[Vec<Token>]) -> Self {
-        let max_len = stop_sequences.iter().map(Vec::len).max().unwrap_or(0);
+        // Bound the ring by the same cap the spec streams use: a stop
+        // sequence longer than this can never match a realistic window and
+        // an untrusted config must not drive unbounded pre-allocation.
+        const MAX_STOP_SEQUENCE_LEN: usize = 4096;
+        let max_len = stop_sequences
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .min(MAX_STOP_SEQUENCE_LEN);
         Self {
             recent_tokens: Vec::with_capacity(max_len),
             max_len,
@@ -191,8 +200,12 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
         config: SpeculativeGenerationConfig,
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
+        // Allocation sizes here derive from the capped value so an
+        // untrusted config cannot request an unbounded buffer (CodeQL:
+        // rust/uncontrolled-allocation-size).
         let draft_tokens_per_step = config.capped_draft_tokens_per_step();
         let stops = StopTracker::new(&config.generation.stop_sequences);
+        debug_assert!(draft_tokens_per_step <= MAX_DRAFT_TOKENS_PER_STEP);
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -204,8 +217,14 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             last_token: None,
             stops,
             random: Box::new(random),
-            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
-            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
+            draft_token_buffer: Vec::with_capacity(
+                draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP),
+            ),
+            emit_buffer: VecDeque::with_capacity(
+                draft_tokens_per_step
+                    .saturating_add(1)
+                    .min(MAX_DRAFT_TOKENS_PER_STEP + 1),
+            ),
             last_token_pending_kv: false,
             pending_target_logits: None,
             health: SpeculationHealth::new(),
@@ -481,8 +500,12 @@ impl<'a> MtpGenerationStream<'a> {
         config: SpeculativeGenerationConfig,
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
+        // Allocation sizes here derive from the capped value so an
+        // untrusted config cannot request an unbounded buffer (CodeQL:
+        // rust/uncontrolled-allocation-size).
         let draft_tokens_per_step = config.capped_draft_tokens_per_step();
         let stops = StopTracker::new(&config.generation.stop_sequences);
+        debug_assert!(draft_tokens_per_step <= MAX_DRAFT_TOKENS_PER_STEP);
         Self {
             target_model: Some(target_model),
             session: Some(session),
@@ -493,8 +516,14 @@ impl<'a> MtpGenerationStream<'a> {
             last_token: None,
             stops,
             random: Box::new(random),
-            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
-            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
+            draft_token_buffer: Vec::with_capacity(
+                draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP),
+            ),
+            emit_buffer: VecDeque::with_capacity(
+                draft_tokens_per_step
+                    .saturating_add(1)
+                    .min(MAX_DRAFT_TOKENS_PER_STEP + 1),
+            ),
             pending_target_logits: None,
             health: SpeculationHealth::new(),
         }
@@ -738,8 +767,12 @@ impl<'a> Eagle3GenerationStream<'a> {
         random: impl FnMut() -> f32 + 'a,
     ) -> Self {
         target_model.set_eagle3_capture_layers(draft_model.config.extract_layers.clone());
+        // Allocation sizes here derive from the capped value so an
+        // untrusted config cannot request an unbounded buffer (CodeQL:
+        // rust/uncontrolled-allocation-size).
         let draft_tokens_per_step = config.capped_draft_tokens_per_step();
         let stops = StopTracker::new(&config.generation.stop_sequences);
+        debug_assert!(draft_tokens_per_step <= MAX_DRAFT_TOKENS_PER_STEP);
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -751,8 +784,14 @@ impl<'a> Eagle3GenerationStream<'a> {
             last_token: None,
             stops,
             random: Box::new(random),
-            draft_token_buffer: Vec::with_capacity(draft_tokens_per_step),
-            emit_buffer: VecDeque::with_capacity(draft_tokens_per_step.saturating_add(1)),
+            draft_token_buffer: Vec::with_capacity(
+                draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP),
+            ),
+            emit_buffer: VecDeque::with_capacity(
+                draft_tokens_per_step
+                    .saturating_add(1)
+                    .min(MAX_DRAFT_TOKENS_PER_STEP + 1),
+            ),
             last_token_pending_kv: false,
             pending_target_logits: None,
             health: SpeculationHealth::new(),
