@@ -19,7 +19,7 @@ typedef enum {
     OC_CHAT_PLAIN,              /* Plain text concatenation              */
 } OcChatTemplate;
 
-/* Render a single message into the template buffer. */
+/* Render a single message into the template buffer. Returns bytes written excluding NUL; 0 on error or truncation. */
 size_t oc_chat_render_message(OcChatTemplate template,
                               const char *role, const char *content,
                               char *out, size_t out_cap,

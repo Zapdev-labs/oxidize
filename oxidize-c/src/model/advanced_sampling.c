@@ -44,7 +44,7 @@ static float compute_entropy(const float *probs, size_t n)
 
 static uint32_t sample_from_probs(const float *probs, size_t n, float u)
 {
-    /* Accumulate until p. */
+    /* Inverse CDF: accumulate until the random draw `u`. */
     float cum = 0.0f;
     for (size_t i = 0; i < n; i++) {
         cum += probs[i];

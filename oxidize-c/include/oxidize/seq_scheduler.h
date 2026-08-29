@@ -88,7 +88,7 @@ OcError oc_seq_sched_init(OcSeqScheduler **out, OcSeqSchedulerConfig config,
  * request is malformed or the id already exists, OC_ERR_OOM if full. */
 OcError oc_seq_sched_add(OcSeqScheduler *sched, const OcSeqRequest *request);
 
-/* Schedule the next batch (prefill + decode). */
+/* Schedule the next batch (prefill + decode). Returns OC_OK even if out_batch.n_seqs == 0. */
 OcError oc_seq_sched_schedule(OcSeqScheduler *sched, OcSeqBatch *out_batch);
 
 /* Append a generated token to a sequence. Transitions WAITING -> RUNNING

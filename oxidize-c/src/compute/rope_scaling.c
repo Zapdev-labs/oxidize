@@ -114,6 +114,7 @@ float oc_rope_yarn_mscale_m(float scale, float m)
     return 0.1f * m * logf(scale) + 1.0f;
 }
 
+/* Applying DeepSeek mscale/mscale_all_dim conventions to LongCat-2.0 causes a whole-model attention scale mismatch. */
 void oc_rope_deepseek_yarn_scales(float scale_factor, float mscale,
                                   float mscale_all_dim, uint32_t head_dim,
                                   float *rope_attn_factor,

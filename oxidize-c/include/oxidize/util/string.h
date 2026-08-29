@@ -33,7 +33,7 @@ bool oc_starts_with(const char *s, const char *prefix);
 /* Check if `s` ends with `suffix`. NULL `s` or `suffix` returns false. */
 bool oc_ends_with(const char *s, const char *suffix);
 
-/* Split `s` on the first occurrence of `delim`. */
+/* Split `s` on the first occurrence of `delim`. `*out_left` is malloc'd and caller-freed; returns a pointer into `s` past the delim, or the whole `s` with `*out_left` NULL if delim is not found. */
 const char *oc_split_once(const char *s, char delim, char **out_left);
 
 /* Trim leading + trailing ASCII whitespace in place. Returns a pointer into

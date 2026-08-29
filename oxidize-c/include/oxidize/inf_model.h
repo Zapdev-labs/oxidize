@@ -181,7 +181,7 @@ OcError oc_inf_model_run_layer_range(OcInferenceModel *m,
                                        size_t pos);
 
 
-/* Generate draft tokens using the native MTP/nextn block. */
+/* Generate draft tokens using the native MTP/nextn block. `out_tokens` must have capacity >= `max_tokens`; `out_logits` must have capacity >= `max_tokens * vocab_size`. Returns OC_ERR_MODEL if no usable MTP block is present. */
 OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
                                         uint32_t start_token,
                                         const float *start_hidden, size_t hidden_len,
@@ -195,13 +195,13 @@ OcError oc_inf_model_draft_mtp_tokens(OcInferenceModel *m,
  * Returns true when the model can use forward_tokens / forward_batch. */
 bool oc_inf_model_layers_supported_for_batched(const OcInferenceModel *m);
 
-/* Batched prefill: process multiple tokens of ONE sequence via GEMM. */
+/* Batched prefill: process multiple tokens of ONE sequence via GEMM. If `need_logits`, `*out_logits` is set to a `vocab_size` buffer and `*out_logits_len` to `vocab_size`. */
 OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
                                       const uint32_t *tokens, size_t n_tokens,
                                       size_t start_pos, bool need_logits,
                                       float **out_logits, size_t *out_logits_len);
 
-/* Cross-sequence batched decode: process N sequences (one token each) via GEMM. */
+/* Cross-sequence batched decode: process N sequences (one token each) via GEMM. When `need_logits`, `out_logits` must have capacity >= `n_seqs * vocab_size`. */
 OcError oc_inf_model_forward_batch(OcInferenceModel *m,
                                      const uint32_t *tokens,
                                      const size_t *positions,

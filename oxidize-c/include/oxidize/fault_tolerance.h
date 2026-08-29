@@ -78,7 +78,7 @@ OcError oc_ft_remove_node(OcFtManager *mgr, uint64_t node_id);
 OcError oc_ft_heartbeat(OcFtManager *mgr, uint64_t node_id,
                         uint64_t current_ms);
 
-/* Periodic tick. For each node, computes elapsed = current_ms - last_heartbeat. */
+/* Periodic tick. If elapsed > heartbeat_timeout_ms, increments missed_count and promotes to SUSPECT; once missed_count >= max_missed, marks DEAD. */
 OcError oc_ft_tick(OcFtManager *mgr, uint64_t current_ms);
 
 
@@ -96,7 +96,7 @@ OcError oc_ft_get_dead_nodes(const OcFtManager *mgr, uint64_t *out_ids,
                              uint32_t max, uint32_t *out_count);
 
 
-/* Mark `node_id` as RECOVERING. */
+/* Mark `node_id` as RECOVERING. The node is promoted to ALIVE on the next heartbeat. Returns OC_ERR_MODEL if not monitored. */
 OcError oc_ft_recover(OcFtManager *mgr, uint64_t node_id);
 
 /* Human-readable status name (e.g. "ALIVE"). Never NULL. */

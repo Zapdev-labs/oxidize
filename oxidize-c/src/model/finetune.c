@@ -37,7 +37,7 @@ OcError oc_finetune_run(const OcFtConfig *cfg)
                 cfg->learning_rate, cfg->max_seq_length);
     }
 
-    /* The full training loop requires: 1. */
+    /* The C path has no autograd, so the training loop is not implemented. */
 
     fprintf(stderr, "finetune: training loop not yet implemented (requires autograd)\n");
     fprintf(stderr, "  Use the Rust oxidize-finetuning crate for actual training.\n");

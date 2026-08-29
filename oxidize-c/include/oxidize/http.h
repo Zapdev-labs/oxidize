@@ -28,7 +28,7 @@ typedef enum {
 
 typedef bool (*OcHttpStreamWrite)(void *context, const char *data, size_t len);
 
-/* A parsed HTTP request. */
+/* A parsed HTTP request. All string fields alias the server-owned request buffer and are valid only for the handler call. */
 typedef struct OcHttpRequest {
     OcHttpMethod method;
     const char *path;             /* e.g. "/v1/chat/completions"            */

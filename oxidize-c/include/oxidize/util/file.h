@@ -15,7 +15,7 @@ extern "C" {
  * (e.g. file not found). Writes size to `*out_size`. */
 OcError oc_file_size(const char *path, uint64_t *out_size);
 
-/* Read the entire file into a freshly malloc'd buffer. */
+/* Read the entire file into a freshly malloc'd buffer. Writes `*out_data` (caller frees) and `*out_size`; returns OC_OK, OC_ERR_IO, OC_ERR_OOM, or OC_ERR_INVALID_ARG. A zero-length file returns OC_OK with an empty buffer, not an error. */
 OcError oc_file_read_all(const char *path, uint8_t **out_data, size_t *out_size);
 
 /* Write `n` bytes to `path`. Truncates the file if it exists. Returns OC_OK

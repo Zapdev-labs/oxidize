@@ -1,7 +1,8 @@
 /* oxk_neon.h — AArch64 Advanced SIMD (NEON) OXK kernel declarations.
  * Bit-exactness VAL-OXK-NEON-001..006: Q4_0/Q4_1/Q8_0/Q4_K/Q5_K are bit-exact
  * (int mul-accum); Q6_K is NOT bit-exact (f32 per 16-element scale-group) and
- * parity tests use a relative tolerance. */
+ * parity tests use a relative tolerance.
+ * Matvec kernels stay on scalar because they accumulate f32 per element. */
 #ifndef OXIDIZE_OXK_NEON_H
 #define OXIDIZE_OXK_NEON_H
 

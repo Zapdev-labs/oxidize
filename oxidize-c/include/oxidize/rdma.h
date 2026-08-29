@@ -46,7 +46,7 @@ OcError oc_rdma_deregister_memory(OcRdmaDevice *dev, OcRdmaRegion *region);
  * an invalid region, OC_ERR_OOM if the staging buffer cannot grow. */
 OcError oc_rdma_send(OcRdmaDevice *dev, const OcRdmaRegion *region,
                      size_t offset, size_t length);
-/* Complete a receive: copies `length` bytes of the staged payload into region[offset ..]. */
+/* Complete a receive: copies `length` bytes of the staged payload into region[offset ..]. Returns OC_ERR_INVALID_ARG on an out-of-range window or an invalid region, OC_ERR_NETWORK if fewer than `length` bytes were staged by a prior send. */
 OcError oc_rdma_receive(OcRdmaDevice *dev, OcRdmaRegion *region,
                         size_t offset, size_t length);
 bool oc_rdma_is_active(const OcRdmaDevice *dev);

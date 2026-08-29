@@ -219,9 +219,7 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
     if (n_items == 0) return OC_OK;
     if (!items) return OC_ERR_INVALID_ARG;
 
-    /* Build a task list. We submit all tasks, then wait. Each task writes
-     * its result into the out_results slot. We use a per-task context that
-     * carries the item and the output slot. */
+    /* Per-item MapContext (fn, item, output slot) submitted via the file-scope trampoline. */
     typedef struct {
         void *(*fn)(void *);
         void  *item;
@@ -231,23 +229,13 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
     MapContext *ctxs = calloc(n_items, sizeof(MapContext));
     if (!ctxs) return OC_ERR_OOM;
 
-    /* Trampoline that extracts the context, calls fn, stores result. */
-    /* We need a stable function pointer; use a local function. */
-    /* Note: this is a static trampoline pattern. */
     for (size_t i = 0; i < n_items; i++) {
         ctxs[i].fn       = fn;
         ctxs[i].item     = items[i];
         ctxs[i].out_slot = out_results ? &out_results[i] : NULL;
     }
 
-    /* We cannot capture ctx in a plain function pointer easily, so we use
-     * a different approach: submit tasks that each run fn(item) and store
-     * the result. We use a thread-local-ish approach via the arg. */
-    /* Allocate a results array if caller didn't provide one. */
-
-    /* Actually, the simplest correct approach: use the arg as the item, call fn directly, and collect results after wait. */
-
-    /* Allocate a results array if caller didn't provide one. */
+    /* Allocate a results array if the caller didn't provide one. */
     void **results = out_results;
     bool allocated_results = false;
     if (!results) {
@@ -259,16 +247,10 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
         allocated_results = true;
     }
 
-    /* Submit tasks using the context as arg and a trampoline. */
-    /* Define trampoline as a local function — C11 allows nested function
-     * definitions? No, standard C does not. Use a file-scope function. */
-
-    /* Use ctxs[i].out_slot to store the result. */
     for (size_t i = 0; i < n_items; i++) {
         ctxs[i].out_slot = &results[i];
     }
 
-    /* File-scope trampoline defined below; we pass &ctxs[i] as arg. */
     extern void *oc_spinpool_map_trampoline(void *arg);
 
     for (size_t i = 0; i < n_items; i++) {

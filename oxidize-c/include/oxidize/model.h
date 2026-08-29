@@ -70,7 +70,7 @@ bool oc_model_arch_uses_shortconv(OcModelArchitecture arch);
  * Gemma and Phi use this pattern. */
 bool oc_model_arch_uses_parallel_attn_ffn(OcModelArchitecture arch);
 
-/* Map a HuggingFace tensor name to the oxidize canonical form for the given architecture. */
+/* Map a HuggingFace tensor name to the oxidize canonical form for the given architecture. Returns an arena-owned, NUL-terminated string (keep `arena` alive); unmatched names return an arena copy of `name`. Returns NULL only on OOM. */
 const char *oc_gguf_map_tensor_name(OcModelArchitecture arch, const char *name,
                                     OcArena *arena);
 

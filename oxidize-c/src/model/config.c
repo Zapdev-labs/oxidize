@@ -269,7 +269,7 @@ uint64_t oc_model_config_n_params(const OcModelConfig *cfg)
     uint64_t attn = hidden * q_out + hidden * kv_out + hidden * kv_out +
                     q_out * hidden;
 
-    /* FFN: for SwiGLU/GEG it is 3 matrices (gate, up, down) of hidden * inter + hidden * inter + inter * hidden. */
+    /* FFN: 3 matrices (gate, up, down). For MoE, scale by n_expert so total params count all experts, not just n_expert_used. */
     uint64_t ffn_per_layer = hidden * inter + hidden * inter + inter * hidden;
     uint64_t ffn = ffn_per_layer;
     if (cfg->n_expert > 0) {

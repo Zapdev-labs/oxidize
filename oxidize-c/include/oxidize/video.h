@@ -13,6 +13,7 @@
 extern "C" {
 #endif
 
+/* A single RGB frame. The frame does NOT own the pixel data; the caller manages the buffer lifecycle. */
 typedef struct OcVideoFrame {
     uint8_t       *rgb;       /* width * height * 3 bytes               */
     uint32_t       width;

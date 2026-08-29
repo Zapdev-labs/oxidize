@@ -58,7 +58,7 @@ OcError oc_turboquant_init(OcTurboQuant *tq, OcTurboQuantConfig config);
  * OC_ERR_INVALID_ARG. */
 OcError oc_turboquant_calibrate(OcTurboQuant *tq, const float *data, size_t n);
 
-/* Quantize `input` (length `n` f32 values) into the output buffer. */
+/* Quantize `input` (length `n` f32) into `output`, which must be at least `oc_quantized_size(config.target_type, n)` bytes. Writes the byte count to `*out_size`. Returns OC_OK, OC_ERR_INVALID_ARG, or OC_ERR_QUANT. */
 OcError oc_turboquant_quantize(OcTurboQuant *tq, const float *input,
                                size_t n, uint8_t *output, size_t *out_size);
 

@@ -66,7 +66,7 @@ static OcSimdCaps detect_caps(void)
         c.name  = "scalar";
     }
 #elif defined(__aarch64__)
-    /* NEON (Advanced SIMD) is mandatory in the AArch64 base architecture — the OXK NEON kernels deliberately do not use them. */
+    /* NEON is mandatory in AArch64; optional extensions (dotprod / i8mm) are deliberately unused. */
     c.level    = OC_SIMD_NEON;
     c.has_neon = true;
     c.name     = "neon";
