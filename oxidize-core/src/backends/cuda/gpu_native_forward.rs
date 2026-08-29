@@ -147,14 +147,7 @@ pub(super) fn ox_gpu_lmhead_multirow_enabled() -> bool {
 /// up GEMV, silu_mul) and two intermediate-size VRAM round-trips into one.
 /// Numerically identical; only applies when both gate and up weights are Q4_K.
 #[cfg(feature = "cuda")]
-pub(super) fn ox_gpu_ffn_fuse_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("OX_GPU_FFN_FUSE")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
-    })
-}
+crate::cuda::ox_env_flag!(ox_gpu_ffn_fuse_enabled, "OX_GPU_FFN_FUSE", false);
 
 pub(super) const fn select_ffn_fusion(
     gate_is_q4k: bool,

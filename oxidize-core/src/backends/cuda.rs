@@ -9,6 +9,25 @@ const QK_K: usize = 256;
 const BLOCK_Q4_K_SIZE: usize = 144;
 const BLOCK_Q8_K_BYTES: usize = 4 + QK_K + 32;
 
+/// Stamp a cached env-flag getter: `ox_env_flag!(name, "OX_ENV", default)`
+/// reads `OX_ENV` once per process. "0" (or empty) disables; any other value
+/// enables; unset uses `default`. This is the semantics every OX_GPU_* flag
+/// in the CUDA backends already used.
+#[allow(unused_macros)]
+macro_rules! ox_env_flag {
+    ($name:ident, $env:literal, $default:literal) => {
+        pub(super) fn $name() -> bool {
+            static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ENABLED.get_or_init(|| {
+                std::env::var($env)
+                    .map(|v| v != "0" && !v.is_empty())
+                    .unwrap_or($default)
+            })
+        }
+    };
+}
+pub(crate) use ox_env_flag;
+
 pub const GEMV_KERNEL_NAME: &str = "gemv_f32_kernel";
 pub const GEMV_Q8_0_KERNEL_NAME: &str = "gemv_q8_0_f32_kernel";
 pub const GEMV_F16_KERNEL_NAME: &str = "gemv_f16_kernel";
