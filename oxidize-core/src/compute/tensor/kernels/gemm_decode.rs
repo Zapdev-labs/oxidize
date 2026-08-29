@@ -543,11 +543,11 @@ pub(super) fn dot_f32_fast(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
-/// Fast batched Q4_K GEMM path: for each output row, walk each 144-byte block
-/// once, decode it into a 256-element f32 scratch buffer, then for each batch
-/// token compute `scratch · input_chunk` with AVX2 FMA. Decode cost is paid
-/// once per row block; the dot product is paid per token but hits L1 since both
-/// operands are tiny.
+// Fast batched Q4_K GEMM path: for each output row, walk each 144-byte block
+// once, decode it into a 256-element f32 scratch buffer, then for each batch
+// token compute `scratch · input_chunk` with AVX2 FMA. Decode cost is paid
+// once per row block; the dot product is paid per token but hits L1 since both
+// operands are tiny.
 oc_gemm_decode_dispatch!(
     gemm_q4_k_decode_once,
     gemm_q4_k_decode_once_avx2,
@@ -697,7 +697,7 @@ pub(super) unsafe fn gemm_q4_k_decode_once_avx2(
     Ok(())
 }
 
-/// Fast batched Q8_0 GEMM, same shape as [`gemm_q4_k_decode_once`].
+// Fast batched Q8_0 GEMM, same shape as [`gemm_q4_k_decode_once`].
 oc_gemm_decode_dispatch!(
     gemm_q8_0_decode_once,
     BLOCK_Q8_0_SIZE,
