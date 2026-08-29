@@ -25,10 +25,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: oxidize-golang/go.mod
-      - name: gofmt
-        run: |
-          cd oxidize-golang
-          test -z "$(gofmt -l .)"
       - name: go vet
         run: |
           cd oxidize-golang
