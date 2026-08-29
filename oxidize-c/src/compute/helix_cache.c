@@ -734,10 +734,6 @@ OcError oc_helix_cache_append(OcHelixCache *cache,
                 }
             }
         }
-        if (take == 0) {
-            if (is_new) page_reset(page);
-            return OC_ERR_INVALID_ARG;
-        }
         e = extend_hot_page(page, d, take, pre_rope_keys + offset * d,
                             values + offset * d, positions + offset);
         if (e != OC_OK) {
