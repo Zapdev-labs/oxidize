@@ -24,7 +24,5 @@ Test(dspark, pairwise_conf_tied)
     cr_assert_float_eq(c, 0.5f, 0.01f);
 }
 
-Test(dspark, advance_null)
-{
-    cr_assert_neq(oc_dspark_advance(NULL, NULL, NULL, NULL, 0, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(dspark, advance_null,
+        cr_assert_neq(oc_dspark_advance(NULL, NULL, NULL, NULL, 0, NULL, NULL), OC_OK);)

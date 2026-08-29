@@ -13,10 +13,8 @@ Test(eagle, config_init)
     cr_assert(cfg.dynamic_draft);
 }
 
-Test(eagle, config_init_null)
-{
-    cr_assert_neq(oc_eagle_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(eagle, config_init_null,
+        cr_assert_neq(oc_eagle_config_init(NULL), OC_OK);)
 
 Test(eagle, state_init)
 {
@@ -29,10 +27,8 @@ Test(eagle, state_init)
     oc_eagle_state_free(&state);
 }
 
-Test(eagle, state_init_null)
-{
-    cr_assert_neq(oc_eagle_state_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(eagle, state_init_null,
+        cr_assert_neq(oc_eagle_state_init(NULL, NULL), OC_OK);)
 
 Test(eagle, state_init_default)
 {
@@ -106,10 +102,8 @@ Test(eagle, n_draft)
     oc_eagle_state_free(&state);
 }
 
-Test(eagle, n_draft_null)
-{
-    cr_assert_eq(oc_eagle_n_draft(NULL), 0);
-}
+OC_TEST_NULL_SAFE(eagle, n_draft_null,
+        cr_assert_eq(oc_eagle_n_draft(NULL), 0);)
 
 Test(eagle, update_acceptance)
 {
@@ -141,10 +135,8 @@ Test(eagle, generate_custom_max)
     oc_eagle_state_free(&state);
 }
 
-Test(eagle, free_null)
-{
-    oc_eagle_state_free(NULL);
-}
+OC_TEST_NULL_SAFE(eagle, free_null,
+        oc_eagle_state_free(NULL);)
 
 Test(eagle, multiple_generate)
 {

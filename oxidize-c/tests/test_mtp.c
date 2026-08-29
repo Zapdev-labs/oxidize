@@ -27,10 +27,8 @@ Test(mtp, engine_init)
     oc_mtp_engine_free(&engine);
 }
 
-Test(mtp, engine_init_null)
-{
-    cr_assert_neq(oc_mtp_engine_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mtp, engine_init_null,
+        cr_assert_neq(oc_mtp_engine_init(NULL, NULL), OC_OK);)
 
 Test(mtp, engine_init_bad_config)
 {
@@ -185,12 +183,8 @@ Test(mtp, draft_no_mtp)
     oc_mtp_engine_free(&engine);
 }
 
-Test(mtp, draft_null_args)
-{
-    cr_assert_neq(oc_mtp_draft(NULL, 0, NULL, 0, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mtp, draft_null_args,
+        cr_assert_neq(oc_mtp_draft(NULL, 0, NULL, 0, 0, NULL), OC_OK);)
 
-Test(mtp, free_null)
-{
-    oc_mtp_engine_free(NULL);
-}
+OC_TEST_NULL_SAFE(mtp, free_null,
+        oc_mtp_engine_free(NULL);)

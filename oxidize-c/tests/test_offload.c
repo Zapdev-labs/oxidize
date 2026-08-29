@@ -42,8 +42,5 @@ Test(offload, forward_uninitialized)
     cr_assert_neq(oc_offload_forward(&pipe, 0, logits), OC_OK);
 }
 
-Test(offload, free_null_safety)
-{
-    /* Should not crash. */
-    oc_offload_free(NULL);
-}
+OC_TEST_NULL_SAFE(offload, free_null_safety,
+        oc_offload_free(NULL);)

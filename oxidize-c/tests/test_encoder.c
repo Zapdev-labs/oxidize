@@ -47,10 +47,7 @@ Test(encoder, init_with_custom_config)
     oc_encoder_pipeline_free(&pipe);
 }
 
-Test(encoder, init_null_pipe)
-{
-    cr_assert_eq(oc_encoder_pipeline_init(NULL, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(encoder, init_null_pipe, oc_encoder_pipeline_init(NULL, NULL))
 
 Test(encoder, free_null_is_safe)
 {

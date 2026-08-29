@@ -14,10 +14,8 @@ Test(ssm, conv_ring_init)
     oc_ssm_conv_ring_free(&ring);
 }
 
-Test(ssm, conv_ring_init_null)
-{
-    cr_assert_neq(oc_ssm_conv_ring_init(NULL, 4, 8), OC_OK);
-}
+OC_TEST_NULL_SAFE(ssm, conv_ring_init_null,
+        cr_assert_neq(oc_ssm_conv_ring_init(NULL, 4, 8), OC_OK);)
 
 Test(ssm, conv_ring_push)
 {
@@ -92,10 +90,8 @@ Test(ssm, engine_init)
     oc_ssm_engine_free(&engine);
 }
 
-Test(ssm, engine_init_null)
-{
-    cr_assert_neq(oc_ssm_engine_init(NULL, 1, 1, 1, 1), OC_OK);
-}
+OC_TEST_NULL_SAFE(ssm, engine_init_null,
+        cr_assert_neq(oc_ssm_engine_init(NULL, 1, 1, 1, 1), OC_OK);)
 
 Test(ssm, engine_init_bad_args)
 {
@@ -194,7 +190,5 @@ Test(ssm, reset)
     oc_ssm_engine_free(&engine);
 }
 
-Test(ssm, free_null)
-{
-    oc_ssm_engine_free(NULL);
-}
+OC_TEST_NULL_SAFE(ssm, free_null,
+        oc_ssm_engine_free(NULL);)

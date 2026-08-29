@@ -91,10 +91,8 @@ Test(mlx_inference, load_null_path)
     oc_mlx_engine_free(&eng);
 }
 
-Test(mlx_inference, load_null_engine)
-{
-    cr_assert_eq(oc_mlx_engine_load(NULL, "/tmp/x"), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(mlx_inference, load_null_engine,
+        cr_assert_eq(oc_mlx_engine_load(NULL, "/tmp/x"), OC_ERR_INVALID_ARG, "");)
 
 /* ─── generate ─────────────────────────────────────────────────────── */
 

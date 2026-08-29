@@ -14,10 +14,8 @@ Test(loader, load_null_path)
     cr_assert_neq(oc_loader_load(NULL, &r), OC_OK);
 }
 
-Test(loader, load_null_result)
-{
-    cr_assert_neq(oc_loader_load("/tmp/x.gguf", NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(loader, load_null_result,
+        cr_assert_neq(oc_loader_load("/tmp/x.gguf", NULL), OC_OK);)
 
 Test(loader, load_nonexistent)
 {
@@ -35,10 +33,8 @@ Test(loader, detect_arch_null_path)
     cr_assert_neq(oc_loader_detect_arch(NULL, arch, sizeof(arch)), OC_OK);
 }
 
-Test(loader, detect_arch_null_out)
-{
-    cr_assert_neq(oc_loader_detect_arch("/tmp/x.gguf", NULL, 64), OC_OK);
-}
+OC_TEST_NULL_SAFE(loader, detect_arch_null_out,
+        cr_assert_neq(oc_loader_detect_arch("/tmp/x.gguf", NULL, 64), OC_OK);)
 
 Test(loader, detect_arch_nonexistent)
 {
@@ -114,10 +110,8 @@ Test(loader, arch_name_by_index)
     cr_assert(strlen(name0) > 0);
 }
 
-Test(loader, arch_name_out_of_range)
-{
-    cr_assert_eq(oc_loader_arch_name(99999), NULL);
-}
+OC_TEST_NULL_SAFE(loader, arch_name_out_of_range,
+        cr_assert_eq(oc_loader_arch_name(99999), NULL);)
 
 Test(loader, arch_name_roundtrip)
 {
@@ -156,10 +150,8 @@ Test(loader, load_with_arch_nonexistent)
     oc_loader_unload(&r);
 }
 
-Test(loader, unload_null_safe)
-{
-    oc_loader_unload(NULL);
-}
+OC_TEST_NULL_SAFE(loader, unload_null_safe,
+        oc_loader_unload(NULL);)
 
 Test(loader, unload_zeros_result)
 {

@@ -14,10 +14,8 @@ Test(vpre, image_init)
     oc_image_free(&img);
 }
 
-Test(vpre, image_init_null)
-{
-    cr_assert_neq(oc_image_init(NULL, 10, 10), OC_OK);
-}
+OC_TEST_NULL_SAFE(vpre, image_init_null,
+        cr_assert_neq(oc_image_init(NULL, 10, 10), OC_OK);)
 
 Test(vpre, image_from_rgb)
 {
@@ -41,10 +39,8 @@ Test(vpre, image_free)
     cr_assert_eq(img.width, 0);
 }
 
-Test(vpre, image_free_null)
-{
-    cr_assert_eq(oc_image_free(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vpre, image_free_null,
+        cr_assert_eq(oc_image_free(NULL), OC_OK);)
 
 Test(vpre, config_init)
 {
@@ -57,10 +53,8 @@ Test(vpre, config_init)
     cr_assert_float_eq(cfg.mean[0], 0.48145466f, 0.0001f);
 }
 
-Test(vpre, config_init_null)
-{
-    cr_assert_neq(oc_preprocess_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vpre, config_init_null,
+        cr_assert_neq(oc_preprocess_config_init(NULL), OC_OK);)
 
 Test(vpre, resize)
 {
@@ -80,10 +74,8 @@ Test(vpre, resize)
     oc_image_free(&dst);
 }
 
-Test(vpre, resize_null)
-{
-    cr_assert_neq(oc_preprocess_resize(NULL, NULL, 0, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(vpre, resize_null,
+        cr_assert_neq(oc_preprocess_resize(NULL, NULL, 0, 0), OC_OK);)
 
 Test(vpre, center_crop)
 {
@@ -131,10 +123,8 @@ Test(vpre, normalize)
     oc_image_free(&img);
 }
 
-Test(vpre, normalize_null)
-{
-    cr_assert_neq(oc_preprocess_normalize(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vpre, normalize_null,
+        cr_assert_neq(oc_preprocess_normalize(NULL, NULL, NULL), OC_OK);)
 
 Test(vpre, full_pipeline)
 {
@@ -157,10 +147,8 @@ Test(vpre, full_pipeline)
     oc_image_free(&img);
 }
 
-Test(vpre, full_pipeline_null)
-{
-    cr_assert_neq(oc_preprocess_full(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vpre, full_pipeline_null,
+        cr_assert_neq(oc_preprocess_full(NULL, NULL, NULL), OC_OK);)
 
 Test(vpre, resize_uneven)
 {

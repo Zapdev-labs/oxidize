@@ -11,10 +11,8 @@ Test(numa, detect)
     cr_assert(topo.n_cpus_total >= 1);
 }
 
-Test(numa, detect_null)
-{
-    cr_assert_neq(oc_numa_detect(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(numa, detect_null,
+        cr_assert_neq(oc_numa_detect(NULL), OC_OK);)
 
 Test(numa, available)
 {
@@ -112,10 +110,8 @@ Test(numa, describe)
     cr_assert(strstr(buf, "NUMA") != NULL);
 }
 
-Test(numa, describe_null)
-{
-    cr_assert_neq(oc_numa_describe(NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(numa, describe_null,
+        cr_assert_neq(oc_numa_describe(NULL, NULL, 0), OC_OK);)
 
 Test(numa, recommended_threads)
 {
@@ -125,10 +121,8 @@ Test(numa, recommended_threads)
     cr_assert(threads >= 1);
 }
 
-Test(numa, recommended_threads_null)
-{
-    cr_assert_eq(oc_numa_recommended_threads(NULL), 1);
-}
+OC_TEST_NULL_SAFE(numa, recommended_threads_null,
+        cr_assert_eq(oc_numa_recommended_threads(NULL), 1);)
 
 Test(numa, alloc_free)
 {
@@ -152,10 +146,8 @@ Test(numa, alloc_interleaved)
     oc_numa_free(ptr, 2 * 1024 * 1024);
 }
 
-Test(numa, alloc_null_free)
-{
-    oc_numa_free(NULL, 0);
-}
+OC_TEST_NULL_SAFE(numa, alloc_null_free,
+        oc_numa_free(NULL, 0);)
 
 Test(numa, addr_node)
 {

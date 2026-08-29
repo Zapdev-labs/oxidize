@@ -23,10 +23,8 @@ Test(disc, init_defaults)
     oc_discovery_free(&state);
 }
 
-Test(disc, init_null)
-{
-    cr_assert_neq(oc_discovery_init(NULL, 1, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(disc, init_null,
+        cr_assert_neq(oc_discovery_init(NULL, 1, NULL, 0), OC_OK);)
 
 Test(disc, add_seed)
 {
@@ -49,10 +47,8 @@ Test(disc, add_seed_duplicate)
     oc_discovery_free(&state);
 }
 
-Test(disc, add_seed_null)
-{
-    cr_assert_neq(oc_discovery_add_seed(NULL, 0, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(disc, add_seed_null,
+        cr_assert_neq(oc_discovery_add_seed(NULL, 0, NULL, 0), OC_OK);)
 
 Test(disc, receive_peer_new)
 {
@@ -159,10 +155,8 @@ Test(disc, has_peer)
     oc_discovery_free(&state);
 }
 
-Test(disc, has_peer_null)
-{
-    cr_assert(!oc_discovery_has_peer(NULL, 0));
-}
+OC_TEST_NULL_SAFE(disc, has_peer_null,
+        cr_assert(!oc_discovery_has_peer(NULL, 0));)
 
 Test(disc, remove_peer)
 {
@@ -192,7 +186,5 @@ Test(disc, announce)
     oc_discovery_free(&state);
 }
 
-Test(disc, free_null)
-{
-    oc_discovery_free(NULL);
-}
+OC_TEST_NULL_SAFE(disc, free_null,
+        oc_discovery_free(NULL);)

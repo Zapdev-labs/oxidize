@@ -16,10 +16,8 @@ Test(diff, config_init)
     cr_assert_float_eq(cfg.guidance_scale, 7.5f, 1e-6f);
 }
 
-Test(diff, config_init_null)
-{
-    cr_assert_neq(oc_diff_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(diff, config_init_null,
+        cr_assert_neq(oc_diff_config_init(NULL), OC_OK);)
 
 Test(diff, scheduler_init)
 {
@@ -34,10 +32,8 @@ Test(diff, scheduler_init)
     oc_diff_scheduler_free(&sched);
 }
 
-Test(diff, scheduler_init_null)
-{
-    cr_assert_neq(oc_diff_scheduler_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(diff, scheduler_init_null,
+        cr_assert_neq(oc_diff_scheduler_init(NULL, NULL), OC_OK);)
 
 Test(diff, scheduler_init_default_config)
 {
@@ -88,10 +84,8 @@ Test(diff, state_init)
     oc_diff_state_free(&state);
 }
 
-Test(diff, state_init_null)
-{
-    cr_assert_neq(oc_diff_state_init(NULL, 64, 1, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(diff, state_init_null,
+        cr_assert_neq(oc_diff_state_init(NULL, 64, 1, 0), OC_OK);)
 
 Test(diff, state_add_noise)
 {

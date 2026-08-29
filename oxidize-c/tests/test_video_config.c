@@ -24,12 +24,9 @@ Test(video_config, init_defaults)
     cr_assert_eq(cfg.max_video_tokens, 256u, "default max_video_tokens");
 }
 
-Test(video_config, init_null_is_noop)
-{
-    /* Must not crash. */
-    oc_video_config_init(NULL);
-    cr_assert(true, "init(NULL) did not crash");
-}
+OC_TEST_NULL_SAFE(video_config, init_null_is_noop,
+        oc_video_config_init(NULL);
+        cr_assert(true, "init(NULL) did not crash");)
 
 /* ─── validate ─────────────────────────────────────────────────────── */
 
@@ -40,10 +37,8 @@ Test(video_config, validate_good_default)
     cr_assert_eq(oc_video_config_validate(&cfg), OC_OK, "default validates");
 }
 
-Test(video_config, validate_null)
-{
-    cr_assert_eq(oc_video_config_validate(NULL), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(video_config, validate_null,
+        cr_assert_eq(oc_video_config_validate(NULL), OC_ERR_INVALID_ARG, "");)
 
 Test(video_config, validate_zero_target_frames)
 {
@@ -151,7 +146,5 @@ Test(video_config, n_tokens_capped)
     cr_assert_eq(oc_video_config_n_tokens(&cfg), 64u, "capped to max");
 }
 
-Test(video_config, n_tokens_null)
-{
-    cr_assert_eq(oc_video_config_n_tokens(NULL), 0u, "");
-}
+OC_TEST_NULL_SAFE(video_config, n_tokens_null,
+        cr_assert_eq(oc_video_config_n_tokens(NULL), 0u, "");)

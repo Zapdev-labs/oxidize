@@ -10,10 +10,8 @@ Test(det, cpu)
     cr_assert(strlen(info.model_name) > 0);
 }
 
-Test(det, cpu_null)
-{
-    cr_assert_neq(oc_detect_cpu(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(det, cpu_null,
+        cr_assert_neq(oc_detect_cpu(NULL), OC_OK);)
 
 Test(det, all)
 {
@@ -23,10 +21,8 @@ Test(det, all)
     cr_assert(info.n_logical > 0 || info.n_cores > 0);
 }
 
-Test(det, all_null)
-{
-    cr_assert_neq(oc_detect_all(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(det, all_null,
+        cr_assert_neq(oc_detect_all(NULL), OC_OK);)
 
 Test(det, simd_level)
 {
@@ -37,10 +33,8 @@ Test(det, simd_level)
     cr_assert(strlen(level) > 0);
 }
 
-Test(det, simd_level_null)
-{
-    cr_assert_str_eq(oc_detect_simd_level(NULL), "none");
-}
+OC_TEST_NULL_SAFE(det, simd_level_null,
+        cr_assert_str_eq(oc_detect_simd_level(NULL), "none");)
 
 Test(det, supports_vnni)
 {
@@ -50,10 +44,8 @@ Test(det, supports_vnni)
     (void)oc_detect_supports_vnni(&info);
 }
 
-Test(det, supports_vnni_null)
-{
-    cr_assert(!oc_detect_supports_vnni(NULL));
-}
+OC_TEST_NULL_SAFE(det, supports_vnni_null,
+        cr_assert(!oc_detect_supports_vnni(NULL));)
 
 Test(det, is_server)
 {
@@ -62,10 +54,8 @@ Test(det, is_server)
     (void)oc_detect_is_server(&info);
 }
 
-Test(det, is_server_null)
-{
-    cr_assert(!oc_detect_is_server(NULL));
-}
+OC_TEST_NULL_SAFE(det, is_server_null,
+        cr_assert(!oc_detect_is_server(NULL));)
 
 Test(det, recommended_threads)
 {
@@ -75,10 +65,8 @@ Test(det, recommended_threads)
     cr_assert(threads > 0);
 }
 
-Test(det, recommended_threads_null)
-{
-    cr_assert_eq(oc_detect_recommended_threads(NULL), 4);
-}
+OC_TEST_NULL_SAFE(det, recommended_threads_null,
+        cr_assert_eq(oc_detect_recommended_threads(NULL), 4);)
 
 Test(det, print)
 {
@@ -90,11 +78,8 @@ Test(det, print)
     cr_assert(strstr(out, "CPU:") != NULL);
 }
 
-Test(det, print_null)
-{
-    oc_detect_print(NULL, NULL, 0);
-    /* should not crash */
-}
+OC_TEST_NULL_SAFE(det, print_null,
+        oc_detect_print(NULL, NULL, 0);)
 
 Test(det, numa)
 {

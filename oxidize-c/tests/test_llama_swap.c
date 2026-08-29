@@ -36,10 +36,8 @@ Test(swap, init_free)
     oc_model_swap_free(&sw);
 }
 
-Test(swap, init_null)
-{
-    cr_assert_neq(oc_model_swap_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(swap, init_null,
+        cr_assert_neq(oc_model_swap_init(NULL), OC_OK);)
 
 Test(swap, register)
 {
@@ -154,10 +152,8 @@ Test(swap, info)
     oc_model_swap_free(&sw);
 }
 
-Test(swap, info_null)
-{
-    cr_assert_neq(oc_model_swap_info(NULL, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(swap, info_null,
+        cr_assert_neq(oc_model_swap_info(NULL, 0, NULL), OC_OK);)
 
 Test(swap, info_out_of_range)
 {

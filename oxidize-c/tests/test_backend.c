@@ -31,10 +31,8 @@ Test(backend, detect_cpu)
     cr_assert_str_eq(info.name, "cpu");
 }
 
-Test(backend, detect_null)
-{
-    cr_assert_neq(oc_backend_detect(OC_BACKEND_CPU, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(backend, detect_null,
+        cr_assert_neq(oc_backend_detect(OC_BACKEND_CPU, NULL), OC_OK);)
 
 Test(backend, detect_invalid_type)
 {
@@ -85,10 +83,8 @@ Test(backend, init_cpu)
     oc_backend_free(&b);
 }
 
-Test(backend, init_null)
-{
-    cr_assert_neq(oc_backend_init(NULL, OC_BACKEND_CPU), OC_OK);
-}
+OC_TEST_NULL_SAFE(backend, init_null,
+        cr_assert_neq(oc_backend_init(NULL, OC_BACKEND_CPU), OC_OK);)
 
 Test(backend, init_invalid_type)
 {
@@ -96,10 +92,8 @@ Test(backend, init_invalid_type)
     cr_assert_neq(oc_backend_init(&b, (OcBackendType)999), OC_OK);
 }
 
-Test(backend, free_null_safe)
-{
-    oc_backend_free(NULL);
-}
+OC_TEST_NULL_SAFE(backend, free_null_safe,
+        oc_backend_free(NULL);)
 
 Test(backend, free_after_init)
 {

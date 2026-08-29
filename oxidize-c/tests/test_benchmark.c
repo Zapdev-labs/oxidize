@@ -50,8 +50,6 @@ Test(bench, oxk_benchmark)
     cr_assert(r.q8_0_tok_per_sec > 0.0);
 }
 
-Test(bench, null_args)
-{
-    cr_assert_neq(oc_benchmark_run(NULL, NULL, NULL), OC_OK);
-    cr_assert_neq(oc_benchmark_scaling(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(bench, null_args,
+        cr_assert_neq(oc_benchmark_run(NULL, NULL, NULL), OC_OK);
+        cr_assert_neq(oc_benchmark_scaling(NULL, NULL), OC_OK);)

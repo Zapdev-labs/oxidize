@@ -12,10 +12,8 @@ Test(gpu, config_init)
     cr_assert_eq(cfg.batch_timeout_ms, 10);
 }
 
-Test(gpu, config_init_null)
-{
-    cr_assert_neq(oc_gpu_dispatch_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(gpu, config_init_null,
+        cr_assert_neq(oc_gpu_dispatch_config_init(NULL), OC_OK);)
 
 Test(gpu, task_type_name)
 {
@@ -35,10 +33,8 @@ Test(gpu, init_free)
     oc_gpu_dispatch_free(d);
 }
 
-Test(gpu, init_null_out)
-{
-    cr_assert_neq(oc_gpu_dispatch_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(gpu, init_null_out,
+        cr_assert_neq(oc_gpu_dispatch_init(NULL, NULL), OC_OK);)
 
 Test(gpu, detect_no_cuda)
 {
@@ -143,10 +139,8 @@ Test(gpu, get_device_none)
     oc_gpu_dispatch_free(d);
 }
 
-Test(gpu, get_device_invalid_args)
-{
-    cr_assert_neq(oc_gpu_dispatch_get_device(NULL, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(gpu, get_device_invalid_args,
+        cr_assert_neq(oc_gpu_dispatch_get_device(NULL, 0, NULL), OC_OK);)
 
 Test(gpu, n_devices)
 {
@@ -156,10 +150,8 @@ Test(gpu, n_devices)
     oc_gpu_dispatch_free(d);
 }
 
-Test(gpu, free_null_safe)
-{
-    oc_gpu_dispatch_free(NULL);
-}
+OC_TEST_NULL_SAFE(gpu, free_null_safe,
+        oc_gpu_dispatch_free(NULL);)
 
 Test(gpu, init_custom_queue_size)
 {
@@ -178,7 +170,5 @@ Test(gpu, init_custom_queue_size)
     oc_gpu_dispatch_free(d);
 }
 
-Test(gpu, detect_null)
-{
-    cr_assert_neq(oc_gpu_dispatch_detect(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(gpu, detect_null,
+        cr_assert_neq(oc_gpu_dispatch_detect(NULL), OC_OK);)

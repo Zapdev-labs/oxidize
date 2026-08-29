@@ -105,10 +105,8 @@ Test(lw, config_init)
     cr_assert(cfg.available_memory > 0);
 }
 
-Test(lw, config_init_null)
-{
-    cr_assert_neq(oc_lw_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(lw, config_init_null,
+        cr_assert_neq(oc_lw_config_init(NULL), OC_OK);)
 
 Test(lw, state_init)
 {
@@ -119,10 +117,8 @@ Test(lw, state_init)
     oc_lw_state_free(&state);
 }
 
-Test(lw, state_init_null)
-{
-    cr_assert_neq(oc_lw_state_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(lw, state_init_null,
+        cr_assert_neq(oc_lw_state_init(NULL, NULL), OC_OK);)
 
 Test(lw, state_init_custom)
 {
@@ -292,10 +288,8 @@ Test(lw, unload_not_loaded)
     oc_lw_state_free(&state);
 }
 
-Test(lw, free_null)
-{
-    oc_lw_state_free(NULL);
-}
+OC_TEST_NULL_SAFE(lw, free_null,
+        oc_lw_state_free(NULL);)
 
 /* ─── Forward pass tests ────────────────────────────────────────────── */
 

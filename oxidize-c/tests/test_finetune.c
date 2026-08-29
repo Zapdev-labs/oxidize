@@ -11,10 +11,8 @@ Test(ft, strategy_name)
     cr_assert_str_eq(oc_ft_strategy_name(OC_FT_PPO), "ppo");
 }
 
-Test(ft, null_config)
-{
-    cr_assert_neq(oc_finetune_run(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ft, null_config,
+        cr_assert_neq(oc_finetune_run(NULL), OC_OK);)
 
 Test(ft, format_sft)
 {

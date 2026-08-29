@@ -116,10 +116,7 @@ Test(distributed, validate_config_multi_node)
     cr_assert_eq(oc_distributed_validate_config(&cfg), OC_OK);
 }
 
-Test(distributed, validate_config_reject_null)
-{
-    cr_assert_eq(oc_distributed_validate_config(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(distributed, validate_config_reject_null, oc_distributed_validate_config(NULL))
 
 Test(distributed, validate_config_reject_zero_nodes)
 {
@@ -223,10 +220,8 @@ Test(distributed, role_tensor_parallel)
               "expected TENSOR_PARALLEL or PIPELINE_MASTER for TP>1");
 }
 
-Test(distributed, role_null_config)
-{
-    cr_assert_eq(oc_distributed_resolve_role(NULL), OC_NODE_ROLE_NONE);
-}
+OC_TEST_NULL_SAFE(distributed, role_null_config,
+        cr_assert_eq(oc_distributed_resolve_role(NULL), OC_NODE_ROLE_NONE);)
 
 /* ------------------------------------------------------------------ */
 /* Stats                                                              */
@@ -256,10 +251,8 @@ Test(distributed, stats_init_zero)
     oc_distributed_free(&sched);
 }
 
-Test(distributed, stats_null_scheduler)
-{
-    cr_assert_null(oc_distributed_get_stats(NULL));
-}
+OC_TEST_NULL_SAFE(distributed, stats_null_scheduler,
+        cr_assert_null(oc_distributed_get_stats(NULL));)
 
 /* ------------------------------------------------------------------ */
 /* Single-node operation (no communication needed)                    */
@@ -365,11 +358,8 @@ Test(distributed, null_config_init)
     cr_assert_eq(oc_distributed_init(&sched, NULL), OC_ERR_INVALID_ARG);
 }
 
-Test(distributed, free_null)
-{
-    /* Should not crash. */
-    oc_distributed_free(NULL);
-}
+OC_TEST_NULL_SAFE(distributed, free_null,
+        oc_distributed_free(NULL);)
 
 Test(distributed, send_null_data_nonzero_count)
 {
@@ -412,10 +402,7 @@ Test(distributed, all_reduce_null_data_nonzero_count)
     oc_distributed_free(&sched);
 }
 
-Test(distributed, barrier_null_scheduler)
-{
-    cr_assert_eq(oc_distributed_barrier(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(distributed, barrier_null_scheduler, oc_distributed_barrier(NULL))
 
 Test(distributed, operations_on_uninit_scheduler)
 {
@@ -534,10 +521,7 @@ Test(distributed, reconnect_single_node_no_peers)
     oc_distributed_free(&sched);
 }
 
-Test(distributed, reconnect_null_scheduler)
-{
-    cr_assert_eq(oc_distributed_reconnect(NULL, 0), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(distributed, reconnect_null_scheduler, oc_distributed_reconnect(NULL, 0))
 
 /* ------------------------------------------------------------------ */
 /* Multi-node pipeline edge cases                                     */

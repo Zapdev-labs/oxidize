@@ -23,10 +23,7 @@ Test(block_pool, init_free)
     cr_assert_null(pool.slab);
 }
 
-Test(block_pool, init_null)
-{
-    cr_assert_eq(oc_blkpool_init(NULL, 8, 64), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(block_pool, init_null, oc_blkpool_init(NULL, 8, 64))
 
 Test(block_pool, init_invalid_args)
 {
@@ -79,10 +76,8 @@ Test(block_pool, alloc_exhaustion)
     oc_blkpool_free_pool(&pool);
 }
 
-Test(block_pool, alloc_on_null)
-{
-    cr_assert_eq(oc_blkpool_alloc(NULL), OC_BLKPOOL_INVALID);
-}
+OC_TEST_NULL_SAFE(block_pool, alloc_on_null,
+        cr_assert_eq(oc_blkpool_alloc(NULL), OC_BLKPOOL_INVALID);)
 
 Test(block_pool, free_returns_to_pool)
 {

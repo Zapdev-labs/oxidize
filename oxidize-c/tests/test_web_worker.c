@@ -14,10 +14,8 @@ Test(ww, init)
     oc_web_worker_free(&ww);
 }
 
-Test(ww, init_null)
-{
-    cr_assert_neq(oc_web_worker_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ww, init_null,
+        cr_assert_neq(oc_web_worker_init(NULL), OC_OK);)
 
 Test(ww, send)
 {
@@ -161,10 +159,8 @@ Test(ww, queue_size)
     oc_web_worker_free(&ww);
 }
 
-Test(ww, queue_size_null)
-{
-    cr_assert_eq(oc_web_worker_queue_size(NULL), 0);
-}
+OC_TEST_NULL_SAFE(ww, queue_size_null,
+        cr_assert_eq(oc_web_worker_queue_size(NULL), 0);)
 
 Test(ww, next_id)
 {
@@ -184,10 +180,8 @@ Test(ww, msg_type_name)
     cr_assert_str_eq(oc_web_worker_msg_type_name(OC_WW_MSG_ERROR), "error");
 }
 
-Test(ww, free_null)
-{
-    oc_web_worker_free(NULL);
-}
+OC_TEST_NULL_SAFE(ww, free_null,
+        oc_web_worker_free(NULL);)
 
 Test(ww, send_after_free)
 {

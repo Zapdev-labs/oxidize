@@ -77,16 +77,10 @@ Test(model_registry, init_clamps_max)
     oc_model_registry_free(&reg);
 }
 
-Test(model_registry, init_null)
-{
-    cr_assert_eq(oc_model_registry_init(NULL, "/tmp", 4), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(model_registry, init_null, oc_model_registry_init(NULL, "/tmp", 4))
 
-Test(model_registry, free_null)
-{
-    /* Should not crash. */
-    oc_model_registry_free(NULL);
-}
+OC_TEST_NULL_SAFE(model_registry, free_null,
+        oc_model_registry_free(NULL);)
 
 /* ─── add / remove ──────────────────────────────────────────────────────── */
 

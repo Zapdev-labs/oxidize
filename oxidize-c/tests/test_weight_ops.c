@@ -30,10 +30,8 @@ Test(wops, gemv_f32_identity)
     cr_assert_float_eq(y[1], 4.0f, 0.001f);
 }
 
-Test(wops, gemv_f32_null)
-{
-    cr_assert_neq(oc_gemv_f32(NULL, 1, 1, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(wops, gemv_f32_null,
+        cr_assert_neq(oc_gemv_f32(NULL, 1, 1, NULL, NULL), OC_OK);)
 
 Test(wops, gemv_f32_zero_dim)
 {

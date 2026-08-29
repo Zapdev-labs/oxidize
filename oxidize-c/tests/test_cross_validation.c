@@ -133,10 +133,8 @@ Test(cross_validation, compare_single_element)
 
 /* ─── passed() ──────────────────────────────────────────────────────── */
 
-Test(cross_validation, passed_null_returns_false)
-{
-    cr_assert(!oc_cross_validation_passed(NULL));
-}
+OC_TEST_NULL_SAFE(cross_validation, passed_null_returns_false,
+        cr_assert(!oc_cross_validation_passed(NULL));)
 
 Test(cross_validation, passed_exact_tolerance_boundary)
 {

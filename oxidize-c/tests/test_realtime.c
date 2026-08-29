@@ -57,10 +57,8 @@ Test(realtime, parse_missing_type_field)
                  OC_RT_MSG_UNKNOWN);
 }
 
-Test(realtime, parse_null_json)
-{
-    cr_assert_eq(oc_realtime_parse_type(NULL, 0), OC_RT_MSG_UNKNOWN);
-}
+OC_TEST_NULL_SAFE(realtime, parse_null_json,
+        cr_assert_eq(oc_realtime_parse_type(NULL, 0), OC_RT_MSG_UNKNOWN);)
 
 /* ─── Event formatting ─────────────────────────────────────────────────────── */
 

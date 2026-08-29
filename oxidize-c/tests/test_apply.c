@@ -18,10 +18,8 @@ Test(apply, result_init)
     cr_assert_not(r.applied, "");
 }
 
-Test(apply, result_init_null)
-{
-    cr_assert_eq(oc_apply_result_init(NULL), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(apply, result_init_null,
+        cr_assert_eq(oc_apply_result_init(NULL), OC_ERR_INVALID_ARG, "");)
 
 Test(apply, apply_plan_basic)
 {

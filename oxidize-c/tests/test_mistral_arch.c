@@ -20,10 +20,7 @@ Test(mistral, config_init_defaults)
     cr_assert_eq(cfg.max_position, 32768);
 }
 
-Test(mistral, config_init_null)
-{
-    cr_assert_eq(oc_mistral_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(mistral, config_init_null, oc_mistral_config_init(NULL))
 
 Test(mistral, model_init_default)
 {
@@ -54,10 +51,7 @@ Test(mistral, model_init_custom_config)
     oc_mistral_free(&model);
 }
 
-Test(mistral, model_init_null)
-{
-    cr_assert_eq(oc_mistral_model_init(NULL, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(mistral, model_init_null, oc_mistral_model_init(NULL, NULL))
 
 Test(mistral, model_init_bad_config)
 {
@@ -125,10 +119,8 @@ Test(mistral, forward_custom_vocab)
     oc_mistral_free(&model);
 }
 
-Test(mistral, free_null)
-{
-    oc_mistral_free(NULL);
-}
+OC_TEST_NULL_SAFE(mistral, free_null,
+        oc_mistral_free(NULL);)
 
 Test(mistral, free_idempotent_safe)
 {

@@ -16,10 +16,8 @@ Test(seqkv, init)
     oc_seq_kv_free(&kv);
 }
 
-Test(seqkv, init_null)
-{
-    cr_assert_neq(oc_seq_kv_init(NULL, 1, 1, 1), OC_OK);
-}
+OC_TEST_NULL_SAFE(seqkv, init_null,
+        cr_assert_neq(oc_seq_kv_init(NULL, 1, 1, 1), OC_OK);)
 
 Test(seqkv, init_bad_args)
 {
@@ -167,7 +165,5 @@ Test(seqkv, capacity)
     oc_seq_kv_free(&kv);
 }
 
-Test(seqkv, free_null)
-{
-    oc_seq_kv_free(NULL);
-}
+OC_TEST_NULL_SAFE(seqkv, free_null,
+        oc_seq_kv_free(NULL);)

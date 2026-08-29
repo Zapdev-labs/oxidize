@@ -17,11 +17,9 @@ Test(mloader, init_free)
     oc_model_loader_free(&loader);
 }
 
-Test(mloader, init_null)
-{
-    cr_assert_neq(oc_model_loader_init(NULL, "/tmp/t.gguf"), OC_OK);
-    cr_assert_neq(oc_model_loader_init((OcModelLoader[]){0}, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mloader, init_null,
+        cr_assert_neq(oc_model_loader_init(NULL, "/tmp/t.gguf"), OC_OK);
+        cr_assert_neq(oc_model_loader_init((OcModelLoader[]){0}, NULL), OC_OK);)
 
 Test(mloader, arch_name)
 {
@@ -64,10 +62,8 @@ Test(mloader, get_tensor_empty)
     oc_model_loader_free(&loader);
 }
 
-Test(mloader, get_tensor_null)
-{
-    cr_assert_neq(oc_model_loader_get_tensor(NULL, "x", NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mloader, get_tensor_null,
+        cr_assert_neq(oc_model_loader_get_tensor(NULL, "x", NULL), OC_OK);)
 
 Test(mloader, list_tensors_empty)
 {
@@ -80,10 +76,8 @@ Test(mloader, list_tensors_empty)
     oc_model_loader_free(&loader);
 }
 
-Test(mloader, list_tensors_null)
-{
-    cr_assert_neq(oc_model_loader_list_tensors(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mloader, list_tensors_null,
+        cr_assert_neq(oc_model_loader_list_tensors(NULL, NULL, NULL), OC_OK);)
 
 Test(mloader, param_count_empty)
 {
@@ -93,10 +87,8 @@ Test(mloader, param_count_empty)
     oc_model_loader_free(&loader);
 }
 
-Test(mloader, param_count_null)
-{
-    cr_assert_eq(oc_model_loader_param_count(NULL), 0);
-}
+OC_TEST_NULL_SAFE(mloader, param_count_null,
+        cr_assert_eq(oc_model_loader_param_count(NULL), 0);)
 
 Test(mloader, double_load)
 {

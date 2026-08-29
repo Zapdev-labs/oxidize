@@ -147,10 +147,8 @@ Test(video, aggregate_attn)
     oc_video_embedding_free(&emb);
 }
 
-Test(video, aggregate_null)
-{
-    cr_assert_neq(oc_video_aggregate(NULL, 3, 4, OC_TEMPORAL_MEAN, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(video, aggregate_null,
+        cr_assert_neq(oc_video_aggregate(NULL, 3, 4, OC_TEMPORAL_MEAN, NULL), OC_OK);)
 
 Test(video, prompt_create)
 {

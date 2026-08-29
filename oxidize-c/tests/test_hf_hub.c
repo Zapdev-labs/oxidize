@@ -40,10 +40,7 @@ Test(hf_hub, config_init_explicit_cache)
     cr_assert_str_eq(cfg.cache_dir, "/tmp/oxidize-test-hf");
 }
 
-Test(hf_hub, config_init_rejects_null)
-{
-    cr_assert_eq(oc_hf_config_init(NULL, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(hf_hub, config_init_rejects_null, oc_hf_config_init(NULL, NULL))
 
 Test(hf_hub, config_init_preserves_token)
 {
@@ -177,10 +174,8 @@ Test(hf_hub, parse_quant_none_for_no_quant)
     cr_assert(!oc_hf_parse_quant_type(NULL, qt, sizeof(qt)));
 }
 
-Test(hf_hub, parse_quant_null_out)
-{
-    cr_assert(!oc_hf_parse_quant_type("model.Q4_K_M.gguf", NULL, 0));
-}
+OC_TEST_NULL_SAFE(hf_hub, parse_quant_null_out,
+        cr_assert(!oc_hf_parse_quant_type("model.Q4_K_M.gguf", NULL, 0));)
 
 /* ─── Repo ID sanitization ───────────────────────────────────────────── */
 
@@ -199,10 +194,7 @@ Test(hf_hub, sanitize_repo_id_nested)
     cr_assert_str_eq(out, "a_b_c");
 }
 
-Test(hf_hub, sanitize_repo_id_rejects_null)
-{
-    cr_assert_eq(oc_hf_sanitize_repo_id(NULL, NULL, 0), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(hf_hub, sanitize_repo_id_rejects_null, oc_hf_sanitize_repo_id(NULL, NULL, 0))
 
 Test(hf_hub, sanitize_repo_id_rejects_too_long)
 {
@@ -314,10 +306,7 @@ Test(hf_hub, cache_size_rejects_null)
     cr_assert_eq(oc_hf_cache_size(NULL, &sz), OC_ERR_INVALID_ARG);
 }
 
-Test(hf_hub, cache_clean_rejects_null)
-{
-    cr_assert_eq(oc_hf_cache_clean(NULL, 0, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(hf_hub, cache_clean_rejects_null, oc_hf_cache_clean(NULL, 0, NULL))
 
 /* ─── Cache listing (empty cache) ────────────────────────────────────── */
 

@@ -29,10 +29,8 @@ Test(video_decoder, list_init_with_capacity)
     oc_video_frame_list_free(&list);
 }
 
-Test(video_decoder, list_init_null)
-{
-    cr_assert_eq(oc_video_frame_list_init(NULL, 4), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(video_decoder, list_init_null,
+        cr_assert_eq(oc_video_frame_list_init(NULL, 4), OC_ERR_INVALID_ARG, "");)
 
 Test(video_decoder, list_free_null_is_safe)
 {
@@ -205,7 +203,5 @@ Test(video_decoder, list_size_bytes)
     oc_video_frame_list_free(&list);
 }
 
-Test(video_decoder, list_size_bytes_null)
-{
-    cr_assert_eq(oc_video_frame_list_size_bytes(NULL), 0u, "");
-}
+OC_TEST_NULL_SAFE(video_decoder, list_size_bytes_null,
+        cr_assert_eq(oc_video_frame_list_size_bytes(NULL), 0u, "");)

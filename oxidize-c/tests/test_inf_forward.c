@@ -613,10 +613,8 @@ Test(inf_fwd, layers_supported_for_batched)
     oc_inf_model_free(&m);
 }
 
-Test(inf_fwd, layers_supported_null)
-{
-    cr_assert_eq(oc_inf_model_layers_supported_for_batched(NULL), false);
-}
+OC_TEST_NULL_SAFE(inf_fwd, layers_supported_null,
+        cr_assert_eq(oc_inf_model_layers_supported_for_batched(NULL), false);)
 
 Test(inf_fwd, forward_tokens_batched)
 {

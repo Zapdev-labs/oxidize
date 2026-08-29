@@ -260,10 +260,8 @@ Test(safetensors, n_tensors)
     unlink(path);
 }
 
-Test(safetensors, n_tensors_null)
-{
-    cr_assert_eq(oc_safetensors_n_tensors(NULL), 0);
-}
+OC_TEST_NULL_SAFE(safetensors, n_tensors_null,
+        cr_assert_eq(oc_safetensors_n_tensors(NULL), 0);)
 
 Test(safetensors, open_null_args)
 {

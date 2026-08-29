@@ -3,10 +3,8 @@
 #include "oxidize/safetensors_to_gguf.h"
 #include <string.h>
 
-Test(st_to_gguf, null_config)
-{
-    cr_assert_neq(oc_safetensors_to_gguf(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(st_to_gguf, null_config,
+        cr_assert_neq(oc_safetensors_to_gguf(NULL), OC_OK);)
 
 Test(st_to_gguf, null_paths)
 {

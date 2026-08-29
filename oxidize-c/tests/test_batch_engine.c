@@ -24,16 +24,12 @@ Test(batch, engine_init)
     oc_batch_engine_free(engine);
 }
 
-Test(batch, engine_init_null)
-{
-    cr_assert_neq(oc_batch_engine_init(NULL, NULL, 1, 1), OC_OK);
-}
+OC_TEST_NULL_SAFE(batch, engine_init_null,
+        cr_assert_neq(oc_batch_engine_init(NULL, NULL, 1, 1), OC_OK);)
 
-Test(batch, engine_init_bad_kv)
-{
-    OcBatchEngine *engine = NULL;
-    cr_assert_neq(oc_batch_engine_init(&engine, NULL, 0, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(batch, engine_init_bad_kv,
+        OcBatchEngine *engine = NULL;
+        cr_assert_neq(oc_batch_engine_init(&engine, NULL, 0, 0), OC_OK);)
 
 Test(batch, submit)
 {
@@ -49,10 +45,8 @@ Test(batch, submit)
     oc_batch_engine_free(engine);
 }
 
-Test(batch, submit_null)
-{
-    cr_assert_neq(oc_batch_submit(NULL, NULL, 0, 0, 0, false, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(batch, submit_null,
+        cr_assert_neq(oc_batch_submit(NULL, NULL, 0, 0, 0, false, NULL), OC_OK);)
 
 Test(batch, submit_empty_prompt)
 {
@@ -208,10 +202,8 @@ Test(batch, total_submitted)
     oc_batch_engine_free(engine);
 }
 
-Test(batch, free_null)
-{
-    oc_batch_engine_free(NULL);
-}
+OC_TEST_NULL_SAFE(batch, free_null,
+        oc_batch_engine_free(NULL);)
 
 /* ─── Forward callback tests ─────────────────────────────────────────── */
 
@@ -278,10 +270,8 @@ Test(batch, forward_null_falls_back_to_simulated)
     oc_batch_engine_free(engine);
 }
 
-Test(batch, set_forward_null_engine)
-{
-    cr_assert_neq(oc_batch_set_forward(NULL, (OcBatchForward){0}), OC_OK);
-}
+OC_TEST_NULL_SAFE(batch, set_forward_null_engine,
+        cr_assert_neq(oc_batch_set_forward(NULL, (OcBatchForward){0}), OC_OK);)
 
 static OcError test_forward_err(void *ctx, uint32_t token, size_t pos,
                                 OcSeqId seq_id, uint32_t *out_token)

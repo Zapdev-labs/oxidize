@@ -12,10 +12,8 @@ Test(topo, init)
     oc_topology_free(&topo);
 }
 
-Test(topo, init_null)
-{
-    cr_assert_neq(oc_topology_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(topo, init_null,
+        cr_assert_neq(oc_topology_init(NULL), OC_OK);)
 
 Test(topo, add_node)
 {
@@ -186,7 +184,5 @@ Test(topo, n_regions)
     oc_topology_free(&topo);
 }
 
-Test(topo, free_null)
-{
-    oc_topology_free(NULL);
-}
+OC_TEST_NULL_SAFE(topo, free_null,
+        oc_topology_free(NULL);)

@@ -70,10 +70,8 @@ Test(context_cache, init_free)
     oc_context_cache_free(cc);
 }
 
-Test(context_cache, init_null_config)
-{
-    cr_assert_null(oc_context_cache_init(NULL));
-}
+OC_TEST_NULL_SAFE(context_cache, init_null_config,
+        cr_assert_null(oc_context_cache_init(NULL));)
 
 Test(context_cache, init_creates_cache_dir)
 {
@@ -88,10 +86,8 @@ Test(context_cache, init_creates_cache_dir)
     (void)system("rm -rf /tmp/ox_ctx_cache_init_test");
 }
 
-Test(context_cache, free_null_safe)
-{
-    oc_context_cache_free(NULL);
-}
+OC_TEST_NULL_SAFE(context_cache, free_null_safe,
+        oc_context_cache_free(NULL);)
 
 /* ------------------------------------------------------------------ */
 /* store / load roundtrip                                              */

@@ -12,15 +12,11 @@ Test(conv, config_init)
     cr_assert(cfg.copy_metadata);
 }
 
-Test(conv, config_init_null)
-{
-    cr_assert_neq(oc_conv_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(conv, config_init_null,
+        cr_assert_neq(oc_conv_config_init(NULL), OC_OK);)
 
-Test(conv, run_null)
-{
-    cr_assert_neq(oc_conv_run(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(conv, run_null,
+        cr_assert_neq(oc_conv_run(NULL, NULL), OC_OK);)
 
 Test(conv, run_no_input)
 {
@@ -59,10 +55,8 @@ Test(conv, quant_from_str_invalid)
     cr_assert_neq(oc_conv_quant_type_from_str("INVALID", &q), OC_OK);
 }
 
-Test(conv, quant_from_str_null)
-{
-    cr_assert_neq(oc_conv_quant_type_from_str(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(conv, quant_from_str_null,
+        cr_assert_neq(oc_conv_quant_type_from_str(NULL, NULL), OC_OK);)
 
 Test(conv, quant_name)
 {

@@ -72,10 +72,8 @@ Test(moe, router_init_bad_config)
     cr_assert_neq(oc_moe_router_init(&r, &c4), OC_OK);
 }
 
-Test(moe, router_free_null_safety)
-{
-    oc_moe_router_free(NULL);  /* should not crash */
-}
+OC_TEST_NULL_SAFE(moe, router_free_null_safety,
+        oc_moe_router_free(NULL);  /* should not crash */)
 
 /* ─── Set gate / experts ─────────────────────────────────────────────── */
 
@@ -118,10 +116,8 @@ Test(moe, router_set_experts)
     oc_moe_router_free(&r);
 }
 
-Test(moe, router_set_gate_null_router)
-{
-    cr_assert_neq(oc_moe_router_set_gate(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(moe, router_set_gate_null_router,
+        cr_assert_neq(oc_moe_router_set_gate(NULL, NULL), OC_OK);)
 
 /* ─── Routing ────────────────────────────────────────────────────────── */
 
@@ -475,10 +471,8 @@ Test(moe, stats_null_args)
     oc_moe_router_free(&r);
 }
 
-Test(moe, stats_free_null)
-{
-    oc_moe_stats_free(NULL);  /* should not crash */
-}
+OC_TEST_NULL_SAFE(moe, stats_free_null,
+        oc_moe_stats_free(NULL);  /* should not crash */)
 
 /* ─── JSON format ─────────────────────────────────────────────────────── */
 

@@ -50,10 +50,8 @@ Test(qa, recommend_memory)
     cr_assert(r.estimated_size_gb < 5.0);
 }
 
-Test(qa, recommend_null)
-{
-    cr_assert_neq(oc_quant_recommend(0, 0, OC_QUANT_GOAL_SPEED, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(qa, recommend_null,
+        cr_assert_neq(oc_quant_recommend(0, 0, OC_QUANT_GOAL_SPEED, NULL), OC_OK);)
 
 Test(qa, metrics_format_json)
 {

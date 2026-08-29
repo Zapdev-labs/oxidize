@@ -16,10 +16,8 @@ Test(rope, config_init)
     cr_assert_float_eq(cfg.beta_slow, 1.0f, 0.001f);
 }
 
-Test(rope, config_init_null)
-{
-    cr_assert_neq(oc_rope_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(rope, config_init_null,
+        cr_assert_neq(oc_rope_config_init(NULL), OC_OK);)
 
 Test(rope, scale_factor_none)
 {
@@ -272,10 +270,8 @@ Test(rope, apply_to_tensor_multihead)
     cr_assert_eq(oc_rope_apply_to_tensor(&cfg, 10, tensor, 64, 2, 10000.0f), OC_OK);
 }
 
-Test(rope, apply_to_tensor_null)
-{
-    cr_assert_neq(oc_rope_apply_to_tensor(NULL, 0, NULL, 64, 1, 10000.0f), OC_OK);
-}
+OC_TEST_NULL_SAFE(rope, apply_to_tensor_null,
+        cr_assert_neq(oc_rope_apply_to_tensor(NULL, 0, NULL, 64, 1, 10000.0f), OC_OK);)
 
 Test(rope, type_name)
 {

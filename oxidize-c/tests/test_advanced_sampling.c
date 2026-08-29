@@ -36,10 +36,8 @@ Test(asamp, mirostat_v1_uses_caller_rng_state)
     cr_assert_float_eq(mu_a, mu_b, 1e-6f);
 }
 
-Test(asamp, mirostat_v1_null)
-{
-    cr_assert_eq(oc_sample_mirostat_v1(NULL, 5, NULL, 5.0f, 0.1f, NULL), 0);
-}
+OC_TEST_NULL_SAFE(asamp, mirostat_v1_null,
+        cr_assert_eq(oc_sample_mirostat_v1(NULL, 5, NULL, 5.0f, 0.1f, NULL), 0);)
 
 Test(asamp, mirostat_v2)
 {
@@ -58,10 +56,8 @@ Test(asamp, tfs_basic)
     cr_assert(token < 5);
 }
 
-Test(asamp, tfs_null)
-{
-    cr_assert_eq(oc_sample_tfs(NULL, 5, 0.95f, 1.0f), 0);
-}
+OC_TEST_NULL_SAFE(asamp, tfs_null,
+        cr_assert_eq(oc_sample_tfs(NULL, 5, 0.95f, 1.0f), 0);)
 
 Test(asamp, typical_basic)
 {
@@ -114,15 +110,11 @@ Test(asamp, beam_search_init)
     oc_beam_search_free(&st);
 }
 
-Test(asamp, beam_search_null)
-{
-    cr_assert_neq(oc_beam_search_init(NULL, 4, 20, 1.0f, 0, 1), OC_OK);
-}
+OC_TEST_NULL_SAFE(asamp, beam_search_null,
+        cr_assert_neq(oc_beam_search_init(NULL, 4, 20, 1.0f, 0, 1), OC_OK);)
 
-Test(asamp, beam_search_done_empty)
-{
-    cr_assert(oc_beam_search_done(NULL));
-}
+OC_TEST_NULL_SAFE(asamp, beam_search_done_empty,
+        cr_assert(oc_beam_search_done(NULL));)
 
 Test(asamp, beam_search_best)
 {
@@ -135,10 +127,8 @@ Test(asamp, beam_search_best)
     oc_beam_search_free(&st);
 }
 
-Test(asamp, contrastive_null)
-{
-    cr_assert_eq(oc_sample_contrastive(NULL, 5, NULL, NULL, 0, 0, 0.5f, 0.5f), 0);
-}
+OC_TEST_NULL_SAFE(asamp, contrastive_null,
+        cr_assert_eq(oc_sample_contrastive(NULL, 5, NULL, NULL, 0, 0, 0.5f, 0.5f), 0);)
 
 Test(asamp, contrastive_basic)
 {
@@ -216,7 +206,5 @@ Test(asamp, chain_mirostat_v1_advances_chain_rng)
     oc_sampler_chain_free(&chain);
 }
 
-Test(asamp, chain_add_null)
-{
-    cr_assert_neq(oc_sampler_chain_add(NULL, OC_SAMPLER_STEP_TEMPERATURE, 0.8f, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(asamp, chain_add_null,
+        cr_assert_neq(oc_sampler_chain_add(NULL, OC_SAMPLER_STEP_TEMPERATURE, 0.8f, 0), OC_OK);)

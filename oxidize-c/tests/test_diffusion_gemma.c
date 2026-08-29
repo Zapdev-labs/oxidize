@@ -16,10 +16,8 @@ Test(dg, config_init)
     cr_assert_eq(cfg.sampler, OC_DIFF_GEMMA_FLOW_MATCH);
 }
 
-Test(dg, config_init_null)
-{
-    cr_assert_neq(oc_diff_gemma_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(dg, config_init_null,
+        cr_assert_neq(oc_diff_gemma_config_init(NULL), OC_OK);)
 
 Test(dg, model_init)
 {
@@ -44,10 +42,8 @@ Test(dg, model_init_custom)
     oc_diff_gemma_free(&model);
 }
 
-Test(dg, model_init_null)
-{
-    cr_assert_neq(oc_diff_gemma_model_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(dg, model_init_null,
+        cr_assert_neq(oc_diff_gemma_model_init(NULL, NULL), OC_OK);)
 
 Test(dg, model_init_bad)
 {
@@ -76,10 +72,8 @@ Test(dg, forward_uninit)
     cr_assert_neq(oc_diff_gemma_forward(&model, 0, 0, logits), OC_OK);
 }
 
-Test(dg, forward_null)
-{
-    cr_assert_neq(oc_diff_gemma_forward(NULL, 0, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(dg, forward_null,
+        cr_assert_neq(oc_diff_gemma_forward(NULL, 0, 0, NULL), OC_OK);)
 
 Test(dg, sample)
 {
@@ -100,10 +94,8 @@ Test(dg, denoise)
     oc_diff_gemma_free(&model);
 }
 
-Test(dg, denoise_null)
-{
-    cr_assert_neq(oc_diff_gemma_denoise(NULL, NULL, 0, 0, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(dg, denoise_null,
+        cr_assert_neq(oc_diff_gemma_denoise(NULL, NULL, 0, 0, 0), OC_OK);)
 
 Test(dg, sampler_name)
 {
@@ -113,10 +105,8 @@ Test(dg, sampler_name)
     cr_assert_str_eq(oc_diff_gemma_sampler_name(OC_DIFF_GEMMA_FLOW_MATCH), "flow_match");
 }
 
-Test(dg, free_null)
-{
-    oc_diff_gemma_free(NULL);
-}
+OC_TEST_NULL_SAFE(dg, free_null,
+        oc_diff_gemma_free(NULL);)
 
 Test(dg, free_reuse)
 {

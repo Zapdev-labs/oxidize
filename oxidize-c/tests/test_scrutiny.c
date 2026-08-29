@@ -11,10 +11,8 @@ Test(scrutiny, config_init)
     cr_assert(cfg.block_on_violation);
 }
 
-Test(scrutiny, config_init_null)
-{
-    cr_assert_neq(oc_scrutiny_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(scrutiny, config_init_null,
+        cr_assert_neq(oc_scrutiny_config_init(NULL), OC_OK);)
 
 Test(scrutiny, add_banned_phrase)
 {
@@ -126,10 +124,8 @@ Test(scrutiny, check_pii_clean)
     cr_assert(result.passed);
 }
 
-Test(scrutiny, check_null)
-{
-    cr_assert_neq(oc_scrutiny_check(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(scrutiny, check_null,
+        cr_assert_neq(oc_scrutiny_check(NULL, NULL, NULL), OC_OK);)
 
 Test(scrutiny, check_tokens_max)
 {
@@ -153,10 +149,8 @@ Test(scrutiny, check_tokens_min)
     cr_assert(!result.passed);
 }
 
-Test(scrutiny, result_passed_null)
-{
-    cr_assert(oc_scrutiny_result_passed(NULL));
-}
+OC_TEST_NULL_SAFE(scrutiny, result_passed_null,
+        cr_assert(oc_scrutiny_result_passed(NULL));)
 
 Test(scrutiny, rule_type_name)
 {
@@ -166,10 +160,8 @@ Test(scrutiny, rule_type_name)
     cr_assert_str_eq(oc_scrutiny_rule_type_name(OC_SCRUTINY_RULE_TOXICITY), "toxicity");
 }
 
-Test(scrutiny, result_free_null)
-{
-    oc_scrutiny_result_free(NULL);
-}
+OC_TEST_NULL_SAFE(scrutiny, result_free_null,
+        oc_scrutiny_result_free(NULL);)
 
 Test(scrutiny, multiple_violations)
 {

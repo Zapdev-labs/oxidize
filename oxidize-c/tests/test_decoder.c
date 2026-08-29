@@ -16,10 +16,7 @@ Test(decoder, config_init_defaults)
     cr_assert(cfg.add_space_prefix);
 }
 
-Test(decoder, config_init_null)
-{
-    cr_assert_eq(oc_decoder_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(decoder, config_init_null, oc_decoder_config_init(NULL))
 
 /* ─── Init tests ────────────────────────────────────────────────────────── */
 
@@ -46,10 +43,7 @@ Test(decoder, init_custom_config)
     oc_decoder_free(&dec);
 }
 
-Test(decoder, init_null)
-{
-    cr_assert_eq(oc_decoder_init(NULL, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(decoder, init_null, oc_decoder_init(NULL, NULL))
 
 Test(decoder, free_null_safe)
 {
@@ -190,7 +184,5 @@ Test(decoder, n_decoded)
     oc_decoder_free(&dec);
 }
 
-Test(decoder, n_decoded_null)
-{
-    cr_assert_eq(oc_decoder_n_decoded(NULL), 0u);
-}
+OC_TEST_NULL_SAFE(decoder, n_decoded_null,
+        cr_assert_eq(oc_decoder_n_decoded(NULL), 0u);)

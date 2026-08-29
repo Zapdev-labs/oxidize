@@ -22,15 +22,10 @@ Test(sse, init_free)
     cr_assert(!c.in_use);
 }
 
-Test(sse, init_null)
-{
-    cr_assert_eq(oc_sse_init(NULL, 1), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(sse, init_null, oc_sse_init(NULL, 1))
 
-Test(sse, free_null)
-{
-    oc_sse_free(NULL);
-}
+OC_TEST_NULL_SAFE(sse, free_null,
+        oc_sse_free(NULL);)
 
 /* ─── format_event ───────────────────────────────────────────────────────── */
 
@@ -271,15 +266,10 @@ Test(sse_server, init_clamps_max)
     oc_sse_server_free(&s);
 }
 
-Test(sse_server, init_null)
-{
-    cr_assert_eq(oc_sse_server_init(NULL, 8), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(sse_server, init_null, oc_sse_server_init(NULL, 8))
 
-Test(sse_server, free_null)
-{
-    oc_sse_server_free(NULL);
-}
+OC_TEST_NULL_SAFE(sse_server, free_null,
+        oc_sse_server_free(NULL);)
 
 /* ─── accept / disconnect ────────────────────────────────────────────────── */
 

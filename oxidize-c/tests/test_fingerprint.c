@@ -12,10 +12,8 @@ Test(fp, init)
     cr_assert_float_eq(fp.rope_theta, 10000.0f, 0.1f);
 }
 
-Test(fp, init_null)
-{
-    cr_assert_neq(oc_fingerprint_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(fp, init_null,
+        cr_assert_neq(oc_fingerprint_init(NULL), OC_OK);)
 
 Test(fp, from_file_notfound)
 {
@@ -23,10 +21,8 @@ Test(fp, from_file_notfound)
     cr_assert_neq(oc_fingerprint_from_file("/nonexistent.gguf", &fp), OC_OK);
 }
 
-Test(fp, from_file_null)
-{
-    cr_assert_neq(oc_fingerprint_from_file(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(fp, from_file_null,
+        cr_assert_neq(oc_fingerprint_from_file(NULL, NULL), OC_OK);)
 
 Test(fp, validate_empty)
 {
@@ -43,10 +39,8 @@ Test(fp, validate_ok)
     cr_assert_eq(oc_fingerprint_validate(&fp), OC_OK);
 }
 
-Test(fp, validate_null)
-{
-    cr_assert_neq(oc_fingerprint_validate(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(fp, validate_null,
+        cr_assert_neq(oc_fingerprint_validate(NULL), OC_OK);)
 
 Test(fp, is_quantized)
 {
@@ -57,10 +51,8 @@ Test(fp, is_quantized)
     cr_assert(oc_fingerprint_is_quantized(&fp));
 }
 
-Test(fp, is_quantized_null)
-{
-    cr_assert(!oc_fingerprint_is_quantized(NULL));
-}
+OC_TEST_NULL_SAFE(fp, is_quantized_null,
+        cr_assert(!oc_fingerprint_is_quantized(NULL));)
 
 Test(fp, is_moe)
 {
@@ -84,10 +76,8 @@ Test(fp, has_gqa)
     cr_assert(!oc_fingerprint_has_gqa(&fp));
 }
 
-Test(fp, has_gqa_null)
-{
-    cr_assert(!oc_fingerprint_has_gqa(NULL));
-}
+OC_TEST_NULL_SAFE(fp, has_gqa_null,
+        cr_assert(!oc_fingerprint_has_gqa(NULL));)
 
 Test(fp, model_size_gb)
 {
@@ -97,10 +87,8 @@ Test(fp, model_size_gb)
     cr_assert_float_eq(oc_fingerprint_model_size_gb(&fp), 4.0, 0.01);
 }
 
-Test(fp, model_size_null)
-{
-    cr_assert_eq(oc_fingerprint_model_size_gb(NULL), 0.0);
-}
+OC_TEST_NULL_SAFE(fp, model_size_null,
+        cr_assert_eq(oc_fingerprint_model_size_gb(NULL), 0.0);)
 
 Test(fp, bits_per_param)
 {

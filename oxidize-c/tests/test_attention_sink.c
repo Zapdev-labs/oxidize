@@ -11,10 +11,8 @@ Test(sink, config_init)
     cr_assert_eq(cfg.window_size, 4096);
 }
 
-Test(sink, config_init_null)
-{
-    cr_assert_neq(oc_attn_sink_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(sink, config_init_null,
+        cr_assert_neq(oc_attn_sink_config_init(NULL), OC_OK);)
 
 Test(sink, init_free)
 {
@@ -223,10 +221,8 @@ Test(sink, size_empty)
     oc_attn_sink_free(&sink);
 }
 
-Test(sink, size_null)
-{
-    cr_assert_eq(oc_attn_sink_size(NULL), 0);
-}
+OC_TEST_NULL_SAFE(sink, size_null,
+        cr_assert_eq(oc_attn_sink_size(NULL), 0);)
 
 Test(sink, get_null)
 {
@@ -247,10 +243,8 @@ Test(sink, get_out_of_range)
     oc_attn_sink_free(&sink);
 }
 
-Test(sink, append_null)
-{
-    cr_assert_neq(oc_attn_sink_append(NULL, NULL, NULL, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(sink, append_null,
+        cr_assert_neq(oc_attn_sink_append(NULL, NULL, NULL, 0, NULL), OC_OK);)
 
 Test(sink, evict_empty)
 {

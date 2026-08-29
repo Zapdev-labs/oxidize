@@ -222,10 +222,8 @@ Test(gpu_cluster, node_pool_yaml_invalid_family)
     cr_assert_neq(oc_gpu_cluster_node_pool_yaml(OC_GPU_FAMILY__COUNT, 1, buf, sizeof(buf)), OC_OK);
 }
 
-Test(gpu_cluster, node_pool_yaml_null_out)
-{
-    cr_assert_neq(oc_gpu_cluster_node_pool_yaml(OC_GPU_FAMILY_B200, 1, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(gpu_cluster, node_pool_yaml_null_out,
+        cr_assert_neq(oc_gpu_cluster_node_pool_yaml(OC_GPU_FAMILY_B200, 1, NULL, 0), OC_OK);)
 
 Test(gpu_cluster, node_pool_yaml_overflow)
 {
@@ -270,7 +268,5 @@ Test(gpu_cluster, device_plugin_yaml_invalid_family)
     cr_assert_neq(oc_gpu_cluster_device_plugin_yaml(OC_GPU_FAMILY__COUNT, buf, sizeof(buf)), OC_OK);
 }
 
-Test(gpu_cluster, device_plugin_yaml_null_out)
-{
-    cr_assert_neq(oc_gpu_cluster_device_plugin_yaml(OC_GPU_FAMILY_B200, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(gpu_cluster, device_plugin_yaml_null_out,
+        cr_assert_neq(oc_gpu_cluster_device_plugin_yaml(OC_GPU_FAMILY_B200, NULL, 0), OC_OK);)

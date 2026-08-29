@@ -13,10 +13,8 @@ Test(ring, init_free)
     oc_ring_free(&ring);
 }
 
-Test(ring, init_null)
-{
-    cr_assert_neq(oc_ring_init(NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(ring, init_null,
+        cr_assert_neq(oc_ring_init(NULL, 0), OC_OK);)
 
 Test(ring, add_node)
 {
@@ -39,10 +37,8 @@ Test(ring, add_duplicate)
     oc_ring_free(&ring);
 }
 
-Test(ring, add_null)
-{
-    cr_assert_neq(oc_ring_add_node(NULL, 0, "a", 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(ring, add_null,
+        cr_assert_neq(oc_ring_add_node(NULL, 0, "a", 0), OC_OK);)
 
 Test(ring, remove_node)
 {

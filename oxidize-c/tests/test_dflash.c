@@ -13,10 +13,8 @@ Test(dflash, config_init)
     cr_assert(cfg.adaptive);
 }
 
-Test(dflash, config_init_null)
-{
-    cr_assert_neq(oc_dflash_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(dflash, config_init_null,
+        cr_assert_neq(oc_dflash_config_init(NULL), OC_OK);)
 
 Test(dflash, state_init)
 {
@@ -27,10 +25,8 @@ Test(dflash, state_init)
     oc_dflash_state_free(&state);
 }
 
-Test(dflash, state_init_null)
-{
-    cr_assert_neq(oc_dflash_state_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(dflash, state_init_null,
+        cr_assert_neq(oc_dflash_state_init(NULL, NULL), OC_OK);)
 
 Test(dflash, set_draft)
 {
@@ -44,10 +40,8 @@ Test(dflash, set_draft)
     oc_dflash_state_free(&state);
 }
 
-Test(dflash, set_draft_null)
-{
-    cr_assert_neq(oc_dflash_set_draft(NULL, NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(dflash, set_draft_null,
+        cr_assert_neq(oc_dflash_set_draft(NULL, NULL, NULL, 0), OC_OK);)
 
 Test(dflash, set_target)
 {
@@ -153,10 +147,8 @@ Test(dflash, get_accepted)
     oc_dflash_state_free(&state);
 }
 
-Test(dflash, verify_null)
-{
-    cr_assert_neq(oc_dflash_verify(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(dflash, verify_null,
+        cr_assert_neq(oc_dflash_verify(NULL, NULL, NULL), OC_OK);)
 
 Test(dflash, set_draft_overflow)
 {
@@ -172,10 +164,8 @@ Test(dflash, set_draft_overflow)
     oc_dflash_state_free(&state);
 }
 
-Test(dflash, free_null)
-{
-    oc_dflash_state_free(NULL);
-}
+OC_TEST_NULL_SAFE(dflash, free_null,
+        oc_dflash_state_free(NULL);)
 
 Test(dflash, multiple_rounds)
 {

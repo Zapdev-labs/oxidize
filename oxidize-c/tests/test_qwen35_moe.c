@@ -235,14 +235,10 @@ Test(qwen35_moe, homogeneous_top_k_one_and_eight_use_two_dispatches)
     cr_assert_arr_eq(one_thread, sixteen_threads, sizeof(one_thread));
 }
 
-Test(qwen35_moe, shared_and_zero_experts_preserve_selected_order)
-{
-    run_moe_case(8, 1, true, OC_QUANT_Q4_0, 1, 2, 0, NULL);
-    run_moe_case(8, 1, true, OC_QUANT_Q4_0, 16, 2, 0, NULL);
-}
+OC_TEST_NULL_SAFE(qwen35_moe, shared_and_zero_experts_preserve_selected_order,
+        run_moe_case(8, 1, true, OC_QUANT_Q4_0, 1, 2, 0, NULL);
+        run_moe_case(8, 1, true, OC_QUANT_Q4_0, 16, 2, 0, NULL);)
 
-Test(qwen35_moe, mixed_qtypes_use_exact_fallback)
-{
-    run_moe_case(8, 0, false, OC_QUANT_Q4_1, 1, 17, 16, NULL);
-    run_moe_case(8, 0, false, OC_QUANT_Q4_1, 16, 17, 16, NULL);
-}
+OC_TEST_NULL_SAFE(qwen35_moe, mixed_qtypes_use_exact_fallback,
+        run_moe_case(8, 0, false, OC_QUANT_Q4_1, 1, 17, 16, NULL);
+        run_moe_case(8, 0, false, OC_QUANT_Q4_1, 16, 17, 16, NULL);)

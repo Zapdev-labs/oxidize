@@ -30,10 +30,7 @@ Test(scheduler, config_init_defaults)
     cr_assert(cfg.enable_continuous_batching);
 }
 
-Test(scheduler, config_init_null)
-{
-    cr_assert_eq(oc_sched_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(scheduler, config_init_null, oc_sched_config_init(NULL))
 
 /* ─── Init/free tests ───────────────────────────────────────────────────── */
 
@@ -78,10 +75,7 @@ Test(scheduler, init_rejects_zero_tokens_total)
     cr_assert_eq(oc_sched_init(&sched, &cfg), OC_ERR_INVALID_ARG);
 }
 
-Test(scheduler, init_null_sched)
-{
-    cr_assert_eq(oc_sched_init(NULL, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(scheduler, init_null_sched, oc_sched_init(NULL, NULL))
 
 Test(scheduler, free_null_is_safe)
 {

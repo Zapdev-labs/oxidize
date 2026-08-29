@@ -154,10 +154,8 @@ Test(wstore, empty_after_init)
     oc_weight_storage_free(&w);
 }
 
-Test(wstore, free_null)
-{
-    oc_weight_storage_free(NULL);
-}
+OC_TEST_NULL_SAFE(wstore, free_null,
+        oc_weight_storage_free(NULL);)
 
 Test(wstore, reassign_f32_to_quant)
 {

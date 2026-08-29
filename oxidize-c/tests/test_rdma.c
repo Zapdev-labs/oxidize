@@ -21,10 +21,8 @@ Test(rdma, init_null_name)
     oc_rdma_free(&dev);
 }
 
-Test(rdma, init_null)
-{
-    cr_assert_neq(oc_rdma_init(NULL, "ib0"), OC_OK);
-}
+OC_TEST_NULL_SAFE(rdma, init_null,
+        cr_assert_neq(oc_rdma_init(NULL, "ib0"), OC_OK);)
 
 Test(rdma, register_memory)
 {
@@ -41,10 +39,8 @@ Test(rdma, register_memory)
     oc_rdma_free(&dev);
 }
 
-Test(rdma, register_null)
-{
-    cr_assert_neq(oc_rdma_register_memory(NULL, NULL, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(rdma, register_null,
+        cr_assert_neq(oc_rdma_register_memory(NULL, NULL, 0, NULL), OC_OK);)
 
 Test(rdma, deregister)
 {
@@ -202,7 +198,5 @@ Test(rdma, bytes_received)
     oc_rdma_free(&dev);
 }
 
-Test(rdma, free_null)
-{
-    oc_rdma_free(NULL);
-}
+OC_TEST_NULL_SAFE(rdma, free_null,
+        oc_rdma_free(NULL);)

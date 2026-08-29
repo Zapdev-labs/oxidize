@@ -75,16 +75,12 @@ Test(af, prompt_cache_is_valid)
     oc_prompt_cache_free(&cache);
 }
 
-Test(af, prompt_cache_null)
-{
-    cr_assert_neq(oc_prompt_cache_init(NULL), OC_OK);
-    cr_assert_neq(oc_prompt_cache_set_prefix(NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(af, prompt_cache_null,
+        cr_assert_neq(oc_prompt_cache_init(NULL), OC_OK);
+        cr_assert_neq(oc_prompt_cache_set_prefix(NULL, NULL, 0), OC_OK);)
 
-Test(af, prompt_cache_free_null)
-{
-    oc_prompt_cache_free(NULL);
-}
+OC_TEST_NULL_SAFE(af, prompt_cache_free_null,
+        oc_prompt_cache_free(NULL);)
 
 /* ─── Speculative Decoding Stats ──────────────────────────────────── */
 
@@ -119,16 +115,12 @@ Test(af, spec_stats_record_multiple)
     cr_assert_float_eq(stats.acceptance_rate, 0.625f, 0.01f);
 }
 
-Test(af, spec_stats_null)
-{
-    cr_assert_neq(oc_spec_stats_init(NULL, OC_SPEC_MODE_NONE, 0), OC_OK);
-    cr_assert_neq(oc_spec_stats_record(NULL, 0, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(af, spec_stats_null,
+        cr_assert_neq(oc_spec_stats_init(NULL, OC_SPEC_MODE_NONE, 0), OC_OK);
+        cr_assert_neq(oc_spec_stats_record(NULL, 0, 0), OC_OK);)
 
-Test(af, spec_stats_acceptance_rate_null)
-{
-    cr_assert_eq(oc_spec_stats_acceptance_rate(NULL), 0.0f);
-}
+OC_TEST_NULL_SAFE(af, spec_stats_acceptance_rate_null,
+        cr_assert_eq(oc_spec_stats_acceptance_rate(NULL), 0.0f);)
 
 Test(af, spec_mode_name)
 {

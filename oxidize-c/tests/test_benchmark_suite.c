@@ -12,10 +12,8 @@ Test(bsuite, init)
     oc_bench_suite_free(&suite);
 }
 
-Test(bsuite, init_null)
-{
-    cr_assert_neq(oc_bench_suite_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(bsuite, init_null,
+        cr_assert_neq(oc_bench_suite_init(NULL), OC_OK);)
 
 Test(bsuite, run_single)
 {
@@ -60,10 +58,8 @@ Test(bsuite, add_result)
     oc_bench_suite_free(&suite);
 }
 
-Test(bsuite, add_result_null)
-{
-    cr_assert_neq(oc_bench_suite_add_result(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(bsuite, add_result_null,
+        cr_assert_neq(oc_bench_suite_add_result(NULL, NULL), OC_OK);)
 
 Test(bsuite, get_result)
 {
@@ -94,10 +90,8 @@ Test(bsuite, n_results)
     oc_bench_suite_free(&suite);
 }
 
-Test(bsuite, n_results_null)
-{
-    cr_assert_eq(oc_bench_suite_n_results(NULL), 0);
-}
+OC_TEST_NULL_SAFE(bsuite, n_results_null,
+        cr_assert_eq(oc_bench_suite_n_results(NULL), 0);)
 
 Test(bsuite, type_name)
 {
@@ -119,10 +113,8 @@ Test(bsuite, report)
     oc_bench_suite_free(&suite);
 }
 
-Test(bsuite, report_null)
-{
-    cr_assert_neq(oc_bench_suite_report(NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(bsuite, report_null,
+        cr_assert_neq(oc_bench_suite_report(NULL, NULL, 0), OC_OK);)
 
 Test(bsuite, time_now)
 {
@@ -139,12 +131,8 @@ Test(bsuite, elapsed)
     cr_assert_geq(e, 0.0);
 }
 
-Test(bsuite, free_null)
-{
-    oc_bench_suite_free(NULL);
-}
+OC_TEST_NULL_SAFE(bsuite, free_null,
+        oc_bench_suite_free(NULL);)
 
-Test(bsuite, run_null)
-{
-    cr_assert_neq(oc_bench_suite_run(NULL, OC_BENCH_MATVEC_F32, 10), OC_OK);
-}
+OC_TEST_NULL_SAFE(bsuite, run_null,
+        cr_assert_neq(oc_bench_suite_run(NULL, OC_BENCH_MATVEC_F32, 10), OC_OK);)

@@ -15,11 +15,9 @@ Test(lw, init)
     oc_layer_weights_free(&lw);
 }
 
-Test(lw, init_null)
-{
-    oc_layer_weights_init(NULL);
-    oc_layer_weights_free(NULL);
-}
+OC_TEST_NULL_SAFE(lw, init_null,
+        oc_layer_weights_init(NULL);
+        oc_layer_weights_free(NULL);)
 
 Test(lw, has_attention)
 {

@@ -15,10 +15,8 @@ Test(temporal, config_init_defaults)
     cr_assert_eq(cfg.hidden_dim, 0, "");
 }
 
-Test(temporal, config_init_null)
-{
-    cr_assert_eq(oc_temporal_config_init(NULL), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(temporal, config_init_null,
+        cr_assert_eq(oc_temporal_config_init(NULL), OC_ERR_INVALID_ARG, "");)
 
 Test(temporal, agg_type_name)
 {
