@@ -72,7 +72,7 @@ OcError oc_shard_get_assignment(const OcShardManager *mgr,
                                 const char *tensor_name, uint32_t shard_id,
                                 OcShardInfo *out_info);
 
-/* Copy up to `max` shard assignments for `tensor_name` into `out_array`. */
+/* Copy up to `max` shard assignments for `tensor_name` into `out_array`. Pass NULL for `out_array` to count only. If `tensor_name` is NULL, returns assignments across all tensors. Sets `*out_count` to the full match count. */
 OcError oc_shard_get_all_assignments(const OcShardManager *mgr,
                                      const char *tensor_name,
                                      OcShardInfo *out_array, uint32_t max,

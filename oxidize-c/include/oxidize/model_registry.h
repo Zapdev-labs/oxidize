@@ -97,7 +97,7 @@ size_t oc_model_registry_list(const OcModelRegistry *reg,
                               OcModelSortKey key,
                               const OcModelEntry **out, size_t cap);
 
-/* Format the registry as a JSON array into `buf` (cap bytes). Returns */
+/* Format the registry as a JSON array into `buf` (cap bytes). Returns bytes written excluding NUL, or 0 on overflow or NULL args. */
 size_t oc_model_registry_format(const OcModelRegistry *reg,
                                 char *buf, size_t cap);
 

@@ -59,7 +59,7 @@ OcError oc_sse_init(OcSseClient *c, int fd);
  * Safe on NULL. Zeroes the struct. */
 void oc_sse_free(OcSseClient *c);
 
-/* Format an SSE event into `buf` (cap bytes) per the wire format. Handles */
+/* Format an SSE event into `buf` (cap bytes). Multi-line data emits one `data:` line each, with CRLF endings and a trailing blank line. Returns bytes written excluding NUL, or 0 on overflow or NULL args. */
 size_t oc_sse_format_event(const OcSseEvent *ev, char *buf, size_t cap);
 
 /* Convenience: format an event from raw fields (avoids constructing an
@@ -67,7 +67,7 @@ size_t oc_sse_format_event(const OcSseEvent *ev, char *buf, size_t cap);
 size_t oc_sse_format_event_raw(const char *event, const char *data,
                                const char *id, char *buf, size_t cap);
 
-/* Parse incoming SSE data (e.g. from a POST body or upstream stream). */
+/* Parse one SSE event from writable `buf`; `out_event` pointers alias into it. Returns bytes consumed including the trailing blank line, or 0 if incomplete or malformed. */
 size_t oc_sse_parse_event(const char *buf, size_t len, OcSseEvent *out_event);
 
 /* Send an SSE event to a connected client by writing the formatted block to `c->fd`. On success returns OC_OK and updates `c->last_event_id` if `ev->id` is non-NULL/non-empty. On broken pipe / connection reset returns OC_ERR_NETWORK (the caller should call oc_sse_free on the client). `ev` may have NULL fields. */

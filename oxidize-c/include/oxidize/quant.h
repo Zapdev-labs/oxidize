@@ -112,13 +112,12 @@ OcQuantBlockLayout oc_quant_block_size(OcGgufQuantizationType qtype);
  * elements_per_block (port of Rust `quantized_size`). */
 size_t oc_quantized_size(OcGgufQuantizationType qtype, size_t value_count);
 
-/* Dequantize `src_len` bytes of `src` (a packed quant buffer of type `qtype`) into `dst` (an f32 array of length `value_count`). */
-/* `src_len / bytes_per_block * elements_per_block`; otherwise returns */
+/* Dequantize `src` into `dst`. `value_count` must equal `src_len / bytes_per_block * elements_per_block`; otherwise returns OC_ERR_INVALID_ARG. Unknown types return OC_ERR_QUANT. */
 OcError oc_quant_dequant_row(OcGgufQuantizationType qtype,
                              const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count);
 
-/* Scalar-only dequant (skips the SIMD dispatch). Same semantics as SIMD path in oc_quant_dequant_row is bit-exact with this scalar reference by contract (VAL-SIMD-001..004). */
+/* Scalar-only dequant (skips SIMD dispatch). Same semantics as oc_quant_dequant_row; the SIMD path is bit-exact with this scalar reference (VAL-SIMD-001..004). */
 OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
                                     const uint8_t *src, size_t src_len,
                                     float *dst, size_t value_count);

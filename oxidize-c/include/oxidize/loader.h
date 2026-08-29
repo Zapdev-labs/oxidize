@@ -39,7 +39,7 @@ OcError oc_loader_load(const char *path, OcLoaderResult *result);
 OcError oc_loader_load_with_arch(const char *path, const char *arch,
                                  OcLoaderResult *result);
 
-/* Detect the architecture from a GGUF file without fully loading it. */
+/* Detect the architecture from a GGUF file without fully loading it. Writes the name into `out_arch`. Returns OC_ERR_INVALID_ARG on NULL args or out_size == 0, OC_ERR_IO / OC_ERR_FORMAT from gguf open, or OC_OK with an empty string if general.architecture is missing. */
 OcError oc_loader_detect_arch(const char *path, char *out_arch,
                               size_t out_size);
 

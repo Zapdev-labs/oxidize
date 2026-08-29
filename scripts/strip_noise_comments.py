@@ -93,7 +93,7 @@ def comment_text_lines(block: list[str]) -> list[str]:
 
 
 HANG_END = re.compile(
-    r"\b(?:the|a|an|of|and|to|for|with|from|by|as|into|on|in|or|is)\s*$",
+    r"\b(?:the|a|an|of|and|to|for|with|from|by|as|into|on|in|or|is|if|when|unless|because|so|where|returns|handles)\s*$",
     re.IGNORECASE,
 )
 

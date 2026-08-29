@@ -83,15 +83,15 @@ OcError oc_hf_config_init(OcHfConfig *cfg, const char *cache_dir);
 OcError oc_hf_list_models(const OcHfConfig *cfg,
                           OcHfModel *out_models, size_t *inout_count);
 
-/* Resolve a repo_id + filename to a HuggingFace download URL. If */
+/* Resolve a repo_id + filename to a HuggingFace download URL. If `out_model->filename` is empty, picks the single .gguf in the repo (OC_ERR_MODEL if there are 0 or more than 1) and fills download_url, filename, and repo_id. */
 OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model);
 
-/* Get the local cache path for a repo_id + filename. Writes a NUL- terminated path into `out_path` (cap bytes). The path is {cache_dir}/{repo_with_slashes_as_underscores}/{filename} Does not require the file to exist. */
+/* Get the local cache path for a repo_id + filename. Writes a NUL-terminated path into `out_path` (cap bytes). The path is {cache_dir}/{repo_with_slashes_as_underscores}/{filename}. Does not require the file to exist. */
 OcError oc_hf_cache_path(const OcHfConfig *cfg,
                          const char *repo_id, const char *filename,
                          char *out_path, size_t cap);
 
-/* Download a model file to cache_dir. Resumes partial downloads if a Range header. Acquires a global mutex for the duration. */
+/* Download a model file to cache_dir. Resumes via HTTP Range if a .part file exists. Verifies SHA-256 when model->sha256 is set. Acquires a global mutex for the transfer. */
 OcError oc_hf_download(const OcHfConfig *cfg, const OcHfModel *model,
                        OcHfProgressCb cb, void *user);
 
