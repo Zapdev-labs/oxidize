@@ -96,7 +96,7 @@ OcError oc_ft_get_dead_nodes(const OcFtManager *mgr, uint64_t *out_ids,
                              uint32_t max, uint32_t *out_count);
 
 
-/* Mark `node_id` as RECOVERING. The node is promoted to ALIVE on the next heartbeat. Returns OC_ERR_MODEL if not monitored. */
+/* Mark `node_id` as RECOVERING. Promoted to ALIVE on the next heartbeat; `recovery_timeout_ms` is unused by tick (caller discretion). Returns OC_ERR_MODEL if not monitored. */
 OcError oc_ft_recover(OcFtManager *mgr, uint64_t node_id);
 
 /* Human-readable status name (e.g. "ALIVE"). Never NULL. */

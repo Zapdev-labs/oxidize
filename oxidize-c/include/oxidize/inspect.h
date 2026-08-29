@@ -78,7 +78,7 @@ OcError oc_inspect_llama(const OcLlamaModel *model, OcModelInfo *out);
 /* Format `info` as a human-readable table into `buf` (up to `cap-1` chars, NUL-terminated). Returns the full length excluding NUL; NULL `buf` or `cap` 0 writes nothing and returns the required length; if the output does not fit, returns 0 after NUL-terminating. */
 size_t oc_inspect_format(const OcModelInfo *info, char *buf, size_t cap);
 
-/* Format `info` as a single-line JSON object into `buf` (up to `cap-1` chars, NUL-terminated). Returns the full length excluding NUL, like snprintf: if the return is >= `cap` the output was truncated; NULL `buf` or `cap` 0 writes nothing and returns the required length. */
+/* Format `info` as a single-line JSON object into `buf` (up to `cap-1` chars, NUL-terminated). Returns the full length excluding NUL; NULL `buf` or `cap` 0 writes nothing and returns the required length; if the output does not fit, returns 0 after NUL-terminating. */
 size_t oc_inspect_format_json(const OcModelInfo *info, char *buf, size_t cap);
 
 /* Free the heap-allocated fields of `info` (currently `info->tensors`).

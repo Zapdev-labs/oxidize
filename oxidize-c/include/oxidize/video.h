@@ -1,4 +1,4 @@
-/* video.h — Video multimodal frame sampling and temporal aggregation. */
+/* video.h — Video multimodal frame sampling and temporal aggregation. No decoder; callers supply decoded frames (e.g. FFmpeg/GStreamer). */
 #ifndef OXIDIZE_VIDEO_H
 #define OXIDIZE_VIDEO_H
 
