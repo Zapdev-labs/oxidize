@@ -188,7 +188,6 @@ Test(llama, batch_allocates_mla_workspace)
     cr_assert_not_null(batch.mla_kv_compressed);
     cr_assert_not_null(batch.mla_q_absorbed);
     cr_assert_not_null(batch.mla_ctx_latent);
-    /* MLA caches the compressed [c_kv | k_pe] latent, and the batch path */
     cr_assert_eq(batch.kv_row_floats,
                  (size_t)model.cfg.mla_kv_lora_dim + model.cfg.mla_q_rope_dim);
     oc_batch_session_free(&batch);
@@ -223,7 +222,6 @@ Test(llama, batch_validates_context_and_moe_workspace)
 Test(llama, moe_config_defaults_dense)
 {
     OcLlamaModel m;
-    /* We can't easily construct a full model, but we can verify the config */
     memset(&m, 0, sizeof(m));
     /* Simulate a default config (as parse_config would set it). */
     m.cfg.num_experts = 0;

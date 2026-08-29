@@ -621,12 +621,10 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
     }
   };
 
-  // 1. Router logits.
   std::vector<float> rw(n_experts, 0.0f);  // routing weight (renorm source)
   gemv_weight(layer.ffn_gate_inp, n_experts, h, normed, rw.data());
   dbg_vec("moe router logits (raw)", rw.data(), n_experts, 8);
 
-  // 2. Gating: softmax (Mixtral/Qwen) or sigmoid+bias (LFM2MoE). sel = selection
   // score, rw = routing weight.
   std::vector<std::pair<size_t, float>> sel(n_experts);  // (idx, selection score)
   if (sigmoid) {
@@ -644,7 +642,6 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
     for (size_t i = 0; i < n_experts; ++i) sel[i] = {i, rw[i]};
   }
 
-  // 3. Top-k by selection score (desc).
   auto by_score = [](const std::pair<size_t, float>& a,
                      const std::pair<size_t, float>& b) { return a.second > b.second; };
   if (n_sel < n_experts)
@@ -652,7 +649,6 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
   else
     std::sort(sel.begin(), sel.end(), by_score);
 
-  // 4. Renormalize routing weights over selected; apply routed scale. The
   // routing *weights* are gathered from the UNBIASED probs `rw` (the per-expert
   // bias only affects top-k selection above). For softmax gating rw already sums
   // to 1 over all experts; GLM/DeepSeek sigmoid gating renormalizes the selected
@@ -667,7 +663,6 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
   }
   float scale = cfg.expert_weights_scale > 0.0f ? cfg.expert_weights_scale : 1.0f;
 
-  // 5. Per-expert FFN, accumulated into ffn_out.
   std::vector<float> gate(i_size), up(i_size), down(h);
   const bool use_split_experts =
       !layer.ffn_gate_expert_list.empty() && !layer.ffn_up_expert_list.empty() &&
@@ -696,7 +691,6 @@ void LlamaModel::moe_ffn(const LlamaLayer& layer, const float* normed,
   }
 
   dbg_vec("moe routed ffn_out (pre-shexp)", ffn_out, h);
-  // 6. Shared (always-on) expert (GLM-5.2 / DeepSeek-V2): a standard SwiGLU FFN
   // over the SAME normed input, added with weight 1.0 (NOT routed, NOT scaled by
   // expert_weights_scale). n_ff_shexp = expert_inter * num_shared_experts.
   if (layer.has_shared_expert()) {
@@ -743,7 +737,6 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
 
   bool is_l0p0 = (l == 0 && pos == 0);
 
-  // 0. pre-attention RMSNorm.
   std::vector<float> normed(h);
   d_rms_norm(normed.data(), x_.data(), layer.attn_norm.data(), h, eps, /*plus_one=*/false);
   if (is_l0p0) {
@@ -751,7 +744,6 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
     dbg_vec("normed (l0 attn_norm)", normed.data(), h);
   }
 
-  // 1. Query: x -> q_a(2048) -> norm -> q(n_heads*mla_key).
   std::vector<float> q_a(q_rank);
   gemv_weight(layer.attn_q_a, q_rank, h, normed.data(), q_a.data());
   if (is_l0p0) dbg_vec("q_a (pre-norm)", q_a.data(), q_rank);
@@ -765,7 +757,6 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
   gemv_weight(layer.attn_q_b, n_heads * mla_key, q_rank, q_a.data(), q.data());
   if (is_l0p0) dbg_vec("q[h0] (pre-rope)", q.data(), mla_key);
 
-  // 2. Partial RoPE on the rope part (last n_rot dims) of each q head.
   // GLM-DSA uses LLAMA_ROPE_TYPE_NORM (adjacent-pair rotation), NOT NeoX
   // split-half. apply_rope_norm rotates pairs (h[2i], h[2i+1]).
   for (size_t hd = 0; hd < n_heads; ++hd) {
@@ -773,7 +764,6 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
     apply_rope_norm(q_pe, n_rot, 1, pos, theta, /*rope_dim=*/0);
   }
 
-  // 3. KV: x -> kv_a_mqa(576). Split latent(512) + k_pe(64); norm latent; rope k_pe.
   std::vector<float> kv(latent_row);
   gemv_weight(layer.attn_kv_a_mqa, latent_row, h, normed.data(), kv.data());
   if (is_l0p0) {
@@ -790,12 +780,10 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
     dbg_vec("cache_row (roped k_pe)", cache_row.data() + kv_rank, n_rot);
   }
 
-  // 4. Store the 576-dim compressed latent row in the KV cache (kv_heads=1).
   size_t phys = pos % kv_context_;
   size_t base = (l * kv_context_ + phys) * kv_token_size_;
   for (size_t i = 0; i < latent_row; ++i) kv_keys_[base + i] = cache_row[i];
 
-  // 5. Per-head MLA attention over the compressed latent cache (MQA: one shared
   // K/V row per position). Q_head = [absorb(q_nope)->512 ++ q_pe(64)] (576).
   const float* cache_layer = kv_keys_.data() + (l * kv_context_) * kv_token_size_;
   std::vector<float> attn_result(n_heads * mla_val, 0.0f);
@@ -847,7 +835,6 @@ void LlamaModel::mla_attention(const LlamaLayer& layer, size_t l, size_t pos,
   }
   if (is_l0p0) dbg_vec("attn_result (all heads, first 8)", attn_result.data(), n_heads * mla_val);
 
-  // 6. Output projection: [n_heads*mla_val] -> [hidden].
   gemv_weight(layer.attn_output, h, n_heads * mla_val, attn_result.data(), attn_out);
   if (is_l0p0) dbg_vec("attn_out (post o_proj)", attn_out, h);
 }

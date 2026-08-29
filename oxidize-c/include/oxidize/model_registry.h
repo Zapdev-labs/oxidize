@@ -22,7 +22,6 @@ extern "C" {
  * human-managed cache directories, not arbitrary filesystem traversal). */
 #define OC_MODEL_REGISTRY_MAX_PATH 512
 
-/* A single registered model entry. All strings are NUL-terminated and owned */
 typedef struct OcModelEntry {
     char               path[OC_MODEL_REGISTRY_MAX_PATH];   /* absolute or relative file path */
     char               name[OC_MODEL_REGISTRY_MAX_PATH];   /* basename without .gguf extension */

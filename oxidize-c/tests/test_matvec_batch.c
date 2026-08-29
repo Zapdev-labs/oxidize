@@ -212,7 +212,6 @@ Test(matvec_batch, scratch_size_is_a_bound)
     }
 }
 
-/* The prepared-row Q4_K kernel is what the batched path actually runs. It */
 Test(matvec_batch, q4k_prepped_matches_packed)
 {
     uint32_t seed = 31337u;

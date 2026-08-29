@@ -533,7 +533,6 @@ GgufFile GgufModel::parse(const uint8_t* bytes, size_t len) {
   return file;
 }
 
-// ── GgufModel::load (POSIX mmap) ─────────────────────────────────────────────
 GgufModel GgufModel::load(const std::string& path) {
   int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) {

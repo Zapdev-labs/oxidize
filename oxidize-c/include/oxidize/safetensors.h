@@ -21,7 +21,6 @@ extern "C" {
 /* Maximum dtype string length (NUL-terminated). */
 #define OC_SAFETENSORS_DTYPE_LEN 16
 
-/* A single parsed tensor descriptor. `data_offset` and `data_length` are byte */
 typedef struct OcSafetensorsTensor {
     char     name[OC_SAFETENSORS_NAME_LEN];
     char     dtype[OC_SAFETENSORS_DTYPE_LEN];
@@ -31,7 +30,6 @@ typedef struct OcSafetensorsTensor {
     uint64_t data_length;   /* byte length of this tensor's data */
 } OcSafetensorsTensor;
 
-/* Parsed SafeTensors file. `tensors` is a malloc'd array of `n_tensors` mmap'd region (when `mmapped` is true) or a malloc'd buffer. `data_start` */
 typedef struct OcSafetensorsFile {
     OcSafetensorsTensor *tensors;
     size_t               n_tensors;

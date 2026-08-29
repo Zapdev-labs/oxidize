@@ -409,7 +409,6 @@ void oc_autotune_plan_dump(const OcTuningPlan *plan,
             plan->rationale_memory ? plan->rationale_memory : "");
 }
 
-/* ─── Apply (autotune-plan-apply feature) ──────────────────────────────── Applies the memory-side of the plan (hugepages + mlock) to the mmap'd GGUF. */
 
 OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m)
 {

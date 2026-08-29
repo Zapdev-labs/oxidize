@@ -30,7 +30,6 @@ size_t oc_parallel_n_threads(void);
 void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data);
 
 /* Per-thread scratch of at least `bytes`, valid until the next call with a larger size on the same `tid`. */
-/* larger size on the same `tid`. */
 void *oc_parallel_scratch(size_t tid, size_t bytes);
 
 /* Join workers and release the pool. Safe to call when not started. Mainly

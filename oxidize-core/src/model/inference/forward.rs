@@ -184,7 +184,6 @@ impl InferenceModel {
         let n = cfg.num_attention_heads;
         let kvh = cfg.num_key_value_heads;
 
-        // 1. Embedding lookup for every batch position into x_batch[batch, h].
         let mut x_batch = vec![0.0_f32; batch * h];
         for (i, &token) in tokens.iter().enumerate() {
             let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
@@ -283,7 +282,6 @@ impl InferenceModel {
             let layer_rope = cfg.layer_rope_theta(layer_idx);
             let layer_window = cfg.layer_sliding_window(layer_idx);
 
-            // 2. Per-token attn RMSNorm into normed_batch.
             for i in 0..batch {
                 rms_norm_f32(
                     &x_batch[i * h..(i + 1) * h],
@@ -294,7 +292,6 @@ impl InferenceModel {
                 .map_err(|e| ModelError::InferenceFailed(format!("rms_norm: {:?}", e)))?;
             }
 
-            // 3. Batched Q/K/V via GEMM — the main win over per-token GEMV.
             gemm_weight(&layer.attn_q, q_len, h, &normed_batch, &mut q_batch, batch)
                 .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
             if !layer.attn_q_bias.is_empty() {
@@ -345,7 +342,6 @@ impl InferenceModel {
             let mut key_copy_buf: Vec<f32> = Vec::new();
             let mut value_copy_buf: Vec<f32> = Vec::new();
 
-            // 4. Per-token: Q/K norm, RoPE, KV cache writes.
             for i in 0..batch {
                 let pos = start_pos + i;
                 let q = &mut q_batch[i * q_len..i * q_len + q_len_used0];
@@ -456,7 +452,6 @@ impl InferenceModel {
                 }
             }
 
-            // 5. Per-token: attention. Each position attends to its own causal
             // prefix (positions 0..=pos).
             //
             // For F32 KV caches we try to borrow the prefix directly (zero-copy).
@@ -563,7 +558,6 @@ impl InferenceModel {
                 .map_err(|e| ModelError::InferenceFailed(format!("flash attn: {:?}", e)))?;
             }
 
-            // 6. Batched attn_output projection.
             if !layer.attn_output.is_empty() && aoil0 > 0 {
                 gemm_weight(
                     &layer.attn_output,
@@ -597,12 +591,10 @@ impl InferenceModel {
                 }
             }
 
-            // 7. Residual add (attn).
             for i in 0..batch * h {
                 x_batch[i] += attn_proj_batch[i];
             }
 
-            // 8. FFN: per-token RMSNorm, batched gate+up, SwiGLU, batched down.
             let has_ffn = !layer.ffn_gate.is_empty()
                 && !layer.ffn_up.is_empty()
                 && !layer.ffn_down.is_empty()
@@ -766,7 +758,6 @@ impl InferenceModel {
         let n = cfg.num_attention_heads;
         let kvh = cfg.num_key_value_heads;
 
-        // 1. Embedding lookup for every sequence into x_batch[batch, h].
         let mut x_batch = vec![0.0_f32; batch * h];
         for (i, &(token, _pos)) in rows.iter().enumerate() {
             let token_idx = (token as usize).min(cfg.vocab_size.saturating_sub(1));
@@ -882,7 +873,6 @@ impl InferenceModel {
             let layer_rope = cfg.layer_rope_theta(layer_idx);
             let layer_window = cfg.layer_sliding_window(layer_idx);
 
-            // 2. Per-row attn RMSNorm.
             for i in 0..batch {
                 rms_norm_f32(
                     &x_batch[i * h..(i + 1) * h],
@@ -893,7 +883,6 @@ impl InferenceModel {
                 .map_err(|e| ModelError::InferenceFailed(format!("rms_norm: {:?}", e)))?;
             }
 
-            // 3. Batched Q/K/V GEMM — amortizes one weight read across all N seqs.
             gemm_weight(&layer.attn_q, q_len, h, &normed_batch, &mut q_batch, batch)
                 .map_err(|e| ModelError::InferenceFailed(format!("attn_q: {:?}", e)))?;
             if !layer.attn_q_bias.is_empty() {
@@ -929,7 +918,6 @@ impl InferenceModel {
             let q_heads = q_len_used0 / q_head_dim.max(1);
             let kv_heads = kv_len.checked_div(kv_head_dim).unwrap_or(0);
 
-            // 4. Per-row: Q/K norm, RoPE (using the sequence's OWN position), then
             //    KV write into that sequence's own buffer at slot (layer, len).
             for i in 0..batch {
                 let pos = rows[i].1;
@@ -1023,7 +1011,6 @@ impl InferenceModel {
                     k[off..off + k_rope_len].copy_from_slice(rotated);
                 }
 
-                // 5. KV WRITE into the sequence's own buffer at slot (layer, len).
                 //    Only attention layers have a KV slot; skip otherwise.
                 if kv_len > 0 {
                     if let Some(kv_idx) = kv_layer_idx {
@@ -1036,7 +1023,6 @@ impl InferenceModel {
                 }
             }
 
-            // 6. Per-row attention over each sequence's OWN contiguous KV prefix.
             //    Guarded on `Some(kv_idx)`: non-attention layers wrote no KV and
             //    must not read the (out-of-bounds) raw SeqKv slice.
             if let (true, Some(kv_idx)) = (kv_len > 0, kv_layer_idx) {
@@ -1076,7 +1062,6 @@ impl InferenceModel {
                 }
             }
 
-            // 7. Batched attn_output projection + per-row residual.
             if !layer.attn_output.is_empty() && aoil0 > 0 {
                 gemm_weight(
                     &layer.attn_output,
@@ -1112,7 +1097,6 @@ impl InferenceModel {
                 x_batch[i] += attn_proj_batch[i];
             }
 
-            // 8. FFN: per-row norm, batched gate+up, SwiGLU, batched down.
             let has_ffn = !layer.ffn_gate.is_empty()
                 && !layer.ffn_up.is_empty()
                 && !layer.ffn_down.is_empty()
@@ -1200,7 +1184,6 @@ impl InferenceModel {
             return Ok(Vec::new());
         }
 
-        // 9. LM HEAD per sequence — final norm + lm_head for EVERY row (unlike
         //    forward_batched which only emits the last position).
         let mut out: Vec<Logits> = Vec::with_capacity(batch);
         let mut final_normed = vec![0.0_f32; h];
@@ -1431,7 +1414,6 @@ impl InferenceModel {
             crate::cuda::gpu_kv_batched_reset().map_err(ModelError::InferenceFailed)?;
         }
 
-        // 1. Host-side embedding lookup into row-major [B, h], then upload.
         let mut x_batch = vec![0.0_f32; batch * h];
         for (i, &(token, _pos)) in rows.iter().enumerate() {
             let token_idx = (token as usize).min(vocab.saturating_sub(1));
@@ -1471,7 +1453,6 @@ impl InferenceModel {
             rope_dim,
         };
 
-        // 2. Run every transformer layer on-device (one weight pass per proj).
         for layer_idx in 0..cfg.layer_count {
             let layer = &self.layers[layer_idx];
             let kv_layer_idx = self
@@ -1513,7 +1494,6 @@ impl InferenceModel {
                 .map_err(ModelError::InferenceFailed)?;
         }
 
-        // 3. Bump each sequence's KV length once after the last layer (host
         //    bookkeeping; device counters were bumped during KV-append).
         for seq in kv.iter_mut() {
             seq.len += 1;
@@ -1527,7 +1507,6 @@ impl InferenceModel {
             return Ok(Some(Vec::new()));
         }
 
-        // 4. Batched final head: per-row final norm + bN lm_head GEMV.
         let out_bytes = out_q4k.expect("checked above");
         let mut flat = vec![0.0_f32; batch * vocab];
         crate::cuda::gpu_batched_final_head(

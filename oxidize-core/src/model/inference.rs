@@ -1597,12 +1597,10 @@ pub(crate) fn moe_ffn_forward_weights(
     let n_experts_per_tok = cfg.num_experts_per_tok.max(1).min(n_experts);
     let sigmoid_gating = cfg.expert_gating_sigmoid;
 
-    // 1. Router logits: [n_experts]
     router_logits.fill(0.0_f32);
     gemv_weight(layer.gate_inp, n_experts, h, normed, router_logits)
         .map_err(|e| ModelError::InferenceFailed(format!("moe router: {:?}", e)))?;
 
-    // 2. Gating. Softmax (Mixtral) or sigmoid + per-layer expert bias (LFM2MoE).
     // For sigmoid gating the bias is added for top-k *selection* only; the
     // routing weights are the raw sigmoid scores, renormalized over the
     // selected experts. `router_logits` holds the weight, `expert_scores.1`
@@ -1678,7 +1676,6 @@ pub(crate) fn moe_ffn_forward_weights(
         });
     }
 
-    // 3. Top-k expert selection by selection score.
     let compare_score = |a: &(usize, f32), b: &(usize, f32)| {
         b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
     };
@@ -1700,7 +1697,6 @@ pub(crate) fn moe_ffn_forward_weights(
         if s > 0.0 { s } else { 1.0 }
     };
 
-    // 4. Gather the selected experts and their routing weights. The routed
     // contribution is scaled by `expert_weights_scale` (DeepSeek-V3/Kimi
     // `routed_scaling_factor`); folding it into the per-expert weight here
     // applies it uniformly across the fused, non-fused, and f32 expert paths
@@ -1718,7 +1714,6 @@ pub(crate) fn moe_ffn_forward_weights(
         weights.push(routed_scale * router_logits[expert_idx] / weight_norm);
     }
 
-    // 5. Expert FFN. Prefer the batched path (one parallel region per
     // projection across all selected experts) for quantized experts; this
     // avoids 12 separate rayon dispatches per MoE layer. Fall back to the
     // per-expert path for f32 experts.

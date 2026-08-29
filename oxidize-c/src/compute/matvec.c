@@ -595,7 +595,6 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
         }
     }
 
-    /* A scratch allocation failure inside a slice would silently leave that */
     const size_t nt = oc_parallel_n_threads();
     if (nt > 1 && rows >= 8) {
         for (size_t t = 1; t < nt; t++) {

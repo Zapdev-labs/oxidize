@@ -215,7 +215,6 @@ Test(muse_glimmer, per_layer_tensors_bind)
     remove(p);
 }
 
-/* The forward pass has to run end to end and produce finite, softcapped */
 Test(muse_glimmer, forward_produces_softcapped_logits)
 {
     const char *p = FIXTURE("fwd");

@@ -48,7 +48,6 @@ Test(gguf, v3_header_parses_correctly)
 
 Test(gguf, v3_tensor_inventory_bit_exact_vs_rust)
 {
-    /* Rust reference expectations (from oxidize-core/src/format/gguf.rs */
     OcGgufFile f;
     OcError e = oc_gguf_open(FIXTURE("valid-v3.gguf"), &f);
     cr_assert_eq(e, OC_OK, "parse failed: %s", oc_error_msg(e));
@@ -94,7 +93,6 @@ Test(gguf, v3_data_section_first_four_bytes)
 
 Test(gguf, v2_backward_compat)
 {
-    /* Synthesize a v2 GGUF by copying valid-v3 and rewriting the version */
     OcGgufFile v3;
     OcError e = oc_gguf_open(FIXTURE("valid-v3.gguf"), &v3);
     cr_assert_eq(e, OC_OK, "open v3: %s", oc_error_msg(e));
@@ -493,7 +491,6 @@ Test(gguf, unknown_metadata_value_type_rejected)
 
 Test(gguf, nested_array_metadata_rejected)
 {
-    /* GGUF spec forbids arrays-of-arrays (ARRAY element_type must be a scalar */
     uint8_t buf[64];
     size_t off = 0;
     uint32_t magic = OC_GGUF_MAGIC, ver = 3;

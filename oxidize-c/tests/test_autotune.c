@@ -49,7 +49,6 @@ Test(autotune, plan_threads_match_learned_heuristics)
     OcCpuInfo cpu;
     oc_autotune_detect_cpu(&cpu);
 
-    /* One thread per physical core. The plan used to cap at 16, which was */
     OcModelFingerprint small;
     memset(&small, 0, sizeof(small));
     small.file_bytes = 8ULL << 30;

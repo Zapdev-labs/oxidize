@@ -76,7 +76,6 @@ OcError oc_autotune_fingerprint_gguf(const OcGgufMmappedFile *m,
 OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
                               const OcModelFingerprint *model);
 
-/* ─── Apply (autotune-plan-apply feature) ──────────────────────────────── Apply a plan to a loaded mmap'd GGUF: applies MADV_HUGEPAGE (if plan->use_hugepages) and mlock (if plan->mlock_weights) to every shard. */
 OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m);
 
 /* Bind the calling thread to a single NUMA node (Linux only, best-effort).

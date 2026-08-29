@@ -79,7 +79,6 @@ float oc_oxk_dot_q4_0_q8_0_scalar(const uint8_t *row, size_t blocks,
         const uint8_t *qs = wb + 2; /* 16 packed bytes → 32 nibbles */
         const int8_t  *qv = (const int8_t *)(qb + 2); /* 32 int8 values */
         int32_t isum = 0;
-        /* GGUF Q4_0 splits a block into halves: the low nibble of byte i is */
         for (int i = 0; i < 16; i++) {
             int lo = qs[i] & 0x0F;
             int hi = qs[i] >> 4;
@@ -219,7 +218,6 @@ void oc_oxk_q4_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
                                     &mn[b * OC_Q4K_SUBGROUPS + j]);
         }
 
-        /* Nibble order: within group gp, the low nibble of qs[gp*32+l] is */
         uint8_t *c = codes + b * OC_OXK_QK_K;
         for (unsigned gp = 0; gp < 4; gp++) {
             const uint8_t *src = qs + gp * 32;

@@ -246,7 +246,6 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             GenerationError::Model(ModelError::InferenceFailed("no last token".to_string()))
         })?;
 
-        // 1. Draft model generates K tokens autoregressively.
         let k = self.config.capped_draft_tokens_per_step();
         let mut draft_tokens = std::mem::take(&mut self.draft_token_buffer);
         draft_tokens.clear();
@@ -270,7 +269,6 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             current_token = token;
         }
 
-        // 2. Target model verifies draft tokens from a fixed KV checkpoint.
         let verify_start = session.consumed_tokens();
         let mut target_logits = Vec::with_capacity(draft_tokens.len() + 1);
         if self.last_token_pending_kv {
@@ -301,7 +299,6 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             Vec::new()
         };
 
-        // 3. Speculative decode: accept/reject draft tokens.
         let randoms: Vec<f32> = (0..=2 * draft_tokens.len())
             .map(|_| (self.random.as_mut())())
             .collect();

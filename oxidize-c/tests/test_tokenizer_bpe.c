@@ -152,7 +152,6 @@ Test(tokenizer_bpe, gpt2_byte_mapping_space_to_g_dot)
 
 Test(tokenizer_bpe, train_merges_common_pairs)
 {
-    /* Rust: BpeTokenizer::train(&["banana", "bandana"], 4) We don't assert the exact merge sequence here (it depends on tie- */
     OcArena *arena = oc_arena_new(0);
     cr_assert_not_null(arena, "arena");
 

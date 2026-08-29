@@ -303,7 +303,6 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
             .last()
             .ok_or(SpeculativeError::NoContext)?;
 
-        // 1. Draft model generates K tokens
         let mut draft_tokens = Vec::with_capacity(k);
         let mut draft_logits = Vec::with_capacity(k);
         let mut current_token = start_token;
@@ -330,7 +329,6 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
 
         self.stats.total_draft_tokens += k;
 
-        // 2. Target model verifies: get logits for each draft position
         let mut target_logits = Vec::with_capacity(k + 1);
 
         // First position: start token
@@ -369,7 +367,6 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
 
         self.stats.target_forward_passes += 1;
 
-        // 3. Speculative decode: accept/reject
         let randoms: Vec<f32> = (0..=2 * k).map(|_| fastrand::f32()).collect();
 
         let result = speculative_decode(
@@ -381,7 +378,6 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
         )
         .map_err(SpeculativeError::Sampling)?;
 
-        // 4. Update target model with accepted sequence
         let accepted_count = result.accepted_draft_tokens;
         self.stats.accepted_draft_tokens += accepted_count;
 
@@ -405,7 +401,6 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
 
         self.last_token_pending_kv = false;
 
-        // 5. Update draft model KV cache to match accepted tokens.
         // The cache must hold the full context up to (but not including) the next
         // step's start token. The next step's first `forward_token` re-feeds that
         // start token, so the cache here must contain `start_token` followed by
@@ -428,7 +423,6 @@ impl<'a, T: Model> SpeculativeDecoder<'a, T> {
             let _ = self.draft_model.forward_token(replay_token, None);
         }
 
-        // 6. Queue accepted tokens for emission
         for token in result.tokens {
             self.recent_tokens.push(token);
             self.emit_buffer.push_back(token);

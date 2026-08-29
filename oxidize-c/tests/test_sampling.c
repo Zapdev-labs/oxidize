@@ -198,7 +198,6 @@ Test(sampling, typical_zero_uses_unfiltered_distribution)
 
 Test(sampling, mirostat_v2_clamps_mu_to_zero)
 {
-    /* If tau is very small (near-zero target surprise) and the sampled token */
     float logits[] = {10.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;
     cfg.type = OC_SAMPLER_MIROSTAT_V2;

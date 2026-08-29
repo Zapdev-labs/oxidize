@@ -307,7 +307,6 @@ static ssize_t oc_cc_find_slot(OcContextCache *cc, const char *session_id,
                 if (first_tomb < 0) {
                     first_tomb = (ssize_t)idx;
                 }
-                /* keep probing in case the key lives further on */
             } else {
                 /* genuinely empty — key absent */
                 if (find_tombstone && first_tomb >= 0) {

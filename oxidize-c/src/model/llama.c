@@ -2128,7 +2128,6 @@ static void forward_mla_attention(OcLlamaSession *s, uint32_t layer)
         oc_apply_rope_f32(k_pe, k_pe, q_rope, q_rope, s->pos, c->rope_theta);
     }
 
-    /* 7. Cache the LATENT, not the expanded per-head K/V. smaller -- and is also less arithmetic per step, because k_b and v_b */
     size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos) * s->kv_row_floats;
     float *latent_row = s->kv_k + kv_off;
     memcpy(latent_row, s->mla_c_kv, kv_lora * sizeof(float));

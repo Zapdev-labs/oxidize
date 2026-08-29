@@ -502,7 +502,6 @@ Test(longcat, zero_expert_contributes_identity)
 
 Test(longcat, zero_expert_output_is_not_renormalized)
 {
-    /* If top-k were renormalized to sum 1, the single selected expert would */
     float lo[ZE_H] = {0}, hi[ZE_H] = {0};
     ze_run(0.0f, 1.0f, NULL, 1.0f, lo);
     ze_run(0.0f, 6.0f, NULL, 1.0f, hi);
@@ -532,7 +531,6 @@ Test(longcat, exp_probs_b_biases_selection_not_weight)
 
 Test(longcat, routed_expert_still_runs_when_it_wins)
 {
-    /* Sanity: with the routed expert winning, the zero-expert path must not */
     float out[ZE_H] = {0};
     ze_run(4.0f, 0.0f, NULL, 1.0f, out);
 
@@ -567,7 +565,6 @@ Test(longcat, mla_session_initializes)
 
 Test(longcat, mla_kv_row_is_the_compressed_latent)
 {
-    /* MLA caches [c_kv | k_pe] -- the compressed latent every head's K and V */
     const char *p = FIXTURE("kvrow");
     build_longcat_gguf(p);
 

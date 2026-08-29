@@ -143,7 +143,6 @@ float oc_oxk_dot_q4_k_prepped(const void *scratch, size_t blocks,
                               const uint8_t *q8);
 
 /* Dispatched multi-activation form: dot one prepared row against `n_act` activations spaced `act_stride` bytes apart. */
-/* activations spaced `act_stride` bytes apart. */
 void oc_oxk_dot_q4_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
                                    size_t n_act, float *out);
@@ -257,7 +256,6 @@ void oc_oxk_matvec_q4_k_f32_avx512(const uint8_t *w, size_t n_rows,
 void oc_oxk_matvec_q8_0_f32_avx512(const uint8_t *w, size_t n_rows,
                                    size_t row_bytes, const float *x, float *out);
 
-/* ─── Shared helpers (exposed for tests + reuse by SIMD files) ─────────── Bit-exact f16 → f32 conversion (no libm). */
 /* Bit-exact f16 → f32 conversion (no libm). */
 float oc_oxk_f16_le_to_f32(const uint8_t p[2]);
 

@@ -790,7 +790,6 @@ uint32_t oc_sampler_chain_sample(OcSamplerChain *chain,
 {
     if (!chain || !logits || vocab_size == 0) return 0;
 
-    /* Apply every transform step in order; a terminal sampling step is */
     const OcSamplerStep *terminal = NULL;
     bool greedy = false;
 

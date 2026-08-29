@@ -156,7 +156,6 @@ Test(cuda_mmq_layout, iq4_xs_expand_matches_dequant)
     free(packed); free(ref); free(got);
 }
 
-/* The group dot must agree with dequantize-then-dot. This is the check that */
 Test(cuda_mmq_layout, iq4_xs_group_dot_matches_reference)
 {
     const size_t cols = MIRROR_QK_K * 5;

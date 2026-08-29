@@ -222,7 +222,6 @@ float oc_oxk_dot_q8_0_q8_0_avx512(const uint8_t *row, size_t blocks,
 
 __attribute__((target("avx512bw,avx512dq,avx512vnni")))
 /* AVX-512 hosts run the AVX2 kernel. */
-/* instruction) was written and measured: bit-exact, and about 6% faster on a */
 __attribute__((target("avx512bw,avx512dq")))
 float oc_oxk_dot_q4_k_q8_k_avx512(const uint8_t *row, size_t blocks,
                                   const uint8_t *q8)

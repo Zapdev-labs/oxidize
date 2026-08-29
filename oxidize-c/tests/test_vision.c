@@ -97,8 +97,6 @@ Test(vision, encode_with_weights)
     cr_assert_eq(out_len, 16);
 
     /* With uniform 128 pixel values, each pixel is 128/127.5-1 = ~0.004 */
-    /* The projection should produce the same value for each patch dim */
-    /* since all patches have the same input. */
     float expected = 128.0f / 127.5f - 1.0f; /* ~0.004 */
     for (int p = 0; p < 4; p++) {
         cr_assert_float_eq(emb[p * 4], expected, 0.01f, "patch %d dim 0", p);

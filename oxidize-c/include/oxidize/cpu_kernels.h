@@ -62,7 +62,6 @@ float oc_cpu_dot_f32_scalar(const float *a, const float *b, size_t n);
 void oc_cpu_matvec_f32_scalar(const float *w, const float *x, float *out,
                                size_t n_rows, size_t n_cols);
 
-/* SIMD implementations. Only defined on x86-64 with a compiler that */
 #if defined(__x86_64__) || defined(__i386__)
 #define OC_CPU_KERNELS_HAVE_AVX2 1
 float oc_cpu_dot_f32_avx2(const float *a, const float *b, size_t n);

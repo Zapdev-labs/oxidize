@@ -21,7 +21,6 @@
 #include <string.h>
 
 
-/* Printable byte ranges (match Rust `gpt2_byte_is_printable`). A byte is */
 static bool gpt2_byte_is_printable(uint32_t b)
 {
     return (b >= 33 && b <= 126)

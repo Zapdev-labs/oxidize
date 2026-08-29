@@ -136,7 +136,6 @@ static void run_case(const TypeUnderTest *t, uint32_t seed)
         const float packed = t->packed(row, N_BLOCKS, act);
         const float prepped = t->prepped(prep, N_BLOCKS, act);
 
-        /* The integer kernels and the dequant reference sum in different */
         const float tol = 1e-4f * (fabsf(ref) + 1.0f);
         cr_assert_float_eq(packed, ref, tol,
             "act %d: packed dot %f != dequant reference %f", a,
