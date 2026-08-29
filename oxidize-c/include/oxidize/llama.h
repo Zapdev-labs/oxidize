@@ -484,9 +484,10 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
                                  OcKvCacheType kv_type);
 
 /* Attach a compressed KV cache. Decode stays on the f32/q8 path until this
- * is called. `name` is "none" | "rotor" | "helix". Refused after any token
- * has been written (`sess->pos > 0`); there is no migrate path. Also
- * refused for GPT-2 / GPT-J / GPT-NeoX / Falcon, MLA, Qwen3.5, and Gemma 4. */
+ * is called. `name` is "none" | "rotor" | "helix". Refused while
+ * `sess->pos > 0` (call oc_llama_session_reset first); there is no migrate
+ * path. Also refused for GPT-2 / GPT-J / GPT-NeoX / Falcon, MLA, Qwen3.5,
+ * and Gemma 4. */
 OcError oc_llama_session_enable_kv_compress(OcLlamaSession *sess,
                                             OcKvScheme scheme);
 OcError oc_llama_session_enable_kv_compress_name(OcLlamaSession *sess,

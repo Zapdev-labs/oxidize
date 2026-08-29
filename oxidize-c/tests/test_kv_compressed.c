@@ -313,28 +313,58 @@ Test(kv_compressed, helix_store_page_rejects_cross_page)
 
 Test(kv_compressed, helix_store_page_replaces)
 {
-    OcCompressedKvCache cache;
-    float keys[8], values[8];
+    OcCompressedKvCache cache, only_b;
+    float keys_a[8], keys_b[8], values_a[8], values_b[8], query[8];
+    float out_a[8], out_replaced[8], out_b[8];
     size_t positions[1] = {0};
     size_t i;
+    int differed = 0;
     const OcHelixCache *helix;
+    OcHelixColdPageView view;
     for (i = 0; i < 8; i++) {
-        keys[i] = 0.1f * (float)(i + 1);
-        values[i] = 0.2f;
+        keys_a[i] = 0.1f * (float)(i + 1);
+        values_a[i] = 1.0f;
+        keys_b[i] = 3.0f + 0.5f * (float)i;
+        values_b[i] = 7.0f;
+        query[i] = 0.4f;
     }
     cr_assert_eq(oc_compressed_kv_init(&cache, 8, OC_KV_SCHEME_HELIX, 4,
                                        10000.0f),
                  OC_OK);
-    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+    cr_assert_eq(oc_compressed_kv_init(&only_b, 8, OC_KV_SCHEME_HELIX, 4,
+                                       10000.0f),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys_a, values_a,
                                              positions, 1),
                  OC_OK);
-    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+    cr_assert_eq(oc_compressed_kv_attention(&cache, 0, 0, query, 8, 0, out_a),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys_b, values_b,
+                                             positions, 1),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&only_b, 0, 0, keys_b, values_b,
                                              positions, 1),
                  OC_OK);
     helix = oc_compressed_kv_helix(&cache);
     cr_assert_not_null(helix);
     cr_assert_eq(oc_helix_cache_page_count(helix), (size_t)1);
+    cr_assert(oc_helix_cache_cold_page_view(helix, 0, &view));
+    cr_assert_eq(view.tokens, (size_t)1);
+    cr_assert_eq(oc_compressed_kv_attention(&cache, 0, 0, query, 8, 0,
+                                            out_replaced),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_attention(&only_b, 0, 0, query, 8, 0, out_b),
+                 OC_OK);
+    for (i = 0; i < 8; i++) {
+        cr_assert(isfinite(out_replaced[i]));
+        cr_assert(fabsf(out_replaced[i] - out_b[i]) < 1.0e-5f,
+                  "replaced page dim %zu: %f vs only-B %f", i, out_replaced[i],
+                  out_b[i]);
+        if (fabsf(out_replaced[i] - out_a[i]) > 1.0e-3f) differed = 1;
+    }
+    cr_assert(differed, "second store must replace first-page contents");
     oc_compressed_kv_free(&cache);
+    oc_compressed_kv_free(&only_b);
 }
 
 Test(kv_compressed, helix_append_accumulates)
