@@ -1,5 +1,5 @@
 /* test_grammar.c — grammar constraint tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/grammar.h"
 
 Test(grammar, init_none)

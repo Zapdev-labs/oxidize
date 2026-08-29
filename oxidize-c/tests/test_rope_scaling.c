@@ -1,5 +1,5 @@
 /* test_rope_scaling.c — RoPE scaling tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/rope_scaling.h"
 #include <math.h>
 #include <string.h>

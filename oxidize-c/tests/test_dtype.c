@@ -1,5 +1,5 @@
 /* test_dtype.c — OcDType tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/dtype.h"
 
 Test(dtype, sizes)

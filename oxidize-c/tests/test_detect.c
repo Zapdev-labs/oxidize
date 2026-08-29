@@ -1,5 +1,5 @@
 /* test_detect.c — Hardware detection tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/detect.h"
 #include <string.h>
 

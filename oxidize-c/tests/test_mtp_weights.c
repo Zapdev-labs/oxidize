@@ -1,5 +1,5 @@
 /* test_mtp_weights.c — MTP weights tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/mtp_weights.h"
 #include "oxidize/inference.h"
 #include <stdlib.h>

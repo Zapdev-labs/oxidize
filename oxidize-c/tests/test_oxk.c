@@ -1,5 +1,5 @@
 /* test_oxk.c — OXK kernel tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/oxk.h"
 #include <string.h>
 #include <math.h>

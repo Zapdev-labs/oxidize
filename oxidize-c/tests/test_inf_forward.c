@@ -1,5 +1,5 @@
 /* test_inf_forward.c — Forward pass tests for OcInferenceModel. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"
 #include "oxidize/layer_weights.h"

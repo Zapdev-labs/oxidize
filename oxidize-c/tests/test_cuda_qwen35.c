@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/activation.h"
 #include "oxidize/qwen35_delta.h"

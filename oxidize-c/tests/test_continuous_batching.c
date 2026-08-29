@@ -1,6 +1,6 @@
 /* test_continuous_batching.c — continuous batching scheduler tests. */
 #define _POSIX_C_SOURCE 200809L
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/continuous_batching.h"
 #include <string.h>
 #include <sys/types.h>

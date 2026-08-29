@@ -1,5 +1,5 @@
 /* test_lora.c — LoRA adapter inference tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/lora.h"
 
 Test(lora, model_init_free)

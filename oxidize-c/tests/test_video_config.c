@@ -4,7 +4,7 @@
  * suite in test_video.c and the "video_error" suite in
  * test_video_error.c.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 
 #include "oxidize/video_config.h"

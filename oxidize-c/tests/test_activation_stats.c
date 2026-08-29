@@ -1,5 +1,5 @@
 /* test_activation_stats.c — activation stats tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/activation_stats.h"
 #include <math.h>
 

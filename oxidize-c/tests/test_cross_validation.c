@@ -1,5 +1,5 @@
 /* test_cross_validation.c — cross-validation suite tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <math.h>
 #include <string.h>
 

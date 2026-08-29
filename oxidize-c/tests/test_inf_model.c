@@ -1,5 +1,5 @@
 /* test_inf_model.c — Inference model struct tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/inf_model.h"
 #include <stdlib.h>
 

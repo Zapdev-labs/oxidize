@@ -1,5 +1,5 @@
 /* test_vision.c — vision encoder stub tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/vision.h"
 #include <stdlib.h>
 #include <string.h>

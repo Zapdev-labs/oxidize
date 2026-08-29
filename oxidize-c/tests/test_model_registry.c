@@ -1,7 +1,7 @@
 /* test_model_registry.c — model registry tests. */
 #define _POSIX_C_SOURCE 200809L
 
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/model_registry.h"
 
 #include <dirent.h>

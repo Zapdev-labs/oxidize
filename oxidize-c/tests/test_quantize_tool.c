@@ -3,7 +3,7 @@
 /* test_quantize_tool.c — offline quantization tool tests. */
 #include "oxidize/quant.h"
 #include "oxidize/quantize_tool.h"
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

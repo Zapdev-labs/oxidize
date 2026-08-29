@@ -1,6 +1,6 @@
 /* test_kv_page.c — paged KV cache management tests. */
 #define _POSIX_C_SOURCE 200809L
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/kv_page.h"
 #include <string.h>
 

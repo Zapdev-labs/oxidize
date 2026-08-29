@@ -1,6 +1,6 @@
 /* test_kv_cache.c — simple per-layer KV cache tests. */
 #define _POSIX_C_SOURCE 200809L
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/kv_cache.h"
 #include <stdlib.h>
 #include <string.h>

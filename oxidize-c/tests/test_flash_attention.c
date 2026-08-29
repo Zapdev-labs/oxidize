@@ -1,5 +1,5 @@
 /* test_flash_attention.c — flash attention kernel tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/flash_attention.h"
 #include <math.h>
 #include <string.h>

@@ -1,5 +1,5 @@
 /* test_safetensors_to_gguf.c — SafeTensors to GGUF conversion tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/safetensors_to_gguf.h"
 #include <string.h>
 

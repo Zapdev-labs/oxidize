@@ -13,7 +13,7 @@
  * Reference for the contract: LongCat-2.0 config.json + a header parse of
  * LongCat-2.0-BF16.gguf.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/gguf_writer.h"
 #include "oxidize/llama.h"
 #include "oxidize/inf_model.h"

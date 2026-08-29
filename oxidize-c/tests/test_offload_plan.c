@@ -1,5 +1,5 @@
 /* test_offload_plan.c — Multi-GPU offload planning tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/offload.h"
 #include <stdlib.h>
 #include <string.h>

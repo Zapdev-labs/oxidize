@@ -1,5 +1,5 @@
 /* test_mistral_arch.c — Mistral architecture forward pass tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/mistral_arch.h"
 #include <stdlib.h>
 #include <string.h>

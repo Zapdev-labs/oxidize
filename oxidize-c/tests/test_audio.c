@@ -1,5 +1,5 @@
 /* test_audio.c — audio multimodal module tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>

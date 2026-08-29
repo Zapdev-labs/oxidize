@@ -1,5 +1,5 @@
 /* test_fingerprint.c — Model fingerprint tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/fingerprint.h"
 #include <string.h>
 

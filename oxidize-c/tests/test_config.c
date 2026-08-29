@@ -7,7 +7,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/config.h"
 #include "oxidize/gguf.h"

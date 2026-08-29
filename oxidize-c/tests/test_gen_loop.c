@@ -1,5 +1,5 @@
 /* test_gen_loop.c — Full generation loop tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/generation.h"
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"

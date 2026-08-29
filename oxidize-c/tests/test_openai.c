@@ -13,7 +13,7 @@
  * verify the routing + error contract only.
  */
 #define _GNU_SOURCE 1
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/http.h"
 #include "oxidize/openai.h"

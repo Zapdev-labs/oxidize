@@ -1,5 +1,5 @@
 /* test_validation.c — cross-validation and quality-assessment tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <math.h>
 #include <string.h>
 #include "oxidize/validation.h"

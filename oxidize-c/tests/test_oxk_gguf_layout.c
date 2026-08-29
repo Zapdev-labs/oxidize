@@ -14,7 +14,7 @@
  *
  * This caught three real defects in Q4_0, Q4_1 and Q4_K, all now fixed.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/flash_attention.h"
 #include "oxidize/oxk.h"

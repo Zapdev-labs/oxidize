@@ -1,5 +1,5 @@
 /* test_llama_swap.c — Model swap tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/llama_swap.h"
 #include <string.h>
 #include <stdio.h>

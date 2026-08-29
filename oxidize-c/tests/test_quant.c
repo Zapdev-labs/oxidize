@@ -22,8 +22,7 @@
  * SIMD parity (scalar-vs-AVX2 / AVX2-vs-AVX-512) is layered on by the
  * `quant-simd-dispatch` feature.
  */
-#include <criterion/criterion.h>
-#include <criterion/redirect.h>
+#include "framework.h"
 
 #include "oxidize/quant.h"
 #include "oxidize/error.h"

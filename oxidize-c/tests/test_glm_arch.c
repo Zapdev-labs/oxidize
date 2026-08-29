@@ -15,9 +15,9 @@
  *   cc -std=c11 -Wall -Wextra -Werror -O2 -c tests/test_glm_arch.c \
  *       -I include
  *   cc -std=c11 -Wall -Wextra -Werror -O2 tests/test_glm_arch.o \
- *       src/model/glm_arch.o ... -lcriterion -lm -o test_glm_arch
+ *       src/model/glm_arch.o ... framework_main.o -lm -o test_glm_arch
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 
 #include "oxidize/gguf.h"

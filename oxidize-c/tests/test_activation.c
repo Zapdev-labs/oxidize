@@ -1,5 +1,5 @@
 /* test_activation.c — Activation function tests (softmax, layer_norm, swiglu, attention, rms_norm_qwen). */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/activation.h"
 #include <math.h>
 #include <string.h>

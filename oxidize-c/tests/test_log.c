@@ -1,7 +1,7 @@
 /* test_log.c — oc_log leveled logging + OX_LOG_LEVEL tests. */
 #define _POSIX_C_SOURCE 200809L  /* setenv/unsetenv */
 
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/log.h"
 
 #include <stdlib.h>

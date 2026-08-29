@@ -1,5 +1,5 @@
 /* test_advanced_sampling.c — advanced sampling tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/advanced_sampling.h"
 #include <math.h>
 #include <string.h>

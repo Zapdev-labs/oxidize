@@ -1,5 +1,5 @@
 /* test_finetune.c — finetuning tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/finetune.h"
 #include <string.h>
 

@@ -1,5 +1,5 @@
 /* test_moe.c — Mixture-of-Experts routing tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <math.h>
 #include <string.h>
 #include "oxidize/moe.h"

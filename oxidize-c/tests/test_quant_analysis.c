@@ -1,5 +1,5 @@
 /* test_quant_analysis.c — quantization analysis tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/quant_analysis.h"
 #include <string.h>
 

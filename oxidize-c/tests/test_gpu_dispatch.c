@@ -1,5 +1,5 @@
 /* test_gpu_dispatch.c — GPU dispatch tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/gpu_dispatch.h"
 #include <string.h>
 

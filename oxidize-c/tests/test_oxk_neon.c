@@ -11,7 +11,7 @@
  *     term per element; the NEON kernel reduces each 16-element scale group in
  *     int32 first). Checked with a relative tolerance instead.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/oxk.h"
 #include "oxidize/oxk_neon.h"

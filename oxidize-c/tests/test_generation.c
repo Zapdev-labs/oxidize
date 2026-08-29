@@ -1,5 +1,5 @@
 /* test_generation.c — Generation engine tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/generation.h"
 #include <string.h>
 

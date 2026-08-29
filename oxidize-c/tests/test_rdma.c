@@ -1,5 +1,5 @@
 /* test_rdma.c — RDMA stub tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/rdma.h"
 #include <string.h>
 

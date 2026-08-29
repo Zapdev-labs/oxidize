@@ -1,5 +1,5 @@
 /* test_diffusion_gemma.c — Gemma diffusion model tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/diffusion_gemma.h"
 #include <string.h>
 

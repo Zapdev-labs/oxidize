@@ -11,8 +11,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include <criterion/criterion.h>
-#include <criterion/redirect.h>
+#include "framework.h"
 
 #include "oxidize/gguf.h"
 #include "oxidize/gguf_writer.h"

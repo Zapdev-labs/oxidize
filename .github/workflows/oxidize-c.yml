@@ -53,9 +53,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build tools
-        run: brew install criterion pkgconf
-
       - name: Build (CPU-only)
         run: make clean && make build
 

@@ -18,7 +18,7 @@
 
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/tokenizer.h"
 #include "oxidize/arena.h"

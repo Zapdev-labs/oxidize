@@ -1,7 +1,7 @@
 /* test_sse.c — SSE streaming tests. */
 #define _POSIX_C_SOURCE 200809L
 
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/sse.h"
 
 #include <stdio.h>

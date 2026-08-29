@@ -1,5 +1,5 @@
 /* test_topology.c — Network topology tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/topology.h"
 #include <string.h>
 

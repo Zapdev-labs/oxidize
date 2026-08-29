@@ -1,7 +1,7 @@
 /*
  * test_multimodal_proj.c — tests for the multimodal projection layer.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>

@@ -14,7 +14,7 @@
  * doesn't actually collapse to a 2 MiB page (the mapping is too small);
  * the call's success is what we verify here.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/arena.h"
 #include "oxidize/error.h"
 #include "oxidize/gguf.h"

@@ -1,5 +1,5 @@
 /* test_batch_engine.c — Continuous-batching decode engine tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/batch_engine.h"
 #include <string.h>
 

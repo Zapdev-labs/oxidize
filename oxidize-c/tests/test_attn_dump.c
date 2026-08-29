@@ -1,5 +1,5 @@
 /* test_attn_dump.c — attention dumper tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/attn_dump.h"
 #include <stdlib.h>
 

@@ -11,7 +11,7 @@
  * Every test restores the pool to 1 thread on the way out; the rest of the
  * suite assumes the inline default.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/matvec.h"
 #include "oxidize/parallel.h"

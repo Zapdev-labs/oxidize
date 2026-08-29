@@ -1,6 +1,6 @@
 /* test_encoder.c — vision encoder pipeline tests. */
 #define _POSIX_C_SOURCE 200809L
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 #include "oxidize/encoder.h"
 #include "oxidize/vision_config.h"

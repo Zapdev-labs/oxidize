@@ -1,5 +1,5 @@
 /* test_mtp.c — MTP/nextn draft generation tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/mtp.h"
 #include <string.h>
 

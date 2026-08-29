@@ -1,5 +1,5 @@
 /* test_merge.c — checkpoint merge tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/merge.h"
 
 Test(merge, strategy_name)

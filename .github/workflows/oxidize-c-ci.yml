@@ -22,9 +22,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-24.04 (glibc 2.39): the vendored tests/criterion/lib/
-          # libcriterion.a is built against glibc >= 2.38 (references
-          # __isoc23_strtol), so it will not link on ubuntu-22.04's glibc 2.35.
           - os: ubuntu-24.04
             cc: gcc
             cxx: g++
@@ -43,14 +40,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential clang
 
-      - name: Verify vendored Criterion
-        run: |
-          echo "Criterion include dir:"
-          ls -la tests/criterion/include
-          echo "Criterion static lib:"
-          ls -la tests/criterion/lib/libcriterion.a
-          test -f tests/criterion/lib/libcriterion.a
-
       - name: Build (CPU-only)
         env:
           CC: ${{ matrix.cc }}
@@ -68,7 +57,7 @@ jobs:
         if: always()
         run: |
           mkdir -p test-results
-          # Re-run tests with XML output if criterion supports it, else capture logs
+          # Re-run tests with XML output, else capture logs
           if [ -x ./test_runner ]; then
             ./test_runner --xml test-results/results.xml || true
           fi

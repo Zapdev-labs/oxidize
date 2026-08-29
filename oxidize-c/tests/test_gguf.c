@@ -28,8 +28,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 
-#include <criterion/criterion.h>
-#include <criterion/redirect.h>
+#include "framework.h"
 
 #include "oxidize/gguf.h"
 

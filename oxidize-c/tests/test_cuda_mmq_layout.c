@@ -15,7 +15,7 @@
  * Keep the MIRROR_* functions structurally identical to their mq_*_group_dot
  * counterparts. If one changes, change both.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include <math.h>
 #include <stdint.h>

@@ -1,5 +1,5 @@
 /* test_loader.c — Universal loader tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/loader.h"
 #include <string.h>
 

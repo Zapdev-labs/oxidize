@@ -19,7 +19,7 @@
  * The kernels are still compiled in and exercised directly by the
  * kernel-level tests below, gated on `oc_simd_caps()->level`.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/quant.h"
 #include "oxidize/simd.h"

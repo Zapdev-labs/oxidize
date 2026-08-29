@@ -9,8 +9,7 @@
  * and are validated manually.
  */
 #define _GNU_SOURCE 1
-#include <criterion/criterion.h>
-#include <criterion/redirect.h>
+#include "framework.h"
 
 #include "oxidize/hf_hub.h"
 

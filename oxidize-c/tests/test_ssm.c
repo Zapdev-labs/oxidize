@@ -1,5 +1,5 @@
 /* test_ssm.c — State-Space Model (SSM) recurrent state tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/ssm.h"
 #include <string.h>
 

@@ -1,5 +1,5 @@
 /* test_benchmark_suite.c — Benchmark suite tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/benchmark_suite.h"
 #include <string.h>
 

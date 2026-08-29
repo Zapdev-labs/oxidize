@@ -10,7 +10,7 @@
  *   5. SIMD level in plan matches detected caps.
  *   6. NUMA name function covers all enum values.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/autotune.h"
 #include "oxidize/gguf.h"

@@ -1,5 +1,5 @@
 /* test_frame_sampler.c — Frame sampler tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/frame_sampler.h"
 #include <string.h>
 

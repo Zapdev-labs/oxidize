@@ -1,5 +1,5 @@
 /* test_chat_template.c — Chat template tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/chat_template.h"
 #include <string.h>
 

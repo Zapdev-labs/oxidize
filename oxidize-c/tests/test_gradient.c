@@ -1,5 +1,5 @@
 /* test_gradient.c — Gradient computation + optimizer tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <math.h>
 #include <string.h>
 

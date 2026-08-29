@@ -12,7 +12,7 @@
  * Reference: Rust oxidize-core/src/format/gguf.rs::map_tensor_name +
  * oxidize-core/src/model/inference.rs::ModelArchitecture::from_gguf.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/arena.h"
 #include "oxidize/model.h"
 

@@ -2,7 +2,7 @@
  *
  * Unique suite name "video_encoder".
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 
 #include "oxidize/video_encoder.h"

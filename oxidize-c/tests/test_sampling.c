@@ -14,7 +14,7 @@
  * set rather than asserting an exact token (which would be brittle to RNG
  * ordering changes).
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/sampling.h"
 

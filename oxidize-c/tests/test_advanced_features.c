@@ -1,5 +1,5 @@
 /* test_advanced_features.c — Advanced features tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/advanced_features.h"
 #include <string.h>
 

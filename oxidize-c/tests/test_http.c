@@ -13,7 +13,7 @@
  * runs on port 0 (kernel-assigned) to avoid collisions.
  */
 #define _GNU_SOURCE 1
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/http.h"
 

@@ -1,5 +1,5 @@
 /* test_apply.c — OcApplyResult tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/apply.h"
 #include "oxidize/autotune_rules.h"
 

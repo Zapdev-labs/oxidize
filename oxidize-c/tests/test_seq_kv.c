@@ -1,5 +1,5 @@
 /* test_seq_kv.c — Per-sequence KV buffer tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/seq_kv.h"
 #include <string.h>
 
