@@ -1246,8 +1246,8 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out)
     return oc_llama_session_init_kv(model, out, kv_type_from_env());
 }
 
-OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
-                                 OcKvCacheType kv_type)
+static OcError session_init_kv_impl(OcLlamaModel *model, OcLlamaSession *out,
+                                    OcKvCacheType kv_type, int skip_dense_kv)
 {
     if (model == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     /* uses_geglu is fully handled by forward_dense_ffn (GeGLU vs SwiGLU),
@@ -1302,7 +1302,7 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     }
     out->kv_type = kv_type;
 
-    if (kv_type == OC_KV_Q8) {
+    if (!skip_dense_kv && kv_type == OC_KV_Q8) {
         size_t groups;
         if (!size_mul(cache_layers, model->cfg.n_ctx, &groups) ||
             !size_mul(groups, model->cfg.n_head_kv, &groups))
@@ -1316,7 +1316,7 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
             oc_llama_session_free(out);
             return OC_ERR_OOM;
         }
-    } else {
+    } else if (!skip_dense_kv) {
         out->kv_k = xcalloc(total, sizeof(float));
         /* MLA has no separate V cache: forward_mla_attention stores the
          * [c_kv | k_pe] latent in kv_k and reconstructs V from it via v_b at
@@ -1385,13 +1385,17 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
         out->shexp_up    = xcalloc(shexp_size, sizeof(float));
         out->shexp_out   = xcalloc(model->cfg.n_embd, sizeof(float));
     }
-    oc_log(OC_LOG_INFO, "llama: KV cache %s, %.1f MB (%.1f MB as f32)",
-           out->kv_type == OC_KV_Q8 ? "int8" : "f32",
-           (double)oc_llama_kv_cache_bytes(model, out->kv_type) / 1e6,
-           (double)oc_llama_kv_cache_bytes(model, OC_KV_F32) / 1e6);
+    if (skip_dense_kv) {
+        oc_log(OC_LOG_INFO, "llama: dense KV skipped (compressed cache)");
+    } else {
+        oc_log(OC_LOG_INFO, "llama: KV cache %s, %.1f MB (%.1f MB as f32)",
+               out->kv_type == OC_KV_Q8 ? "int8" : "f32",
+               (double)oc_llama_kv_cache_bytes(model, out->kv_type) / 1e6,
+               (double)oc_llama_kv_cache_bytes(model, OC_KV_F32) / 1e6);
+    }
 
     /* Q8 leaves kv_k/kv_v NULL; its buffers were checked at allocation. */
-    if ((out->kv_type == OC_KV_F32 &&
+    if ((!skip_dense_kv && out->kv_type == OC_KV_F32 &&
          (!out->kv_k || (!out->kv_v && !model->cfg.uses_mla))) ||
         !out->x || !out->normed || !out->q ||
         !out->k || !out->v || !out->attn_out || !out->ffn_gate ||
@@ -1513,6 +1517,42 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     return OC_OK;
 }
 
+OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
+                                 OcKvCacheType kv_type)
+{
+    return session_init_kv_impl(model, out, kv_type, 0);
+}
+
+static int layer_qualifies_compressed(const OcLlamaModel *m, const OcLlamaLayer *L)
+{
+    if (!m || !L) return 0;
+    return L->use_rope && m->cfg.yarn_factor <= 0.0f && !m->cfg.uses_mla &&
+           !m->cfg.is_qwen35 && !m->cfg.uses_gemma4 && L->sliding_window == 0;
+}
+
+static int model_all_layers_compressed(const OcLlamaModel *m)
+{
+    uint32_t l;
+    if (!m || !m->layers || m->cfg.n_layer == 0) return 0;
+    if (m->cfg.uses_mla || m->cfg.is_qwen35 || m->cfg.uses_gemma4) return 0;
+    if (m->cfg.yarn_factor > 0.0f) return 0;
+    for (l = 0; l < m->cfg.n_layer; l++) {
+        if (!layer_qualifies_compressed(m, &m->layers[l])) return 0;
+    }
+    return 1;
+}
+
+static void release_dense_kv(OcLlamaSession *sess)
+{
+    if (!sess) return;
+    free(sess->kv_k); sess->kv_k = NULL;
+    free(sess->kv_v); sess->kv_v = NULL;
+    free(sess->kv_k_q); sess->kv_k_q = NULL;
+    free(sess->kv_v_q); sess->kv_v_q = NULL;
+    free(sess->kv_k_scale); sess->kv_k_scale = NULL;
+    free(sess->kv_v_scale); sess->kv_v_scale = NULL;
+}
+
 OcError oc_llama_session_enable_kv_compress(OcLlamaSession *sess,
                                             OcKvScheme scheme)
 {
@@ -1533,8 +1573,7 @@ OcError oc_llama_session_enable_kv_compress(OcLlamaSession *sess,
     if (sess->model->cfg.uses_mla || sess->model->cfg.is_qwen35 ||
         sess->model->cfg.uses_gemma4)
         return OC_ERR_INVALID_ARG;
-    page_size = sess->model->cfg.n_ctx;
-    if (page_size == 0) page_size = 64;
+    page_size = OC_COMPRESSED_KV_PAGE_SIZE;
     theta = sess->model->cfg.rope_theta > 0.0f ? sess->model->cfg.rope_theta
                                                : 10000.0f;
     cache = (OcCompressedKvCache *)calloc(1, sizeof(*cache));
@@ -1547,7 +1586,14 @@ OcError oc_llama_session_enable_kv_compress(OcLlamaSession *sess,
     oc_compressed_kv_set_rope_layout(
         cache, sess->model->cfg.rope_norm_pairs ? OC_KV_ROPE_INTERLEAVED
                                                 : OC_KV_ROPE_SPLIT_HALVES);
+    {
+        size_t rope_dim = sess->model->cfg.rope_dim;
+        if (rope_dim == 0) rope_dim = head_dim;
+        oc_compressed_kv_set_rope_dim(cache, rope_dim);
+    }
     sess->kv_compress = cache;
+    if (model_all_layers_compressed(sess->model))
+        release_dense_kv(sess);
     oc_log(OC_LOG_INFO, "llama: compressed KV %s (head_dim=%zu)",
            scheme == OC_KV_SCHEME_HELIX ? "helix" : "rotor", head_dim);
     return OC_OK;
@@ -1561,6 +1607,36 @@ OcError oc_llama_session_enable_kv_compress_name(OcLlamaSession *sess,
         return oc_llama_session_enable_kv_compress(sess, OC_KV_SCHEME_ROTOR);
     if (strcmp(name, "helix") == 0)
         return oc_llama_session_enable_kv_compress(sess, OC_KV_SCHEME_HELIX);
+    return OC_ERR_INVALID_ARG;
+}
+
+OcError oc_llama_session_init_compressed(OcLlamaModel *model,
+                                         OcLlamaSession *out,
+                                         OcKvScheme scheme)
+{
+    OcError e;
+    int skip = model && model_all_layers_compressed(model);
+    e = session_init_kv_impl(model, out, OC_KV_F32, skip);
+    if (e != OC_OK) return e;
+    e = oc_llama_session_enable_kv_compress(out, scheme);
+    if (e != OC_OK) {
+        oc_llama_session_free(out);
+        return e;
+    }
+    return OC_OK;
+}
+
+OcError oc_llama_session_init_with_compress(OcLlamaModel *model,
+                                            OcLlamaSession *out,
+                                            OcKvCacheType kv_type,
+                                            const char *name)
+{
+    if (!name || name[0] == '\0' || strcmp(name, "none") == 0)
+        return oc_llama_session_init_kv(model, out, kv_type);
+    if (strcmp(name, "rotor") == 0)
+        return oc_llama_session_init_compressed(model, out, OC_KV_SCHEME_ROTOR);
+    if (strcmp(name, "helix") == 0)
+        return oc_llama_session_init_compressed(model, out, OC_KV_SCHEME_HELIX);
     return OC_ERR_INVALID_ARG;
 }
 
@@ -1942,11 +2018,8 @@ static void attn_decode_kv_slice(size_t begin, size_t end, size_t tid, void *ud)
 
 static int use_compressed_attn(const OcLlamaSession *s, const OcLlamaLayer *L)
 {
-    const OcLlamaConfig *c;
     if (!s || !s->kv_compress || !L || !s->model) return 0;
-    c = &s->model->cfg;
-    return L->use_rope && c->yarn_factor <= 0.0f && !c->uses_mla &&
-           !c->is_qwen35 && !c->uses_gemma4 && L->sliding_window == 0;
+    return layer_qualifies_compressed(s->model, L);
 }
 
 static OcError store_compressed_token(OcLlamaSession *s, uint32_t layer,

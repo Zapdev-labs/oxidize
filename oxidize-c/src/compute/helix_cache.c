@@ -251,6 +251,7 @@ void oc_helix_cache_config_init(OcHelixCacheConfig *cfg)
     if (!cfg) return;
     cfg->page_size = 64;
     cfg->head_dim = 128;
+    cfg->rope_dim = 0;
     cfg->key_radius_bits = 4;
     cfg->key_phase_bits = 4;
     cfg->value_bits = 3;
@@ -271,6 +272,8 @@ OcError oc_helix_cache_init(OcHelixCache *cache, const OcHelixCacheConfig *cfg)
         return OC_ERR_INVALID_ARG;
     memset(cache, 0, sizeof(*cache));
     cache->config = *cfg;
+    if (cache->config.rope_dim == 0 || cache->config.rope_dim > cfg->head_dim)
+        cache->config.rope_dim = cfg->head_dim;
     ensure_phase_lut();
     return OC_OK;
 }
@@ -504,6 +507,111 @@ OcError oc_helix_cache_store_cold_page(OcHelixCache *cache,
     return OC_OK;
 }
 
+static OcError extend_hot_page(OcHelixPage *page, size_t d, size_t add,
+                               const float *keys, const float *values,
+                               const size_t *positions)
+{
+    size_t n = page->n_tokens + add;
+    size_t *pos = (size_t *)realloc(page->positions, n * sizeof(size_t));
+    float *hk = (float *)realloc(page->hot_keys, n * d * sizeof(float));
+    float *hv = (float *)realloc(page->hot_values, n * d * sizeof(float));
+    if (!pos || !hk || !hv) {
+        page->positions = pos ? pos : page->positions;
+        page->hot_keys = hk ? hk : page->hot_keys;
+        page->hot_values = hv ? hv : page->hot_values;
+        return OC_ERR_OOM;
+    }
+    memcpy(pos + page->n_tokens, positions, add * sizeof(size_t));
+    memcpy(hk + page->n_tokens * d, keys, add * d * sizeof(float));
+    memcpy(hv + page->n_tokens * d, values, add * d * sizeof(float));
+    page->positions = pos;
+    page->hot_keys = hk;
+    page->hot_values = hv;
+    page->n_tokens = n;
+    return OC_OK;
+}
+
+static OcHelixPage *find_open_hot(OcHelixCache *cache, size_t layer,
+                                  size_t kv_head)
+{
+    size_t i;
+    for (i = 0; i < cache->n_pages; i++) {
+        OcHelixPage *p = &cache->pages[i];
+        if (p->key.layer == layer && p->key.head == kv_head &&
+            p->tier == OC_HELIX_PAGE_HOT &&
+            p->n_tokens < cache->config.page_size)
+            return p;
+    }
+    return NULL;
+}
+
+static OcError freeze_hot_page(OcHelixCache *cache, OcHelixPage *page)
+{
+    float *keys, *values;
+    size_t *pos;
+    size_t n, layer, head, pid;
+    OcError e;
+    if (!page || page->tier != OC_HELIX_PAGE_HOT || page->n_tokens == 0)
+        return OC_OK;
+    keys = page->hot_keys;
+    values = page->hot_values;
+    pos = page->positions;
+    n = page->n_tokens;
+    layer = page->key.layer;
+    head = page->key.head;
+    pid = page->key.page;
+    page->hot_keys = NULL;
+    page->hot_values = NULL;
+    page->positions = NULL;
+    page->n_tokens = 0;
+    e = oc_helix_cache_store_cold_page(cache, layer, head, pid, keys, values,
+                                       pos, n);
+    free(keys);
+    free(values);
+    free(pos);
+    return e;
+}
+
+OcError oc_helix_cache_append(OcHelixCache *cache,
+                              size_t layer, size_t kv_head,
+                              const float *pre_rope_keys,
+                              const float *values,
+                              const size_t *positions,
+                              size_t n_tokens)
+{
+    const size_t d = cache ? cache->config.head_dim : 0;
+    size_t offset = 0;
+    if (!cache || !pre_rope_keys || !values || !positions || n_tokens == 0)
+        return OC_ERR_INVALID_ARG;
+    while (offset < n_tokens) {
+        OcHelixPage *page = find_open_hot(cache, layer, kv_head);
+        size_t room, take;
+        OcError e;
+        if (!page) {
+            size_t page_id = positions[offset] / cache->config.page_size;
+            e = alloc_page_slot(cache, layer, kv_head, page_id, &page);
+            if (e != OC_OK) return e;
+            page->key.layer = layer;
+            page->key.head = kv_head;
+            page->key.page = page_id;
+            page->tier = OC_HELIX_PAGE_HOT;
+            page->n_tokens = 0;
+        }
+        room = cache->config.page_size - page->n_tokens;
+        take = n_tokens - offset;
+        if (take > room) take = room;
+        e = extend_hot_page(page, d, take, pre_rope_keys + offset * d,
+                            values + offset * d, positions + offset);
+        if (e != OC_OK) return e;
+        offset += take;
+        if (page->n_tokens >= cache->config.page_size) {
+            e = freeze_hot_page(cache, page);
+            if (e != OC_OK) return e;
+        }
+    }
+    return OC_OK;
+}
+
 size_t oc_helix_cache_n_logits(const OcHelixCache *cache, size_t layer,
                                size_t kv_head)
 {
@@ -572,26 +680,34 @@ OcError oc_helix_cache_logits(const OcHelixCache *cache,
     if (query_n != cache->config.head_dim) return OC_ERR_INVALID_ARG;
     d = cache->config.head_dim;
     pairs = d / 2;
-    need = oc_helix_cache_n_logits(cache, layer, kv_head);
-    *n_out = need;
-    if (need == 0) return OC_OK;
-    if (!out || out_cap < need) return OC_ERR_INVALID_ARG;
+    {
+        const size_t rope_dim = cache->config.rope_dim ? cache->config.rope_dim : d;
+        const size_t rope_pairs = rope_dim / 2;
+        need = oc_helix_cache_n_logits(cache, layer, kv_head);
+        *n_out = need;
+        if (need == 0) return OC_OK;
+        if (!out || out_cap < need) return OC_ERR_INVALID_ARG;
 
-    freq = (float *)malloc(pairs * sizeof(float));
-    step_c = (float *)malloc(pairs * sizeof(float));
-    step_s = (float *)malloc(pairs * sizeof(float));
-    qx = (float *)malloc(pairs * sizeof(float));
-    qy = (float *)malloc(pairs * sizeof(float));
-    if (!freq || !step_c || !step_s || !qx || !qy) {
-        free(freq); free(step_c); free(step_s); free(qx); free(qy);
-        return OC_ERR_OOM;
-    }
-    for (p = 0; p < pairs; p++) {
-        freq[p] = rope_frequency(p, d, rope_theta);
-        /* Advance to the next key (kpos+1) decreases (qpos-kpos) by 1, so
-         * the incremental rotator is R_{-freq}. */
-        step_c[p] = cosf(freq[p]);
-        step_s[p] = sinf(freq[p]);
+        freq = (float *)malloc(pairs * sizeof(float));
+        step_c = (float *)malloc(pairs * sizeof(float));
+        step_s = (float *)malloc(pairs * sizeof(float));
+        qx = (float *)malloc(pairs * sizeof(float));
+        qy = (float *)malloc(pairs * sizeof(float));
+        if (!freq || !step_c || !step_s || !qx || !qy) {
+            free(freq); free(step_c); free(step_s); free(qx); free(qy);
+            return OC_ERR_OOM;
+        }
+        for (p = 0; p < pairs; p++) {
+            if (p < rope_pairs) {
+                freq[p] = rope_frequency(p, rope_dim, rope_theta);
+                step_c[p] = cosf(freq[p]);
+                step_s[p] = sinf(freq[p]);
+            } else {
+                freq[p] = 0.0f;
+                step_c[p] = 1.0f;
+                step_s[p] = 0.0f;
+            }
+        }
     }
 
     for (pi = 0; pi < cache->n_pages; pi++) {
@@ -819,15 +935,16 @@ OcError oc_helix_cache_rewind(OcHelixCache *cache, size_t n_keep)
     if (!cache) return OC_ERR_INVALID_ARG;
     w = 0;
     for (i = 0; i < cache->n_pages; i++) {
-        size_t min_pos = (size_t)-1, t;
         OcHelixPage *p = &cache->pages[i];
+        size_t keep = 0, t;
         for (t = 0; t < p->n_tokens; t++) {
-            if (p->positions[t] < min_pos) min_pos = p->positions[t];
+            if (p->positions[t] < n_keep) keep = t + 1;
         }
-        if (p->key.page >= n_keep || min_pos >= n_keep) {
+        if (keep == 0) {
             page_reset(p);
             continue;
         }
+        p->n_tokens = keep;
         if (w != i) cache->pages[w] = cache->pages[i];
         w += 1;
     }

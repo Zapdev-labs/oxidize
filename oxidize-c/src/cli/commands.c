@@ -127,14 +127,7 @@ static OcError cli_session_init(const OcCliContext *ctx, OcLlamaModel *model,
                                 OcLlamaSession *sess)
 {
     OcKvCacheType kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
-    OcError e = oc_llama_session_init_kv(model, sess, kv);
-    if (e != OC_OK) return e;
-    e = oc_llama_session_enable_kv_compress_name(sess, ctx->kv_compress);
-    if (e != OC_OK) {
-        oc_llama_session_free(sess);
-        return e;
-    }
-    return OC_OK;
+    return oc_llama_session_init_with_compress(model, sess, kv, ctx->kv_compress);
 }
 
 void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model)

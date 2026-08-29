@@ -716,3 +716,38 @@ Test(llama, compressed_kv_rotor_cosine_hd16)
 {
     rotor_facade_vs_f32(16);
 }
+
+Test(llama, enable_kv_compress_releases_dense_cache)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    cr_assert_eq(oc_llama_session_init(&t.model, &s), OC_OK);
+    cr_assert_not_null(s.kv_k, "dense cache is allocated first");
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_OK);
+    cr_assert_null(s.kv_k, "enabling compression must drop the f32 cache");
+    cr_assert_null(s.kv_v);
+    cr_assert_not_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}
+
+Test(llama, init_compressed_skips_dense_cache)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    cr_assert_eq(oc_llama_session_init_compressed(&t.model, &s,
+                                                 OC_KV_SCHEME_ROTOR),
+                 OC_OK);
+    cr_assert_null(s.kv_k, "init_compressed must not allocate the f32 cache");
+    cr_assert_null(s.kv_v);
+    cr_assert_not_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}

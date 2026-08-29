@@ -4,6 +4,10 @@
  * P1: attention validates query length before RoPE so a short buffer cannot
  * walk off the end of query_pre_rope (the C++ facade indexed by head_dim
  * unconditionally).
+ *
+ * Helix polar pairs are always (2i, 2i+1). Split-halves models are remapped
+ * into that pairing before Helix store/attention. Values stay in model order
+ * so the attention output matches the rest of the network.
  */
 #include "oxidize/kv_compressed.h"
 
@@ -17,18 +21,20 @@ OcError oc_compressed_kv_init(OcCompressedKvCache *cache, size_t head_dim,
                               float rope_theta)
 {
     if (!cache || head_dim == 0) return OC_ERR_INVALID_ARG;
-    if (page_size == 0) page_size = 64;
+    if (page_size == 0) page_size = OC_COMPRESSED_KV_PAGE_SIZE;
     if (rope_theta <= 0.0f) rope_theta = 10000.0f;
     memset(cache, 0, sizeof(*cache));
     cache->scheme = scheme;
     cache->rope_layout = OC_KV_ROPE_INTERLEAVED;
     cache->head_dim = head_dim;
+    cache->rope_dim = head_dim;
     cache->page_size = page_size;
     cache->rope_theta = rope_theta;
     if (scheme == OC_KV_SCHEME_HELIX) {
         OcHelixCacheConfig cfg;
         oc_helix_cache_config_init(&cfg);
         cfg.head_dim = head_dim;
+        cfg.rope_dim = head_dim;
         cfg.page_size = page_size;
         if (oc_helix_cache_init(&cache->helix, &cfg) != OC_OK)
             return OC_ERR_INVALID_ARG;
@@ -58,21 +64,69 @@ void oc_compressed_kv_set_rope_layout(OcCompressedKvCache *cache,
     if (cache) cache->rope_layout = layout;
 }
 
+void oc_compressed_kv_set_rope_dim(OcCompressedKvCache *cache, size_t rope_dim)
+{
+    if (!cache || rope_dim == 0) return;
+    if (rope_dim > cache->head_dim) rope_dim = cache->head_dim;
+    cache->rope_dim = rope_dim;
+    if (cache->has_helix) cache->helix.config.rope_dim = rope_dim;
+}
+
 OcKvScheme oc_compressed_kv_scheme(const OcCompressedKvCache *cache)
 {
     return cache ? cache->scheme : OC_KV_SCHEME_ROTOR;
 }
 
+static size_t rotary_len(const OcCompressedKvCache *cache)
+{
+    size_t n = cache->rope_dim ? cache->rope_dim : cache->head_dim;
+    return n > cache->head_dim ? cache->head_dim : n;
+}
+
 static OcError apply_rope_row(const OcCompressedKvCache *cache, const float *row,
                               size_t position, float *out)
 {
+    const size_t rope_len = rotary_len(cache);
     if (cache->rope_layout == OC_KV_ROPE_SPLIT_HALVES) {
-        oc_apply_rope_f32(row, out, cache->head_dim, cache->head_dim,
+        oc_apply_rope_f32(row, out, cache->head_dim, rope_len,
                           (int64_t)position, cache->rope_theta);
     } else {
-        oc_apply_rope_norm_f32(row, out, cache->head_dim, cache->head_dim,
+        oc_apply_rope_norm_f32(row, out, cache->head_dim, rope_len,
                                (int64_t)position, cache->rope_theta);
     }
+    return OC_OK;
+}
+
+/* Split-halves (i, i+half) → interleaved (2i, 2i+1) on the rotary prefix. */
+static void split_to_interleaved(const float *src, float *dst, size_t head_dim,
+                                 size_t rope_len)
+{
+    size_t i, half;
+    if (rope_len > head_dim) rope_len = head_dim;
+    half = rope_len / 2;
+    for (i = 0; i < half; i++) {
+        dst[2 * i] = src[i];
+        dst[2 * i + 1] = src[i + half];
+    }
+    if (rope_len & 1u) dst[rope_len - 1] = src[rope_len - 1];
+    for (i = rope_len; i < head_dim; i++) dst[i] = src[i];
+}
+
+static OcError remap_rows_to_helix(const OcCompressedKvCache *cache,
+                                   const float *src, size_t n_tokens,
+                                   float **out)
+{
+    size_t t, d = cache->head_dim, rope_len = rotary_len(cache);
+    float *buf;
+    if (cache->rope_layout != OC_KV_ROPE_SPLIT_HALVES) {
+        *out = NULL;
+        return OC_OK;
+    }
+    buf = (float *)malloc(n_tokens * d * sizeof(float));
+    if (!buf) return OC_ERR_OOM;
+    for (t = 0; t < n_tokens; t++)
+        split_to_interleaved(src + t * d, buf + t * d, d, rope_len);
+    *out = buf;
     return OC_OK;
 }
 
@@ -84,15 +138,19 @@ OcError oc_compressed_kv_store_page(OcCompressedKvCache *cache,
                                     size_t n_tokens)
 {
     size_t t;
-    float *roped, *row;
+    float *roped, *row, *helix_keys = NULL;
+    const float *keys;
     OcError e;
     if (!cache || !pre_rope_keys || !values || !positions || n_tokens == 0)
         return OC_ERR_INVALID_ARG;
     if (cache->has_helix) {
-        return oc_helix_cache_store_cold_page(&cache->helix, layer, kv_head,
-                                              positions[0],
-                                              pre_rope_keys, values, positions,
-                                              n_tokens);
+        e = remap_rows_to_helix(cache, pre_rope_keys, n_tokens, &helix_keys);
+        if (e != OC_OK) return e;
+        keys = helix_keys ? helix_keys : pre_rope_keys;
+        e = oc_helix_cache_append(&cache->helix, layer, kv_head, keys, values,
+                                  positions, n_tokens);
+        free(helix_keys);
+        return e;
     }
     roped = (float *)malloc(n_tokens * cache->head_dim * sizeof(float));
     row = (float *)malloc(cache->head_dim * sizeof(float));
@@ -120,15 +178,20 @@ OcError oc_compressed_kv_attention(OcCompressedKvCache *cache,
                                    const float *query_pre_rope, size_t query_n,
                                    size_t query_position, float *out)
 {
-    float *rq;
+    float *rq, *hq = NULL;
+    const float *query;
     OcError e;
     if (!cache || !query_pre_rope || !out) return OC_ERR_INVALID_ARG;
     if (query_n != cache->head_dim) return OC_ERR_INVALID_ARG;
     if (cache->has_helix) {
-        return oc_helix_cache_attention(&cache->helix, layer, kv_head,
-                                        query_pre_rope, query_n,
-                                        query_position,
-                                        cache->rope_theta, out);
+        e = remap_rows_to_helix(cache, query_pre_rope, 1, &hq);
+        if (e != OC_OK) return e;
+        query = hq ? hq : query_pre_rope;
+        e = oc_helix_cache_attention(&cache->helix, layer, kv_head, query,
+                                     query_n, query_position, cache->rope_theta,
+                                     out);
+        free(hq);
+        return e;
     }
     rq = (float *)malloc(cache->head_dim * sizeof(float));
     if (!rq) return OC_ERR_OOM;

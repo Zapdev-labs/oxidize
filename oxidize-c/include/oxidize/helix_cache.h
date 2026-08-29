@@ -25,6 +25,7 @@ typedef enum {
 typedef struct OcHelixCacheConfig {
     size_t  page_size;
     size_t  head_dim;
+    size_t  rope_dim; /* 0 = head_dim; only this many coords get incremental RoPE */
     uint8_t key_radius_bits;
     uint8_t key_phase_bits;
     uint8_t value_bits;
@@ -92,6 +93,15 @@ OcError oc_helix_cache_store_hot_page(OcHelixCache *cache,
                                       const float *values,
                                       const size_t *positions,
                                       size_t n_tokens);
+
+/* Append tokens onto a per-(layer, kv_head) hot page. A full page is frozen
+ * to cold so per-page polar metadata is amortized. n_tokens may span pages. */
+OcError oc_helix_cache_append(OcHelixCache *cache,
+                              size_t layer, size_t kv_head,
+                              const float *pre_rope_keys,
+                              const float *values,
+                              const size_t *positions,
+                              size_t n_tokens);
 
 OcError oc_helix_cache_logits(const OcHelixCache *cache,
                               size_t layer, size_t kv_head,

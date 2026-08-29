@@ -490,6 +490,19 @@ OcError oc_llama_session_enable_kv_compress(OcLlamaSession *sess,
 OcError oc_llama_session_enable_kv_compress_name(OcLlamaSession *sess,
                                                  const char *name);
 
+/* Session init that attaches compressed KV without first allocating the
+ * context-sized f32/q8 cache when every layer can use the facade. */
+OcError oc_llama_session_init_compressed(OcLlamaModel *model,
+                                         OcLlamaSession *out,
+                                         OcKvScheme scheme);
+
+/* `name` is NULL/"none" (dense `kv_type`) or "rotor"/"helix" (skips the
+ * context-sized cache when every layer can use the facade). */
+OcError oc_llama_session_init_with_compress(OcLlamaModel *model,
+                                            OcLlamaSession *out,
+                                            OcKvCacheType kv_type,
+                                            const char *name);
+
 /* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
  * explicit: "q8", "f32", or NULL. Contexts >= 8192 default to Q8. */
 OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx,

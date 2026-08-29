@@ -30,10 +30,13 @@ typedef enum {
     OC_KV_ROPE_SPLIT_HALVES = 1,
 } OcKvRopeLayout;
 
+#define OC_COMPRESSED_KV_PAGE_SIZE 64
+
 typedef struct OcCompressedKvCache {
     OcKvScheme      scheme;
     OcKvRopeLayout  rope_layout;
     size_t          head_dim;
+    size_t          rope_dim;
     size_t          page_size;
     float           rope_theta;
     size_t          next_page_id;
@@ -50,6 +53,7 @@ void oc_compressed_kv_free(OcCompressedKvCache *cache);
 
 void oc_compressed_kv_set_rope_layout(OcCompressedKvCache *cache,
                                       OcKvRopeLayout layout);
+void oc_compressed_kv_set_rope_dim(OcCompressedKvCache *cache, size_t rope_dim);
 
 OcKvScheme oc_compressed_kv_scheme(const OcCompressedKvCache *cache);
 

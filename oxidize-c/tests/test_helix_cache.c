@@ -195,6 +195,43 @@ Test(helix_cache, restore_same_page_id_is_upsert)
     oc_helix_cache_free(&cache);
 }
 
+Test(helix_cache, append_amortizes_page_metadata)
+{
+    OcHelixCacheConfig cfg;
+    OcHelixCache cache;
+    OcHelixCacheStats st;
+    const size_t d = 128, tokens = 64;
+    float *keys, *values;
+    size_t *pos;
+    size_t i;
+    oc_helix_cache_config_init(&cfg);
+    cfg.head_dim = d;
+    cfg.page_size = tokens;
+    cr_assert_eq(oc_helix_cache_init(&cache, &cfg), OC_OK);
+    keys = malloc(d * sizeof(float));
+    values = malloc(d * sizeof(float));
+    pos = malloc(sizeof(size_t));
+    cr_assert(keys && values && pos);
+    for (i = 0; i < tokens; i++) {
+        size_t j;
+        for (j = 0; j < d; j++) {
+            keys[j] = ((j % 7) + 1) * 0.1f;
+            values[j] = ((int)(j % 5) - 2) * 0.25f;
+        }
+        pos[0] = i;
+        cr_assert_eq(oc_helix_cache_append(&cache, 0, 0, keys, values, pos, 1),
+                     OC_OK);
+    }
+    cr_assert_eq(oc_helix_cache_page_count(&cache), (size_t)1,
+                 "64 singleton appends at page_size=64 must share one page");
+    cr_assert_eq(oc_helix_cache_stats(&cache, &st), OC_OK);
+    cr_assert(oc_helix_cache_compression_ratio(&st) > 6.0f,
+              "appended helix pages should compress, got %f",
+              oc_helix_cache_compression_ratio(&st));
+    free(keys); free(values); free(pos);
+    oc_helix_cache_free(&cache);
+}
+
 Test(helix_cache, compression_at_d128)
 {
     OcHelixCacheConfig cfg;
