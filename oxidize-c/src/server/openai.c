@@ -973,10 +973,7 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         *out_body = oc_openai_error_json("allocation failed", "server_error");
         *out_status = 500; return;
     }
-    {
-        const float *src = (sess.last_hidden != NULL) ? sess.last_hidden : sess.x;
-        for (uint32_t i = 0; i < n_embd; i++) embedding[i] = src[i];
-    }
+    for (uint32_t i = 0; i < n_embd; i++) embedding[i] = sess.x[i];
     oc_llama_session_free(&sess);
     pthread_mutex_unlock(&g_generation_mutex);
     free(ids);
