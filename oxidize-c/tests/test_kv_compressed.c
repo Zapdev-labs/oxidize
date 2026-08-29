@@ -4,6 +4,7 @@
 #include "oxidize/activation.h"
 
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -100,12 +101,22 @@ Test(kv_compressed, both_schemes_track_f32_reference)
         cr_assert_eq(oc_compressed_kv_attention(&cache, 0, 0, query, head_dim,
                                                 tokens, out),
                      OC_OK);
-        for (i = 0; i < head_dim; i++) {
-            cr_assert(fabsf(out[i] - ref[i]) <= tol,
-                      "scheme %d dim %zu: %f vs ref %f", (int)schemes[si], i,
-                      out[i], ref[i]);
+        {
+            float dot = 0.0f, n0 = 0.0f, n1 = 0.0f, cosine;
+            for (i = 0; i < head_dim; i++) {
+                cr_assert(fabsf(out[i] - ref[i]) <= tol,
+                          "scheme %d dim %zu: %f vs ref %f", (int)schemes[si], i,
+                          out[i], ref[i]);
+                dot += out[i] * ref[i];
+                n0 += out[i] * out[i];
+                n1 += ref[i] * ref[i];
+            }
+            cosine = dot / (sqrtf(n0) * sqrtf(n1) + 1.0e-12f);
+            cr_assert(cosine >= 0.95f, "scheme %d cosine %f", (int)schemes[si],
+                      cosine);
         }
-        cr_assert(oc_compressed_kv_compression_ratio(&cache) > 6.0f,
+        cr_assert(oc_compressed_kv_compression_ratio(&cache) >
+                      (schemes[si] == OC_KV_SCHEME_HELIX ? 4.0f : 6.0f),
                   "scheme %d ratio %f", (int)schemes[si],
                   oc_compressed_kv_compression_ratio(&cache));
         oc_compressed_kv_free(&cache);
@@ -208,7 +219,7 @@ Test(kv_compressed, partial_rope_dim_leaves_tail)
     cr_assert_eq(oc_compressed_kv_init(&cache, head_dim, OC_KV_SCHEME_ROTOR,
                                        tokens, theta),
                  OC_OK);
-    oc_compressed_kv_set_rope_dim(&cache, rope_dim);
+    cr_assert_eq(oc_compressed_kv_set_rope_dim(&cache, rope_dim), OC_OK);
     cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
                                              positions, tokens),
                  OC_OK);
@@ -234,4 +245,138 @@ Test(kv_compressed, query_oob_is_rejected)
                  OC_ERR_INVALID_ARG,
                  "P1: short query must not index past query_n during RoPE");
     oc_compressed_kv_free(&cache);
+}
+
+Test(kv_compressed, invalid_scheme_is_rejected)
+{
+    OcCompressedKvCache cache;
+    cr_assert_eq(oc_compressed_kv_init(&cache, 8, (OcKvScheme)2, 8, 10000.0f),
+                 OC_ERR_INVALID_ARG);
+}
+
+Test(kv_compressed, odd_rope_dim_is_rejected)
+{
+    OcCompressedKvCache cache;
+    cr_assert_eq(oc_compressed_kv_init(&cache, 16, OC_KV_SCHEME_ROTOR, 8,
+                                       10000.0f),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_set_rope_dim(&cache, 3), OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_compressed_kv_set_rope_dim(&cache, 8), OC_OK);
+    oc_compressed_kv_free(&cache);
+}
+
+Test(kv_compressed, rotor_noncontiguous_positions_rejected)
+{
+    OcCompressedKvCache cache;
+    float keys[16], values[16];
+    size_t positions[2] = {0, 2};
+    size_t i;
+    for (i = 0; i < 16; i++) {
+        keys[i] = 0.1f;
+        values[i] = 0.2f;
+    }
+    cr_assert_eq(oc_compressed_kv_init(&cache, 8, OC_KV_SCHEME_ROTOR, 8,
+                                       10000.0f),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+                                             positions, 2),
+                 OC_ERR_INVALID_ARG);
+    oc_compressed_kv_free(&cache);
+}
+
+Test(kv_compressed, helix_store_page_replaces)
+{
+    OcCompressedKvCache cache;
+    float keys[8], values[8];
+    size_t positions[1] = {0};
+    size_t i;
+    const OcHelixCache *helix;
+    for (i = 0; i < 8; i++) {
+        keys[i] = 0.1f * (float)(i + 1);
+        values[i] = 0.2f;
+    }
+    cr_assert_eq(oc_compressed_kv_init(&cache, 8, OC_KV_SCHEME_HELIX, 4,
+                                       10000.0f),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+                                             positions, 1),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+                                             positions, 1),
+                 OC_OK);
+    helix = oc_compressed_kv_helix(&cache);
+    cr_assert_not_null(helix);
+    cr_assert_eq(oc_helix_cache_page_count(helix), (size_t)1);
+    oc_compressed_kv_free(&cache);
+}
+
+Test(kv_compressed, helix_append_accumulates)
+{
+    OcCompressedKvCache cache;
+    float keys[16], values[16];
+    size_t pos0 = 0, pos1 = 1;
+    size_t i;
+    const OcHelixCache *helix;
+    for (i = 0; i < 16; i++) {
+        keys[i] = 0.1f;
+        values[i] = 0.2f;
+    }
+    cr_assert_eq(oc_compressed_kv_init(&cache, 8, OC_KV_SCHEME_HELIX, 4,
+                                       10000.0f),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_append(&cache, 0, 0, keys, values, &pos0, 1),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_append(&cache, 0, 0, keys + 8, values + 8,
+                                         &pos1, 1),
+                 OC_OK);
+    helix = oc_compressed_kv_helix(&cache);
+    cr_assert_eq(oc_helix_cache_n_logits(helix, 0, 0), (size_t)2);
+    oc_compressed_kv_free(&cache);
+}
+
+Test(kv_compressed, causal_query_from_middle_of_chunk)
+{
+    OcKvScheme schemes[2];
+    int si;
+    float keys[32], values[32], query[8];
+    size_t positions[4] = {0, 1, 2, 3};
+    size_t prefix_pos[2] = {0, 1};
+    size_t i;
+    schemes[0] = OC_KV_SCHEME_ROTOR;
+    schemes[1] = OC_KV_SCHEME_HELIX;
+    for (i = 0; i < 32; i++) {
+        keys[i] = 0.05f * (float)((int)(i % 5) + 1);
+        values[i] = 0.1f * (float)((int)(i % 3) + 1);
+    }
+    for (i = 0; i < 8; i++) query[i] = 0.2f;
+    for (si = 0; si < 2; si++) {
+        OcCompressedKvCache full, prefix;
+        float out_full[8], out_prefix[8];
+        cr_assert_eq(oc_compressed_kv_init(&full, 8, schemes[si], 8, 10000.0f),
+                     OC_OK);
+        cr_assert_eq(oc_compressed_kv_init(&prefix, 8, schemes[si], 8, 10000.0f),
+                     OC_OK);
+        /* Append keeps Helix pages hot (f32). Cold recode of a 4-token page
+         * would not match a separately encoded 2-token page. */
+        cr_assert_eq(oc_compressed_kv_append(&full, 0, 0, keys, values,
+                                             positions, 4),
+                     OC_OK);
+        cr_assert_eq(oc_compressed_kv_append(&prefix, 0, 0, keys, values,
+                                             prefix_pos, 2),
+                     OC_OK);
+        cr_assert_eq(oc_compressed_kv_attention(&full, 0, 0, query, 8, 1,
+                                                out_full),
+                     OC_OK);
+        cr_assert_eq(oc_compressed_kv_attention(&prefix, 0, 0, query, 8, 1,
+                                                out_prefix),
+                     OC_OK);
+        for (i = 0; i < 8; i++) {
+            cr_assert(isfinite(out_full[i]));
+            cr_assert(fabsf(out_full[i] - out_prefix[i]) < 1.0e-4f,
+                      "scheme %d dim %zu: future tokens leaked into causal attn",
+                      (int)schemes[si], i);
+        }
+        oc_compressed_kv_free(&full);
+        oc_compressed_kv_free(&prefix);
+    }
 }

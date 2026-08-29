@@ -16,6 +16,12 @@ int oc_cli_kv_compress_enabled(const char *name)
     return name && name[0] != '\0' && strcmp(name, "none") != 0;
 }
 
+int oc_cli_kv_compress_valid(const char *name)
+{
+    if (!name || name[0] == '\0' || strcmp(name, "none") == 0) return 1;
+    return strcmp(name, "rotor") == 0 || strcmp(name, "helix") == 0;
+}
+
 int oc_cli_cuda_conflicts_kv_compress(const char *backend,
                                       const char *kv_compress)
 {

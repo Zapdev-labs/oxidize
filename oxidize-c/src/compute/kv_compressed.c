@@ -20,7 +20,10 @@ OcError oc_compressed_kv_init(OcCompressedKvCache *cache, size_t head_dim,
                               OcKvScheme scheme, size_t page_size,
                               float rope_theta)
 {
+    OcError e;
     if (!cache || head_dim == 0) return OC_ERR_INVALID_ARG;
+    if (scheme != OC_KV_SCHEME_ROTOR && scheme != OC_KV_SCHEME_HELIX)
+        return OC_ERR_INVALID_ARG;
     if (page_size == 0) page_size = OC_COMPRESSED_KV_PAGE_SIZE;
     if (rope_theta <= 0.0f) rope_theta = 10000.0f;
     memset(cache, 0, sizeof(*cache));
@@ -36,15 +39,15 @@ OcError oc_compressed_kv_init(OcCompressedKvCache *cache, size_t head_dim,
         cfg.head_dim = head_dim;
         cfg.rope_dim = head_dim;
         cfg.page_size = page_size;
-        if (oc_helix_cache_init(&cache->helix, &cfg) != OC_OK)
-            return OC_ERR_INVALID_ARG;
+        e = oc_helix_cache_init(&cache->helix, &cfg);
+        if (e != OC_OK) return e;
         cache->has_helix = 1;
     } else {
         OcRotorQuantCacheConfig cfg;
         oc_rotorquant_cache_config_init(&cfg);
         cfg.head_dim = head_dim;
-        if (oc_rotorquant_cache_init(&cache->rotor, &cfg) != OC_OK)
-            return OC_ERR_INVALID_ARG;
+        e = oc_rotorquant_cache_init(&cache->rotor, &cfg);
+        if (e != OC_OK) return e;
         cache->has_rotor = 1;
     }
     return OC_OK;
@@ -64,12 +67,15 @@ void oc_compressed_kv_set_rope_layout(OcCompressedKvCache *cache,
     if (cache) cache->rope_layout = layout;
 }
 
-void oc_compressed_kv_set_rope_dim(OcCompressedKvCache *cache, size_t rope_dim)
+OcError oc_compressed_kv_set_rope_dim(OcCompressedKvCache *cache, size_t rope_dim)
 {
-    if (!cache || rope_dim == 0) return;
-    if (rope_dim > cache->head_dim) rope_dim = cache->head_dim;
+    if (!cache) return OC_ERR_INVALID_ARG;
+    if (rope_dim == 0) rope_dim = cache->head_dim;
+    if (rope_dim > cache->head_dim || (rope_dim % 2) != 0)
+        return OC_ERR_INVALID_ARG;
     cache->rope_dim = rope_dim;
     if (cache->has_helix) cache->helix.config.rope_dim = rope_dim;
+    return OC_OK;
 }
 
 OcKvScheme oc_compressed_kv_scheme(const OcCompressedKvCache *cache)
@@ -144,13 +150,17 @@ OcError oc_compressed_kv_store_page(OcCompressedKvCache *cache,
     if (!cache || !pre_rope_keys || !values || !positions || n_tokens == 0)
         return OC_ERR_INVALID_ARG;
     if (cache->has_helix) {
+        size_t page_id = positions[0] / cache->page_size;
         e = remap_rows_to_helix(cache, pre_rope_keys, n_tokens, &helix_keys);
         if (e != OC_OK) return e;
         keys = helix_keys ? helix_keys : pre_rope_keys;
-        e = oc_helix_cache_append(&cache->helix, layer, kv_head, keys, values,
-                                  positions, n_tokens);
+        e = oc_helix_cache_store_cold_page(&cache->helix, layer, kv_head, page_id,
+                                           keys, values, positions, n_tokens);
         free(helix_keys);
         return e;
+    }
+    for (t = 0; t < n_tokens; t++) {
+        if (positions[t] != positions[0] + t) return OC_ERR_INVALID_ARG;
     }
     roped = (float *)malloc(n_tokens * cache->head_dim * sizeof(float));
     row = (float *)malloc(cache->head_dim * sizeof(float));
@@ -169,8 +179,33 @@ OcError oc_compressed_kv_store_page(OcCompressedKvCache *cache,
                                        values, n_tokens, positions[0]);
     free(roped);
     free(row);
-    cache->next_page_id += 1;
+    if (e == OC_OK) cache->next_page_id += 1;
     return e;
+}
+
+OcError oc_compressed_kv_append(OcCompressedKvCache *cache,
+                                size_t layer, size_t kv_head,
+                                const float *pre_rope_keys,
+                                const float *values,
+                                const size_t *positions,
+                                size_t n_tokens)
+{
+    float *helix_keys = NULL;
+    const float *keys;
+    OcError e;
+    if (!cache || !pre_rope_keys || !values || !positions || n_tokens == 0)
+        return OC_ERR_INVALID_ARG;
+    if (cache->has_helix) {
+        e = remap_rows_to_helix(cache, pre_rope_keys, n_tokens, &helix_keys);
+        if (e != OC_OK) return e;
+        keys = helix_keys ? helix_keys : pre_rope_keys;
+        e = oc_helix_cache_append(&cache->helix, layer, kv_head, keys, values,
+                                  positions, n_tokens);
+        free(helix_keys);
+        return e;
+    }
+    return oc_compressed_kv_store_page(cache, layer, kv_head, pre_rope_keys,
+                                       values, positions, n_tokens);
 }
 
 OcError oc_compressed_kv_attention(OcCompressedKvCache *cache,

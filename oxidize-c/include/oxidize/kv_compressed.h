@@ -53,7 +53,7 @@ void oc_compressed_kv_free(OcCompressedKvCache *cache);
 
 void oc_compressed_kv_set_rope_layout(OcCompressedKvCache *cache,
                                       OcKvRopeLayout layout);
-void oc_compressed_kv_set_rope_dim(OcCompressedKvCache *cache, size_t rope_dim);
+OcError oc_compressed_kv_set_rope_dim(OcCompressedKvCache *cache, size_t rope_dim);
 
 OcKvScheme oc_compressed_kv_scheme(const OcCompressedKvCache *cache);
 
@@ -63,6 +63,15 @@ OcError oc_compressed_kv_store_page(OcCompressedKvCache *cache,
                                     const float *values,
                                     const size_t *positions,
                                     size_t n_tokens);
+
+/* Helix: append onto the hot page for positions[i]/page_size.
+ * Rotor: same as store_page (per-call upsert). Llama decode/prefill use this. */
+OcError oc_compressed_kv_append(OcCompressedKvCache *cache,
+                                size_t layer, size_t kv_head,
+                                const float *pre_rope_keys,
+                                const float *values,
+                                const size_t *positions,
+                                size_t n_tokens);
 
 OcError oc_compressed_kv_attention(OcCompressedKvCache *cache,
                                    size_t layer, size_t kv_head,

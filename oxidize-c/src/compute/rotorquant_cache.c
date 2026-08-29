@@ -68,16 +68,6 @@ static void page_free(OcRotorQuantPage *p)
     memset(p, 0, sizeof(*p));
 }
 
-static void compact_page_slot(OcRotorQuantCache *cache, size_t idx)
-{
-    if (idx + 1 < cache->n_pages) {
-        memmove(&cache->pages[idx], &cache->pages[idx + 1],
-                (cache->n_pages - idx - 1) * sizeof(cache->pages[0]));
-    }
-    cache->n_pages--;
-    memset(&cache->pages[cache->n_pages], 0, sizeof(cache->pages[0]));
-}
-
 static size_t blocks_per_row(const OcRotorQuantCache *c)
 {
     return (c->config.head_dim + c->config.block_size - 1) / c->config.block_size;
@@ -232,15 +222,22 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
     OcRotorQuantPage *np = NULL;
     OcError e;
     size_t i;
-    size_t page_idx = 0;
     int reused = 0;
+    float *key_scales = NULL, *value_scales = NULL;
+    uint8_t *key_codes = NULL, *value_codes = NULL;
     if (!cache || !keys || !values || n_tokens == 0) return OC_ERR_INVALID_ARG;
+    e = quantize_rows(cache, keys, n_tokens, &key_scales, &key_codes);
+    if (e != OC_OK) return e;
+    e = quantize_rows(cache, values, n_tokens, &value_scales, &value_codes);
+    if (e != OC_OK) {
+        free(key_scales);
+        free(key_codes);
+        return e;
+    }
     for (i = 0; i < cache->n_pages; i++) {
         if (cache->pages[i].layer == layer && cache->pages[i].head == kv_head &&
             cache->pages[i].first_position == first_position) {
-            page_free(&cache->pages[i]);
             np = &cache->pages[i];
-            page_idx = i;
             reused = 1;
             break;
         }
@@ -250,30 +247,26 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
             size_t ncap = cache->cap_pages ? cache->cap_pages * 2 : 8;
             OcRotorQuantPage *grown = (OcRotorQuantPage *)realloc(
                 cache->pages, ncap * sizeof(*grown));
-            if (!grown) return OC_ERR_OOM;
+            if (!grown) {
+                free(key_scales); free(key_codes);
+                free(value_scales); free(value_codes);
+                return OC_ERR_OOM;
+            }
             cache->pages = grown;
             cache->cap_pages = ncap;
         }
         np = &cache->pages[cache->n_pages];
         memset(np, 0, sizeof(*np));
     }
+    if (reused) page_free(np);
     np->layer = layer;
     np->head = kv_head;
     np->tokens = n_tokens;
     np->first_position = first_position;
-    e = quantize_rows(cache, keys, n_tokens, &np->key_scales, &np->key_codes);
-    if (e != OC_OK) {
-        page_free(np);
-        if (reused) compact_page_slot(cache, page_idx);
-        return e;
-    }
-    e = quantize_rows(cache, values, n_tokens, &np->value_scales,
-                      &np->value_codes);
-    if (e != OC_OK) {
-        page_free(np);
-        if (reused) compact_page_slot(cache, page_idx);
-        return e;
-    }
+    np->key_scales = key_scales;
+    np->key_codes = key_codes;
+    np->value_scales = value_scales;
+    np->value_codes = value_codes;
     if (!reused) cache->n_pages += 1;
     return OC_OK;
 }
@@ -512,7 +505,12 @@ OcError oc_rotorquant_cache_rewind(OcRotorQuantCache *cache, size_t n_keep)
             page_free(&cache->pages[i]);
             continue;
         }
-        if (w != i) cache->pages[w] = cache->pages[i];
+        if (cache->pages[i].first_position + cache->pages[i].tokens > n_keep)
+            cache->pages[i].tokens = n_keep - cache->pages[i].first_position;
+        if (w != i) {
+            cache->pages[w] = cache->pages[i];
+            memset(&cache->pages[i], 0, sizeof(cache->pages[i]));
+        }
         w += 1;
     }
     cache->n_pages = w;

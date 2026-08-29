@@ -54,6 +54,7 @@ typedef struct OcHelixCacheStats {
 typedef struct OcHelixColdPageView {
     size_t         layer;
     size_t         kv_head;
+    size_t         page_id;
     size_t         tokens;
     const size_t  *positions;
     const uint8_t *key_codes;
@@ -108,7 +109,7 @@ OcError oc_helix_cache_logits(const OcHelixCache *cache,
                               const float *query_pre_rope, size_t query_n,
                               size_t query_position, float rope_theta,
                               float *out, size_t out_cap, size_t *n_out);
-OcError oc_helix_cache_attention(OcHelixCache *cache,
+OcError oc_helix_cache_attention(const OcHelixCache *cache,
                                  size_t layer, size_t kv_head,
                                  const float *query_pre_rope, size_t query_n,
                                  size_t query_position, float rope_theta,

@@ -566,6 +566,19 @@ int main(int argc, char **argv)
                     "error: --kv-compress is not supported with --backend cuda\n");
             return 1;
         }
+        if (!oc_cli_kv_compress_valid(ctx.kv_compress)) {
+            fprintf(stderr,
+                    "error: --kv-compress must be none, rotor, or helix\n");
+            return 1;
+        }
+        if (ctx.command == OC_CLI_CMD_SERVE ||
+            ctx.command == OC_CLI_CMD_SERVE_REALTIME) {
+            if (oc_cli_kv_compress_enabled(ctx.kv_compress)) {
+                fprintf(stderr,
+                        "error: --kv-compress is not supported with serve\n");
+                return 1;
+            }
+        }
         init_compute_threads(ctx.threads);
         OcError ce = oc_cli_command_run(&ctx);
         oc_parallel_shutdown();
@@ -582,6 +595,16 @@ int main(int argc, char **argv)
     if (oc_cli_cuda_conflicts_kv_compress(args.backend, args.kv_compress)) {
         fprintf(stderr,
                 "error: --kv-compress is not supported with --backend cuda\n");
+        return 1;
+    }
+    if (!oc_cli_kv_compress_valid(args.kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress must be none, rotor, or helix\n");
+        return 1;
+    }
+    if (args.serve_api && oc_cli_kv_compress_enabled(args.kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress is not supported with --serve-api\n");
         return 1;
     }
     if (args.cuda_selftest) {

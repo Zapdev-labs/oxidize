@@ -77,6 +77,8 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a);
 
 /* Non-empty name other than "none". */
 int oc_cli_kv_compress_enabled(const char *name);
+/* NULL, empty, "none", "rotor", or "helix". */
+int oc_cli_kv_compress_valid(const char *name);
 /* CUDA forward uses its own dense d_kv_k/d_kv_v and ignores sess compression. */
 int oc_cli_cuda_conflicts_kv_compress(const char *backend,
                                       const char *kv_compress);

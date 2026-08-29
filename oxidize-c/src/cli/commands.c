@@ -677,7 +677,11 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
     oc_tokenizer_free(&tok);
     oc_llama_free(&model);
 
-    if (setup_failed || completed == 0) return OC_ERR_INTERNAL;
+    if (setup_failed || completed == 0) {
+        if (ctx->output_format == OC_CLI_OUTPUT_JSON)
+            printf("],\"error\":\"setup failed\"}\n");
+        return OC_ERR_INTERNAL;
+    }
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("],\"best_decode\":%.2f,\"avg_decode\":%.2f,"

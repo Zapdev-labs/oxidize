@@ -234,6 +234,69 @@ Test(rotorquant_cache, causal_mask_drops_future_tokens)
     oc_rotorquant_cache_free(&cache);
 }
 
+Test(rotorquant_cache, attention_causal_mask_drops_future_tokens)
+{
+    OcRotorQuantCacheConfig cfg;
+    OcRotorQuantCache full, prefix;
+    const size_t d = 32, tokens = 4;
+    float keys[128], values[128], query[32], out_full[32], out_prefix[32];
+    size_t i;
+    oc_rotorquant_cache_config_init(&cfg);
+    cfg.head_dim = d;
+    cr_assert_eq(oc_rotorquant_cache_init(&full, &cfg), OC_OK);
+    cr_assert_eq(oc_rotorquant_cache_init(&prefix, &cfg), OC_OK);
+    for (i = 0; i < tokens * d; i++) {
+        keys[i] = 0.25f;
+        values[i] = 1.0f;
+    }
+    for (i = 0; i < d; i++) query[i] = 0.5f;
+    cr_assert_eq(oc_rotorquant_cache_store_page(&full, 0, 0, keys, values,
+                                                tokens, 0),
+                 OC_OK);
+    cr_assert_eq(oc_rotorquant_cache_store_page(&prefix, 0, 0, keys, values, 2,
+                                                0),
+                 OC_OK);
+    cr_assert_eq(oc_rotorquant_cache_attention(&full, 0, 0, query, d, 1,
+                                                out_full),
+                 OC_OK);
+    cr_assert_eq(oc_rotorquant_cache_attention(&prefix, 0, 0, query, d, 1,
+                                                out_prefix),
+                 OC_OK);
+    for (i = 0; i < d; i++) {
+        cr_assert(fabsf(out_full[i] - out_prefix[i]) < 1.0e-5f,
+                  "future tokens must not contribute at query_pos=1 dim %zu",
+                  i);
+    }
+    oc_rotorquant_cache_free(&full);
+    oc_rotorquant_cache_free(&prefix);
+}
+
+Test(rotorquant_cache, rewind_truncates_mid_page)
+{
+    OcRotorQuantCacheConfig cfg;
+    OcRotorQuantCache cache;
+    OcRotorQuantPageView view;
+    float keys[32], values[32];
+    size_t i;
+    oc_rotorquant_cache_config_init(&cfg);
+    cfg.head_dim = 8;
+    cr_assert_eq(oc_rotorquant_cache_init(&cache, &cfg), OC_OK);
+    for (i = 0; i < 32; i++) {
+        keys[i] = 0.1f;
+        values[i] = 0.2f;
+    }
+    cr_assert_eq(oc_rotorquant_cache_store_page(&cache, 0, 0, keys, values,
+                                                4, 0),
+                 OC_OK);
+    cr_assert_eq(oc_rotorquant_cache_rewind(&cache, 2), OC_OK);
+    cr_assert_eq(oc_rotorquant_cache_page_count(&cache), (size_t)1);
+    cr_assert_eq(oc_rotorquant_cache_n_logits(&cache, 0, 0), (size_t)2);
+    cr_assert(oc_rotorquant_cache_page_view(&cache, 0, &view));
+    cr_assert_eq(view.tokens, (size_t)2);
+    cr_assert_eq(view.first_position, (size_t)0);
+    oc_rotorquant_cache_free(&cache);
+}
+
 Test(rotorquant_cache, rejects_zero_dim)
 {
     OcRotorQuantCacheConfig cfg;

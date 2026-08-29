@@ -70,7 +70,9 @@ OcError oc_rotorquant_cache_init(OcRotorQuantCache *cache,
                                  const OcRotorQuantCacheConfig *cfg);
 void oc_rotorquant_cache_free(OcRotorQuantCache *cache);
 
-/* `first_position` is recorded for rewind; pass 0 when unused. */
+/* `first_position` is the upsert key and the position of token 0. It must
+ * be distinct per page for the same (layer, kv_head). Token t lives at
+ * first_position + t. */
 OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
                                        size_t layer, size_t kv_head,
                                        const float *keys, const float *values,
@@ -78,13 +80,15 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
 
 /* Token t of a page is at first_position + t. Keys with position >
  * query_position are dropped (causal). Pass SIZE_MAX to include every
- * stored token. */
+ * stored token. `out_cap` is checked against the unfiltered token count
+ * (every stored token for this head), not the post-mask visible count. */
 OcError oc_rotorquant_cache_logits(const OcRotorQuantCache *cache,
                                    size_t layer, size_t kv_head,
                                    const float *query, size_t query_n,
                                    size_t query_position,
                                    float *out, size_t out_cap, size_t *n_out);
 
+/* `out` must hold config.head_dim floats. */
 OcError oc_rotorquant_cache_attention(const OcRotorQuantCache *cache,
                                       size_t layer, size_t kv_head,
                                       const float *query, size_t query_n,
@@ -106,7 +110,8 @@ OcError oc_rotorquant_cache_stats(const OcRotorQuantCache *cache,
                                   OcRotorQuantCacheStats *out);
 float oc_rotorquant_cache_compression_ratio(const OcRotorQuantCacheStats *st);
 
-/* Drop pages whose first_position >= n_keep. */
+/* Drop pages whose first_position >= n_keep. Pages that straddle n_keep
+ * are truncated so tokens at first_position + t >= n_keep are dropped. */
 OcError oc_rotorquant_cache_rewind(OcRotorQuantCache *cache, size_t n_keep);
 void oc_rotorquant_cache_clear(OcRotorQuantCache *cache);
 

@@ -188,3 +188,14 @@ Test(cli, kv_compress_conflicts_with_cuda)
     cr_assert(!oc_cli_kv_compress_enabled("none"));
     cr_assert(!oc_cli_kv_compress_enabled(NULL));
 }
+
+Test(cli, kv_compress_valid_names)
+{
+    cr_assert(oc_cli_kv_compress_valid(NULL));
+    cr_assert(oc_cli_kv_compress_valid(""));
+    cr_assert(oc_cli_kv_compress_valid("none"));
+    cr_assert(oc_cli_kv_compress_valid("rotor"));
+    cr_assert(oc_cli_kv_compress_valid("helix"));
+    cr_assert(!oc_cli_kv_compress_valid("turbo"));
+    cr_assert(!oc_cli_kv_compress_valid("ROTORS"));
+}

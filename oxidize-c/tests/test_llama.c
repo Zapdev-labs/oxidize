@@ -775,3 +775,34 @@ Test(llama, mixed_swa_pattern_keeps_dense_kv)
     cr_assert_not_null(s.kv_compress);
     oc_llama_session_free(&s);
 }
+
+Test(llama, enable_kv_compress_after_tokens_is_rejected)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    cr_assert_eq(oc_llama_session_init(&t.model, &s), OC_OK);
+    s.pos = 1;
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}
+
+Test(llama, enable_kv_compress_rejects_gpt_family)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    t.model.arch = OC_ARCH_GPT2;
+    cr_assert_eq(oc_llama_session_init(&t.model, &s), OC_OK);
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_ERR_INVALID_ARG);
+    oc_llama_session_free(&s);
+}
