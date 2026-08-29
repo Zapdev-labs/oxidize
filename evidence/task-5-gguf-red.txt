@@ -1,5 +1,0 @@
-# github.com/Zapdev-labs/oxidize/golang/internal/gguf [github.com/Zapdev-labs/oxidize/golang/internal/gguf.test]
-internal/gguf/gguf_test.go:10:15: undefined: LoadFile
-internal/gguf/gguf_test.go:38:14: undefined: LoadFile
-FAIL	github.com/Zapdev-labs/oxidize/golang/internal/gguf [build failed]
-FAIL

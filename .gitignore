@@ -31,3 +31,14 @@ oxidize-golang/oxidize
 .cursor/hooks/state/
 .omo/
 modal_app.py.tmp.*
+
+# Compiled artifacts (never commit binaries)
+rust_out
+dist/*.whl
+*.o
+*.a
+
+# One-off run transcripts, bench logs, and research scrapes
+results/
+evidence/
+.cursor/*.log
