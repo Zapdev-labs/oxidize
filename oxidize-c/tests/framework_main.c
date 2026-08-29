@@ -29,12 +29,22 @@
 
 #include <errno.h>
 #include <fnmatch.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#if defined(__has_feature)
+#    if __has_feature(address_sanitizer)
+#        define OC_TEST_ASAN 1
+#    endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#    define OC_TEST_ASAN 1
+#endif
 
 OcTest *oc_tests_head = NULL;
 static size_t oc_tests_registered = 0;
@@ -161,6 +171,43 @@ void oc_test_skip(const char *fmt, ...)
     longjmp(oc_test_abort_jmp, 2);
 }
 
+static void vfail_cmp(const char *file, int line, const char *kind,
+                      const char *lhs, const char *op, const char *rhs,
+                      const char *sa, const char *sb, const char *fmt,
+                      va_list ap)
+{
+    fprintf(stderr, "[----] %s:%d: %s: %s %s %s [%s vs %s] ", file, line, kind,
+            lhs, op, rhs, sa, sb);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+
+void oc_test_fail_cmp(const char *file, int line, const char *lhs,
+                      const char *op, const char *rhs, const char *sa,
+                      const char *sb, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vfail_cmp(file, line, "FAIL", lhs, op, rhs, sa, sb, fmt, ap);
+    va_end(ap);
+    oc_test_failed = 1;
+    if (oc_test_can_skip)
+        longjmp(oc_test_abort_jmp, 1);
+    exit(1);
+}
+
+void oc_test_soft_fail_cmp(const char *file, int line, const char *lhs,
+                           const char *op, const char *rhs, const char *sa,
+                           const char *sb, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vfail_cmp(file, line, "EXPECT", lhs, op, rhs, sa, sb, fmt, ap);
+    va_end(ap);
+    oc_test_failed = 1;
+}
+
 /* ─── Selection ──────────────────────────────────────────────────────── */
 
 static int match_full(const char *pat, const OcTest *t)
@@ -234,8 +281,10 @@ static OcResult run_one(OcTest *t)
         return RESULT_CRASH;
     }
     if (pid == 0) {
-        /* ASan owns SEGV/ABRT; chaining our handler would swallow reports. */
-#if !defined(__SANITIZE_ADDRESS__)
+        /* ASan owns SEGV/ABRT; chaining our handler would swallow reports.
+         * GCC defines __SANITIZE_ADDRESS__; Clang 18 uses
+         * __has_feature(address_sanitizer) and may not define the GCC macro. */
+#if !defined(OC_TEST_ASAN)
         struct sigaction sa;
         memset(&sa, 0, sizeof(sa));
         sa.sa_handler = child_signal_handler;
@@ -428,6 +477,20 @@ static const char *require_arg(int argc, char **argv, int *i, const char *flag)
     return argv[++(*i)];
 }
 
+static int parse_nonneg_int(const char *s, const char *flag, int *out)
+{
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno == ERANGE || end == s || *end != '\0' || v < 0 || v > INT_MAX) {
+        fprintf(stderr, "%s: invalid integer '%s'\n", flag, s);
+        usage(stderr);
+        return -1;
+    }
+    *out = (int)v;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *xml_path = NULL;
@@ -458,13 +521,16 @@ int main(int argc, char **argv)
             const char *v = require_arg(argc, argv, &i, argv[i]);
             if (!v)
                 return 2;
-            jobs = atoi(v);
+            jobs = 0;
+            if (parse_nonneg_int(v, argv[i - 1], &jobs) != 0)
+                return 2;
             (void)jobs;
         } else if (strcmp(argv[i], "--verbose") == 0) {
             const char *v = require_arg(argc, argv, &i, argv[i]);
             if (!v)
                 return 2;
-            g_verbose = atoi(v);
+            if (parse_nonneg_int(v, argv[i - 1], &g_verbose) != 0)
+                return 2;
         } else if (strcmp(argv[i], "--short-filename") == 0 ||
                    strcmp(argv[i], "--full-statistics") == 0 ||
                    strcmp(argv[i], "--always-exit-0") == 0 ||

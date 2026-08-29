@@ -3,7 +3,9 @@
  *
  * Config parsing and version mapping for the GLM-4 / ChatGLM and
  * Hunyuan-MoE families. Inference for these architectures runs through
- * the llama.c session paths (MLA / MoE / qk-norm flags on OcLlamaConfig).
+ * the llama.c session paths (MLA / MoE on OcLlamaConfig; QK-norm weights
+ * on OcLlamaLayer.attn_q_norm / attn_k_norm, with OcGlmConfig.apply_qk_norm
+ * recording whether a GLM GGUF requested that step).
  * There is no separate oc_arch_forward_glm / oc_arch_forward_hunyuan.
  *
  *   GLM-4 / ChatGLM:

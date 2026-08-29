@@ -68,6 +68,17 @@ void oc_test_soft_fail(const char *file, int line, const char *fmt, ...);
 /* Skip: longjmps to the runner (test SKIP). Only valid inside a test. */
 void oc_test_skip(const char *fmt, ...) __attribute__((noreturn));
 
+/* Comparison failure: prints `lhs op rhs [sa vs sb]` then the optional
+ * caller format. Fixed operands are emitted before `__VA_ARGS__` so a
+ * message like `cr_assert_eq(a, b, "n=%d", n)` cannot bind `n` to `%s`. */
+void oc_test_fail_cmp(const char *file, int line, const char *lhs,
+                      const char *op, const char *rhs, const char *sa,
+                      const char *sb, const char *fmt, ...)
+    __attribute__((noreturn, format(printf, 8, 9)));
+void oc_test_soft_fail_cmp(const char *file, int line, const char *lhs,
+                           const char *op, const char *rhs, const char *sa,
+                           const char *sb, const char *fmt, ...);
+
 /* Used by the value-printing assert macros; not for direct calls. */
 const char *oc_test_vstr(const void *p);
 const char *oc_test_vstr_ll(long long v);
@@ -120,17 +131,15 @@ const char *oc_test_vstr_ld(long double v);
 #define OC_ASSERT_OP(a, b, op, ...)                                      \
     do {                                                                  \
         if (!((a) op (b)))                                                \
-            oc_test_fail(__FILE__, __LINE__,                              \
-                "%s %s %s [%s vs %s] " __VA_ARGS__,                       \
-                #a, #op, #b, OC_VSTR_(a), OC_VSTR_(b));                   \
+            oc_test_fail_cmp(__FILE__, __LINE__, #a, #op, #b,             \
+                OC_VSTR_(a), OC_VSTR_(b), "" __VA_ARGS__);                \
     } while (0)
 
 #define OC_EXPECT_OP(a, b, op, ...)                                      \
     do {                                                                  \
         if (!((a) op (b)))                                                \
-            oc_test_soft_fail(__FILE__, __LINE__,                         \
-                "%s %s %s [%s vs %s] " __VA_ARGS__,                       \
-                #a, #op, #b, OC_VSTR_(a), OC_VSTR_(b));                   \
+            oc_test_soft_fail_cmp(__FILE__, __LINE__, #a, #op, #b,        \
+                OC_VSTR_(a), OC_VSTR_(b), "" __VA_ARGS__);                \
     } while (0)
 
 /* ─── Assertions: hard (abort test on failure) ───────────────────────── */

@@ -18,6 +18,13 @@ Test(framework, str_eq)
     cr_assert_str_eq("ok", "ok");
 }
 
+Test(framework, formatted_extra_args_bind_after_operands)
+{
+    int n = 7;
+    cr_assert_eq(1, 1, "n=%d", n);
+    cr_expect_neq(1, 2, "n=%d", n);
+}
+
 Test(framework, disabled_does_not_run, .disabled = true)
 {
     cr_fail("disabled test must not execute");
