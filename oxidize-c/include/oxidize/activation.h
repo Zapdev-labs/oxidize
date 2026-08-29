@@ -39,8 +39,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta);
 
-/* Apply RoPE with YaRN long-context scaling. */
-/* As oc_apply_rope_yarn_f32, but with an explicit cos/sin amplitude. */
+/* YaRN RoPE with explicit cos/sin amplitude. attn_factor < 0 selects the standard mscale (1 + 0.1*ln(factor)); oc_apply_rope_yarn_f32 passes -1. */
 void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
                                     size_t rope_len, int64_t position,
                                     float theta, float yarn_factor,

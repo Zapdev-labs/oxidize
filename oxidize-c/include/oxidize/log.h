@@ -1,4 +1,4 @@
-/* log.h — oc_log leveled logging with OX_LOG_LEVEL env filter. */
+/* log.h — oc_log leveled logging with OX_LOG_LEVEL env filter. Concurrent oc_log() writes are flockfile-safe; g_level and lazy-init are not atomic — set the level once before worker threads. */
 #ifndef OXIDIZE_LOG_H
 #define OXIDIZE_LOG_H
 

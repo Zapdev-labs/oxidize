@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-/* GEMV: y = W @ x, where W is [rows, cols] in natural row-major layout. For Quantized/Mmap: dequantizes blocks on the fly. */
+/* GEMV: y = W @ x, W is [rows, cols] row-major. `input` is cols floats, `output` is rows floats. F32 is a direct row dot; Quantized/Mmap dequantizes on the fly. */
 OcError oc_gemv_weight(const OcWeightStorage *ws,
                        size_t rows, size_t cols,
                        const float *input, float *output);

@@ -1444,6 +1444,8 @@ mod tests {
             cfg.capped_draft_tokens_per_step(),
             MAX_DRAFT_TOKENS_PER_STEP
         );
-        const { assert!(MAX_DRAFT_TOKENS_PER_STEP < 1024); }
+        const {
+            assert!(MAX_DRAFT_TOKENS_PER_STEP < 1024);
+        }
     }
 }

@@ -49,7 +49,7 @@ OcError oc_safetensors_get_tensor(const OcSafetensorsFile *st,
                                   const char *name,
                                   const OcSafetensorsTensor **out);
 
-/* Return a pointer to a tensor's raw data within the file's raw data section. */
+/* Pointer into `st->raw_data` (valid until close); does not copy. Returns OC_OK, OC_ERR_INVALID_ARG (NULL args), or OC_ERR_FORMAT (NULL raw_data or offset/length outside the file). */
 OcError oc_safetensors_get_tensor_data(const OcSafetensorsFile *st,
                                        const OcSafetensorsTensor *tensor,
                                        const void **out_data);
