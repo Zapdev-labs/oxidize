@@ -5,7 +5,7 @@
  * and the config/stats defaults. Full end-to-end generation requires two
  * loaded GGUF models sharing a vocabulary.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/speculative.h"
 

@@ -1,5 +1,5 @@
 /* test_weight_ops.c — Weight matrix operations tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/weight_ops.h"
 #include "oxidize/weight_storage.h"
 #include "oxidize/inference.h"

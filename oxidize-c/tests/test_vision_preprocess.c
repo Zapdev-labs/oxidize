@@ -1,5 +1,5 @@
 /* test_vision_preprocess.c — Vision preprocessing tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/vision_preprocess.h"
 #include <string.h>
 #include <math.h>

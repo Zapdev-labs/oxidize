@@ -1,7 +1,7 @@
 /*
  * test_paged_attention.c — paged KV cache management + scheduling tests.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/paged_attention.h"
 

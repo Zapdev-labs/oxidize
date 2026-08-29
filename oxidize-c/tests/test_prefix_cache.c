@@ -1,6 +1,6 @@
 /* test_prefix_cache.c — prefix cache tests. */
 #define _POSIX_C_SOURCE 200809L
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/prefix_cache.h"
 #include <string.h>
 

@@ -1,5 +1,5 @@
 /* test_video_error.c — video pipeline error type tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 
 #include "oxidize/video_error.h"

@@ -9,7 +9,7 @@
  *   5. Frame parsing (unmasked text, masked text, extended payload length).
  */
 #define _GNU_SOURCE 1
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/websocket.h"
 

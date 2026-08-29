@@ -1,5 +1,5 @@
 /* test_string.c — string util helpers tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/util/string.h"
 
 #include <stdlib.h>

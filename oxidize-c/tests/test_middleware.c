@@ -10,7 +10,7 @@
  *   5. CORS: headers set correctly.
  */
 #define _GNU_SOURCE 1
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/middleware.h"
 

@@ -1,5 +1,5 @@
 /* test_strix.c — Structured output tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/strix.h"
 #include <string.h>
 #include <math.h>

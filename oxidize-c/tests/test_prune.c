@@ -1,5 +1,5 @@
 /* test_prune.c — pruning tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/prune.h"
 
 Test(prune, strategy_name)

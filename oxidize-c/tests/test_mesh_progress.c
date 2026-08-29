@@ -1,5 +1,5 @@
 /* test_mesh_progress.c — Distributed task progress tracking tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/mesh_progress.h"
 #include <math.h>
 #include <stdio.h>

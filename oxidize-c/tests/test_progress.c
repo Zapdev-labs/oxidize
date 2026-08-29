@@ -1,5 +1,5 @@
 /* test_progress.c — Progress tracking tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/progress.h"
 #include <string.h>
 

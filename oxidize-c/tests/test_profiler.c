@@ -1,5 +1,5 @@
 /* test_profiler.c — profiler tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/profiler.h"
 #include <string.h>
 

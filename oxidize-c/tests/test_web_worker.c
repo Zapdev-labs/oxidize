@@ -1,5 +1,5 @@
 /* test_web_worker.c — Web worker tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/web_worker.h"
 #include <string.h>
 

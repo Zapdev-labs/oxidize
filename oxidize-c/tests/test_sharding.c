@@ -1,5 +1,5 @@
 /* test_sharding.c — sharding tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/sharding.h"
 #include <string.h>
 

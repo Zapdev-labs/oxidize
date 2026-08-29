@@ -1,5 +1,5 @@
 /* test_scrutiny.c — Scrutiny module tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/scrutiny.h"
 #include <string.h>
 

@@ -17,7 +17,7 @@
  * (3) compares multi vs prepared within 1 ULP: SIMD and scalar epilogues
  * can round the final float conversion differently.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/oxk.h"
 #include "oxidize/quant.h"

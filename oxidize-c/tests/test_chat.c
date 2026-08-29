@@ -1,7 +1,7 @@
 /*
  * test_chat.c — chat template formatting tests.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/chat.h"
 

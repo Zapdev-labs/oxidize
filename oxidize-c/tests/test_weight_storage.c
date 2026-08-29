@@ -1,5 +1,5 @@
 /* test_weight_storage.c — Weight storage tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/weight_storage.h"
 #include <stdlib.h>
 #include <string.h>

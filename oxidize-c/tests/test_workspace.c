@@ -1,5 +1,5 @@
 /* test_workspace.c — Inference workspace tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/workspace.h"
 #include <string.h>
 

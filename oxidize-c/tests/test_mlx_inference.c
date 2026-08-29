@@ -3,7 +3,7 @@
  * Unique suite name "mlx_inference". On non-macOS every operation is a
  * stub returning OC_ERR_BACKEND; these tests assert that contract.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 
 #include "oxidize/mlx_inference.h"

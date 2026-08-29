@@ -1,6 +1,6 @@
 /* test_block_pool.c — memory block pool allocator tests. */
 #define _POSIX_C_SOURCE 200809L
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/block_pool.h"
 #include <stdlib.h>
 #include <string.h>

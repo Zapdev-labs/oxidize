@@ -1,5 +1,5 @@
 /* test_tensor_ops.c — tensor operations tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/tensor_ops.h"
 #include <math.h>
 #include <string.h>

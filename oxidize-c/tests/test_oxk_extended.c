@@ -5,9 +5,9 @@
  * and SIMD implementations, and exercises capability detection, dispatcher,
  * block-size constants, large inputs, edge cases (zeros, negatives).
  *
- * Uses the vendored Criterion framework (see tests/criterion/).
+ * Uses the in-repo test framework (see tests/framework.h).
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/oxk.h"
 #include "oxidize/oxk_avx512.h"
 

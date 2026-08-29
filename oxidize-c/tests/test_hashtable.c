@@ -1,5 +1,5 @@
 /* test_hashtable.c — OcHashtable (FNV-1a, open-addressing) tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/hashtable.h"
 
 #include <stdint.h>

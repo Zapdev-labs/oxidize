@@ -1,5 +1,5 @@
 /* test_layer_wise.c — Layer-wise inference tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/layer_wise.h"
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"

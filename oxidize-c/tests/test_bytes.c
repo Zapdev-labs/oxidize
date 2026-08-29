@@ -1,5 +1,5 @@
 /* test_bytes.c — byte-level read primitive tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/util/bytes.h"
 
 #include <string.h>

@@ -1,5 +1,5 @@
 /* test_conversion.c — Conversion module tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/conversion.h"
 #include <string.h>
 

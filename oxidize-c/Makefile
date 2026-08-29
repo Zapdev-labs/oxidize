@@ -48,35 +48,25 @@ lib: liboxidize-c.a
 liboxidize-c.a: $(LIB_OBJS)
 	ar rcs $@ $^
 
-# Vendored Criterion (MIT) test framework — see tests/criterion/README.md.
-# Each tests/test_<module>.c uses Criterion's Test(Suite, Case) macro for
-# auto-registration; Criterion provides main(), so no separate runner.c is
-# needed. One test_<module>.c per src/<module>.c (see CONTRIBUTING.md).
-CRITERION_DIR      := tests/criterion
-CRITERION_INCLUDE  := $(CRITERION_DIR)/include
-CRITERION_ARCHIVE  := $(CRITERION_DIR)/lib/libcriterion.a
-
-# The checked-in archive is built for Linux.  macOS CI links Homebrew's native
-# Criterion build while continuing to compile against the vendored headers.
-ifeq ($(shell uname -s),Darwin)
-CRITERION_DEPS :=
-CRITERION_LINK := $(shell pkg-config --libs criterion)
-else
-CRITERION_DEPS := $(CRITERION_ARCHIVE)
-CRITERION_LINK := $(CRITERION_ARCHIVE)
-endif
+# In-repo test framework (tests/framework.h) — dependency-free drop-in
+# for the Criterion subset this suite uses. Each tests/test_<module>.c
+# uses the Test(Suite, Case) macro for auto-registration;
+# tests/framework_main.c provides main(). One test_<module>.c per
+# src/<module>.c (see CONTRIBUTING.md).
+TEST_FRAMEWORK_OBJ := tests/framework_main.o
 
 TEST_SRCS := $(wildcard tests/test_*.c)
 TEST_OBJS := $(TEST_SRCS:.c=.o)
 
 # ASan + UBSan for leak/UB detection in tests (valgrind not installed locally).
-# Criterion needs pthreads, dynamic loading, and math.  Linux additionally
-# needs librt for its POSIX shared-memory implementation; macOS provides the
-# same APIs through libSystem and has no separate librt.
+# The runner needs pthreads and math. Linux additionally needs librt for
+# POSIX shared memory; macOS provides the same APIs through libSystem and
+# has no separate librt.
 TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
+               -Wno-override-init \
                -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 \
                -ffp-contract=off \
-               -I$(CRITERION_INCLUDE)
+               -Itests
 TEST_SYSTEM_LIBS := -lm -lpthread -ldl
 ifneq ($(shell uname -s),Darwin)
 TEST_SYSTEM_LIBS += -lrt
@@ -86,10 +76,11 @@ TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) -fsanitize=address,undefined
 # ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
 DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
-             $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d)
+             $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d) \
+             $(TEST_FRAMEWORK_OBJ:.o=.d)
 
-test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
-	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LINK) $(TEST_LDFLAGS)
+test_runner: $(TEST_OBJS) $(TEST_FRAMEWORK_OBJ) $(LIB_ASAN_OBJS)
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(TEST_FRAMEWORK_OBJ) $(LIB_ASAN_OBJS) $(TEST_LDFLAGS)
 
 # Build library objects with ASan for the test_runner.
 src/%.asan.o: src/%.c
@@ -106,10 +97,10 @@ src/%.o: src/%.c
 
 # Test filtering: `make test TEST_FILTER=<pattern>` runs only matching tests.
 # Pattern conventions (validated by scrutiny + the validation contract):
-#   * test_<suite>_<case_prefix>   → criterion filter `<suite>/<case_prefix>*`
+#   * test_<suite>_<case_prefix>   → filter `<suite>/<case_prefix>*`
 #     e.g. TEST_FILTER=test_gguf_v3_header → --filter 'gguf/v3_header*'
-#   * <suite>/<case> or <suite>/<case>*  → passed through to criterion verbatim
-#   * any other pattern                  → passed through to criterion verbatim
+#   * <suite>/<case> or <suite>/<case>*  → passed through to the runner verbatim
+#   * any other pattern                  → passed through to the runner verbatim
 # When TEST_FILTER is empty (default), all tests run.
 TEST_FILTER ?=
 # Homebrew Criterion on macOS defaults to parallel jobs. That deadlocks
@@ -208,7 +199,7 @@ cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 
 clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
-	      $(LIB_ASAN_OBJS) $(CUDA_OBJS) \
+	      $(LIB_ASAN_OBJS) $(CUDA_OBJS) $(TEST_FRAMEWORK_OBJ) \
 	      $(DEP_FILES) \
 	      oxidize-c test_runner liboxidize-c.a
 

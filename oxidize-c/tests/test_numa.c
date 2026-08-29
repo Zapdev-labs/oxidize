@@ -1,5 +1,5 @@
 /* test_numa.c — NUMA awareness tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/numa.h"
 #include <string.h>
 

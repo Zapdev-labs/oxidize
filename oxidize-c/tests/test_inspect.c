@@ -1,5 +1,5 @@
 /* test_inspect.c — model inspector tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/inspect.h"
 #include <string.h>
 

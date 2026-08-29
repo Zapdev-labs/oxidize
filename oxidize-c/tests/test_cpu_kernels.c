@@ -1,5 +1,5 @@
 /* test_cpu_kernels.c — CPU kernel dispatch tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/cpu_kernels.h"
 #include <string.h>
 

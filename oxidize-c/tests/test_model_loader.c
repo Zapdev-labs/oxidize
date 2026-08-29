@@ -1,5 +1,5 @@
 /* test_model_loader.c — Model loader tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/gguf_writer.h"
 #include "oxidize/model_loader.h"
 #include "oxidize/model.h"

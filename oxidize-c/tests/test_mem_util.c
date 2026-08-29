@@ -1,5 +1,5 @@
 /* test_mem_util.c — memory utility tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/mem_util.h"
 #include <string.h>
 

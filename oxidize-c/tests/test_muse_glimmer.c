@@ -20,7 +20,7 @@
  * parse of Muse-Glimmer-30B-UD-Q4_K_XL.gguf. The fixture is geometrically
  * faithful but tiny — the real model is 6656-wide with 52 layers.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/gguf_writer.h"
 #include "oxidize/llama.h"

@@ -1,5 +1,5 @@
 /* test_vision_config.c — Vision config tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/vision_config.h"
 
 Test(vcfg, init)

@@ -15,7 +15,7 @@
  * overran the buffer and corrupted the forward pass. Hence the deliberately
  * awkward widths below, and the undersized-scratch case.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/matvec.h"
 #include "oxidize/oxk.h"

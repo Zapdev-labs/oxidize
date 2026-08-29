@@ -1,7 +1,7 @@
 /*
  * test_qwen.c — Qwen2/Qwen3 config-prefix support tests.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/model.h"
 

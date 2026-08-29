@@ -1,5 +1,5 @@
 /* test_vision_prompt.c — Vision prompt tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/vision_prompt.h"
 #include <string.h>
 

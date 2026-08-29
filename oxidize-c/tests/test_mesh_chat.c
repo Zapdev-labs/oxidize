@@ -1,5 +1,5 @@
 /* test_mesh_chat.c — Chat routing over mesh tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/mesh_chat.h"
 #include <string.h>
 

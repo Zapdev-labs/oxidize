@@ -13,8 +13,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include <criterion/criterion.h>
-#include <criterion/redirect.h>
+#include "framework.h"
 
 #include "oxidize/tokenizer_train.h"
 

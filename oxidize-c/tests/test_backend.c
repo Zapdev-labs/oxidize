@@ -1,5 +1,5 @@
 /* test_backend.c — Backend interface tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/backend.h"
 #include <string.h>
 

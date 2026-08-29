@@ -1,5 +1,5 @@
 /* test_temporal.c — OcTemporal aggregation tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/temporal.h"
 
 #include <math.h>

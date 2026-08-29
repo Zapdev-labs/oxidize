@@ -1,5 +1,5 @@
 /* test_vector.c — OcVector dynamic array tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/vector.h"
 
 #include <string.h>

@@ -1,5 +1,5 @@
 /* test_phi_arch.c — Phi-2/3 architecture forward pass tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/phi_arch.h"
 #include <stdlib.h>
 #include <string.h>

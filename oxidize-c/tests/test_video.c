@@ -1,5 +1,5 @@
 /* test_video.c — video multimodal tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/video.h"
 #include <string.h>
 

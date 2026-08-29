@@ -1,5 +1,5 @@
 /* test_rotorquant.c — RotorQuant (PlanarQuant / IsoQuant) KV compression. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/rotorquant.h"
 #include <math.h>
 #include <stdlib.h>

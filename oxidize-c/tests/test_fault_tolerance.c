@@ -1,5 +1,5 @@
 /* test_fault_tolerance.c — fault tolerance tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/fault_tolerance.h"
 #include <string.h>
 

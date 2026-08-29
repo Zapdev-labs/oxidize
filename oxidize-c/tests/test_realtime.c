@@ -7,7 +7,7 @@
  *   3. Session init/free without a model (error event path).
  */
 #define _GNU_SOURCE 1
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/realtime.h"
 

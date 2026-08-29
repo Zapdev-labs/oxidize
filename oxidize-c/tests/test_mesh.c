@@ -1,5 +1,5 @@
 /* test_mesh.c — distributed mesh stub tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/mesh.h"
 #include <string.h>
 

@@ -1,5 +1,5 @@
 /* test_layer_range.c — run_layer_range + speculative stats tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/inf_model.h"
 #include "oxidize/weight_storage.h"
 #include "oxidize/layer_weights.h"

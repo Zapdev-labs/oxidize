@@ -1,5 +1,5 @@
 /* test_discovery.c — Mesh discovery protocol tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/discovery.h"
 #include <string.h>
 

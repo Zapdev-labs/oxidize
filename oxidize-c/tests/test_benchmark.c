@@ -1,5 +1,5 @@
 /* test_benchmark.c — benchmark utility tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/benchmark.h"
 #include <string.h>
 

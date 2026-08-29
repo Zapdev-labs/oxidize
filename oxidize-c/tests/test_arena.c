@@ -4,7 +4,7 @@
  * 1000 alloc/free cycles (ASan-clean substitutes for valgrind which is not
  * installed locally).
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/arena.h"
 
 #include <stdint.h>

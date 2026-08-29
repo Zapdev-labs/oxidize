@@ -10,7 +10,7 @@
  *   - Null / edge-case handling
  *   - Stats JSON formatting
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 #include <stdio.h>
 

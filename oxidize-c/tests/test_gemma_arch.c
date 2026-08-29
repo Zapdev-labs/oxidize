@@ -1,5 +1,5 @@
 /* test_gemma_arch.c — Gemma architecture forward pass tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/gemma_arch.h"
 #include <math.h>
 #include <stdlib.h>

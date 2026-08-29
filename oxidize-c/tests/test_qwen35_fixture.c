@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/gguf.h"
 #include "oxidize/gguf_writer.h"

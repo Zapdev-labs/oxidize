@@ -14,7 +14,7 @@
  * GGUF model; that test runs on the remote NUMA box (ai@192.168.1.121) as
  * part of the cpu-qwen-benchmark-121 feature.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/activation.h"
 #include "oxidize/llama.h"

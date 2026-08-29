@@ -14,7 +14,7 @@
  * Rust web_worker.rs unit tests which assert exact token sequences against
  * the deterministic stub generator.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 
 #include "oxidize/wasm.h"

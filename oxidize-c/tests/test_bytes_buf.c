@@ -1,5 +1,5 @@
 /* test_bytes_buf.c — OcBytes byte buffer tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/bytes.h"
 
 #include <stdint.h>

@@ -8,7 +8,7 @@ follow when adding to the C11 port in `oxidize-c/`.
 | Command            | What it does                                                      |
 |--------------------|-------------------------------------------------------------------|
 | `make` / `make build` | Default CPU-only build (libc only) → `./oxidize-c`            |
-| `make test`        | Build + run the Criterion test suite → `./test_runner`            |
+| `make test`        | Build + run the test suite → `./test_runner`                      |
 | `make lint`        | clang-tidy on `src/**/*.c`                                        |
 | `make lib`         | Static library `liboxidize-c.a`                                  |
 | `make clean`       | Remove all build artifacts                                        |
@@ -38,9 +38,12 @@ libm, libpthread. Every optional backend (`OC_CUDA`, `OC_VULKAN`, `OC_METAL`,
 
 ## Test conventions
 
-The test framework is **Criterion 2.4.3** (MIT), vendored at
-`tests/criterion/` (see `tests/criterion/README.md` for provenance and
-update instructions).
+The test framework is the in-repo, dependency-free `tests/framework.h`
+plus `tests/framework_main.c`. It implements the exact subset of the
+Criterion API this suite uses (`Test()`, `cr_assert*`/`cr_expect*`,
+`.description`/`.disabled`, `cr_skip_test`, `--filter`, `--list`,
+`--xml`, fork-per-test isolation) without any vendored headers or
+prebuilt archives — the runner links only libc + libm + libpthread.
 
 ### File layout (one test file per source file)
 
@@ -61,17 +64,17 @@ paired `tests/test_<module>.c` with at least one smoke `Test(module, stub)`
 case so `make test` reflects the file's existence.
 
 `tests/test_smoke.c` is the permanent harness sanity check — it verifies
-that the Criterion framework itself is wired up correctly. Keep it; do not
+that the test framework itself is wired up correctly. Keep it; do not
 delete it.
 
 ### Test authoring rules
 
-1. **Use the Criterion API.** Each test is declared with the
-   `Test(suite, case)` macro. Criterion auto-registers it; you do not need
-   a separate runner or registration boilerplate.
+1. **Use the framework API.** Each test is declared with the
+   `Test(suite, case)` macro. The framework auto-registers it; you do not
+   need a separate runner or registration boilerplate.
 
    ```c
-   #include <criterion/criterion.h>
+   #include "framework.h"
    #include "oxidize/error.h"
 
    Test(error, msg_returns_ok)
@@ -80,25 +83,25 @@ delete it.
    }
    ```
 
-2. **Use Criterion assertions, not `assert()`/`printf`.**
+2. **Use framework assertions, not `assert()`/`printf`.**
    - `cr_assert(cond, fmt, ...)` — abort the test on failure.
    - `cr_expect(cond, fmt, ...)` — record a failure but keep running.
    - `cr_assert_eq(a, b, fmt, ...)`, `cr_assert_ne`, `cr_assert_str_eq`,
      `cr_assert_null`, `cr_assert_not_null`, `cr_assert_lt/le/gt/ge`, etc.
-     (see `tests/criterion/include/criterion/assert.h` for the full set).
+     (see `tests/framework.h` for the full set).
 
-3. **No `main()` in test files.** Criterion provides `main()` via
-   `libcriterion.a`. The `make test` target compiles every `tests/test_*.c`
-   into a single `test_runner` binary and links it against
-   `tests/criterion/lib/libcriterion.a`.
+3. **No `main()` in test files.** `tests/framework_main.c` provides
+   `main()`. The `make test` target compiles every `tests/test_*.c` into a
+   single `test_runner` binary and links it with
+   `tests/framework_main.o`.
 
 4. **ASan + UBSan.** Tests are compiled with
    `-fsanitize=address,undefined` (valgrind is not installed locally, so
    ASan substitutes for leak/UB checking). Any new test must be ASan-clean.
 
-5. **Test isolation.** Criterion forks each test into its own process by
-   default. Global state changes in one test do not leak into another. Do
-   not rely on cross-test ordering.
+5. **Test isolation.** The runner forks each test into its own process.
+   Global state changes in one test do not leak into another. Do not rely
+   on cross-test ordering.
 
 6. **Naming.** `Test(<module>, <behavior>)` where `<module>` matches the
    source file's basename (e.g. `Test(arena, alloc_returns_aligned)` for
@@ -110,7 +113,7 @@ delete it.
 ```bash
 make test                # build + run all tests
 ./test_runner             # run already-built test_runner
-./test_runner --help      # Criterion's flag reference
+./test_runner --help      # flag reference
 ./test_runner --filter "error/*"   # run only tests in the "error" suite
 ./test_runner --list      # list all registered tests
 ./test_runner --verbose 2 # increase verbosity (0=quiet, 1=normal, 2=verbose)
@@ -120,7 +123,7 @@ make test                # build + run all tests
 
 1. Create `tests/test_<module>.c` (where `<module>` matches the source file
    basename, e.g. `test_gguf.c` for `src/format/gguf.c`).
-2. `#include <criterion/criterion.h>` first, then the project header under
+2. `#include "framework.h"` first, then the project header under
    test (`#include "oxidize/<module>.h"`), then system headers.
 3. Declare one `Test(<module>, <case>)` per behavior.
 4. Run `make test`. The `tests/test_*.c` wildcard in the Makefile will pick

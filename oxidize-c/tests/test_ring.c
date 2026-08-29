@@ -1,5 +1,5 @@
 /* test_ring.c — Ring topology tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/ring.h"
 #include <string.h>
 

@@ -1,5 +1,5 @@
 /* test_offload.c — CPU/GPU offload pipeline tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/offload.h"
 
 Test(offload, cuda_available_check)

@@ -1,5 +1,5 @@
 /* test_autotune_rules.c — Autotune rules tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/autotune_rules.h"
 #include <string.h>
 

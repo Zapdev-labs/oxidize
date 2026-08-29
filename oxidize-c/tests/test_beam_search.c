@@ -1,5 +1,5 @@
 /* test_beam_search.c — Beam search tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/sampling.h"
 #include "oxidize/error.h"
 #include <stdlib.h>

@@ -1,5 +1,5 @@
 /* test_qwen_arch.c — Qwen architecture tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/qwen_arch.h"
 #include <string.h>
 

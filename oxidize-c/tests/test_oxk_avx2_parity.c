@@ -9,7 +9,7 @@
  * Skipped at runtime on hosts without the relevant ISA — the functions exist
  * in every build, but calling them where unsupported would fault.
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "oxidize/oxk.h"
 #include "oxidize/quant.h"

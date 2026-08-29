@@ -1,5 +1,5 @@
 /* test_diffusion.c — Diffusion scheduler tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/diffusion.h"
 #include <math.h>
 #include <string.h>

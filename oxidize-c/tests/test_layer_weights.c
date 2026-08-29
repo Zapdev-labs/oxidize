@@ -1,5 +1,5 @@
 /* test_layer_weights.c — Layer weights tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/layer_weights.h"
 #include <stdlib.h>
 

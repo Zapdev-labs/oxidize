@@ -1,4 +1,4 @@
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/dspark.h"
 #include <math.h>
 

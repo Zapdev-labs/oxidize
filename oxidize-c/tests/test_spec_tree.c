@@ -1,5 +1,5 @@
 /* test_spec_tree.c — Speculative tree tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include <string.h>
 
 #include "oxidize/spec_tree.h"

@@ -1,5 +1,5 @@
 /* test_cluster.c — GPU cluster tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/cluster.h"
 #include <string.h>
 

@@ -1,5 +1,5 @@
 /* test_dflash.c — DFlash speculative decoding tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/dflash.h"
 #include <math.h>
 #include <string.h>

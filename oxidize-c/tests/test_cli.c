@@ -9,7 +9,7 @@
  * main.c's run_generation is exercised end-to-end by running the built
  * `oxidize-c` binary with --help / --version / --prompt (smoke, manual).
  */
-#include <criterion/criterion.h>
+#include "framework.h"
 
 #include "../src/cli/args.h"
 #include "oxidize/cli_commands.h"

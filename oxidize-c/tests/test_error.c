@@ -1,5 +1,5 @@
 /* test_error.c — OcError enum + OcErrorCtx tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/error.h"
 
 Test(error, msg_returns_ok)

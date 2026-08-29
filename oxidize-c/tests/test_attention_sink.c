@@ -1,5 +1,5 @@
 /* test_attention_sink.c — Attention sink tests. */
-#include <criterion/criterion.h>
+#include "framework.h"
 #include "oxidize/attention_sink.h"
 #include <string.h>
 
