@@ -15,10 +15,8 @@ Test(spec_tree, config_init_defaults)
     cr_assert_eq(cfg.max_nodes, OC_SPEC_TREE_DEFAULT_MAX_NODES);
 }
 
-Test(spec_tree, config_init_null)
-{
-    cr_assert_neq(oc_spec_tree_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(spec_tree, config_init_null,
+        cr_assert_neq(oc_spec_tree_config_init(NULL), OC_OK);)
 
 Test(spec_tree, init_free)
 {
@@ -52,10 +50,8 @@ Test(spec_tree, init_bad_args)
     cr_assert_neq(oc_spec_tree_init(&cfg, &t), OC_OK);
 }
 
-Test(spec_tree, free_null_safe)
-{
-    oc_spec_tree_free(NULL);
-}
+OC_TEST_NULL_SAFE(spec_tree, free_null_safe,
+        oc_spec_tree_free(NULL);)
 
 /* ─── Root / child ──────────────────────────────────────────────────── */
 
@@ -319,8 +315,6 @@ Test(spec_tree, size_and_depth)
     oc_spec_tree_free(&t);
 }
 
-Test(spec_tree, size_null_safe)
-{
-    cr_assert_eq(oc_spec_tree_size(NULL), 0u);
-    cr_assert_eq(oc_spec_tree_depth(NULL), 0u);
-}
+OC_TEST_NULL_SAFE(spec_tree, size_null_safe,
+        cr_assert_eq(oc_spec_tree_size(NULL), 0u);
+        cr_assert_eq(oc_spec_tree_depth(NULL), 0u);)

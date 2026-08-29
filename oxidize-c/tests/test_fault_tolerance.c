@@ -13,10 +13,8 @@ Test(ft, config_init)
     cr_assert_eq(cfg.recovery_timeout_ms, OC_FT_DEFAULT_RECOVERY_MS);
 }
 
-Test(ft, config_init_null)
-{
-    cr_assert_neq(oc_ft_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ft, config_init_null,
+        cr_assert_neq(oc_ft_config_init(NULL), OC_OK);)
 
 Test(ft, init_free)
 {
@@ -28,10 +26,8 @@ Test(ft, init_free)
     oc_ft_free(mgr);
 }
 
-Test(ft, init_null_out)
-{
-    cr_assert_neq(oc_ft_init(NULL, 1, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ft, init_null_out,
+        cr_assert_neq(oc_ft_init(NULL, 1, NULL), OC_OK);)
 
 Test(ft, add_node)
 {
@@ -275,10 +271,8 @@ Test(ft, self_never_times_out)
     oc_ft_free(mgr);
 }
 
-Test(ft, free_null_safe)
-{
-    oc_ft_free(NULL);
-}
+OC_TEST_NULL_SAFE(ft, free_null_safe,
+        oc_ft_free(NULL);)
 
 Test(ft, get_node_state_not_found)
 {

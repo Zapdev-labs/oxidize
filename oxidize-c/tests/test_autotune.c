@@ -32,10 +32,7 @@ Test(autotune, detect_cpu_returns_sensible_values)
               "simd name must be set");
 }
 
-Test(autotune, detect_cpu_null_arg_rejected)
-{
-    cr_assert_eq(oc_autotune_detect_cpu(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(autotune, detect_cpu_null_arg_rejected, oc_autotune_detect_cpu(NULL))
 
 /* ─── Plan purity ──────────────────────────────────────────────────────── */
 

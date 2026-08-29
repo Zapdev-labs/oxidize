@@ -24,10 +24,8 @@ Test(ws, for_config_default)
     oc_workspace_free(&ws);
 }
 
-Test(ws, for_config_null)
-{
-    cr_assert_neq(oc_workspace_for_config(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ws, for_config_null,
+        cr_assert_neq(oc_workspace_for_config(NULL, NULL), OC_OK);)
 
 Test(ws, for_config_null_ws)
 {
@@ -42,10 +40,8 @@ Test(ws, for_config_null_cfg)
     cr_assert_neq(oc_workspace_for_config(&ws, NULL), OC_OK);
 }
 
-Test(ws, free_null)
-{
-    oc_workspace_free(NULL);
-}
+OC_TEST_NULL_SAFE(ws, free_null,
+        oc_workspace_free(NULL);)
 
 Test(ws, zero)
 {
@@ -75,10 +71,8 @@ Test(ws, size_bytes)
     oc_workspace_free(&ws);
 }
 
-Test(ws, size_bytes_null)
-{
-    cr_assert_eq(oc_workspace_size_bytes(NULL), 0);
-}
+OC_TEST_NULL_SAFE(ws, size_bytes_null,
+        cr_assert_eq(oc_workspace_size_bytes(NULL), 0);)
 
 Test(ws, moe_config)
 {

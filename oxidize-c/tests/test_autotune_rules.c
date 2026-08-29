@@ -12,10 +12,8 @@ Test(ar, hw_caps_init)
     cr_assert_eq(caps.n_sockets, 1);
 }
 
-Test(ar, hw_caps_init_null)
-{
-    cr_assert_neq(oc_hw_caps_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ar, hw_caps_init_null,
+        cr_assert_neq(oc_hw_caps_init(NULL), OC_OK);)
 
 Test(ar, model_fp_init)
 {
@@ -26,10 +24,8 @@ Test(ar, model_fp_init)
     cr_assert_eq(fp.hidden_dim, 4096);
 }
 
-Test(ar, model_fp_init_null)
-{
-    cr_assert_neq(oc_model_fp_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ar, model_fp_init_null,
+        cr_assert_neq(oc_model_fp_init(NULL), OC_OK);)
 
 Test(ar, plan_basic)
 {
@@ -131,10 +127,8 @@ Test(ar, plan_no_mlock_large)
     cr_assert(!plan.use_mlock);
 }
 
-Test(ar, plan_null)
-{
-    cr_assert_neq(oc_plan_compute(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ar, plan_null,
+        cr_assert_neq(oc_plan_compute(NULL, NULL, NULL), OC_OK);)
 
 Test(ar, plan_dump)
 {
@@ -148,10 +142,8 @@ Test(ar, plan_dump)
     cr_assert(strstr(out, "Threads:") != NULL);
 }
 
-Test(ar, plan_dump_null)
-{
-    cr_assert_neq(oc_plan_dump(NULL, NULL, NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(ar, plan_dump_null,
+        cr_assert_neq(oc_plan_dump(NULL, NULL, NULL, NULL, 0), OC_OK);)
 
 Test(ar, numa_name)
 {

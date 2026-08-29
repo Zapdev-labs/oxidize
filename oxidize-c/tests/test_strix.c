@@ -12,10 +12,8 @@ Test(strix, config_init)
     cr_assert(!cfg.strict);
 }
 
-Test(strix, config_init_null)
-{
-    cr_assert_neq(oc_strix_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(strix, config_init_null,
+        cr_assert_neq(oc_strix_config_init(NULL), OC_OK);)
 
 Test(strix, config_json)
 {
@@ -55,10 +53,8 @@ Test(strix, state_init)
     oc_strix_free(&state);
 }
 
-Test(strix, state_init_null)
-{
-    cr_assert_neq(oc_strix_state_init(NULL, NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(strix, state_init_null,
+        cr_assert_neq(oc_strix_state_init(NULL, NULL, NULL, 0), OC_OK);)
 
 Test(strix, accept_char)
 {
@@ -81,10 +77,8 @@ Test(strix, accept_token)
     oc_strix_free(&state);
 }
 
-Test(strix, accept_token_null)
-{
-    cr_assert_neq(oc_strix_accept_token(NULL, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(strix, accept_token_null,
+        cr_assert_neq(oc_strix_accept_token(NULL, 0, NULL), OC_OK);)
 
 Test(strix, json_complete)
 {
@@ -184,10 +178,8 @@ Test(strix, finalize)
     oc_strix_free(&state);
 }
 
-Test(strix, free_null)
-{
-    oc_strix_free(NULL);
-}
+OC_TEST_NULL_SAFE(strix, free_null,
+        oc_strix_free(NULL);)
 
 Test(strix, accept_overflow)
 {

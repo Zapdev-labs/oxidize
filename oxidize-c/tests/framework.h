@@ -283,6 +283,25 @@ const char *oc_test_str_or_null(const char *s);
 #define cr_skip_test(...) oc_test_skip("" __VA_ARGS__)
 #define cr_skip(...)      cr_skip_test(__VA_ARGS__)
 
+/* ─── One-line regression cases ──────────────────────────────────────── */
+/* These keep the exercised expression visible at the call site; they are
+ * plain Test() bodies that happen to fit one line. */
+
+/* fn(NULL) and friends must be no-ops: common C-port free/null-safety
+ * contract; a crash or sanitizer failure fails the test. */
+#define OC_TEST_NULL_SAFE(suite, name, ...)                               \
+    Test(suite, name)                                                      \
+    {                                                                     \
+        __VA_ARGS__;                                                      \
+    }
+
+/* The call must be rejected with OC_ERR_INVALID_ARG on NULL input. */
+#define OC_TEST_REJECTS_NULL(suite, name, call)                            \
+    Test(suite, name)                                                      \
+    {                                                                     \
+        cr_assert_eq(call, OC_ERR_INVALID_ARG);                           \
+    }
+
 #ifdef __cplusplus
 }
 #endif

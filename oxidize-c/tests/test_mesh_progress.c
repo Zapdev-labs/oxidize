@@ -17,10 +17,8 @@ Test(mesh_progress, init)
     cr_assert_eq(t.clock, 0u);
 }
 
-Test(mesh_progress, init_null)
-{
-    cr_assert_neq(oc_mesh_progress_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mesh_progress, init_null,
+        cr_assert_neq(oc_mesh_progress_init(NULL), OC_OK);)
 
 /* ----------------------------------------------------------------- */
 /* add.                                                               */
@@ -196,10 +194,8 @@ Test(mesh_progress, overall_excludes_failed_cancelled)
     cr_assert_float_eq(oc_mesh_progress_overall(&t), 0.5f, 1e-6f);
 }
 
-Test(mesh_progress, overall_null)
-{
-    cr_assert_float_eq(oc_mesh_progress_overall(NULL), 0.0f, 1e-6f);
-}
+OC_TEST_NULL_SAFE(mesh_progress, overall_null,
+        cr_assert_float_eq(oc_mesh_progress_overall(NULL), 0.0f, 1e-6f);)
 
 /* ----------------------------------------------------------------- */
 /* state_name + count_by_state.                                       */
@@ -260,10 +256,8 @@ Test(mesh_progress, cancel_all)
     cr_assert_eq(oc_mesh_progress_count_by_state(&t, OC_PROGRESS_CANCELLED), 2u);
 }
 
-Test(mesh_progress, cancel_all_null)
-{
-    cr_assert_neq(oc_mesh_progress_cancel_all(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mesh_progress, cancel_all_null,
+        cr_assert_neq(oc_mesh_progress_cancel_all(NULL), OC_OK);)
 
 /* ----------------------------------------------------------------- */
 /* Overflow: max 128 entries.                                         */

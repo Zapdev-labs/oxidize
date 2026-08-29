@@ -51,10 +51,8 @@ Test(mm_proj, init_single_layer)
     oc_mm_proj_free(proj);
 }
 
-Test(mm_proj, init_null)
-{
-    cr_assert_null(oc_mm_proj_init(NULL));
-}
+OC_TEST_NULL_SAFE(mm_proj, init_null,
+        cr_assert_null(oc_mm_proj_init(NULL));)
 
 Test(mm_proj, init_bad_dims)
 {
@@ -91,11 +89,8 @@ Test(mm_proj, init_hidden_dim_defaults_to_input)
     oc_mm_proj_free(proj);
 }
 
-Test(mm_proj, free_null)
-{
-    /* Should not crash. */
-    oc_mm_proj_free(NULL);
-}
+OC_TEST_NULL_SAFE(mm_proj, free_null,
+        oc_mm_proj_free(NULL);)
 
 Test(mm_proj, set_layer_weight)
 {
@@ -380,7 +375,5 @@ Test(mm_proj, concat_prompt_text_only)
     oc_mm_proj_free(proj);
 }
 
-Test(mm_proj, concat_prompt_null_proj)
-{
-    cr_assert_null(oc_mm_proj_concat_prompt(NULL, NULL, 0, NULL, 0));
-}
+OC_TEST_NULL_SAFE(mm_proj, concat_prompt_null_proj,
+        cr_assert_null(oc_mm_proj_concat_prompt(NULL, NULL, 0, NULL, 0));)

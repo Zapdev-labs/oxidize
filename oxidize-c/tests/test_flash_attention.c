@@ -139,10 +139,8 @@ Test(flash_decode_heads, f32_empty_seq)
         cr_assert_float_eq(out[i], 0.0f, 1e-6f);
 }
 
-Test(flash_decode_heads, f32_null_safety)
-{
-    cr_assert_neq(oc_flash_attention_decode_heads_f32(NULL, NULL, NULL, 0, 1, 1, 1, 1, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(flash_decode_heads, f32_null_safety,
+        cr_assert_neq(oc_flash_attention_decode_heads_f32(NULL, NULL, NULL, 0, 1, 1, 1, 1, NULL), OC_OK);)
 
 Test(flash_decode_heads, f32_invalid_heads)
 {
@@ -220,10 +218,8 @@ Test(flash_decode_heads, f16_matches_f32)
         cr_assert_float_eq(out_f16[i], out_f32[i], 0.02f);
 }
 
-Test(flash_decode_heads, f16_null_safety)
-{
-    cr_assert_neq(oc_flash_attention_decode_heads_f16(NULL, NULL, NULL, 0, 1, 1, 1, 1, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(flash_decode_heads, f16_null_safety,
+        cr_assert_neq(oc_flash_attention_decode_heads_f16(NULL, NULL, NULL, 0, 1, 1, 1, 1, NULL), OC_OK);)
 
 /* ─── prefill_f32 tests ─────────────────────────────────────────────── */
 
@@ -257,10 +253,8 @@ Test(flash_prefill, single_query_single_kv)
     cr_assert_float_eq(out[1], 5.0f, 1e-5f);
 }
 
-Test(flash_prefill, null_safety)
-{
-    cr_assert_neq(oc_flash_attention_prefill_f32(NULL, NULL, NULL, 0, 0, 1, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(flash_prefill, null_safety,
+        cr_assert_neq(oc_flash_attention_prefill_f32(NULL, NULL, NULL, 0, 0, 1, NULL), OC_OK);)
 
 Test(flash_prefill, block_boundary)
 {

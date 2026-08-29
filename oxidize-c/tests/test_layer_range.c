@@ -206,14 +206,10 @@ Test(spec_stats, estimated_speedup)
     cr_assert_float_eq(oc_speculative_estimated_speedup(&stats), 4.0, 0.001);
 }
 
-Test(spec_stats, null_safety)
-{
-    cr_assert_float_eq(oc_speculative_acceptance_rate(NULL), 0.0, 0.001);
-    cr_assert_float_eq(oc_speculative_tokens_per_target_forward(NULL), 0.0, 0.001);
-    cr_assert_float_eq(oc_speculative_estimated_speedup(NULL), 0.0, 0.001);
-}
+OC_TEST_NULL_SAFE(spec_stats, null_safety,
+        cr_assert_float_eq(oc_speculative_acceptance_rate(NULL), 0.0, 0.001);
+        cr_assert_float_eq(oc_speculative_tokens_per_target_forward(NULL), 0.0, 0.001);
+        cr_assert_float_eq(oc_speculative_estimated_speedup(NULL), 0.0, 0.001);)
 
-Test(spec_stats, load_draft_null)
-{
-    cr_assert_neq(oc_speculative_load_draft(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(spec_stats, load_draft_null,
+        cr_assert_neq(oc_speculative_load_draft(NULL, NULL, NULL), OC_OK);)

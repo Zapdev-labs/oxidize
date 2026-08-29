@@ -16,10 +16,8 @@ Test(bytes_buf, init)
     oc_bytes_free(&b);
 }
 
-Test(bytes_buf, init_null)
-{
-    cr_assert_eq(oc_bytes_init(NULL), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(bytes_buf, init_null,
+        cr_assert_eq(oc_bytes_init(NULL), OC_ERR_INVALID_ARG, "");)
 
 Test(bytes_buf, append_u8)
 {

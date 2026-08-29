@@ -14,11 +14,9 @@ Test(mtpw, init)
     oc_mtp_weights_free(&mw);
 }
 
-Test(mtpw, init_null)
-{
-    oc_mtp_weights_init(NULL);
-    oc_mtp_weights_free(NULL);
-}
+OC_TEST_NULL_SAFE(mtpw, init_null,
+        oc_mtp_weights_init(NULL);
+        oc_mtp_weights_free(NULL);)
 
 Test(mtpw, is_usable_empty)
 {
@@ -30,10 +28,8 @@ Test(mtpw, is_usable_empty)
     oc_mtp_weights_free(&mw);
 }
 
-Test(mtpw, is_usable_null)
-{
-    cr_assert(!oc_mtp_weights_is_usable(NULL, NULL));
-}
+OC_TEST_NULL_SAFE(mtpw, is_usable_null,
+        cr_assert(!oc_mtp_weights_is_usable(NULL, NULL));)
 
 Test(mtpw, is_usable_complete)
 {

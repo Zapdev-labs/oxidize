@@ -19,10 +19,8 @@ Test(infm, init)
     oc_inf_model_free(&m);
 }
 
-Test(infm, init_null)
-{
-    cr_assert_neq(oc_inf_model_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(infm, init_null,
+        cr_assert_neq(oc_inf_model_init(NULL, NULL), OC_OK);)
 
 Test(infm, init_bad_config)
 {
@@ -64,10 +62,8 @@ Test(infm, add_layer_grows)
     oc_inf_model_free(&m);
 }
 
-Test(infm, add_layer_null)
-{
-    cr_assert_neq(oc_inf_model_add_layer(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(infm, add_layer_null,
+        cr_assert_neq(oc_inf_model_add_layer(NULL, NULL), OC_OK);)
 
 Test(infm, set_mtp)
 {
@@ -113,10 +109,8 @@ Test(infm, config)
     oc_inf_model_free(&m);
 }
 
-Test(infm, config_null)
-{
-    cr_assert_null(oc_inf_model_config(NULL));
-}
+OC_TEST_NULL_SAFE(infm, config_null,
+        cr_assert_null(oc_inf_model_config(NULL));)
 
 Test(infm, kv_layer_count)
 {
@@ -153,10 +147,8 @@ Test(infm, is_loaded)
     oc_inf_model_free(&m);
 }
 
-Test(infm, free_null)
-{
-    oc_inf_model_free(NULL);
-}
+OC_TEST_NULL_SAFE(infm, free_null,
+        oc_inf_model_free(NULL);)
 
 Test(infm, batched_decode_default)
 {

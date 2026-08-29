@@ -81,10 +81,7 @@ Test(config, init_defaults)
     cr_assert_eq(cfg.sliding_window, 0);
 }
 
-Test(config, init_null)
-{
-    cr_assert_eq(oc_model_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(config, init_null, oc_model_config_init(NULL))
 
 Test(config, from_gguf_llama_dense)
 {
@@ -188,10 +185,7 @@ Test(config, validate_ok)
     cr_assert_eq(oc_model_config_validate(&cfg), OC_OK);
 }
 
-Test(config, validate_null)
-{
-    cr_assert_eq(oc_model_config_validate(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(config, validate_null, oc_model_config_validate(NULL))
 
 Test(config, validate_missing_layers)
 {
@@ -358,10 +352,8 @@ Test(config, n_params_dense)
     cr_assert_gt(n, 2 * 100 * 32);
 }
 
-Test(config, n_params_null)
-{
-    cr_assert_eq(oc_model_config_n_params(NULL), 0);
-}
+OC_TEST_NULL_SAFE(config, n_params_null,
+        cr_assert_eq(oc_model_config_n_params(NULL), 0);)
 
 Test(config, n_params_invalid)
 {

@@ -13,10 +13,8 @@ Test(fs, config_init)
     cr_assert_eq(cfg.seed, 42);
 }
 
-Test(fs, config_init_null)
-{
-    cr_assert_neq(oc_fs_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(fs, config_init_null,
+        cr_assert_neq(oc_fs_config_init(NULL), OC_OK);)
 
 Test(fs, uniform)
 {
@@ -116,10 +114,8 @@ Test(fs, sample_config)
     oc_fs_result_free(&r);
 }
 
-Test(fs, sample_null)
-{
-    cr_assert_neq(oc_fs_sample(NULL, 0, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(fs, sample_null,
+        cr_assert_neq(oc_fs_sample(NULL, 0, 0, NULL), OC_OK);)
 
 Test(fs, estimate_n_frames)
 {
@@ -138,10 +134,8 @@ Test(fs, strategy_name)
     cr_assert_str_eq(oc_fs_strategy_name(OC_FS_STRATEGY_KEYFRAME), "keyframe");
 }
 
-Test(fs, result_free_null)
-{
-    oc_fs_result_free(NULL);
-}
+OC_TEST_NULL_SAFE(fs, result_free_null,
+        oc_fs_result_free(NULL);)
 
 Test(fs, uniform_zero)
 {

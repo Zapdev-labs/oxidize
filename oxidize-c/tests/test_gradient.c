@@ -16,10 +16,8 @@ Test(grad, config_init_defaults)
     cr_assert_float_eq(cfg.weight_decay, OC_GRAD_DEFAULT_WEIGHT_DECAY, 1e-9f);
 }
 
-Test(grad, config_init_null)
-{
-    cr_assert_neq(oc_grad_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(grad, config_init_null,
+        cr_assert_neq(oc_grad_config_init(NULL), OC_OK);)
 
 Test(grad, init_free)
 {
@@ -212,10 +210,8 @@ Test(grad, set_get_lr)
     oc_grad_free(&st);
 }
 
-Test(grad, get_lr_null)
-{
-    cr_assert_float_eq(oc_grad_get_lr(NULL), 0.0f, 1e-9f);
-}
+OC_TEST_NULL_SAFE(grad, get_lr_null,
+        cr_assert_float_eq(oc_grad_get_lr(NULL), 0.0f, 1e-9f);)
 
 /* ─── Linear backward ──────────────────────────────────────────────── */
 

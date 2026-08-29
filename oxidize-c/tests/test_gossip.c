@@ -17,10 +17,7 @@ Test(gossip, config_init_defaults)
     cr_assert_eq(cfg.fanout,      OC_GOSSIP_DEFAULT_FANOUT);
 }
 
-Test(gossip, config_init_null)
-{
-    cr_assert_eq(oc_gossip_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(gossip, config_init_null, oc_gossip_config_init(NULL))
 
 /* ─── Lifecycle ───────────────────────────────────────────────────── */
 
@@ -191,10 +188,7 @@ Test(gossip, tick_keeps_recent_healthy)
     oc_gossip_free(s);
 }
 
-Test(gossip, tick_null_is_error)
-{
-    cr_assert_eq(oc_gossip_tick(NULL, 0), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(gossip, tick_null_is_error, oc_gossip_tick(NULL, 0))
 
 /* ─── Queries ─────────────────────────────────────────────────────── */
 
@@ -224,10 +218,8 @@ Test(gossip, get_nodes_count_only)
     oc_gossip_free(s);
 }
 
-Test(gossip, get_healthy_count_empty_state)
-{
-    cr_assert_eq(oc_gossip_get_healthy_count(NULL), 0u);
-}
+OC_TEST_NULL_SAFE(gossip, get_healthy_count_empty_state,
+        cr_assert_eq(oc_gossip_get_healthy_count(NULL), 0u);)
 
 /* ─── Merge ───────────────────────────────────────────────────────── */
 

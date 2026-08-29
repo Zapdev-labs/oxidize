@@ -22,10 +22,7 @@ Test(gemma, config_init_defaults)
     cr_assert_float_eq(cfg.rope_theta, 10000.0f, 0.001f);
 }
 
-Test(gemma, config_init_null)
-{
-    cr_assert_eq(oc_gemma_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(gemma, config_init_null, oc_gemma_config_init(NULL))
 
 Test(gemma, embedding_scale_is_sqrt_hidden)
 {
@@ -66,10 +63,7 @@ Test(gemma, model_init_custom_config)
     oc_gemma_free(&model);
 }
 
-Test(gemma, model_init_null)
-{
-    cr_assert_eq(oc_gemma_model_init(NULL, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(gemma, model_init_null, oc_gemma_model_init(NULL, NULL))
 
 Test(gemma, model_init_bad_config)
 {
@@ -139,10 +133,8 @@ Test(gemma, forward_uninitialized)
     cr_assert_neq(oc_gemma_forward(&model, 0, logits), OC_OK);
 }
 
-Test(gemma, free_null)
-{
-    oc_gemma_free(NULL);
-}
+OC_TEST_NULL_SAFE(gemma, free_null,
+        oc_gemma_free(NULL);)
 
 Test(gemma, free_idempotent_safe)
 {

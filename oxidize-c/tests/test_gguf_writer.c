@@ -73,11 +73,9 @@ Test(gguf_writer, init_null_path)
     cr_assert_neq(e, OC_OK, "NULL path should fail");
 }
 
-Test(gguf_writer, init_null_writer)
-{
-    OcError e = oc_gguf_writer_init("foo.gguf", "llama", NULL);
-    cr_assert_neq(e, OC_OK, "NULL writer should fail");
-}
+OC_TEST_NULL_SAFE(gguf_writer, init_null_writer,
+        OcError e = oc_gguf_writer_init("foo.gguf", "llama", NULL);
+        cr_assert_neq(e, OC_OK, "NULL writer should fail");)
 
 Test(gguf_writer, init_null_arch_skips_arch_kv)
 {
@@ -576,10 +574,8 @@ Test(gguf_writer, full_round_trip)
     unlink(path);
 }
 
-Test(gguf_writer, free_null_safe)
-{
-    oc_gguf_writer_free(NULL);
-}
+OC_TEST_NULL_SAFE(gguf_writer, free_null_safe,
+        oc_gguf_writer_free(NULL);)
 
 Test(gguf_writer, zero_byte_tensor_data)
 {

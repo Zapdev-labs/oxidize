@@ -12,10 +12,8 @@ Test(shard, config_init)
     cr_assert_eq(cfg.strategy, OC_SHARD_ROW);
 }
 
-Test(shard, config_init_null)
-{
-    cr_assert_neq(oc_shard_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(shard, config_init_null,
+        cr_assert_neq(oc_shard_config_init(NULL), OC_OK);)
 
 Test(shard, strategy_name)
 {
@@ -34,10 +32,8 @@ Test(shard, init_free)
     oc_shard_free(mgr);
 }
 
-Test(shard, init_null_out)
-{
-    cr_assert_neq(oc_shard_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(shard, init_null_out,
+        cr_assert_neq(oc_shard_init(NULL, NULL), OC_OK);)
 
 Test(shard, init_zero_shards)
 {
@@ -242,10 +238,8 @@ Test(shard, n_shards_after_assign)
     oc_shard_free(mgr);
 }
 
-Test(shard, free_null_safe)
-{
-    oc_shard_free(NULL);
-}
+OC_TEST_NULL_SAFE(shard, free_null_safe,
+        oc_shard_free(NULL);)
 
 Test(shard, assign_capacity)
 {

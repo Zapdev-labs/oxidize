@@ -15,10 +15,8 @@ Test(inf, config_init)
     cr_assert(!cfg.use_gpu);
 }
 
-Test(inf, config_init_null)
-{
-    cr_assert_neq(oc_inf_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(inf, config_init_null,
+        cr_assert_neq(oc_inf_config_init(NULL), OC_OK);)
 
 Test(inf, engine_init)
 {
@@ -42,10 +40,8 @@ Test(inf, engine_init_with_config)
     oc_inf_engine_free(&engine);
 }
 
-Test(inf, engine_init_null)
-{
-    cr_assert_neq(oc_inf_engine_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(inf, engine_init_null,
+        cr_assert_neq(oc_inf_engine_init(NULL, NULL), OC_OK);)
 
 Test(inf, engine_load)
 {
@@ -57,10 +53,8 @@ Test(inf, engine_load)
     oc_inf_engine_free(&engine);
 }
 
-Test(inf, engine_load_null)
-{
-    cr_assert_neq(oc_inf_engine_load(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(inf, engine_load_null,
+        cr_assert_neq(oc_inf_engine_load(NULL, NULL), OC_OK);)
 
 Test(inf, engine_generate_unloaded)
 {
@@ -122,10 +116,8 @@ Test(inf, engine_stats)
     oc_inf_engine_free(&engine);
 }
 
-Test(inf, engine_stats_null)
-{
-    cr_assert_neq(oc_inf_engine_stats(NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(inf, engine_stats_null,
+        cr_assert_neq(oc_inf_engine_stats(NULL, NULL, 0), OC_OK);)
 
 Test(inf, is_loaded)
 {
@@ -137,10 +129,8 @@ Test(inf, is_loaded)
     oc_inf_engine_free(&engine);
 }
 
-Test(inf, is_loaded_null)
-{
-    cr_assert(!oc_inf_engine_is_loaded(NULL));
-}
+OC_TEST_NULL_SAFE(inf, is_loaded_null,
+        cr_assert(!oc_inf_engine_is_loaded(NULL));)
 
 Test(inf, model_type_from_arch)
 {
@@ -172,10 +162,8 @@ Test(inf, model_type_arch)
     cr_assert_str_eq(oc_inf_model_type_arch(OC_INF_MODEL_QWEN), "qwen2");
 }
 
-Test(inf, free_null)
-{
-    oc_inf_engine_free(NULL);
-}
+OC_TEST_NULL_SAFE(inf, free_null,
+        oc_inf_engine_free(NULL);)
 
 Test(inf, encode_decode_roundtrip)
 {
@@ -239,10 +227,8 @@ Test(inf_cfg, head_dim_custom)
     cr_assert_eq(oc_inference_config_head_dim(&cfg), 128);
 }
 
-Test(inf_cfg, head_dim_null)
-{
-    cr_assert_eq(oc_inference_config_head_dim(NULL), 0);
-}
+OC_TEST_NULL_SAFE(inf_cfg, head_dim_null,
+        cr_assert_eq(oc_inference_config_head_dim(NULL), 0);)
 
 Test(inf_cfg, effective_rope_dim_default)
 {
@@ -283,10 +269,8 @@ Test(inf_cfg, validate_ok)
     cr_assert_eq(oc_inference_config_validate(&cfg), OC_OK);
 }
 
-Test(inf_cfg, validate_null)
-{
-    cr_assert_neq(oc_inference_config_validate(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(inf_cfg, validate_null,
+        cr_assert_neq(oc_inference_config_validate(NULL), OC_OK);)
 
 Test(inf_cfg, validate_zero_hidden)
 {
@@ -398,10 +382,8 @@ Test(inf_cfg, layer_is_global_interleaved)
     cr_assert(!oc_inference_config_layer_is_global(&cfg, 3));
 }
 
-Test(inf_cfg, layer_is_global_null)
-{
-    cr_assert(oc_inference_config_layer_is_global(NULL, 0));
-}
+OC_TEST_NULL_SAFE(inf_cfg, layer_is_global_null,
+        cr_assert(oc_inference_config_layer_is_global(NULL, 0));)
 
 Test(inf_cfg, layer_rope_theta_default)
 {
@@ -426,10 +408,8 @@ Test(inf_cfg, layer_rope_theta_swa)
     cr_assert_float_eq(oc_inference_config_layer_rope_theta(&cfg, 0), 10000.0f, 0.01f);
 }
 
-Test(inf_cfg, layer_rope_theta_null)
-{
-    cr_assert_float_eq(oc_inference_config_layer_rope_theta(NULL, 0), 10000.0f, 0.01f);
-}
+OC_TEST_NULL_SAFE(inf_cfg, layer_rope_theta_null,
+        cr_assert_float_eq(oc_inference_config_layer_rope_theta(NULL, 0), 10000.0f, 0.01f);)
 
 Test(inf_cfg, layer_sliding_window_none)
 {
@@ -462,10 +442,8 @@ Test(inf_cfg, layer_sliding_window_interleaved)
     cr_assert_eq(oc_inference_config_layer_sliding_window(&cfg, 0), 1024);
 }
 
-Test(inf_cfg, layer_sliding_window_null)
-{
-    cr_assert_eq(oc_inference_config_layer_sliding_window(NULL, 0), 0);
-}
+OC_TEST_NULL_SAFE(inf_cfg, layer_sliding_window_null,
+        cr_assert_eq(oc_inference_config_layer_sliding_window(NULL, 0), 0);)
 
 Test(inf_cfg, apply_rope_head_basic)
 {

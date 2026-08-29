@@ -57,17 +57,11 @@ Test(bpe_train, init_default_config_values)
     oc_bpe_trainer_free(t);
 }
 
-Test(bpe_train, init_null_config_trainer)
-{
-    /* init() takes a config by value, so we test the NULL trainer case via
-     * the other functions. */
-    cr_assert_eq(oc_bpe_trainer_train(NULL, "hello", 0), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(bpe_train, init_null_config_trainer,
+        cr_assert_eq(oc_bpe_trainer_train(NULL, "hello", 0), OC_ERR_INVALID_ARG, "");)
 
-Test(bpe_train, free_null_safe)
-{
-    oc_bpe_trainer_free(NULL);
-}
+OC_TEST_NULL_SAFE(bpe_train, free_null_safe,
+        oc_bpe_trainer_free(NULL);)
 
 /* ─── Training: basic ───────────────────────────────────────────────────── */
 
@@ -146,10 +140,8 @@ Test(bpe_train, vocab_ids_are_sequential)
     oc_bpe_trainer_free(t);
 }
 
-Test(bpe_train, vocab_getter_null_args)
-{
-    cr_assert_eq(oc_bpe_trainer_vocab(NULL, NULL, NULL), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(bpe_train, vocab_getter_null_args,
+        cr_assert_eq(oc_bpe_trainer_vocab(NULL, NULL, NULL), OC_ERR_INVALID_ARG, "");)
 
 /* ─── Merge extraction ─────────────────────────────────────────────────── */
 
@@ -186,10 +178,8 @@ Test(bpe_train, merge_rule_correctness)
     oc_bpe_trainer_free(t);
 }
 
-Test(bpe_train, merges_getter_null_args)
-{
-    cr_assert_eq(oc_bpe_trainer_merges(NULL, NULL, NULL), OC_ERR_INVALID_ARG, "");
-}
+OC_TEST_NULL_SAFE(bpe_train, merges_getter_null_args,
+        cr_assert_eq(oc_bpe_trainer_merges(NULL, NULL, NULL), OC_ERR_INVALID_ARG, "");)
 
 Test(bpe_train, multiple_merges)
 {

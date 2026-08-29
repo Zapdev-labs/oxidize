@@ -15,10 +15,7 @@ Test(election, config_init_defaults)
     cr_assert_eq(cfg.node_priority,        OC_ELECTION_DEFAULT_NODE_PRIORITY);
 }
 
-Test(election, config_init_null)
-{
-    cr_assert_eq(oc_election_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(election, config_init_null, oc_election_config_init(NULL))
 
 /* ─── Lifecycle ───────────────────────────────────────────────────── */
 
@@ -317,9 +314,7 @@ Test(election, get_term_returns_current_term)
     oc_election_free(s);
 }
 
-Test(election, get_role_null_is_safe)
-{
-    cr_assert_eq(oc_election_get_role(NULL), OC_ELECTION_FOLLOWER);
-    cr_assert_eq(oc_election_get_leader(NULL), 0u);
-    cr_assert_eq(oc_election_get_term(NULL), 0u);
-}
+OC_TEST_NULL_SAFE(election, get_role_null_is_safe,
+        cr_assert_eq(oc_election_get_role(NULL), OC_ELECTION_FOLLOWER);
+        cr_assert_eq(oc_election_get_leader(NULL), 0u);
+        cr_assert_eq(oc_election_get_term(NULL), 0u);)

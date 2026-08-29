@@ -18,10 +18,7 @@ Test(vision_encoder, config_init_defaults)
     cr_assert_eq(cfg.n_heads,    OC_VISION_DEFAULT_N_HEADS);
 }
 
-Test(vision_encoder, config_init_null)
-{
-    cr_assert_eq(oc_vision_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(vision_encoder, config_init_null, oc_vision_config_init(NULL))
 
 /* ─── Encoder lifecycle ─────────────────────────────────────────────── */
 

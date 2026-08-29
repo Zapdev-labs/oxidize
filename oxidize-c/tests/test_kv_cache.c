@@ -275,12 +275,10 @@ Test(kv_cache, truncate_invalid)
     oc_kv_cache_free(&cache);
 }
 
-Test(kv_cache, accessors_on_null)
-{
-    cr_assert_eq(oc_kv_cache_n_tokens(NULL), 0u);
-    cr_assert_eq(oc_kv_cache_capacity(NULL), 0u);
-    cr_assert_eq(oc_kv_cache_size_bytes(NULL), 0u);
-}
+OC_TEST_NULL_SAFE(kv_cache, accessors_on_null,
+        cr_assert_eq(oc_kv_cache_n_tokens(NULL), 0u);
+        cr_assert_eq(oc_kv_cache_capacity(NULL), 0u);
+        cr_assert_eq(oc_kv_cache_size_bytes(NULL), 0u);)
 
 Test(kv_cache, size_bytes)
 {

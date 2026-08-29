@@ -12,10 +12,8 @@ Test(prog, init)
     oc_progress_free(&prog);
 }
 
-Test(prog, init_null)
-{
-    cr_assert_neq(oc_progress_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(prog, init_null,
+        cr_assert_neq(oc_progress_init(NULL), OC_OK);)
 
 Test(prog, add_stage)
 {
@@ -28,10 +26,8 @@ Test(prog, add_stage)
     oc_progress_free(&prog);
 }
 
-Test(prog, add_stage_null)
-{
-    cr_assert_neq(oc_progress_add_stage(NULL, "x", 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(prog, add_stage_null,
+        cr_assert_neq(oc_progress_add_stage(NULL, "x", 0), OC_OK);)
 
 Test(prog, update)
 {
@@ -187,7 +183,5 @@ Test(prog, stage_name)
     oc_progress_free(&prog);
 }
 
-Test(prog, free_null)
-{
-    oc_progress_free(NULL);
-}
+OC_TEST_NULL_SAFE(prog, free_null,
+        oc_progress_free(NULL);)

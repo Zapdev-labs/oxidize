@@ -13,10 +13,8 @@ Test(ck, detect)
     free((void *)caps.cpu_name);
 }
 
-Test(ck, detect_null)
-{
-    cr_assert_neq(oc_cpu_kernels_detect(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ck, detect_null,
+        cr_assert_neq(oc_cpu_kernels_detect(NULL), OC_OK);)
 
 Test(ck, best_level)
 {
@@ -42,10 +40,8 @@ Test(ck, init_scalar)
     cr_assert_not_null(k.matvec_f32);
 }
 
-Test(ck, init_null)
-{
-    cr_assert_neq(oc_cpu_kernels_init_scalar(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(ck, init_null,
+        cr_assert_neq(oc_cpu_kernels_init_scalar(NULL), OC_OK);)
 
 Test(ck, init_best)
 {
@@ -69,10 +65,8 @@ Test(ck, dot_scalar)
     cr_assert_float_eq(result, 70.0f, 0.001f); /* 5+12+21+32 */
 }
 
-Test(ck, dot_scalar_null)
-{
-    cr_assert_float_eq(oc_cpu_dot_f32_scalar(NULL, NULL, 0), 0.0f, 0.001f);
-}
+OC_TEST_NULL_SAFE(ck, dot_scalar_null,
+        cr_assert_float_eq(oc_cpu_dot_f32_scalar(NULL, NULL, 0), 0.0f, 0.001f);)
 
 Test(ck, dot_scalar_empty)
 {
@@ -90,11 +84,8 @@ Test(ck, matvec_scalar)
     cr_assert_float_eq(out[1], 15.0f, 0.001f); /* 4+5+6 */
 }
 
-Test(ck, matvec_scalar_null)
-{
-    oc_cpu_matvec_f32_scalar(NULL, NULL, NULL, 0, 0);
-    /* Should not crash. */
-}
+OC_TEST_NULL_SAFE(ck, matvec_scalar_null,
+        oc_cpu_matvec_f32_scalar(NULL, NULL, NULL, 0, 0);)
 
 Test(ck, has_vnni)
 {

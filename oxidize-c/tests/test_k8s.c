@@ -33,10 +33,8 @@ Test(k8s, init_null_ns)
     oc_k8s_free(&cluster);
 }
 
-Test(k8s, init_null)
-{
-    cr_assert_neq(oc_k8s_init(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(k8s, init_null,
+        cr_assert_neq(oc_k8s_init(NULL, NULL, NULL), OC_OK);)
 
 Test(k8s, detect)
 {
@@ -58,10 +56,8 @@ Test(k8s, add_pod)
     oc_k8s_free(&cluster);
 }
 
-Test(k8s, add_pod_null)
-{
-    cr_assert_neq(oc_k8s_add_pod(NULL, NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(k8s, add_pod_null,
+        cr_assert_neq(oc_k8s_add_pod(NULL, NULL, NULL, 0), OC_OK);)
 
 Test(k8s, get_pods)
 {
@@ -333,10 +329,8 @@ Test(k8s, mark_pod_not_found)
     oc_k8s_free(&cluster);
 }
 
-Test(k8s, free_null)
-{
-    oc_k8s_free(NULL);
-}
+OC_TEST_NULL_SAFE(k8s, free_null,
+        oc_k8s_free(NULL);)
 
 Test(k8s, add_multiple_pods)
 {

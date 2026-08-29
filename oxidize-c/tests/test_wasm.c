@@ -253,10 +253,8 @@ Test(wasm, cancel_sets_flag)
     oc_wasm_bridge_free(br);
 }
 
-Test(wasm, cancel_null_handling)
-{
-    cr_assert_neq(oc_wasm_bridge_cancel(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(wasm, cancel_null_handling,
+        cr_assert_neq(oc_wasm_bridge_cancel(NULL), OC_OK);)
 
 /* ─── Stats ──────────────────────────────────────────────────────────── */
 

@@ -190,15 +190,11 @@ Test(node, is_online_true_after_init)
     oc_node_free(n);
 }
 
-Test(node, is_online_null_returns_false)
-{
-    cr_assert_not(oc_node_is_online(NULL));
-}
+OC_TEST_NULL_SAFE(node, is_online_null_returns_false,
+        cr_assert_not(oc_node_is_online(NULL));)
 
-Test(node, n_connections_null_returns_zero)
-{
-    cr_assert_eq(oc_node_n_connections(NULL), 0u);
-}
+OC_TEST_NULL_SAFE(node, n_connections_null_returns_zero,
+        cr_assert_eq(oc_node_n_connections(NULL), 0u);)
 
 Test(node, has_capability_checks_flag)
 {
@@ -213,10 +209,8 @@ Test(node, has_capability_checks_flag)
     oc_node_free(n);
 }
 
-Test(node, has_capability_null_returns_false)
-{
-    cr_assert_not(oc_node_has_capability(NULL, OC_NODE_CAP_GPU));
-}
+OC_TEST_NULL_SAFE(node, has_capability_null_returns_false,
+        cr_assert_not(oc_node_has_capability(NULL, OC_NODE_CAP_GPU));)
 
 /* ─── Traffic accounting ───────────────────────────────────────────── */
 
@@ -244,11 +238,9 @@ Test(node, record_received_accumulates)
     oc_node_free(n);
 }
 
-Test(node, record_sent_null_fails)
-{
-    cr_assert_eq(oc_node_record_sent(NULL, 100), OC_ERR_INVALID_ARG);
-    cr_assert_eq(oc_node_record_received(NULL, 100), OC_ERR_INVALID_ARG);
-}
+OC_TEST_NULL_SAFE(node, record_sent_null_fails,
+        cr_assert_eq(oc_node_record_sent(NULL, 100), OC_ERR_INVALID_ARG);
+        cr_assert_eq(oc_node_record_received(NULL, 100), OC_ERR_INVALID_ARG);)
 
 /* ─── Capability names ──────────────────────────────────────────────── */
 

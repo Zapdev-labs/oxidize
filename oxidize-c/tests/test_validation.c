@@ -31,10 +31,7 @@ Test(validation, config_init_defaults)
     cr_assert_eq(cfg.seed,        OC_VALIDATION_DEFAULT_SEED);
 }
 
-Test(validation, config_init_null)
-{
-    cr_assert_eq(oc_validation_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(validation, config_init_null, oc_validation_config_init(NULL))
 
 /* ─── Lifecycle ───────────────────────────────────────────────────── */
 

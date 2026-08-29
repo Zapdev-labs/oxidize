@@ -17,10 +17,7 @@ Test(phi, config_init_defaults)
     cr_assert_float_eq(cfg.rope_theta, 10000.0f, 0.001f);
 }
 
-Test(phi, config_init_null)
-{
-    cr_assert_eq(oc_phi_config_init(NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(phi, config_init_null, oc_phi_config_init(NULL))
 
 Test(phi, model_init_default)
 {
@@ -51,10 +48,7 @@ Test(phi, model_init_custom_config)
     oc_phi_free(&model);
 }
 
-Test(phi, model_init_null)
-{
-    cr_assert_eq(oc_phi_model_init(NULL, NULL), OC_ERR_INVALID_ARG);
-}
+OC_TEST_REJECTS_NULL(phi, model_init_null, oc_phi_model_init(NULL, NULL))
 
 Test(phi, model_init_bad_config)
 {
@@ -108,10 +102,8 @@ Test(phi, forward_uninitialized)
     cr_assert_neq(oc_phi_forward(&model, 0, logits), OC_OK);
 }
 
-Test(phi, free_null)
-{
-    oc_phi_free(NULL);
-}
+OC_TEST_NULL_SAFE(phi, free_null,
+        oc_phi_free(NULL);)
 
 Test(phi, free_idempotent_safe)
 {

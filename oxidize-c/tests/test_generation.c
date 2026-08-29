@@ -15,10 +15,8 @@ Test(gen, config_init)
     cr_assert(cfg.stop_on_eos);
 }
 
-Test(gen, config_init_null)
-{
-    cr_assert_neq(oc_gen_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(gen, config_init_null,
+        cr_assert_neq(oc_gen_config_init(NULL), OC_OK);)
 
 Test(gen, state_init_empty)
 {
@@ -73,10 +71,8 @@ Test(gen, state_add_many_tokens)
     free(state.context);
 }
 
-Test(gen, state_add_null)
-{
-    cr_assert_neq(oc_gen_state_add_token(NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(gen, state_add_null,
+        cr_assert_neq(oc_gen_state_add_token(NULL, 0), OC_OK);)
 
 Test(gen, result_init_free)
 {
@@ -96,10 +92,8 @@ Test(gen, result_init_default_size)
     oc_gen_result_free(&result);
 }
 
-Test(gen, result_init_null)
-{
-    cr_assert_neq(oc_gen_result_init(NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(gen, result_init_null,
+        cr_assert_neq(oc_gen_result_init(NULL, 0), OC_OK);)
 
 Test(gen, config_from_cli)
 {
@@ -127,10 +121,8 @@ Test(gen, config_from_cli_top_p_only)
     cr_assert_eq(scfg.type, OC_SAMPLER_TOP_P);
 }
 
-Test(gen, config_from_cli_null)
-{
-    cr_assert_neq(oc_gen_config_from_cli(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(gen, config_from_cli_null,
+        cr_assert_neq(oc_gen_config_from_cli(NULL, NULL), OC_OK);)
 
 Test(gen, stop_reason)
 {
@@ -146,10 +138,8 @@ Test(gen, stop_reason)
     cr_assert_str_eq(oc_gen_stop_reason(&result), "error");
 }
 
-Test(gen, stop_reason_null)
-{
-    cr_assert_str_eq(oc_gen_stop_reason(NULL), "unknown");
-}
+OC_TEST_NULL_SAFE(gen, stop_reason_null,
+        cr_assert_str_eq(oc_gen_stop_reason(NULL), "unknown");)
 
 Test(gen, total_tokens)
 {
@@ -159,12 +149,8 @@ Test(gen, total_tokens)
     cr_assert_eq(oc_gen_total_tokens(&result), 150);
 }
 
-Test(gen, total_tokens_null)
-{
-    cr_assert_eq(oc_gen_total_tokens(NULL), 0);
-}
+OC_TEST_NULL_SAFE(gen, total_tokens_null,
+        cr_assert_eq(oc_gen_total_tokens(NULL), 0);)
 
-Test(gen, result_free_null)
-{
-    oc_gen_result_free(NULL);
-}
+OC_TEST_NULL_SAFE(gen, result_free_null,
+        oc_gen_result_free(NULL);)

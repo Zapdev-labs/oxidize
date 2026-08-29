@@ -19,10 +19,8 @@ Test(qwen, config_init)
     cr_assert(!cfg.tie_word_embeddings);
 }
 
-Test(qwen, config_init_null)
-{
-    cr_assert_neq(oc_qwen_config_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(qwen, config_init_null,
+        cr_assert_neq(oc_qwen_config_init(NULL), OC_OK);)
 
 Test(qwen, config_qwen3_06b)
 {
@@ -70,10 +68,8 @@ Test(qwen, model_init_default)
     oc_qwen_free(&model);
 }
 
-Test(qwen, model_init_null)
-{
-    cr_assert_neq(oc_qwen_model_init(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(qwen, model_init_null,
+        cr_assert_neq(oc_qwen_model_init(NULL, NULL), OC_OK);)
 
 Test(qwen, model_init_bad_config)
 {
@@ -114,15 +110,11 @@ Test(qwen, forward_uninit)
     cr_assert_neq(oc_qwen_forward(&model, 0, logits), OC_OK);
 }
 
-Test(qwen, forward_null)
-{
-    cr_assert_neq(oc_qwen_forward(NULL, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(qwen, forward_null,
+        cr_assert_neq(oc_qwen_forward(NULL, 0, NULL), OC_OK);)
 
-Test(qwen, free_null)
-{
-    oc_qwen_free(NULL);
-}
+OC_TEST_NULL_SAFE(qwen, free_null,
+        oc_qwen_free(NULL);)
 
 Test(qwen, free_reuse)
 {

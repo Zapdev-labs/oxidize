@@ -130,10 +130,8 @@ Test(audio, hann_window_single)
     cr_assert_float_eq(w, 1.0f, 1e-6f);
 }
 
-Test(audio, hann_window_null)
-{
-    cr_assert_neq(oc_audio_hann_window(NULL, 10), OC_OK);
-}
+OC_TEST_NULL_SAFE(audio, hann_window_null,
+        cr_assert_neq(oc_audio_hann_window(NULL, 10), OC_OK);)
 
 /* ─── DFT ───────────────────────────────────────────────────────────────── */
 
@@ -181,10 +179,8 @@ Test(audio, dft_pure_tone)
     cr_assert_eq(max_bin, k, "DFT peak should be at bin %u, got %u", k, max_bin);
 }
 
-Test(audio, dft_null)
-{
-    cr_assert_neq(oc_audio_dft(NULL, 10, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(audio, dft_null,
+        cr_assert_neq(oc_audio_dft(NULL, 10, NULL), OC_OK);)
 
 /* ─── Mel filter bank ──────────────────────────────────────────────────── */
 
@@ -245,10 +241,8 @@ Test(audio, mel_filterbank_triangular)
     free(fb);
 }
 
-Test(audio, mel_filterbank_null)
-{
-    cr_assert_neq(oc_audio_mel_filterbank(NULL, NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(audio, mel_filterbank_null,
+        cr_assert_neq(oc_audio_mel_filterbank(NULL, NULL, NULL), OC_OK);)
 
 /* ─── Mel spectrogram ──────────────────────────────────────────────────── */
 
@@ -457,13 +451,10 @@ Test(audio, wav_free)
     cr_assert_eq(wav.n_samples, 0);
 }
 
-Test(audio, free_null_safe)
-{
-    /* Should not crash on NULL. */
-    oc_audio_free(NULL);
-    oc_audio_features_free(NULL);
-    oc_audio_wav_free(NULL);
-}
+OC_TEST_NULL_SAFE(audio, free_null_safe,
+        oc_audio_free(NULL);
+        oc_audio_features_free(NULL);
+        oc_audio_wav_free(NULL);)
 
 /* ─── WAV loading (non-existent file) ───────────────────────────────────── */
 

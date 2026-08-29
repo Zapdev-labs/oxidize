@@ -10,10 +10,8 @@ Test(merge, strategy_name)
     cr_assert_str_eq(oc_merge_strategy_name(OC_MERGE_DARE), "dare");
 }
 
-Test(merge, null_config)
-{
-    cr_assert_neq(oc_merge_models(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(merge, null_config,
+        cr_assert_neq(oc_merge_models(NULL), OC_OK);)
 
 Test(merge, linear_too_few_inputs)
 {
@@ -21,7 +19,5 @@ Test(merge, linear_too_few_inputs)
     cr_assert_neq(oc_merge_linear(inputs, 1, "out.gguf"), OC_OK);
 }
 
-Test(merge, slerp_null_paths)
-{
-    cr_assert_neq(oc_merge_slerp(NULL, NULL, 0.5f, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(merge, slerp_null_paths,
+        cr_assert_neq(oc_merge_slerp(NULL, NULL, 0.5f, NULL), OC_OK);)

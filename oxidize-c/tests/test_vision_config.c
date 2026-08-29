@@ -13,10 +13,8 @@ Test(vcfg, init)
     cr_assert_eq(cfg.hidden_dim, 768);
 }
 
-Test(vcfg, init_null)
-{
-    cr_assert_neq(oc_vision_cfg_init(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vcfg, init_null,
+        cr_assert_neq(oc_vision_cfg_init(NULL), OC_OK);)
 
 Test(vcfg, clip_base)
 {
@@ -54,10 +52,8 @@ Test(vcfg, validate_ok)
     cr_assert_eq(oc_vision_cfg_validate(&cfg), OC_OK);
 }
 
-Test(vcfg, validate_null)
-{
-    cr_assert_neq(oc_vision_cfg_validate(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vcfg, validate_null,
+        cr_assert_neq(oc_vision_cfg_validate(NULL), OC_OK);)
 
 Test(vcfg, validate_bad_patch)
 {

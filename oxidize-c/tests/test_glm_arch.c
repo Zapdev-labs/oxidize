@@ -97,11 +97,9 @@ Test(glm_arch, version_from_str_unknown)
 
 /* ─── Null handling ────────────────────────────────────────────────────── */
 
-Test(glm_arch, version_from_str_null)
-{
-    cr_assert_eq(oc_glm_version_from_str(NULL), OC_GLM_VERSION_UNKNOWN,
-        "NULL → unknown");
-}
+OC_TEST_NULL_SAFE(glm_arch, version_from_str_null,
+        cr_assert_eq(oc_glm_version_from_str(NULL), OC_GLM_VERSION_UNKNOWN,
+        "NULL → unknown");)
 
 Test(glm_arch, version_from_str_empty)
 {
@@ -142,12 +140,9 @@ Test(glm_arch, hunyuan_config_parse_null_cfg)
         "NULL cfg → OC_ERR_INVALID_ARG");
 }
 
-Test(glm_arch, config_defaults_null)
-{
-    /* Should not crash. */
-    oc_glm_config_defaults(NULL);
-    oc_hunyuan_config_defaults(NULL);
-}
+OC_TEST_NULL_SAFE(glm_arch, config_defaults_null,
+        oc_glm_config_defaults(NULL);
+        oc_hunyuan_config_defaults(NULL);)
 
 /* ─── Config defaults ─────────────────────────────────────────────────── */
 

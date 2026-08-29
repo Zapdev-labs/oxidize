@@ -12,10 +12,8 @@ Test(cluster, init)
     oc_cluster_free(&c);
 }
 
-Test(cluster, init_null)
-{
-    cr_assert_neq(oc_cluster_init(NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(cluster, init_null,
+        cr_assert_neq(oc_cluster_init(NULL, 0), OC_OK);)
 
 Test(cluster, add_node)
 {
@@ -39,10 +37,8 @@ Test(cluster, add_duplicate)
     oc_cluster_free(&c);
 }
 
-Test(cluster, add_null)
-{
-    cr_assert_neq(oc_cluster_add_node(NULL, NULL, NULL, 0, 0, 0, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(cluster, add_null,
+        cr_assert_neq(oc_cluster_add_node(NULL, NULL, NULL, 0, 0, 0, 0), OC_OK);)
 
 Test(cluster, remove_node)
 {
@@ -188,7 +184,5 @@ Test(cluster, free_memory)
     oc_cluster_free(&c);
 }
 
-Test(cluster, free_null)
-{
-    oc_cluster_free(NULL);
-}
+OC_TEST_NULL_SAFE(cluster, free_null,
+        oc_cluster_free(NULL);)

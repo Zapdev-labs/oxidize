@@ -24,10 +24,8 @@ Test(mesh_chat, init_null_id)
     cr_assert_eq(conv.count, 0u);
 }
 
-Test(mesh_chat, init_null_conv)
-{
-    cr_assert_neq(oc_mesh_chat_init(NULL, "x"), OC_OK);
-}
+OC_TEST_NULL_SAFE(mesh_chat, init_null_conv,
+        cr_assert_neq(oc_mesh_chat_init(NULL, "x"), OC_OK);)
 
 /* ----------------------------------------------------------------- */
 /* add_message.                                                       */
@@ -177,10 +175,8 @@ Test(mesh_chat, message_count_by_role)
     cr_assert_eq(oc_mesh_chat_message_count(&conv, OC_MESH_CHAT_ROLE_SYSTEM), 0u);
 }
 
-Test(mesh_chat, message_count_null_conv)
-{
-    cr_assert_eq(oc_mesh_chat_message_count(NULL, OC_MESH_CHAT_ROLE__COUNT), 0u);
-}
+OC_TEST_NULL_SAFE(mesh_chat, message_count_null_conv,
+        cr_assert_eq(oc_mesh_chat_message_count(NULL, OC_MESH_CHAT_ROLE__COUNT), 0u);)
 
 /* ----------------------------------------------------------------- */
 /* role_name.                                                         */
@@ -217,10 +213,8 @@ Test(mesh_chat, clear)
     cr_assert_eq(conv.messages[0].timestamp, 0u);
 }
 
-Test(mesh_chat, clear_null)
-{
-    cr_assert_neq(oc_mesh_chat_clear(NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(mesh_chat, clear_null,
+        cr_assert_neq(oc_mesh_chat_clear(NULL), OC_OK);)
 
 /* ----------------------------------------------------------------- */
 /* serialize.                                                         */

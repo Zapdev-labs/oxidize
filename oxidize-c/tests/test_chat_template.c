@@ -19,10 +19,8 @@ Test(tpl, init_llama2)
     cr_assert_str_eq(tpl.eos_token, "</s>");
 }
 
-Test(tpl, init_null)
-{
-    cr_assert_neq(oc_chat_tpl_init(NULL, OC_TPL_CHATML), OC_OK);
-}
+OC_TEST_NULL_SAFE(tpl, init_null,
+        cr_assert_neq(oc_chat_tpl_init(NULL, OC_TPL_CHATML), OC_OK);)
 
 Test(tpl, add_message)
 {
@@ -33,10 +31,8 @@ Test(tpl, add_message)
     cr_assert_str_eq(msgs[0].content, "hello");
 }
 
-Test(tpl, add_message_null)
-{
-    cr_assert_neq(oc_chat_tpl_add_message(NULL, NULL, OC_ROLE_USER, "x"), OC_OK);
-}
+OC_TEST_NULL_SAFE(tpl, add_message_null,
+        cr_assert_neq(oc_chat_tpl_add_message(NULL, NULL, OC_ROLE_USER, "x"), OC_OK);)
 
 Test(tpl, render_chatml)
 {
@@ -161,10 +157,8 @@ Test(tpl, gen_prompt_alpaca)
     cr_assert(strstr(out, "### Response:") != NULL);
 }
 
-Test(tpl, render_null)
-{
-    cr_assert_neq(oc_chat_tpl_render(NULL, NULL, 0, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(tpl, render_null,
+        cr_assert_neq(oc_chat_tpl_render(NULL, NULL, 0, NULL, 0), OC_OK);)
 
 Test(tpl, render_empty)
 {

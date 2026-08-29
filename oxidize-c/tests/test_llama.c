@@ -589,10 +589,8 @@ Test(llama, kv_cache_bytes_q8_is_about_four_times_smaller)
               "expected ~3.88x saving, got %.3fx", ratio);
 }
 
-Test(llama, kv_cache_bytes_null_is_zero)
-{
-    cr_assert_eq(oc_llama_kv_cache_bytes(NULL, OC_KV_Q8), 0);
-}
+OC_TEST_NULL_SAFE(llama, kv_cache_bytes_null_is_zero,
+        cr_assert_eq(oc_llama_kv_cache_bytes(NULL, OC_KV_Q8), 0);)
 
 /* A long-context model is exactly where this matters: 128k context on a
  * 28-layer model wants tens of GB of f32 KV. */

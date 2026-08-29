@@ -13,10 +13,8 @@ Test(vp, init)
     oc_vision_prompt_free(&vp);
 }
 
-Test(vp, init_null)
-{
-    cr_assert_neq(oc_vision_prompt_init(NULL, OC_VP_FORMAT_LLAVA), OC_OK);
-}
+OC_TEST_NULL_SAFE(vp, init_null,
+        cr_assert_neq(oc_vision_prompt_init(NULL, OC_VP_FORMAT_LLAVA), OC_OK);)
 
 Test(vp, set_text)
 {
@@ -27,10 +25,8 @@ Test(vp, set_text)
     oc_vision_prompt_free(&vp);
 }
 
-Test(vp, set_text_null)
-{
-    cr_assert_neq(oc_vision_prompt_set_text(NULL, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vp, set_text_null,
+        cr_assert_neq(oc_vision_prompt_set_text(NULL, NULL), OC_OK);)
 
 Test(vp, add_image)
 {
@@ -44,10 +40,8 @@ Test(vp, add_image)
     oc_vision_prompt_free(&vp);
 }
 
-Test(vp, add_image_null)
-{
-    cr_assert_neq(oc_vision_prompt_add_image(NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(vp, add_image_null,
+        cr_assert_neq(oc_vision_prompt_add_image(NULL, NULL, 0), OC_OK);)
 
 Test(vp, add_multiple_images)
 {
@@ -110,10 +104,8 @@ Test(vp, render_mplug_owl)
     oc_vision_prompt_free(&vp);
 }
 
-Test(vp, render_null)
-{
-    cr_assert_neq(oc_vision_prompt_render(NULL, NULL, 0), OC_OK);
-}
+OC_TEST_NULL_SAFE(vp, render_null,
+        cr_assert_neq(oc_vision_prompt_render(NULL, NULL, 0), OC_OK);)
 
 Test(vp, render_tokens)
 {
@@ -192,10 +184,8 @@ Test(vp, render_tokens_mplug_owl)
     oc_vision_prompt_free(&vp);
 }
 
-Test(vp, render_tokens_null)
-{
-    cr_assert_neq(oc_vision_prompt_render_tokens(NULL, NULL, 0, NULL), OC_OK);
-}
+OC_TEST_NULL_SAFE(vp, render_tokens_null,
+        cr_assert_neq(oc_vision_prompt_render_tokens(NULL, NULL, 0, NULL), OC_OK);)
 
 Test(vp, n_images)
 {
@@ -208,10 +198,8 @@ Test(vp, n_images)
     oc_vision_prompt_free(&vp);
 }
 
-Test(vp, n_images_null)
-{
-    cr_assert_eq(oc_vision_prompt_n_images(NULL), 0);
-}
+OC_TEST_NULL_SAFE(vp, n_images_null,
+        cr_assert_eq(oc_vision_prompt_n_images(NULL), 0);)
 
 Test(vp, format_name)
 {
@@ -221,7 +209,5 @@ Test(vp, format_name)
     cr_assert_str_eq(oc_vision_prompt_format_name(OC_VP_FORMAT_MPLUG_OWL), "mplug_owl");
 }
 
-Test(vp, free_null)
-{
-    oc_vision_prompt_free(NULL);
-}
+OC_TEST_NULL_SAFE(vp, free_null,
+        oc_vision_prompt_free(NULL);)
