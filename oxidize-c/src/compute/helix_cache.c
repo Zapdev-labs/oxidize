@@ -727,6 +727,16 @@ OcError oc_helix_cache_append(OcHelixCache *cache,
         room = cache->config.page_size - page->n_tokens;
         take = n_tokens - offset;
         if (take > room) take = room;
+        {
+            size_t t;
+            const size_t ps = cache->config.page_size;
+            for (t = 1; t < take; t++) {
+                if (positions[offset + t] / ps != page_id) {
+                    take = t;
+                    break;
+                }
+            }
+        }
         if (take == 0) {
             if (is_new) page_reset(page);
             return OC_ERR_INVALID_ARG;

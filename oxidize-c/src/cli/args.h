@@ -82,6 +82,11 @@ int oc_cli_kv_compress_valid(const char *name);
 /* CUDA forward uses its own dense d_kv_k/d_kv_v and ignores sess compression. */
 int oc_cli_cuda_conflicts_kv_compress(const char *backend,
                                       const char *kv_compress);
+/* Prints a diagnostic and returns 1 when compression is invalid for this
+ * invocation. `server_label` is NULL when not serving, else the command
+ * name ("serve", "serve-realtime") or "--serve-api". */
+int oc_cli_kv_compress_reject(const char *backend, const char *kv_compress,
+                              const char *server_label);
 
 /* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext.
  * Returns true when argv[1] names a known subcommand (ctx is filled in and

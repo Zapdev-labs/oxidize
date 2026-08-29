@@ -561,25 +561,12 @@ int main(int argc, char **argv)
      * every existing script keep working. */
     OcCliContext ctx;
     if (oc_cli_context_parse(argc, argv, &ctx)) {
-        if (oc_cli_cuda_conflicts_kv_compress(ctx.backend, ctx.kv_compress)) {
-            fprintf(stderr,
-                    "error: --kv-compress is not supported with --backend cuda\n");
-            return 1;
-        }
-        if (!oc_cli_kv_compress_valid(ctx.kv_compress)) {
-            fprintf(stderr,
-                    "error: --kv-compress must be none, rotor, or helix\n");
-            return 1;
-        }
+        const char *server = NULL;
         if (ctx.command == OC_CLI_CMD_SERVE ||
-            ctx.command == OC_CLI_CMD_SERVE_REALTIME) {
-            if (oc_cli_kv_compress_enabled(ctx.kv_compress)) {
-                fprintf(stderr,
-                        "error: --kv-compress is not supported with %s\n",
-                        oc_cli_command_name(ctx.command));
-                return 1;
-            }
-        }
+            ctx.command == OC_CLI_CMD_SERVE_REALTIME)
+            server = oc_cli_command_name(ctx.command);
+        if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
+            return 1;
         init_compute_threads(ctx.threads);
         OcError ce = oc_cli_command_run(&ctx);
         oc_parallel_shutdown();
@@ -593,21 +580,9 @@ int main(int argc, char **argv)
      * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
-    if (oc_cli_cuda_conflicts_kv_compress(args.backend, args.kv_compress)) {
-        fprintf(stderr,
-                "error: --kv-compress is not supported with --backend cuda\n");
+    if (oc_cli_kv_compress_reject(args.backend, args.kv_compress,
+                                  args.serve_api ? "--serve-api" : NULL))
         return 1;
-    }
-    if (!oc_cli_kv_compress_valid(args.kv_compress)) {
-        fprintf(stderr,
-                "error: --kv-compress must be none, rotor, or helix\n");
-        return 1;
-    }
-    if (args.serve_api && oc_cli_kv_compress_enabled(args.kv_compress)) {
-        fprintf(stderr,
-                "error: --kv-compress is not supported with --serve-api\n");
-        return 1;
-    }
     if (args.cuda_selftest) {
         OcError se = oc_cuda_selftest();
         if (se != OC_OK) {

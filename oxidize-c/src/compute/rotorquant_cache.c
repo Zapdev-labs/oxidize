@@ -226,6 +226,7 @@ OcError oc_rotorquant_cache_store_page(OcRotorQuantCache *cache,
     float *key_scales = NULL, *value_scales = NULL;
     uint8_t *key_codes = NULL, *value_codes = NULL;
     if (!cache || !keys || !values || n_tokens == 0) return OC_ERR_INVALID_ARG;
+    if (n_tokens > (size_t)-1 - first_position) return OC_ERR_INVALID_ARG;
     e = quantize_rows(cache, keys, n_tokens, &key_scales, &key_codes);
     if (e != OC_OK) return e;
     e = quantize_rows(cache, values, n_tokens, &value_scales, &value_codes);
@@ -505,7 +506,7 @@ OcError oc_rotorquant_cache_rewind(OcRotorQuantCache *cache, size_t n_keep)
             page_free(&cache->pages[i]);
             continue;
         }
-        if (cache->pages[i].first_position + cache->pages[i].tokens > n_keep) {
+        if (cache->pages[i].tokens > n_keep - cache->pages[i].first_position) {
             /* Logical truncate only: realloc would move the buffers and
              * dangle any OcRotorQuantPageView taken before rewind. */
             cache->pages[i].tokens = n_keep - cache->pages[i].first_position;

@@ -200,6 +200,16 @@ Test(cli, kv_compress_valid_names)
     cr_assert(!oc_cli_kv_compress_valid("ROTORS"));
 }
 
+Test(cli, kv_compress_reject_helper_matches_paths)
+{
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "rotor", NULL), 0);
+    cr_assert_eq(oc_cli_kv_compress_reject("cuda", "rotor", NULL), 1);
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "rotr", NULL), 1);
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "helix", "serve-realtime"),
+                 1);
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "none", "serve"), 0);
+}
+
 Test(cli, command_name_identifies_serve_realtime)
 {
     cr_assert_str_eq(oc_cli_command_name(OC_CLI_CMD_SERVE), "serve");

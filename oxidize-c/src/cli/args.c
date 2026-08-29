@@ -8,6 +8,7 @@
 
 #include "oxidize/cli_commands.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,6 +28,29 @@ int oc_cli_cuda_conflicts_kv_compress(const char *backend,
 {
     return backend && strcmp(backend, "cuda") == 0 &&
            oc_cli_kv_compress_enabled(kv_compress);
+}
+
+int oc_cli_kv_compress_reject(const char *backend, const char *kv_compress,
+                              const char *server_label)
+{
+    if (oc_cli_cuda_conflicts_kv_compress(backend, kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress is not supported with --backend cuda\n");
+        return 1;
+    }
+    if (!oc_cli_kv_compress_valid(kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress must be none, rotor, or helix\n");
+        return 1;
+    }
+    if (server_label && server_label[0] != '\0' &&
+        oc_cli_kv_compress_enabled(kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress is not supported with %s\n",
+                server_label);
+        return 1;
+    }
+    return 0;
 }
 
 void oc_cli_args_defaults(OcCliArgs *a)

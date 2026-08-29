@@ -311,6 +311,25 @@ Test(rotorquant_cache, rewind_truncates_mid_page)
     oc_rotorquant_cache_free(&cache);
 }
 
+Test(rotorquant_cache, store_rejects_position_range_overflow)
+{
+    OcRotorQuantCacheConfig cfg;
+    OcRotorQuantCache cache;
+    float keys[16], values[16];
+    size_t i;
+    oc_rotorquant_cache_config_init(&cfg);
+    cfg.head_dim = 8;
+    cr_assert_eq(oc_rotorquant_cache_init(&cache, &cfg), OC_OK);
+    for (i = 0; i < 16; i++) {
+        keys[i] = 0.1f;
+        values[i] = 0.2f;
+    }
+    cr_assert_eq(oc_rotorquant_cache_store_page(&cache, 0, 0, keys, values,
+                                                2, (size_t)-1),
+                 OC_ERR_INVALID_ARG);
+    oc_rotorquant_cache_free(&cache);
+}
+
 Test(rotorquant_cache, rejects_zero_dim)
 {
     OcRotorQuantCacheConfig cfg;

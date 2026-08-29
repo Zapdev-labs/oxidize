@@ -387,6 +387,28 @@ Test(helix_cache, append_at_next_page_does_not_extend_page0)
     oc_helix_cache_free(&cache);
 }
 
+Test(helix_cache, append_batch_splits_at_page_boundary)
+{
+    OcHelixCacheConfig cfg;
+    OcHelixCache cache;
+    float keys[24], values[24];
+    size_t pos[] = {3, 4, 5};
+    size_t i;
+    oc_helix_cache_config_init(&cfg);
+    cfg.page_size = 4;
+    cfg.head_dim = 8;
+    for (i = 0; i < 24; i++) {
+        keys[i] = 1.0f;
+        values[i] = 0.0f;
+    }
+    cr_assert_eq(oc_helix_cache_init(&cache, &cfg), OC_OK);
+    cr_assert_eq(oc_helix_cache_append(&cache, 0, 0, keys, values, pos, 3),
+                 OC_OK);
+    cr_assert_eq(oc_helix_cache_page_count(&cache), (size_t)2);
+    cr_assert_eq(oc_helix_cache_n_logits(&cache, 0, 0), (size_t)3);
+    oc_helix_cache_free(&cache);
+}
+
 Test(helix_cache, append_to_full_page_is_rejected)
 {
     OcHelixCacheConfig cfg;

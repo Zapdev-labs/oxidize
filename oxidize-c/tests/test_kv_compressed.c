@@ -361,6 +361,28 @@ Test(kv_compressed, helix_append_accumulates)
     oc_compressed_kv_free(&cache);
 }
 
+Test(kv_compressed, helix_append_batch_splits_pages)
+{
+    OcCompressedKvCache cache;
+    float keys[24], values[24];
+    size_t pos[] = {3, 4, 5};
+    size_t i;
+    const OcHelixCache *helix;
+    for (i = 0; i < 24; i++) {
+        keys[i] = 0.1f;
+        values[i] = 0.2f;
+    }
+    cr_assert_eq(oc_compressed_kv_init(&cache, 8, OC_KV_SCHEME_HELIX, 4,
+                                       10000.0f),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_append(&cache, 0, 0, keys, values, pos, 3),
+                 OC_OK);
+    helix = oc_compressed_kv_helix(&cache);
+    cr_assert_eq(oc_helix_cache_page_count(helix), (size_t)2);
+    cr_assert_eq(oc_helix_cache_n_logits(helix, 0, 0), (size_t)3);
+    oc_compressed_kv_free(&cache);
+}
+
 Test(kv_compressed, causal_query_from_middle_of_chunk)
 {
     OcKvScheme schemes[2];
