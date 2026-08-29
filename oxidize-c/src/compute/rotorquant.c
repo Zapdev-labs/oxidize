@@ -34,7 +34,7 @@ static double rng_normal(uint64_t *state)
 }
 
 
-/* Coordinate density after a random rotation of a unit vector in R^d. */
+/* Coordinate density after a random rotation of a unit vector in R^d. N(0, 1/d) is accurate for the d >= 64 head dims here. */
 static double coord_pdf(double x, double sigma)
 {
     double t = x / sigma;

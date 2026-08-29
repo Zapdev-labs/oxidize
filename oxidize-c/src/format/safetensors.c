@@ -73,7 +73,7 @@ static bool parser_emit(OcStParser *p)
     return true;
 }
 
-/* Copy a JSON string token (without quotes, with escapes unescaped) into a fixed-size NUL-terminated buffer. */
+/* Copy a JSON string token (without quotes, with escapes unescaped) into a fixed-size NUL-terminated buffer. Returns decoded length, or -1 if `src` is not at an opening quote (`*endp` stays at `src`). On success `*endp` is past the closing quote. Truncation still returns the written length. */
 static int json_decode_string(const char *src, const char **endp,
                               char *dst, size_t dst_cap)
 {

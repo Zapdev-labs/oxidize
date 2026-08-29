@@ -39,7 +39,7 @@ void oc_apply_rope_f32(const float *in, float *out, size_t head_dim,
 void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta);
 
-/* YaRN RoPE with explicit cos/sin amplitude. attn_factor < 0 selects the standard mscale (1 + 0.1*ln(factor)); oc_apply_rope_yarn_f32 passes -1. deepseek_yarn must pass the explicit value from oc_rope_deepseek_yarn_scales (LongCat both-1 is 1.0; baking 1.4787 here double-counts mscale_all_dim^2 already in the attention scale). */
+/* YaRN RoPE with explicit cos/sin amplitude. attn_factor < 0 selects the standard mscale (1 + 0.1*ln(factor)); oc_apply_rope_yarn_f32 passes -1. Model-specific attn_factor values are the caller's responsibility. */
 void oc_apply_rope_yarn_scaled_f32(const float *in, float *out, size_t head_dim,
                                     size_t rope_len, int64_t position,
                                     float theta, float yarn_factor,
