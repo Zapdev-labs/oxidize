@@ -34,6 +34,9 @@
 #include <unistd.h>
 
 OcTest *oc_tests_head = NULL;
+static size_t oc_tests_registered = 0;
+
+size_t oc_test_count(void);
 
 jmp_buf oc_test_abort_jmp;
 int oc_test_failed = 0;
@@ -44,8 +47,14 @@ static int g_verbose = 0;
 
 /* ─── Registry ───────────────────────────────────────────────────────── */
 
+size_t oc_test_count(void)
+{
+    return oc_tests_registered;
+}
+
 void oc_test_register(OcTest *t)
 {
+    oc_tests_registered++;
     /* Constructors run in link order; keep registration order stable. */
     t->next = NULL;
     static OcTest **tail = &oc_tests_head;
@@ -206,9 +215,13 @@ static OcResult run_one(OcTest *t)
 
         oc_test_failed = 0;
         oc_test_can_skip = 1;
-        if (setjmp(oc_test_abort_jmp) == 0)
+        int longjmp_rc = setjmp(oc_test_abort_jmp);
+        if (longjmp_rc == 0)
             t->fn();
         oc_test_can_skip = 0;
+        /* longjmp value 2 = skip (cr_skip_test), 1 = hard failure. */
+        if (longjmp_rc == 2)
+            _exit(77);
         _exit(oc_test_failed ? 1 : 0);
     }
 
@@ -235,6 +248,12 @@ typedef struct {
     size_t tested, passing, failing, crashing, skipped, disabled;
 } OcStats;
 
+/* Per-test XML outcome, parallel to the registry list. */
+typedef struct {
+    const OcTest *test;
+    OcResult result;
+} OcRunRecord;
+
 static void print_synthesis(const OcStats *s)
 {
     printf("[====] Synthesis: Tested: %zu | Passing: %zu | Failing: %zu | "
@@ -245,7 +264,8 @@ static void print_synthesis(const OcStats *s)
     printf("\n");
 }
 
-static void write_xml(const char *path, const OcStats *s)
+static void write_xml(const char *path, const OcStats *s,
+                      const OcRunRecord *runs, size_t n_runs)
 {
     FILE *f = fopen(path, "w");
     if (!f)
@@ -254,12 +274,45 @@ static void write_xml(const char *path, const OcStats *s)
     fprintf(f, "<testsuites tests=\"%zu\" failures=\"%zu\" "
                "errors=\"%zu\" time=\"0\">\n",
             s->tested, s->failing, s->crashing);
-    for (OcTest *t = oc_tests_head; t; t = t->next) {
-        if (!selected(t) || t->disabled)
+    /* One <testsuite> per suite, one <testcase> per test — balanced tags
+     * for JUnit consumers (CI uploads this artifact). */
+    for (OcTest *st = oc_tests_head; st; st = st->next) {
+        size_t suite_tests = 0, suite_fails = 0;
+        int printed_header = 0;
+        for (size_t i = 0; i < n_runs; i++) {
+            const OcTest *t = runs[i].test;
+            if (strcmp(t->suite, st->suite) != 0)
+                continue;
+            if (!printed_header) {
+                fprintf(f, "  <testsuite name=\"%s\">\n", t->suite);
+                printed_header = 1;
+            }
+            suite_tests++;
+            if (runs[i].result == RESULT_FAIL || runs[i].result == RESULT_CRASH)
+                suite_fails++;
+        }
+        if (!printed_header)
             continue;
-        fprintf(f, "  <testsuite name=\"%s\">\n", t->suite);
+        (void)suite_tests;
+        (void)suite_fails;
+        for (size_t i = 0; i < n_runs; i++) {
+            const OcTest *t = runs[i].test;
+            if (strcmp(t->suite, st->suite) != 0)
+                continue;
+            fprintf(f, "    <testcase classname=\"%s\" name=\"%s\"", t->suite,
+                    t->case_name);
+            if (runs[i].result == RESULT_SKIP)
+                fprintf(f, "><skipped/></testcase>\n");
+            else if (runs[i].result == RESULT_FAIL)
+                fprintf(f, "><failure/></testcase>\n");
+            else if (runs[i].result == RESULT_CRASH)
+                fprintf(f, "><error/></testcase>\n");
+            else
+                fprintf(f, "/>\n");
+        }
+        fprintf(f, "  </testsuite>\n");
     }
-    fprintf(f, "  </testsuite>\n</testsuites>\n");
+    fprintf(f, "</testsuites>\n");
     fclose(f);
 }
 
@@ -299,6 +352,8 @@ int main(int argc, char **argv)
     }
 
     OcStats stats = {0};
+    OcRunRecord *runs = calloc(oc_test_count(), sizeof(OcRunRecord));
+    size_t n_runs = 0;
     for (OcTest *t = oc_tests_head; t; t = t->next) {
         if (!selected(t))
             continue;
@@ -308,6 +363,11 @@ int main(int argc, char **argv)
         }
         stats.tested++;
         OcResult r = run_one(t);
+        if (runs) {
+            runs[n_runs].test = t;
+            runs[n_runs].result = r;
+            n_runs++;
+        }
         switch (r) {
         case RESULT_PASS:
             stats.passing++;
@@ -332,6 +392,7 @@ int main(int argc, char **argv)
 
     print_synthesis(&stats);
     if (xml_path)
-        write_xml(xml_path, &stats);
+        write_xml(xml_path, &stats, runs, n_runs);
+    free(runs);
     return (stats.failing || stats.crashing) ? 1 : 0;
 }
