@@ -1,4 +1,4 @@
-/* vision.h — CLIP-style vision encoder for multimodal inference. */
+/* vision.h — CLIP-style vision encoder for multimodal inference. Weights optional; if `patch_proj` is NULL, encode zeros the embedding buffer. */
 #ifndef OXIDIZE_VISION_H
 #define OXIDIZE_VISION_H
 
@@ -40,7 +40,7 @@ typedef struct OcVisionConfig {
 /* Vision encoder state. */
 typedef struct OcVisionEncoder {
     OcVisionConfig config;
-    /* Weight matrices (all optional; if NULL, uses fallback). */
+    /* Weight matrices (all optional; if `patch_proj` is NULL, encode zeros the output). */
     const float *patch_proj;     /* [hidden_size, patch_size^2 * channels] */
     const float *pos_emb;       /* [n_patches, hidden_size] (or NULL)      */
     const float *ln_weight;     /* [hidden_size] (or NULL)                  */
@@ -60,7 +60,7 @@ OcError oc_vision_set_weights(OcVisionEncoder *enc,
                                const float *ln_bias,
                                const float *cls_emb);
 
-/* Encode an image into a flat embedding vector.
+/* Encode an image into a flat embedding vector. Without `patch_proj` the buffer is zeroed.
  * `out_embeddings` receives `n_patches * hidden_size` floats.
  * `out_len` receives the number of floats written. */
 OcError oc_vision_encode(OcVisionEncoder *enc, const OcImage *img,
