@@ -837,6 +837,7 @@ oc_gemv_dispatch!(
             }
         }
         let _ = use_avx2;
+        let _ = blocks_per_row;
         let mut sum = 0.0_f32;
         for (block_idx, block) in row.chunks_exact(BLOCK_Q4_K_SIZE).enumerate() {
             let v_off = block_idx * QK_K;
@@ -1785,6 +1786,7 @@ oc_gemv_dispatch!(
             }
         }
         let _ = use_avx2;
+        let _ = blocks_per_row;
         let mut sum = 0.0_f32;
         for (block_idx, block) in row.chunks_exact(BLOCK_Q6_K_SIZE).enumerate() {
             let v_off = block_idx * QK_K;
