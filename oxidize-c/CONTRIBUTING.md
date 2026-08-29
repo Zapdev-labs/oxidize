@@ -86,8 +86,8 @@ delete it.
 2. **Use framework assertions, not `assert()`/`printf`.**
    - `cr_assert(cond, fmt, ...)` — abort the test on failure.
    - `cr_expect(cond, fmt, ...)` — record a failure but keep running.
-   - `cr_assert_eq(a, b, fmt, ...)`, `cr_assert_ne`, `cr_assert_str_eq`,
-     `cr_assert_null`, `cr_assert_not_null`, `cr_assert_lt/le/gt/ge`, etc.
+   - `cr_assert_eq(a, b, fmt, ...)`, `cr_assert_neq`, `cr_assert_str_eq`,
+     `cr_assert_null`, `cr_assert_not_null`, `cr_assert_lt/leq/gt/geq`, etc.
      (see `tests/framework.h` for the full set).
 
 3. **No `main()` in test files.** `tests/framework_main.c` provides
@@ -115,8 +115,10 @@ make test                # build + run all tests
 ./test_runner             # run already-built test_runner
 ./test_runner --help      # flag reference
 ./test_runner --filter "error/*"   # run only tests in the "error" suite
+./test_runner --filter kv_cache_init  # suite/case via underscore
 ./test_runner --list      # list all registered tests
-./test_runner --verbose 2 # increase verbosity (0=quiet, 1=normal, 2=verbose)
+./test_runner --verbose 1 # print PASS lines
+./test_runner --xml out.xml  # JUnit (one <testsuite> per suite)
 ```
 
 ### Adding a new test file

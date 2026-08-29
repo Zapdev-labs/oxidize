@@ -1638,7 +1638,7 @@ static void llama_qk_norm_heads(float *q, float *k, uint32_t n_head,
  * `hd` floats each, in place. The arithmetic is identical at both call
  * sites (prefill parity is a hard invariant). */
 static void llama_rope_dispatch(float *vecs, uint32_t n, size_t hd,
-                                size_t rope_dim, size_t pos, float rope_theta,
+                                size_t rope_dim, int64_t pos, float rope_theta,
                                 const OcLlamaConfig *c)
 {
     for (uint32_t h = 0; h < n; h++) {

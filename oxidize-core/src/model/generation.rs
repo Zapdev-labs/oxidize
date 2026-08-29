@@ -21,13 +21,15 @@ impl StopTracker {
         // Bound the ring by the same cap the spec streams use: a stop
         // sequence longer than this can never match a realistic window and
         // an untrusted config must not drive unbounded pre-allocation.
+        // Sequences above the cap are ignored at match time (they cannot
+        // `ends_with` a shorter ring).
         const MAX_STOP_SEQUENCE_LEN: usize = 4096;
         let max_len = stop_sequences
             .iter()
             .map(Vec::len)
+            .filter(|&len| len > 0 && len <= MAX_STOP_SEQUENCE_LEN)
             .max()
-            .unwrap_or(0)
-            .min(MAX_STOP_SEQUENCE_LEN);
+            .unwrap_or(0);
         Self {
             recent_tokens: Vec::with_capacity(max_len),
             max_len,
@@ -50,7 +52,7 @@ impl StopTracker {
         }
         let matched_stop_sequence = stop_sequences
             .iter()
-            .filter(|sequence| !sequence.is_empty())
+            .filter(|sequence| !sequence.is_empty() && sequence.len() <= self.max_len)
             .any(|sequence| self.recent_tokens.ends_with(sequence));
         stop_token == Some(token) || matched_stop_sequence
     }
@@ -1316,6 +1318,42 @@ mod tests {
 
         let items = collect_stream(&mut stream);
         assert_eq!(items, vec![Ok(3), Ok(3), Ok(3)]);
+    }
+
+    #[test]
+    fn stop_tracker_matches_short_sequence() {
+        let seq = vec![1u32, 2, 3];
+        let seqs = [seq.clone()];
+        let mut tracker = StopTracker::new(&seqs);
+        assert!(!tracker.push(1, None, &seqs));
+        assert!(!tracker.push(2, None, &seqs));
+        assert!(tracker.push(3, None, &seqs));
+    }
+
+    #[test]
+    fn stop_tracker_ignores_sequences_over_allocation_cap() {
+        let too_long = vec![7u32; 4097];
+        let short = vec![1u32, 2];
+        let seqs = [too_long, short];
+        let mut tracker = StopTracker::new(&seqs);
+        assert!(!tracker.push(1, None, &seqs));
+        assert!(
+            tracker.push(2, None, &seqs),
+            "a 2-token stop must still match when a >4096 sequence is also present"
+        );
+    }
+
+    #[test]
+    fn stop_tracker_does_not_match_overlong_needle() {
+        let too_long = vec![9u32; 4097];
+        let seqs = [too_long.clone()];
+        let mut tracker = StopTracker::new(&seqs);
+        for &tok in &too_long {
+            assert!(
+                !tracker.push(tok, None, &seqs),
+                "sequences longer than the ring cap must not match"
+            );
+        }
     }
 
     #[test]

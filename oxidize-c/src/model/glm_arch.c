@@ -6,38 +6,18 @@
  *   - Hunyuan config parsing from GGUF metadata (oc_hunyuan_config_parse)
  *   - Version-string mapping (oc_glm_version_from_str)
  *
- * The historical oc_arch_forward_glm / oc_arch_forward_hunyuan forward
- * passes were removed: no loader, dispatcher, or test ever reached them
- * (GLM/Hunyuan inference runs through the llama.c session paths). The
- * config parsing and arch-registry entries they fed are kept.
+ * Dedicated oc_arch_forward_glm / oc_arch_forward_hunyuan passes were
+ * removed: no loader, dispatcher, or test ever reached them. GLM/Hunyuan
+ * inference runs through the llama.c session paths. Config parsing and
+ * arch-registry entries they fed are kept.
  */
 #include "oxidize/glm_arch.h"
 
 #include <ctype.h>
-#include <math.h>
-#include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-#include "oxidize/activation.h"
-#include "oxidize/arena.h"
 #include "oxidize/gguf.h"
-#include "oxidize/llama.h"
-
-#include "llama_session_ops.h"
-#include "oxidize/log.h"
-#include "oxidize/matvec.h"
-#include "oxidize/model.h"
-#include "oxidize/quant.h"
-#include "oxidize/tensor_ops.h"
-
-/* ─── Helpers ────────────────────────────────────────────────────────────
- *
- * These mirror the static helpers in arch_forward.c / llama.c. We keep
- * local copies to remain self-contained (the llama.c originals are static).
- */
 
 static uint32_t glm_cfg_u32(const OcGgufFile *f, const char *key, uint32_t def)
 {
@@ -56,6 +36,7 @@ static bool glm_cfg_bool(const OcGgufFile *f, const char *key, bool def)
     bool v;
     return oc_gguf_metadata_get_bool(f, key, &v) ? v : def;
 }
+
 /* ─── GLM version detection ───────────────────────────────────────────── */
 
 OcGlmVersion oc_glm_version_from_str(const char *s)

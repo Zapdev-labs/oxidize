@@ -1641,12 +1641,6 @@ oc_gemv_dispatch!(
     quantized_matrix,
     vector,
     output,
-    [
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        let _use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        let _use_avx2 = false;
-    ]
     |row_bytes, row_idx, _blocks_per_row| -> f32 {
         let row_start = row_idx * row_bytes;
         let row = &quantized_matrix[row_start..row_start + row_bytes];

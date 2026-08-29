@@ -276,7 +276,7 @@ impl GgufFile {
     }
 
     pub fn quantization_type(&self) -> Option<GgufQuantizationType> {
-        let file_type = metadata_as_u32(self.metadata.get("general.file_type")?)?;
+        let file_type = self.metadata.get("general.file_type")?.as_u32()?;
         Some(GgufQuantizationType::from_llama_ftype(file_type))
     }
 }
@@ -721,20 +721,6 @@ fn alignment_from_metadata(value: &GgufMetadataValue) -> Result<u64, GgufParseEr
         GgufMetadataValue::Int32(v) if *v > 0 => Ok(*v as u64),
         GgufMetadataValue::Int64(v) if *v > 0 => Ok(*v as u64),
         _ => Err(GgufParseError::InvalidAlignment(0)),
-    }
-}
-
-fn metadata_as_u32(value: &GgufMetadataValue) -> Option<u32> {
-    match value {
-        GgufMetadataValue::Uint8(v) => Some((*v).into()),
-        GgufMetadataValue::Uint16(v) => Some((*v).into()),
-        GgufMetadataValue::Uint32(v) => Some(*v),
-        GgufMetadataValue::Uint64(v) => (*v).try_into().ok(),
-        GgufMetadataValue::Int8(v) if *v >= 0 => Some((*v as u8).into()),
-        GgufMetadataValue::Int16(v) if *v >= 0 => Some((*v as u16).into()),
-        GgufMetadataValue::Int32(v) if *v >= 0 => (*v).try_into().ok(),
-        GgufMetadataValue::Int64(v) if *v >= 0 => (*v).try_into().ok(),
-        _ => None,
     }
 }
 

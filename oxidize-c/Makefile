@@ -3,7 +3,7 @@
 # Targets:
 #   make / make build   — default CPU-only, dependency-free binary
 #   make lib           — static library liboxidize-c.a
-#   make test          — build + run vendored Criterion test_runner (ASan)
+#   make test          — build + run in-repo test_runner (ASan + UBSan)
 #   make lint          — clang-tidy on library sources
 #   make clean         — remove build artifacts
 #   make avx512        — AVX-512 build (for .121 Cascade Lake)
@@ -96,35 +96,24 @@ src/%.o: src/%.c
 -include $(DEP_FILES)
 
 # Test filtering: `make test TEST_FILTER=<pattern>` runs only matching tests.
-# Pattern conventions (validated by scrutiny + the validation contract):
-#   * test_<suite>_<case_prefix>   → filter `<suite>/<case_prefix>*`
-#     e.g. TEST_FILTER=test_gguf_v3_header → --filter 'gguf/v3_header*'
-#   * <suite>/<case> or <suite>/<case>*  → passed through to the runner verbatim
-#   * any other pattern                  → passed through to the runner verbatim
+# Pattern conventions:
+#   * suite/case or suite/case*     → passed through to the runner
+#   * a suite name (error, kv_cache) → runs that suite
+#   * test_<suite>_<case>            → test_ prefix stripped; each '_' may
+#     stand in for the suite/case slash (test_kv_cache_init → kv_cache/init)
 # When TEST_FILTER is empty (default), all tests run.
 TEST_FILTER ?=
-# Homebrew Criterion on macOS defaults to parallel jobs. That deadlocks
-# under ASan (GitHub macos-latest hung until the 6h job limit).
-ifeq ($(shell uname -s),Darwin)
-TEST_RUNNER_ARGS := --jobs 1
-else
+# --jobs is accepted by the runner but runs stay serial. Fork-per-test is
+# the isolation boundary; parallel jobs deadlock under ASan on macOS.
 TEST_RUNNER_ARGS :=
-endif
 
 test: test_runner
 	@if [ -z "$(TEST_FILTER)" ]; then \
 		./test_runner $(TEST_RUNNER_ARGS); \
 	else \
 		f="$(TEST_FILTER)"; \
-		case "$$f" in \
-			test_*_*) \
-				s="$${f#test_}"; \
-				suite="$${s%%_*}"; \
-				case_prefix="$${s#*_}"; \
-				./test_runner $(TEST_RUNNER_ARGS) --filter "$$suite/$$case_prefix*" ;; \
-			*) \
-				./test_runner $(TEST_RUNNER_ARGS) --filter "$$f" ;; \
-		esac; \
+		f="$${f#test_}"; \
+		./test_runner $(TEST_RUNNER_ARGS) --filter "$$f"; \
 	fi
 
 test-avx512: TEST_CFLAGS += -DOC_AVX512 -mavx512f -mavx512bw -mavx512dq \

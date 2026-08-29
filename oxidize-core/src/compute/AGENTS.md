@@ -15,7 +15,7 @@ CPU tensor ops, quantization, KV cache, and flash attention. 7 files, 10,000+ li
 | KV cache quantization | `kv_cache.rs` | `KvQuantization::Asymmetric` (per-token) or `TurboQuant` (per-block, 32-el) |
 | Flash attention | `flash_attention.rs` | `flash_attention_prefill_f32`, `flash_attention_decode_f32` |
 | SIMD backend | `simd.rs` | Runtime detection: AVX-512 > AVX2 > NEON > scalar |
-| Fused ops | `cpu_kernels.rs` | `fused_rms_norm_gemv_f32_transposed`, workspace reuse |
+| Fused ops | `cpu_kernels.rs` | `dot_product_avx2_or_scalar`; quantized GEMV lives in `tensor/kernels` |
 | TurboQuant weights | `turboquant.rs` | Block-wise INT4/INT8 for GEMV, 32-element blocks |
 
 ## CONVENTIONS

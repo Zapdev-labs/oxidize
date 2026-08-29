@@ -142,10 +142,24 @@ macro_rules! oc_gemm_decode_dispatch {
 
             let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
             let compute_row = $compute_row;
-            row_major
-                .par_chunks_mut(batch)
-                .enumerate()
-                .for_each(|(row_idx, slice)| {
+            let total_ops = rows.saturating_mul(cols).saturating_mul(batch);
+            if total_ops >= PARALLEL_GEMV_MIN_OPS {
+                row_major
+                    .par_chunks_mut(batch)
+                    .enumerate()
+                    .for_each(|(row_idx, slice)| {
+                        compute_row(
+                            quantized_matrix,
+                            inputs,
+                            cols,
+                            blocks_per_row,
+                            batch,
+                            row_idx,
+                            slice,
+                        )
+                    });
+            } else {
+                for (row_idx, slice) in row_major.chunks_mut(batch).enumerate() {
                     compute_row(
                         quantized_matrix,
                         inputs,
@@ -154,8 +168,9 @@ macro_rules! oc_gemm_decode_dispatch {
                         batch,
                         row_idx,
                         slice,
-                    )
-                });
+                    );
+                }
+            }
 
             for r in 0..rows {
                 let src = &row_major[r * batch..(r + 1) * batch];
@@ -188,10 +203,24 @@ macro_rules! oc_gemm_decode_dispatch {
             }
             let mut row_major = vec![0.0_f32; rows.saturating_mul(batch)];
             let compute_row = $compute_row;
-            row_major
-                .par_chunks_mut(batch)
-                .enumerate()
-                .for_each(|(row_idx, slice)| {
+            let total_ops = rows.saturating_mul(cols).saturating_mul(batch);
+            if total_ops >= PARALLEL_GEMV_MIN_OPS {
+                row_major
+                    .par_chunks_mut(batch)
+                    .enumerate()
+                    .for_each(|(row_idx, slice)| {
+                        compute_row(
+                            quantized_matrix,
+                            inputs,
+                            cols,
+                            blocks_per_row,
+                            batch,
+                            row_idx,
+                            slice,
+                        )
+                    });
+            } else {
+                for (row_idx, slice) in row_major.chunks_mut(batch).enumerate() {
                     compute_row(
                         quantized_matrix,
                         inputs,
@@ -200,8 +229,9 @@ macro_rules! oc_gemm_decode_dispatch {
                         batch,
                         row_idx,
                         slice,
-                    )
-                });
+                    );
+                }
+            }
 
             for r in 0..rows {
                 let src = &row_major[r * batch..(r + 1) * batch];

@@ -10,11 +10,12 @@
  *   - fork-per-test isolation: a crash kills one test, not the run
  *   - cr_assert* aborts the current test; cr_expect* records and continues
  *   - .description / .disabled extras; cr_skip_test()
- *   - CLI: --filter 'suite/case*' glob, --list, --jobs N, --xml FILE
- *   - exit code 0 iff no test failed (crashing counts as failing)
+ *   - CLI: --filter/--pattern glob, --list, --jobs N, --xml FILE, --help
+ *   - exit code 0 iff no test failed or crashed (skips are non-failures)
  *
  * Output mirrors Criterion's summary line:
  *   [====] Synthesis: Tested: N | Passing: N | Failing: n | Crashing: n
+ *                    [| Skipped: n] [| Disabled: n]
  *
  * This file is test infrastructure only — never installed, never part of
  * liboxidize-c.a.
@@ -24,6 +25,7 @@
 
 #include <math.h>
 #include <setjmp.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -97,14 +99,6 @@ const char *oc_test_vstr_ld(long double v);
 
 /* ─── Assertion plumbing ─────────────────────────────────────────────── */
 
-/* "" __VA_ARGS__ concatenates the optional format string (a literal) with
- * a leading "" so the call always has a fmt argument. Pass-through user
- * format arguments follow verbatim. */
-#define OC_FAIL_(fmt_and_args)                                           \
-    oc_test_fail(__FILE__, __LINE__, fmt_and_args)
-#define OC_SOFT_(fmt_and_args)                                           \
-    oc_test_soft_fail(__FILE__, __LINE__, fmt_and_args)
-
 /* Type-selecting stringifier: (x) + 0 promotes enums/small ints to int,
  * keeps float/double/long double, and leaves pointer types (void* + 0 is
  * a GNU extension but compiles clean under -Wall -Wextra). */
@@ -121,21 +115,13 @@ const char *oc_test_vstr_ld(long double v);
         long double: oc_test_vstr_ld,                                     \
         default: oc_test_vstr)((x))
 
-/* Two-value comparison. Values are stringified for the failure message
- * only — the comparison itself uses the original expressions. */
-#define OC_ASSERT_OP_(a, b, op, ...)                                      \
-    do {                                                                  \
-        if (!((a) op (b)))                                                \
-            OC_FAIL_(("assertion failed: %s %s %s [%s vs %s] " __VA_ARGS__)); \
-    } while (0)
-
-/* The stringified values must be evaluated before the call; wrap the op
- * macros so a/b are expanded exactly once each. */
+/* Two-value comparison. The predicate evaluates each operand once; the
+ * failure stringifier may evaluate again (failure path only). */
 #define OC_ASSERT_OP(a, b, op, ...)                                      \
     do {                                                                  \
         if (!((a) op (b)))                                                \
             oc_test_fail(__FILE__, __LINE__,                              \
-                "assertion failed: %s %s %s [%s vs %s] " __VA_ARGS__,     \
+                "%s %s %s [%s vs %s] " __VA_ARGS__,                       \
                 #a, #op, #b, OC_VSTR_(a), OC_VSTR_(b));                   \
     } while (0)
 
@@ -143,7 +129,7 @@ const char *oc_test_vstr_ld(long double v);
     do {                                                                  \
         if (!((a) op (b)))                                                \
             oc_test_soft_fail(__FILE__, __LINE__,                         \
-                "expectation failed: %s %s %s [%s vs %s] " __VA_ARGS__,    \
+                "%s %s %s [%s vs %s] " __VA_ARGS__,                       \
                 #a, #op, #b, OC_VSTR_(a), OC_VSTR_(b));                   \
     } while (0)
 
