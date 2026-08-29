@@ -660,29 +660,15 @@ static OcHelixPage *find_open_hot(OcHelixCache *cache, size_t layer,
 
 static OcError freeze_hot_page(OcHelixCache *cache, OcHelixPage *page)
 {
-    float *keys, *values;
-    size_t *pos;
-    size_t n, layer, head, pid;
-    OcError e;
+    /* Encode into a new cold page and install it only after success.
+     * Clearing the hot slot first would drop the prefix (and any tokens
+     * just appended) if store_cold_page OOMs. */
     if (!page || page->tier != OC_HELIX_PAGE_HOT || page->n_tokens == 0)
         return OC_OK;
-    keys = page->hot_keys;
-    values = page->hot_values;
-    pos = page->positions;
-    n = page->n_tokens;
-    layer = page->key.layer;
-    head = page->key.head;
-    pid = page->key.page;
-    page->hot_keys = NULL;
-    page->hot_values = NULL;
-    page->positions = NULL;
-    page->n_tokens = 0;
-    e = oc_helix_cache_store_cold_page(cache, layer, head, pid, keys, values,
-                                       pos, n);
-    free(keys);
-    free(values);
-    free(pos);
-    return e;
+    return oc_helix_cache_store_cold_page(cache, page->key.layer, page->key.head,
+                                          page->key.page, page->hot_keys,
+                                          page->hot_values, page->positions,
+                                          page->n_tokens);
 }
 
 OcError oc_helix_cache_append(OcHelixCache *cache,
