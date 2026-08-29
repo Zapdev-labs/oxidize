@@ -1630,7 +1630,7 @@ pub(super) fn iq4_xs_dot(block: &[u8], vector: &[f32]) -> f32 {
     sum
 }
 
-/// IQ4_XS GEMV: per row, decode each 136-byte block and dot against the input.
+// IQ4_XS GEMV: per row, decode each 136-byte block and dot against the input.
 oc_gemv_dispatch!(
     gemv_iq4_xs_f32,
     BLOCK_IQ4_XS_SIZE,
@@ -1642,11 +1642,11 @@ oc_gemv_dispatch!(
     output,
     [
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        let use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        let _use_avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        let use_avx2 = false;
+        let _use_avx2 = false;
     ]
-    |row_bytes, row_idx, blocks_per_row| -> f32 {
+    |row_bytes, row_idx, _blocks_per_row| -> f32 {
         let row_start = row_idx * row_bytes;
         let row = &quantized_matrix[row_start..row_start + row_bytes];
         let mut sum = 0.0_f32;
