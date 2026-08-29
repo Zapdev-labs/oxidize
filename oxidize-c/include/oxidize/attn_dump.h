@@ -1,4 +1,4 @@
-/* attn_dump.h — per-layer attention weight dump for debugging/validation. */
+/* attn_dump.h — env-gated dump of per-layer attention weights, RMSNorm/forward traces, and logits (OXIDIZE_TRACE_VALS / OXIDIZE_TRACE_FWD). */
 #ifndef OXIDIZE_ATTN_DUMP_H
 #define OXIDIZE_ATTN_DUMP_H
 

@@ -48,7 +48,7 @@ uint32_t oc_sample_eta_cutoff(const float *logits, size_t vocab_size,
                                 float epsilon, float temperature);
 
 
-/* Apply frequency and presence penalties to logits. */
+/* Apply frequency and presence penalties to logits in-place. */
 void oc_apply_penalties(float *logits, size_t vocab_size,
                         const uint32_t *recent_tokens, size_t n_recent,
                         float frequency_penalty, float presence_penalty);

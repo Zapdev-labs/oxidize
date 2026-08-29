@@ -81,7 +81,7 @@ OcError oc_vision_encoder_init(OcVisionEncoder **encoder,
 OcError oc_vision_encoder_load_weights(OcVisionEncoder *encoder,
                                        const void *data, size_t size);
 
-/* Encode an image patch to a feature vector. `*out_features` is heap-allocated and owned by the caller. */
+/* Encode an image to a feature vector. Without weights this is a stub: a deterministic placeholder of size n_patches * hidden_dim. `*out_features` is heap-allocated and caller-owned; `*out_n_features` is the number of floats written. */
 OcError oc_vision_encoder_encode(OcVisionEncoder *encoder,
                                  const OcImagePatch *image,
                                  float **out_features,
