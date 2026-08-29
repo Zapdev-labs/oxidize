@@ -88,7 +88,7 @@ OcError oc_context_cache_store(OcContextCache *cc, const char *session_id,
                                uint32_t head_dim, uint8_t *data,
                                uint64_t size_bytes);
 
-/* Load a KV cache snapshot for `session_id`. Returns OC_ERR_INVALID_ARG on NULL cc/session_id/out. A miss (including hash mismatch) returns OC_OK with `*found` false; inspect `*found` before using `out`. On a hit, fills `*out` with a freshly malloc'd copy (caller frees `out->data`). */
+/* Load a KV cache snapshot for `session_id`. Returns OC_ERR_INVALID_ARG on NULL cc/session_id/out. A miss (including a hash mismatch when `model_hash != 0`) returns OC_OK with `*found` false; inspect `*found` before using `out`. On a hit, fills `*out` with a freshly malloc'd copy (caller frees `out->data`). */
 OcError oc_context_cache_load(OcContextCache *cc, const char *session_id,
                               uint64_t model_hash, OcContextCacheEntry *out,
                               bool *found);
