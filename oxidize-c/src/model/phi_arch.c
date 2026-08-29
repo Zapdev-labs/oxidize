@@ -3,6 +3,7 @@
  * GeGLU + RoPE + dense MHA (no GQA).
  */
 #include "oxidize/phi_arch.h"
+#include "arch_ops.h"
 #include "oxidize/flash_attention.h"
 
 #include <math.h>
@@ -77,12 +78,6 @@ OcError oc_phi_model_init(OcPhiModel *model, const OcPhiConfig *cfg)
     return OC_OK;
 }
 
-static float phi_gelu_tanh(float x)
-{
-    float c = 0.7978845608028654f;
-    float inner = c * (x + 0.044715f * x * x * x);
-    return 0.5f * x * (1.0f + tanhf(inner));
-}
 
 OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
 {
@@ -130,14 +125,7 @@ OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
         /* Input norm. */
         float *normed = malloc(h * sizeof(float));
         if (!normed) { free(hidden); return OC_ERR_OOM; }
-        if (layer->input_norm) {
-            float ss = 0.0f;
-            for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
-            float rms = 1.0f / sqrtf(ss / h + eps);
-            for (size_t i = 0; i < h; i++) normed[i] = hidden[i] * rms * layer->input_norm[i];
-        } else {
-            memcpy(normed, hidden, h * sizeof(float));
-        }
+        oc_arch_rms_norm(hidden, layer->input_norm, normed, h, eps);
 
         /* QKV (dense: all use n_heads * head_dim). */
         float *q = calloc(q_size, sizeof(float));
@@ -145,46 +133,17 @@ OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
         float *v = calloc(kv_size, sizeof(float));
         if (!q || !k || !v) { free(hidden); free(normed); free(q); free(k); free(v); return OC_ERR_OOM; }
 
-        if (layer->wq)
-            for (size_t r = 0; r < q_size; r++) {
-                float dot = 0.0f;
-                for (size_t c = 0; c < h; c++) dot += layer->wq[r * h + c] * normed[c];
-                q[r] = dot;
-            }
-        if (layer->wk)
-            for (size_t r = 0; r < kv_size; r++) {
-                float dot = 0.0f;
-                for (size_t c = 0; c < h; c++) dot += layer->wk[r * h + c] * normed[c];
-                k[r] = dot;
-            }
-        if (layer->wv)
-            for (size_t r = 0; r < kv_size; r++) {
-                float dot = 0.0f;
-                for (size_t c = 0; c < h; c++) dot += layer->wv[r * h + c] * normed[c];
-                v[r] = dot;
-            }
+        oc_arch_matvec(layer->wq, normed, q, q_size, h);
+        oc_arch_matvec(layer->wk, normed, k, kv_size, h);
+        oc_arch_matvec(layer->wv, normed, v, kv_size, h);
 
         /* RoPE. */
         size_t pos = s_seq_len;
         float theta = cfg->rope_theta;
-        for (size_t hh = 0; hh < n_heads; hh++) {
-            float *qh = q + hh * hd;
-            for (size_t d = 0; d < hd; d += 2) {
-                float freq = pos / powf(theta, (float)(d / 2) / (float)(hd / 2));
-                float c = cosf(freq), s = sinf(freq);
-                float q0 = qh[d], q1 = qh[d + 1];
-                qh[d] = q0 * c - q1 * s; qh[d + 1] = q0 * s + q1 * c;
-            }
-        }
-        for (size_t hh = 0; hh < n_kv_heads; hh++) {
-            float *kh = k + hh * hd;
-            for (size_t d = 0; d < hd; d += 2) {
-                float freq = pos / powf(theta, (float)(d / 2) / (float)(hd / 2));
-                float c = cosf(freq), s = sinf(freq);
-                float k0 = kh[d], k1 = kh[d + 1];
-                kh[d] = k0 * c - k1 * s; kh[d + 1] = k0 * s + k1 * c;
-            }
-        }
+        for (size_t hh = 0; hh < n_heads; hh++)
+            oc_arch_rope_head(q + hh * hd, hd, pos, theta);
+        for (size_t hh = 0; hh < n_kv_heads; hh++)
+            oc_arch_rope_head(k + hh * hd, hd, pos, theta);
 
         /* KV cache append. */
         if (s_seq_len < s_kv_cap) {
@@ -204,23 +163,11 @@ OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
         /* Output proj + residual. */
         float *attn_resid = calloc(h, sizeof(float));
         if (!attn_resid) { free(hidden); free(normed); free(q); free(k); free(v); free(attn_out); return OC_ERR_OOM; }
-        if (layer->wo)
-            for (size_t r = 0; r < h; r++) {
-                float dot = 0.0f;
-                for (size_t c = 0; c < q_size; c++) dot += layer->wo[r * q_size + c] * attn_out[c];
-                attn_resid[r] = dot;
-            }
+        oc_arch_matvec(layer->wo, attn_out, attn_resid, h, q_size);
         for (size_t i = 0; i < h; i++) hidden[i] += attn_resid[i];
 
         /* Post-attention norm. */
-        if (layer->post_attn_norm) {
-            float ss = 0.0f;
-            for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
-            float rms = 1.0f / sqrtf(ss / h + eps);
-            for (size_t i = 0; i < h; i++) normed[i] = hidden[i] * rms * layer->post_attn_norm[i];
-        } else {
-            memcpy(normed, hidden, h * sizeof(float));
-        }
+        oc_arch_rms_norm(hidden, layer->post_attn_norm, normed, h, eps);
 
         /* GeGLU FFN. */
         float *gate_out = malloc(inter * sizeof(float));
@@ -232,25 +179,10 @@ OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
             free(gate_out); free(up_out); free(act); free(mlp_out);
             return OC_ERR_OOM;
         }
-        if (layer->w_gate)
-            for (size_t r = 0; r < inter; r++) {
-                float dot = 0.0f;
-                for (size_t c = 0; c < h; c++) dot += layer->w_gate[r * h + c] * normed[c];
-                gate_out[r] = dot;
-            }
-        if (layer->w_up)
-            for (size_t r = 0; r < inter; r++) {
-                float dot = 0.0f;
-                for (size_t c = 0; c < h; c++) dot += layer->w_up[r * h + c] * normed[c];
-                up_out[r] = dot;
-            }
-        for (size_t i = 0; i < inter; i++) act[i] = phi_gelu_tanh(gate_out[i]) * up_out[i];
-        if (layer->w_down)
-            for (size_t r = 0; r < h; r++) {
-                float dot = 0.0f;
-                for (size_t c = 0; c < inter; c++) dot += layer->w_down[r * inter + c] * act[c];
-                mlp_out[r] = dot;
-            }
+        oc_arch_matvec(layer->w_gate, normed, gate_out, inter, h);
+        oc_arch_matvec(layer->w_up, normed, up_out, inter, h);
+        for (size_t i = 0; i < inter; i++) act[i] = oc_arch_gelu_tanh(gate_out[i]) * up_out[i];
+        oc_arch_matvec(layer->w_down, act, mlp_out, h, inter);
         for (size_t i = 0; i < h; i++) hidden[i] += mlp_out[i];
 
         free(normed); free(q); free(k); free(v); free(attn_out); free(attn_resid);
@@ -260,14 +192,7 @@ OcError oc_phi_forward(OcPhiModel *model, uint32_t token, float *logits)
     /* Final norm + output. */
     float *normed = malloc(h * sizeof(float));
     if (!normed) { free(hidden); return OC_ERR_OOM; }
-    if (model->output_norm) {
-        float ss = 0.0f;
-        for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
-        float rms = 1.0f / sqrtf(ss / h + eps);
-        for (size_t i = 0; i < h; i++) normed[i] = hidden[i] * rms * model->output_norm[i];
-    } else {
-        memcpy(normed, hidden, h * sizeof(float));
-    }
+    oc_arch_rms_norm(hidden, model->output_norm, normed, h, eps);
 
     if (model->output) {
         for (size_t r = 0; r < vocab; r++) {
