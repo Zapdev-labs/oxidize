@@ -13,6 +13,7 @@
 #define _POSIX_C_SOURCE 200809L   /* strdup */
 #include "oxidize/openai.h"
 
+#include "oxidize/autotune.h"
 #include "oxidize/error.h"
 #include "oxidize/chat.h"
 #include "oxidize/gguf.h"
@@ -20,6 +21,7 @@
 #include "oxidize/log.h"
 #include "oxidize/model.h"
 #include "oxidize/sampling.h"
+#include "oxidize/scheduler.h"
 #include "oxidize/version.h"
 #include "oxidize/tokenizer.h"
 
@@ -43,6 +45,45 @@ typedef struct {
 static OcPromptPrefixCache g_prompt_prefix_cache = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
 };
+
+static OcError openai_session_init(OcOpenaiState *st, OcLlamaSession *sess)
+{
+    if (st != NULL && st->kv_set)
+        return oc_llama_session_init_kv(st->model, sess, st->kv_type);
+    return oc_llama_session_init(st->model, sess);
+}
+
+static size_t openai_prefill_chunk(const OcOpenaiState *st)
+{
+    if (st != NULL && st->sched.prefill_chunk_size > 0)
+        return st->sched.prefill_chunk_size;
+    return 0;
+}
+
+OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
+                                      uint32_t explicit_prefill_chunk,
+                                      const char *explicit_kv)
+{
+    if (st == NULL) return OC_ERR_INVALID_ARG;
+    if (plan != NULL) {
+        st->plan = *plan;
+        st->has_plan = true;
+        oc_sched_config_init(&st->sched);
+        oc_autotune_apply_sched(plan, &st->sched);
+        if (plan->kv_turboquant) {
+            st->kv_type = plan->kv_cache;
+            st->kv_set = true;
+        }
+    }
+    if (explicit_prefill_chunk > 0)
+        st->sched.prefill_chunk_size = explicit_prefill_chunk;
+    if (explicit_kv != NULL) {
+        uint32_t n_ctx = (st->model != NULL) ? st->model->cfg.n_ctx : 0;
+        st->kv_type = oc_llama_select_kv_type(n_ctx, explicit_kv);
+        st->kv_set = true;
+    }
+    return OC_OK;
+}
 
 /* The model workspace and persistent compute pool are process-global. HTTP
  * workers must not enter inference concurrently: a second dispatch replaces
@@ -491,8 +532,9 @@ static bool restore_system_prefix(OcOpenaiState *st, OcLlamaSession *sess,
             cache->tokens = NULL;
             cache->valid = false;
         }
-        if (oc_llama_session_init(st->model, &cache->session) == OC_OK &&
-            oc_llama_prefill(&cache->session, tokens, n_tokens, 0,
+        if (openai_session_init(st, &cache->session) == OC_OK &&
+            oc_llama_prefill(&cache->session, tokens, n_tokens,
+                             openai_prefill_chunk(st),
                              cache->session.logits) == OC_OK) {
             cache->tokens = malloc(n_tokens * sizeof(*tokens));
             if (cache->tokens != NULL) {
@@ -523,7 +565,7 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
         return NULL;
     }
     OcLlamaSession sess;
-    if (oc_llama_session_init(st->model, &sess) != OC_OK) {
+    if (openai_session_init(st, &sess) != OC_OK) {
         return NULL;
     }
     uint32_t *ids = NULL;
@@ -578,7 +620,8 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
         free(prefix);
     }
     if (consumed < n_ids &&
-        oc_llama_prefill(&sess, ids + consumed, n_ids - consumed, 0,
+        oc_llama_prefill(&sess, ids + consumed, n_ids - consumed,
+                         openai_prefill_chunk(st),
                          sess.logits) != OC_OK) {
         free(ids); oc_llama_session_free(&sess);
         return NULL;
@@ -903,7 +946,7 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
 
     pthread_mutex_lock(&g_generation_mutex);
     OcLlamaSession sess;
-    e = oc_llama_session_init(st->model, &sess);
+    e = openai_session_init(st, &sess);
     if (e != OC_OK) {
         pthread_mutex_unlock(&g_generation_mutex);
         free(ids);
@@ -912,10 +955,7 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         return;
     }
 
-    for (size_t i = 0; i < n_ids; i++) {
-        e = oc_llama_forward(&sess, ids[i], NULL);
-        if (e != OC_OK) break;
-    }
+    e = oc_llama_prefill(&sess, ids, n_ids, openai_prefill_chunk(st), NULL);
     if (e != OC_OK) {
         oc_llama_session_free(&sess);
         pthread_mutex_unlock(&g_generation_mutex);

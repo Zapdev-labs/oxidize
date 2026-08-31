@@ -23,8 +23,10 @@
 #include "oxidize/log.h"
 #include "oxidize/model.h"
 #include "oxidize/quant.h"
+#include "oxidize/scheduler.h"
 #include "oxidize/simd.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,6 +257,31 @@ OcError oc_autotune_detect_cpu(OcCpuInfo *out)
     out->available_ram_bytes = read_meminfo_field("MemAvailable");
     out->simd = *oc_simd_caps();
     read_model_name(out->model_name, sizeof(out->model_name));
+
+    out->has_gpu = false;
+    out->gpu_family = OC_GPU_FAMILY__COUNT;
+    out->gpu_count = 0;
+    out->gpu_vram_bytes = 0;
+    {
+        OcGpuDevice gpus[16];
+        size_t n = 0;
+        if (oc_gpu_detect(gpus, 16, &n) == OC_OK && n > 0) {
+            out->has_gpu = true;
+            out->gpu_count = (uint32_t)n;
+            uint8_t best_rank = 0;
+            for (size_t i = 0; i < n; i++) {
+                out->gpu_vram_bytes +=
+                    (uint64_t)gpus[i].memory_total_mib * 1024ULL * 1024ULL;
+                if (gpus[i].family < OC_GPU_FAMILY__COUNT) {
+                    uint8_t r = oc_gpu_family_rank(gpus[i].family);
+                    if (r > best_rank) {
+                        best_rank = r;
+                        out->gpu_family = gpus[i].family;
+                    }
+                }
+            }
+        }
+    }
     return OC_OK;
 }
 
@@ -334,6 +361,155 @@ OcError oc_autotune_fingerprint_gguf(const OcGgufMmappedFile *m,
     return OC_OK;
 }
 
+/* ─── Hopper / GPU plan helpers (pure) ──────────────────────────────── */
+
+static void autotune_set_n_gpu_layers(OcTuningPlan *p,
+                                       const OcCpuInfo *cpu,
+                                       const OcModelFingerprint *model)
+{
+    p->n_gpu_layers = 0;
+    if (cpu == NULL || !cpu->has_gpu) return;
+
+    uint32_t n_layer = model ? model->n_layer : 0;
+    uint64_t file_bytes = model ? model->file_bytes : 0;
+
+    if (cpu->gpu_vram_bytes > 0 && file_bytes > 0 && n_layer > 0) {
+        uint64_t usable = (uint64_t)(cpu->gpu_vram_bytes * 0.85);
+        if (usable >= file_bytes)
+            p->n_gpu_layers = n_layer;
+    }
+}
+
+static OcWeightPlan hopper_weight_plan(OcGgufQuantizationType q)
+{
+    switch (q) {
+    case OC_QUANT_Q2_K:
+    case OC_QUANT_Q3_K_S:
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+    case OC_QUANT_IQ1_S:
+    case OC_QUANT_IQ1_M:
+    case OC_QUANT_IQ4_XS:
+    case OC_QUANT_NVFP4:
+    case OC_QUANT_AL5:
+    case OC_QUANT_AL5_XS:
+    case OC_QUANT_AL6:
+    case OC_QUANT_IQ2_XXS:
+    case OC_QUANT_IQ2_XS:
+    case OC_QUANT_IQ2_S:
+    case OC_QUANT_IQ3_XXS:
+    case OC_QUANT_IQ3_S:
+    case OC_QUANT_IQ4_NL:
+    case OC_QUANT_IQ1_XXXS:
+        return OC_WEIGHT_W4A16;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        return OC_WEIGHT_W8A8;
+    case OC_QUANT_F16:
+    case OC_QUANT_BF16:
+        return OC_WEIGHT_FP8;
+    default:
+        return OC_WEIGHT_NATIVE;
+    }
+}
+
+void oc_autotune_tier9_hopper(const OcCpuInfo *cpu,
+                              const OcModelFingerprint *model,
+                              OcTuningPlan *plan)
+{
+    if (plan == NULL) return;
+    if (cpu == NULL || cpu->gpu_family != OC_GPU_FAMILY_H100) return;
+    if (plan->n_gpu_layers == 0) return;
+
+    plan->pipeline = OC_PIPELINE_PAGED;
+    plan->attention_kernel = OC_ATTN_FLASH_ATTENTION3;
+    plan->cuda_graphs = true;
+    plan->persistent_decode_kernels = true;
+
+    uint32_t ctx = model ? model->n_ctx : 0;
+    plan->chunked_prefill_tokens = (ctx >= 8192u) ? 1024u : 512u;
+    plan->max_decode_batch = 16u;
+
+    OcGgufQuantizationType q = model ? model->dominant_qtype : OC_QUANT_UNKNOWN;
+    plan->weight_plan = hopper_weight_plan(q);
+
+    if (plan->weight_plan == OC_WEIGHT_W4A16 ||
+        plan->weight_plan == OC_WEIGHT_W8A8 ||
+        plan->weight_plan == OC_WEIGHT_FP8) {
+        plan->kv_cache = OC_KV_Q8;
+        plan->kv_turboquant = true;
+    }
+
+    plan->rationale_gpu =
+        "single H100 throughput profile -> TP=1 PP=1, paged KV, chunked prefill, "
+        "FlashAttention-3-class decode, CUDA graphs, persistent decode kernels";
+}
+
+static float per_core_decode_tps(const OcModelFingerprint *model)
+{
+    uint64_t bytes = model ? model->file_bytes : 0;
+    const char *size_class = bytes <= (8ULL << 30) ? "small"
+                           : bytes <= (30ULL << 30) ? "medium" : "large";
+    OcGgufQuantizationType q = model ? model->dominant_qtype : OC_QUANT_UNKNOWN;
+    switch (q) {
+    case OC_QUANT_Q4_K_M:
+    case OC_QUANT_Q4_K_S:
+        return size_class[0] == 's' ? 1.2f : size_class[0] == 'm' ? 0.6f : 0.25f;
+    case OC_QUANT_Q2_K:
+    case OC_QUANT_Q3_K_S:
+        return size_class[0] == 's' ? 1.6f : size_class[0] == 'm' ? 0.8f : 0.35f;
+    case OC_QUANT_Q8_0:
+        return 0.8f;
+    case OC_QUANT_F16:
+        return 0.4f;
+    case OC_QUANT_Q5_K_M:
+    case OC_QUANT_Q5_K_S:
+        return size_class[0] == 's' ? 0.9f : size_class[0] == 'm' ? 0.45f : 0.20f;
+    case OC_QUANT_Q6_K:
+        return size_class[0] == 's' ? 0.7f : size_class[0] == 'm' ? 0.35f : 0.18f;
+    default:
+        return 0.5f;
+    }
+}
+
+static void estimate_tps(const OcCpuInfo *cpu,
+                           const OcModelFingerprint *model,
+                           OcTuningPlan *plan)
+{
+    if (plan == NULL) return;
+    float per_core = per_core_decode_tps(model);
+    uint32_t phys = (cpu && cpu->physical_cores > 0) ? cpu->physical_cores : 1u;
+    float cpu_tps = (float)phys * per_core;
+    float mem_bw = cpu ? (float)cpu->total_ram_bytes * 0.7f : 0.0f;
+    float mem_tps = (model && model->file_bytes > 0)
+        ? mem_bw / (float)model->file_bytes : 0.0f;
+    float cpu_branch = cpu_tps < mem_tps || mem_tps <= 0.0f ? cpu_tps : mem_tps;
+
+    float gpu_tps = 0.0f;
+    if (cpu && cpu->has_gpu) {
+        switch (cpu->gpu_family) {
+        case OC_GPU_FAMILY_B200: gpu_tps = 200.0f; break;
+        case OC_GPU_FAMILY_H100:
+            switch (plan->weight_plan) {
+            case OC_WEIGHT_W4A16: gpu_tps = 1150.0f; break;
+            case OC_WEIGHT_W8A8:
+            case OC_WEIGHT_FP8:    gpu_tps = 650.0f; break;
+            case OC_WEIGHT_NATIVE:
+            default:              gpu_tps = 300.0f; break;
+            }
+            break;
+        case OC_GPU_FAMILY_A100: gpu_tps = 90.0f; break;
+        case OC_GPU_FAMILY_RTX_PRO_6000: gpu_tps = 70.0f; break;
+        default: gpu_tps = 30.0f; break;
+        }
+    }
+
+    plan->expected_decode_tps = (cpu && cpu->has_gpu && plan->n_gpu_layers > 0)
+        ? gpu_tps : cpu_branch;
+    plan->expected_prompt_tps = plan->expected_decode_tps * 6.0f;
+}
+
 /* ─── Plan (pure function) ────────────────────────────────────────────── */
 
 OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
@@ -407,6 +583,10 @@ OcTuningPlan oc_autotune_plan(const OcCpuInfo *cpu,
     } else {
         p.rationale_memory = "no model size known → conservative memory policy";
     }
+
+    autotune_set_n_gpu_layers(&p, cpu, model);
+    oc_autotune_tier9_hopper(cpu, model, &p);
+    estimate_tps(cpu, model, &p);
     return p;
 }
 
@@ -418,6 +598,58 @@ const char *oc_autotune_numa_name(OcNumaPolicy p)
     case OC_NUMA_NONE:
     default:                  return "none";
     }
+}
+
+const char *oc_autotune_pipeline_name(OcPipelineMode p)
+{
+    switch (p) {
+    case OC_PIPELINE_CONTINUOUS: return "continuous";
+    case OC_PIPELINE_PAGED:      return "paged";
+    case OC_PIPELINE_SEQUENTIAL:
+    default:                     return "sequential";
+    }
+}
+
+const char *oc_autotune_weight_plan_name(OcWeightPlan p)
+{
+    switch (p) {
+    case OC_WEIGHT_FP8:   return "fp8";
+    case OC_WEIGHT_W8A8:  return "w8a8";
+    case OC_WEIGHT_W4A16: return "w4a16";
+    case OC_WEIGHT_NATIVE:
+    default:              return "native";
+    }
+}
+
+const char *oc_autotune_attention_kernel_name(OcAttentionKernel k)
+{
+    switch (k) {
+    case OC_ATTN_FLASH:            return "flash";
+    case OC_ATTN_FLASH_ATTENTION3: return "flash-attention-3";
+    case OC_ATTN_DEFAULT:
+    default:                     return "default";
+    }
+}
+
+OcError oc_autotune_apply_sched(const OcTuningPlan *plan, OcSchedConfig *cfg)
+{
+    if (plan == NULL || cfg == NULL) return OC_ERR_INVALID_ARG;
+    if (plan->max_decode_batch > 0)
+        cfg->max_batch_size = plan->max_decode_batch;
+    if (plan->chunked_prefill_tokens > 0)
+        cfg->prefill_chunk_size = plan->chunked_prefill_tokens;
+    return OC_OK;
+}
+
+void oc_autotune_clear_gpu_runtime(OcTuningPlan *plan)
+{
+    if (plan == NULL) return;
+    plan->chunked_prefill_tokens = 0;
+    plan->max_decode_batch = 0;
+    plan->kv_turboquant = false;
+    plan->kv_cache = OC_KV_F32;
+    plan->cuda_graphs = false;
+    plan->persistent_decode_kernels = false;
 }
 
 void oc_autotune_plan_dump(const OcTuningPlan *plan,
@@ -454,6 +686,30 @@ void oc_autotune_plan_dump(const OcTuningPlan *plan,
     fprintf(stderr, "  simd dequant:%s   (%s)\n",
             plan->use_simd_dequant ? "yes" : "no",
             plan->rationale_memory ? plan->rationale_memory : "");
+    if (cpu && cpu->has_gpu) {
+        fprintf(stderr, "  gpu:         %s x%u  vram=%llu MiB\n",
+                oc_gpu_family_name(cpu->gpu_family),
+                cpu->gpu_count,
+                (unsigned long long)(cpu->gpu_vram_bytes >> 20));
+    }
+    fprintf(stderr, "  pipeline:    %s\n", oc_autotune_pipeline_name(plan->pipeline));
+    fprintf(stderr, "  weight_plan: %s\n", oc_autotune_weight_plan_name(plan->weight_plan));
+    fprintf(stderr, "  attention:   %s\n",
+            oc_autotune_attention_kernel_name(plan->attention_kernel));
+    fprintf(stderr, "  cuda_graphs: %s  persistent_decode=%s\n",
+            plan->cuda_graphs ? "yes" : "no",
+            plan->persistent_decode_kernels ? "yes" : "no");
+    fprintf(stderr, "  n_gpu_layers:%u\n", plan->n_gpu_layers);
+    fprintf(stderr, "  chunked_prefill: %u tokens  max_decode_batch=%u\n",
+            plan->chunked_prefill_tokens, plan->max_decode_batch);
+    fprintf(stderr, "  kv:          %s  turboquant=%s\n",
+            plan->kv_cache == OC_KV_Q8 ? "q8" : "f32",
+            plan->kv_turboquant ? "yes" : "no");
+    fprintf(stderr, "  expected t/s: prompt ≈ %.1f  decode ≈ %.1f\n",
+            (double)plan->expected_prompt_tps, (double)plan->expected_decode_tps);
+    if (plan->rationale_gpu) {
+        fprintf(stderr, "  gpu rationale: %s\n", plan->rationale_gpu);
+    }
 }
 
 /* ─── Apply (autotune-plan-apply feature) ────────────────────────────────
