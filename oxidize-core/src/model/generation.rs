@@ -48,9 +48,12 @@ impl StopTracker {
                 self.recent_tokens.drain(..to_drop);
             }
         }
+        // Sequences longer than the ring can never match (their tail is
+        // always truncated), so skip them explicitly instead of relying on
+        // ends_with to fail — keeps the ring/match invariant explicit.
         let matched_stop_sequence = stop_sequences
             .iter()
-            .filter(|sequence| !sequence.is_empty())
+            .filter(|sequence| !sequence.is_empty() && sequence.len() <= self.max_len)
             .any(|sequence| self.recent_tokens.ends_with(sequence));
         stop_token == Some(token) || matched_stop_sequence
     }
@@ -1429,5 +1432,30 @@ mod tests {
             MAX_DRAFT_TOKENS_PER_STEP
         );
         const _: () = assert!(MAX_DRAFT_TOKENS_PER_STEP < 1024);
+    }
+
+    #[test]
+    fn stop_tracker_matches_sequences_within_ring() {
+        let stop = vec![3_u32, 4, 5];
+        let mut tracker = StopTracker::new(&[stop.clone()]);
+        assert!(!tracker.push(1, None, &[stop.clone()]));
+        assert!(!tracker.push(2, None, &[stop.clone()]));
+        assert!(!tracker.push(3, None, &[stop.clone()])); // partial only
+        assert!(!tracker.push(4, None, &[stop.clone()])); // partial only
+        assert!(tracker.push(5, None, &[stop])); // completes [3, 4, 5]
+    }
+
+    #[test]
+    fn stop_tracker_ignores_sequences_longer_than_ring() {
+        // A pathological config: one sequence longer than the 4096 ring cap
+        // (impossible to match) plus one normal sequence. The over-long one
+        // must not stop generation, and the ring cap must bound allocation.
+        let overlong = vec![7_u32; 5000];
+        let normal = vec![9_u32, 9];
+        let mut tracker = StopTracker::new(&[overlong, normal.clone()]);
+        assert!(tracker.recent_tokens.capacity() <= 4096);
+        assert!(!tracker.push(7, None, &[vec![7_u32; 5000]])); // never matches
+        assert!(!tracker.push(9, None, &[vec![7_u32; 5000]]));
+        assert!(tracker.push(9, None, &[normal]));
     }
 }

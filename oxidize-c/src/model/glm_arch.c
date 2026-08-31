@@ -21,17 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "oxidize/activation.h"
-#include "oxidize/arena.h"
 #include "oxidize/gguf.h"
-#include "oxidize/llama.h"
 
-#include "llama_session_ops.h"
-#include "oxidize/log.h"
-#include "oxidize/matvec.h"
-#include "oxidize/model.h"
-#include "oxidize/quant.h"
-#include "oxidize/tensor_ops.h"
 
 /* ─── Helpers ────────────────────────────────────────────────────────────
  *

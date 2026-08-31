@@ -1,10 +1,11 @@
 /*
  * glm_arch.h — GLM (ChatGLM/Zhipu) and Hunyuan architecture support.
  *
- * Port of the GLM-4 / ChatGLM and Hunyuan-MoE forward passes to the C11
- * port. These two Chinese LLM families share structural elements with
- * Llama/Mistral (RMSNorm, RoPE, SwiGLU, GQA) but have important
- * architectural divergences that warrant a dedicated forward path:
+ * Configuration parsing and registry entries for the GLM-4 / ChatGLM and
+ * Hunyuan-MoE families in the C11 port. Both share structural elements
+ * with Llama/Mistral (RMSNorm, RoPE, SwiGLU, GQA); inference runs
+ * through the shared llama.c session paths, so this header only carries
+ * the family-specific configuration surface:
  *
  *   GLM-4 / ChatGLM:
  *     - RMSNorm (not LayerNorm) pre-attention + pre-FFN.
@@ -31,11 +32,9 @@
  *     - RoPE with configurable theta; interleaved layout is NOT used
  *       (standard NeoX split-halves).
  *
- * The forward passes reuse the OcLlamaSession workspace and OcWeightView
- * infrastructure defined in llama.h. The config structs below are designed
- * to be populated from GGUF metadata keys (the `glm.` and `hunyuan.`
- * prefixes used by the GGUF converter) and then drive the architecture-
- * specific forward functions.
+ * The config structs below are populated from GGUF metadata keys (the
+ * `glm.` and `hunyuan.` prefixes used by the GGUF converter) and feed
+ * the arch registry / inspect tooling.
  *
  * Weight tensor canonical names (after HF → oxidize mapping):
  *   GLM-4:

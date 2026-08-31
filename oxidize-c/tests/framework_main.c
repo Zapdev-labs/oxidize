@@ -226,7 +226,15 @@ static OcResult run_one(OcTest *t)
     }
 
     int st = 0;
-    waitpid(pid, &st, 0);
+    pid_t w;
+    do {
+        w = waitpid(pid, &st, 0);
+    } while (w < 0 && errno == EINTR);
+    if (w < 0) {
+        /* Never reaped the child: treat as a crash, never a pass. */
+        fprintf(stderr, "waitpid(%d) failed: %s\n", (int)pid, strerror(errno));
+        return RESULT_CRASH;
+    }
     if (WIFSIGNALED(st))
         return RESULT_CRASH;
     if (WIFEXITED(st)) {
@@ -274,49 +282,66 @@ static void write_xml(const char *path, const OcStats *s,
     fprintf(f, "<testsuites tests=\"%zu\" failures=\"%zu\" "
                "errors=\"%zu\" time=\"0\">\n",
             s->tested, s->failing, s->crashing);
-    /* One <testsuite> per suite, one <testcase> per test — balanced tags
-     * for JUnit consumers (CI uploads this artifact). */
-    for (OcTest *st = oc_tests_head; st; st = st->next) {
-        size_t suite_tests = 0, suite_fails = 0;
-        int printed_header = 0;
-        for (size_t i = 0; i < n_runs; i++) {
-            const OcTest *t = runs[i].test;
-            if (strcmp(t->suite, st->suite) != 0)
-                continue;
-            if (!printed_header) {
-                fprintf(f, "  <testsuite name=\"%s\">\n", t->suite);
-                printed_header = 1;
+    /* Walk runs in registry order: registration is grouped per suite
+     * (constructors emit per object file), so open a <testsuite> on every
+     * suite-name change and close it before the next — one row per test,
+     * no duplicates. */
+    const char *cur_suite = NULL;
+    size_t suite_tests = 0, suite_fails = 0, suite_crashes = 0;
+    for (size_t i = 0; i < n_runs; i++) {
+        const OcTest *t = runs[i].test;
+        if (!cur_suite || strcmp(t->suite, cur_suite) != 0) {
+            if (cur_suite)
+                fprintf(f, "  </testsuite>\n");
+            cur_suite = t->suite;
+            suite_tests = 0;
+            suite_fails = 0;
+            suite_crashes = 0;
+            for (size_t j = i; j < n_runs; j++) {
+                const OcTest *u = runs[j].test;
+                if (strcmp(u->suite, cur_suite) != 0)
+                    break;
+                suite_tests++;
+                if (runs[j].result == RESULT_FAIL)
+                    suite_fails++;
+                else if (runs[j].result == RESULT_CRASH)
+                    suite_crashes++;
             }
-            suite_tests++;
-            if (runs[i].result == RESULT_FAIL || runs[i].result == RESULT_CRASH)
-                suite_fails++;
+            fprintf(f, "  <testsuite name=\"%s\" tests=\"%zu\" "
+                       "failures=\"%zu\" errors=\"%zu\">\n",
+                    cur_suite, suite_tests, suite_fails, suite_crashes);
         }
-        if (!printed_header)
-            continue;
-        (void)suite_tests;
-        (void)suite_fails;
-        for (size_t i = 0; i < n_runs; i++) {
-            const OcTest *t = runs[i].test;
-            if (strcmp(t->suite, st->suite) != 0)
-                continue;
-            fprintf(f, "    <testcase classname=\"%s\" name=\"%s\"", t->suite,
-                    t->case_name);
-            if (runs[i].result == RESULT_SKIP)
-                fprintf(f, "><skipped/></testcase>\n");
-            else if (runs[i].result == RESULT_FAIL)
-                fprintf(f, "><failure/></testcase>\n");
-            else if (runs[i].result == RESULT_CRASH)
-                fprintf(f, "><error/></testcase>\n");
-            else
-                fprintf(f, "/>\n");
-        }
-        fprintf(f, "  </testsuite>\n");
+        fprintf(f, "    <testcase classname=\"%s\" name=\"%s\"", t->suite,
+                t->case_name);
+        if (runs[i].result == RESULT_SKIP)
+            fprintf(f, "><skipped/></testcase>\n");
+        else if (runs[i].result == RESULT_FAIL)
+            fprintf(f, "><failure/></testcase>\n");
+        else if (runs[i].result == RESULT_CRASH)
+            fprintf(f, "><error/></testcase>\n");
+        else
+            fprintf(f, "/>\n");
     }
+    if (cur_suite)
+        fprintf(f, "  </testsuite>\n");
     fprintf(f, "</testsuites>\n");
     fclose(f);
 }
 
 /* ─── main ───────────────────────────────────────────────────────────── */
+
+static void usage(FILE *out, const char *prog)
+{
+    fprintf(out,
+        "usage: %s [options] [filter]\n"
+        "  --filter PAT   run only tests matching 'suite/case*' (fnmatch)\n"
+        "  --pattern PAT  alias for --filter (Criterion compatibility)\n"
+        "  --list         list tests and exit\n"
+        "  --xml FILE     write JUnit-style results\n"
+        "  --jobs N       accepted; tests run serially either way\n"
+        "  --verbose N    0=quiet, 1=print passes, higher=more\n",
+        prog);
+}
 
 int main(int argc, char **argv)
 {
@@ -329,24 +354,53 @@ int main(int argc, char **argv)
                 printf("%s/%s%s\n", t->suite, t->case_name,
                        t->disabled ? " (disabled)" : "");
             return 0;
-        } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            usage(stdout, argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "--filter") == 0 ||
+                   strcmp(argv[i], "--pattern") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: %s requires a value\n", argv[0], argv[i]);
+                usage(stderr, argv[0]);
+                return 2;
+            }
             g_filter = argv[++i];
-        } else if (strcmp(argv[i], "--xml") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--xml") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --xml requires a value\n", argv[0]);
+                usage(stderr, argv[0]);
+                return 2;
+            }
             xml_path = argv[++i];
-        } else if (strcmp(argv[i], "--jobs") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--jobs") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --jobs requires a value\n", argv[0]);
+                usage(stderr, argv[0]);
+                return 2;
+            }
             jobs = atoi(argv[++i]);
             (void)jobs;
-        } else if (strcmp(argv[i], "--verbose") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --verbose requires a value\n", argv[0]);
+                usage(stderr, argv[0]);
+                return 2;
+            }
             g_verbose = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--short-filename") == 0 ||
                    strcmp(argv[i], "--full-statistics") == 0 ||
                    strcmp(argv[i], "--always-exit-0") == 0 ||
-                   strcmp(argv[i], "--no-early-exit") == 0 ||
-                   strcmp(argv[i], "--pattern") == 0) {
-            if (strcmp(argv[i], "--pattern") == 0 && i + 1 < argc)
-                i++; /* consume value; Criterion's long-form --pattern */
+                   strcmp(argv[i], "--no-early-exit") == 0) {
+            /* Accepted no-ops for Criterion compatibility. */
+        } else if (argv[i][0] == '-' && argv[i][1] == '-' &&
+                   strcmp(argv[i], "--") != 0) {
+            /* Unknown long flags are rejected rather than silently becoming
+             * a filter that matches nothing (a false green). */
+            fprintf(stderr, "%s: unknown option: %s\n", argv[0], argv[i]);
+            usage(stderr, argv[0]);
+            return 2;
         } else {
-            /* Unknown/positional: treat as a filter for convenience. */
+            /* Positional: treat as a filter for convenience. */
             g_filter = argv[i];
         }
     }
@@ -379,12 +433,11 @@ int main(int argc, char **argv)
             printf("[FAIL] %s::%s\n", t->suite, t->case_name);
             break;
         case RESULT_SKIP:
+            /* Skip is a non-failure, not a pass: keep it out of Passing. */
             stats.skipped++;
-            stats.passing++; /* criterion counts skips as non-failures */
             break;
         case RESULT_CRASH:
             stats.crashing++;
-            stats.failing++;
             printf("[CRSH] %s::%s\n", t->suite, t->case_name);
             break;
         }
