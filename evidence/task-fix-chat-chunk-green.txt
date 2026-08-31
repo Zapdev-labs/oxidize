@@ -1,4 +1,0 @@
-=== RUN   TestChatChunkOmitsMessage
---- PASS: TestChatChunkOmitsMessage (0.00s)
-PASS
-ok  	github.com/Zapdev-labs/oxidize/golang/internal/api	0.002s

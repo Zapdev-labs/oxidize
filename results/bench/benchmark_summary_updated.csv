@@ -1,8 +1,0 @@
-model,weight,test,phase,tps,latency_ms,source
-Qwen3.6-27B-DFlash,Q4_K_M,draft_forward,before,14.81,67.52,oxidize_qwen36_dflash_q4km.log
-Qwen3.6-27B-DFlash,Q4_K_M,draft_forward,after_flash,16.51,60.56,oxidize_qwen36_dflash_q4km_after_flash.log
-Qwen3.6-27B-DFlash,Q4_K_M,draft_forward,after_flash_reserve,16.98,58.9,oxidize_qwen36_dflash_q4km_after_reserve.log
-Qwen3.6-27B-DFlash,llamacpp-export,draft_forward,before,14.04,71.23,oxidize_qwen36_dflash_llamacpp.log
-Qwen3.6-27B-DFlash,llamacpp-export,draft_forward,after_flash,17.09,58.52,oxidize_qwen36_dflash_llamacpp_after_flash.log
-gemma4 31B Q2_K - Medium,Q2_K_M,pp32,baseline,6.43,,llama_cpp_q2k_baseline.log
-gemma4 31B Q2_K - Medium,Q2_K_M,tg32,baseline,1.18,,llama_cpp_q2k_baseline.log

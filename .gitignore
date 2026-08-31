@@ -1,4 +1,5 @@
 /target/
+/dist/
 /dist/wasm/
 
 # Rust/profiling artifacts
@@ -6,6 +7,8 @@
 *.profdata
 *.perf.data
 perf.data*
+rust_out
+*.vsix
 
 # Python caches
 __pycache__/
@@ -22,12 +25,20 @@ __pycache__/
 # Local k8s deployment scripts (not part of upstream)
 deploy/
 /bench_results.json
+/results/
+/evidence/
+/plans/
+/specs/
 
 # Go build output
 oxidize-golang/oxidize
-.firecrawl/
 
 # IDE / agent session artifacts (never commit)
-.cursor/hooks/state/
+.cursor/
+.claire/
+.commandcode/
+.crew/
+.firecrawl/
 .omo/
 modal_app.py.tmp.*
+docs/superpowers/
