@@ -1,10 +1,4 @@
-/*
- * encoder.h — Vision encoder pipeline integration.
- *
- * Ties together vision_config, vision_preprocess, and vision_encoder into
- * a single pipeline: preprocess -> encode -> output features.
- * Port of the conceptual API from oxidize-core/src/vision/encoder.rs.
- */
+/* encoder.h — Vision encoder pipeline integration. */
 #ifndef OXIDIZE_ENCODER_H
 #define OXIDIZE_ENCODER_H
 
@@ -20,7 +14,6 @@
 extern "C" {
 #endif
 
-/* ─── Pipeline ───────────────────────────────────────────────────────── */
 
 typedef struct OcEncoderPipeline {
     OcVisionConfig      config;
@@ -28,7 +21,6 @@ typedef struct OcEncoderPipeline {
     bool                initialized;
 } OcEncoderPipeline;
 
-/* ─── Lifecycle ──────────────────────────────────────────────────────── */
 
 /* Initialize a pipeline with the given vision config (or CLIP base defaults
  * if NULL). */
@@ -44,10 +36,7 @@ OcError oc_encoder_pipeline_process(OcEncoderPipeline *pipe,
                                      size_t max_features,
                                      size_t *out_n);
 
-/* Batch processing: process n_images images, writing results contiguously
- * into out_features. Each image yields oc_encoder_pipeline_n_output_features
- * floats. Returns OC_ERR_INVALID_ARG on bad args, OC_ERR_OOM if buffer too
- * small. */
+/* Batch processing: process n_images images, writing results contiguously into out_features. Each image yields oc_encoder_pipeline_n_output_features floats. Returns OC_ERR_INVALID_ARG on bad args, OC_ERR_OOM if buffer too small. */
 OcError oc_encoder_pipeline_process_batch(OcEncoderPipeline *pipe,
                                            const OcImage *images,
                                            uint32_t n_images,

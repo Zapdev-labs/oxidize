@@ -1,10 +1,4 @@
-/*
- * test_speculative.c — speculative decoding component tests.
- *
- * Tests the verification kernel (greedy + stochastic) with synthetic logits,
- * and the config/stats defaults. Full end-to-end generation requires two
- * loaded GGUF models sharing a vocabulary.
- */
+/* test_speculative.c — speculative decoding component tests. */
 #include <criterion/criterion.h>
 
 #include "oxidize/speculative.h"
@@ -13,17 +7,12 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ─── Verification kernel: greedy ──────────────────────────────────────────
- * K=2, vocab=4. Draft proposes [1, 2]. Target argmax at positions 0, 1
- * matches → both accepted + bonus from position 2. */
 Test(speculative, greedy_all_accepted)
 {
     uint32_t draft_tokens[] = {1, 2};
-    /* draft logits (not used in greedy acceptance, only target argmax matters) */
     float dl0[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float dl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float *draft_l[] = {dl0, dl1};
-    /* target logits: pos 0 argmax=1, pos 1 argmax=2, pos 2 (bonus) argmax=3 */
     float tl0[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float tl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float tl2[] = {0.0f, 0.0f, 0.0f, 10.0f};
@@ -44,16 +33,12 @@ Test(speculative, greedy_all_accepted)
     cr_assert_eq(res.used_residual, false, "no rejection");
 }
 
-/* ─── Verification kernel: greedy rejection at step 0 ────────────────────
- * Draft proposes [1, 2]. Target argmax at position 0 is 0, not 1 → reject,
- * emit target argmax (0), stop. Only 1 token emitted. */
 Test(speculative, greedy_reject_step0)
 {
     uint32_t draft_tokens[] = {1, 2};
     float dl0[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float dl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float *draft_l[] = {dl0, dl1};
-    /* target logits: pos 0 argmax=0 (≠ draft 1) → reject */
     float tl0[] = {10.0f, 0.0f, 0.0f, 0.0f};
     float tl1[] = {0.0f, 0.0f, 10.0f, 0.0f};
     float tl2[] = {0.0f, 0.0f, 0.0f, 10.0f};
@@ -71,9 +56,6 @@ Test(speculative, greedy_reject_step0)
     cr_assert_eq(res.used_residual, true, "rejection → residual");
 }
 
-/* ─── Verification kernel: greedy reject at step 1 ────────────────────────
- * Draft [1, 2]. Target accepts step 0 (argmax=1), rejects step 1 (argmax=3
- * ≠ 2). Emit [1, 3], stop. */
 Test(speculative, greedy_reject_step1)
 {
     uint32_t draft_tokens[] = {1, 2};
@@ -98,16 +80,11 @@ Test(speculative, greedy_reject_step1)
     cr_assert_eq(res.used_residual, true);
 }
 
-/* ─── Stochastic: deterministic acceptance when p >> q ───────────────────
- * Draft proposes token 0 with very low probability, target has it high.
- * p/q > 1 → accept_prob = 1.0 → always accepted. */
 Test(speculative, stochastic_accept_high_ratio)
 {
     uint32_t draft_tokens[] = {0};
-    /* draft gives token 0 very low prob */
     float dl0[] = {-100.0f, 10.0f, 0.0f, 0.0f};
     float *draft_l[] = {dl0};
-    /* target gives token 0 high prob */
     float tl0[] = {10.0f, 0.0f, 0.0f, 0.0f};
     float tl1[] = {0.0f, 10.0f, 0.0f, 0.0f};
     float *target_l[] = {tl0, tl1};
@@ -125,7 +102,6 @@ Test(speculative, stochastic_accept_high_ratio)
     cr_assert_eq(res.used_residual, false);
 }
 
-/* ─── Config defaults ──────────────────────────────────────────────────── */
 Test(speculative, config_defaults)
 {
     OcSpeculativeConfig cfg = OC_SPECULATIVE_DEFAULT;
@@ -135,7 +111,6 @@ Test(speculative, config_defaults)
     cr_assert_eq(cfg.stop_token, 0xFFFFFFFFu, "default no stop");
 }
 
-/* ─── Stats ────────────────────────────────────────────────────────────── */
 Test(speculative, stats_init)
 {
     OcSpeculativeStats stats;
@@ -146,7 +121,6 @@ Test(speculative, stats_init)
     cr_assert_eq(stats.emitted_tokens, 0);
 }
 
-/* ─── Invalid args ─────────────────────────────────────────────────────── */
 Test(speculative, decode_null_args)
 {
     OcSpeculativeResult res;

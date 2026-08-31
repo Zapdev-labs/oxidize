@@ -1,9 +1,4 @@
-/*
- * detect.h — Hardware detection and fingerprinting.
- *
- * Detects CPU capabilities, counts NUMA nodes, and fingerprints
- * model files for autotune. Port from oxidize-core/src/autotune/detect.rs.
- */
+/* detect.h — Hardware detection and fingerprinting. */
 #ifndef OXIDIZE_DETECT_H
 #define OXIDIZE_DETECT_H
 

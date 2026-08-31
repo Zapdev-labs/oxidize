@@ -1,14 +1,4 @@
-/*
- * model_registry.c — on-disk model registry implementation.
- *
- * Port-style companion to oxidize-c/include/oxidize/model_registry.h.
- * Reads GGUF headers (reusing the existing gguf.h parser) to extract
- * architecture + tensor counts, stat()s the file for size, and tracks
- * entries in a flat array. Provides fuzzy name matching (substring +
- * Levenshtein), JSON formatting, and aggregate stats.
- *
- * Concurrency: NOT thread-safe. Callers serialize externally.
- */
+/* model_registry.c — on-disk model registry implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/model_registry.h"
@@ -25,7 +15,6 @@
 #include <strings.h>
 #include <stdarg.h>
 
-/* ─── Internal helpers ──────────────────────────────────────────────────── */
 
 /* Case-insensitive substring search: returns true if `needle` occurs
  * anywhere in `haystack` (case-insensitively). Both must be NUL-terminated. */
@@ -103,11 +92,7 @@ static bool basename_no_gguf(const char *path, char *out, size_t cap)
     return true;
 }
 
-/* Extract the GGUF metadata "quant_type" string. The GGUF spec does not
- * standardize a single quantization label; we read
- * "general.quantization_type" if present (some converters write it),
- * otherwise fall back to "general.file_type" mapped to a short name, and
- * finally to "unknown" if neither is present. */
+/* Extract the GGUF metadata "quant_type" string. */
 static void extract_quant_type(const OcGgufFile *f, char *out, size_t cap)
 {
     if (!out || cap == 0) return;
@@ -184,11 +169,7 @@ static void parse_gguf_metadata(OcModelEntry *e)
     const char *toks = NULL;
     size_t toks_len = 0;
     if (oc_gguf_metadata_get_str(&f, "tokenizer.ggml.tokens", &toks, &toks_len)) {
-        /* The value is an array of strings; the array length is in the
-         * raw metadata. We approximate by reading the count from the
-         * `tokenizer.ggml.model` field (rare) or by counting commas. This
-         * is a best-effort approximation — callers needing exact vocab
-         * should re-parse. */
+        /* The value is an array of strings; the array length is in the raw metadata. */
         (void)toks; (void)toks_len;
     }
     if (oc_gguf_metadata_get_u32(&f, "tokenizer.ggml.n_tokens", &u32) ||
@@ -229,7 +210,6 @@ static bool reserve_slot(OcModelRegistry *reg, size_t *idx)
     return true;
 }
 
-/* ─── Public API ─────────────────────────────────────────────────────────── */
 
 OcError oc_model_registry_init(OcModelRegistry *reg, const char *cache_dir,
                                size_t max_entries)
@@ -389,7 +369,6 @@ static int cmp_name(const void *a, const void *b)
 static int cmp_date(const void *a, const void *b)
 {
     const OcModelEntry *ea = a, *eb = b;
-    /* newest first → descending */
     if (ea->loaded_at < eb->loaded_at) return 1;
     if (ea->loaded_at > eb->loaded_at) return -1;
     return 0;
@@ -517,9 +496,7 @@ size_t oc_model_registry_format(const OcModelRegistry *reg,
         if (!append_field(buf, cap, &off, "n_layers", "%u", e->n_layers)) return 0;
         if (!append_field(buf, cap, &off, "n_embd", "%u", e->n_embd)) return 0;
         if (!append_field(buf, cap, &off, "vocab_size", "%u", e->vocab_size)) return 0;
-        /* last field: no trailing comma */
         {
-            /* strip trailing comma from prior field */
             if (off > 0 && buf[off - 1] == ',') off--;
             int w2 = snprintf(buf + off, cap - off, ",\"loaded_at\":%lld}",
                               (long long)e->loaded_at);

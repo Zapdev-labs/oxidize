@@ -1,11 +1,4 @@
 // Package oxk mirrors oxidize-kernels: custom CPU kernels for quantized GEMV.
-//
-// Phase 1 scope: Q4_K × Q8_K row dots (scalar reference) and a contiguous-range
-// GEMV helper. The per-row math is bit-identical to the legacy kernels in
-// oxidize-core/src/compute/tensor.rs and the Rust oxidize-kernels crate.
-//
-// This package is self-contained (no deps on other oxidize packages) so it can
-// be benchmarked and tested in isolation.
 package oxk
 
 import (
@@ -20,9 +13,7 @@ import (
 // ErrInvalidInput is returned when buffer sizes or shapes do not match.
 var ErrInvalidInput = errors.New("oxk: invalid input")
 
-// ---------------------------------------------------------------------------
 // Constants (match GGUF K-quants)
-// ---------------------------------------------------------------------------
 
 // QK_K is values per super-block.
 const QK_K = 256
@@ -33,9 +24,7 @@ const BLOCK_Q4_K_SIZE = 144
 // BLOCK_Q8_K_BYTES is bytes per Q8_K block: f32 d + 256 int8 + 16 i16 bsums.
 const BLOCK_Q8_K_BYTES = 4 + 256 + 32
 
-// ---------------------------------------------------------------------------
 // CPU vendor / ISA detection and tuning
-// ---------------------------------------------------------------------------
 
 // CpuVendor identifies the CPU manufacturer.
 type CpuVendor int
@@ -155,9 +144,7 @@ func detectCpuinfo() CpuInfo {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // ISA availability stubs (always false in pure Go; build tags can override)
-// ---------------------------------------------------------------------------
 
 // OxkAvx2Available returns whether AVX2 kernels can run.
 func OxkAvx2Available() bool { return false }
@@ -171,9 +158,7 @@ func OxkAvx512vnniAvailable() bool { return false }
 // OxkAvxvnniAvailable returns whether AVX-VNNI (256-bit) kernels can run.
 func OxkAvxvnniAvailable() bool { return false }
 
-// ---------------------------------------------------------------------------
 // Tile width selection (default 16 = widest, enabled by default)
-// ---------------------------------------------------------------------------
 
 var (
 	maxTileOnce sync.Once
@@ -197,9 +182,7 @@ func MaxTile() int {
 	return maxTileVal
 }
 
-// ---------------------------------------------------------------------------
 // f16 helpers
-// ---------------------------------------------------------------------------
 
 // f16LeToF32 converts little-endian f16 bytes to f32, no half dependency.
 func f16LeToF32(bytes [2]byte) float32 {
@@ -229,9 +212,7 @@ func f16LeToF32(bytes [2]byte) float32 {
 	return math.Float32frombits(f32Bits)
 }
 
-// ---------------------------------------------------------------------------
 // Scale/min decoding
-// ---------------------------------------------------------------------------
 
 // GetScaleMinK4 decodes the (scale, min) pair for sub-group j from a Q4_K
 // 12-byte scale field (identical to llama.cpp's get_scale_min_k4).
@@ -248,9 +229,7 @@ func readQ8kBsum(bsums []byte, index int) int16 {
 	return int16(bsums[index*2]) | int16(bsums[index*2+1])<<8
 }
 
-// ---------------------------------------------------------------------------
 // Q8_K activation quantization
-// ---------------------------------------------------------------------------
 
 // QuantizeQ8KInto quantizes vector (length nBlocks*256) into nBlocks Q8_K blocks.
 func QuantizeQ8KInto(vector []float32, nBlocks int, out []byte) error {
@@ -320,9 +299,7 @@ func quantizeQ8KBlock(blockIn []float32, blockOut []byte) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Q4_K × Q8_K scalar row dot
-// ---------------------------------------------------------------------------
 
 // Q4kQ8kRowDotScalar dots one Q4_K row (blocksPerRow blocks) against a Q8_K vector.
 func Q4kQ8kRowDotScalar(row []byte, blocksPerRow int, q8k []byte) (float32, error) {
@@ -368,9 +345,7 @@ func Q4kQ8kRowDotScalar(row []byte, blocksPerRow int, q8k []byte) (float32, erro
 	return acc, nil
 }
 
-// ---------------------------------------------------------------------------
 // Tile runners (multi-row variants) — enabled by default, scalar fallback
-// ---------------------------------------------------------------------------
 
 // Q4kQ8kRowDotX1Scalar is the single-row scalar dot (alias for the scalar function).
 func Q4kQ8kRowDotX1Scalar(row []byte, blocksPerRow int, q8k []byte) (float32, error) {
@@ -425,15 +400,9 @@ func Q4kQ8kRowDotX16Scalar(rows []byte, rowBytes int, blocksPerRow int, q8k []by
 	return nil
 }
 
-// ---------------------------------------------------------------------------
 // Range GEMV — main entry point with tile runner enabled by default
-// ---------------------------------------------------------------------------
 
 // GemvQ4kRange dots a contiguous range of Q4_K rows against one pre-quantized Q8_K vector.
-//
-// rows must point at out.len() rows of blocksPerRow Q4_K blocks laid out back-to-back
-// (rowBytes = blocksPerRow * BLOCK_Q4_K_SIZE apart); q8k holds blocksPerRow Q8_K blocks.
-// Uses the widest available tile width (default 16) with scalar fallback.
 func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) error {
 	rowBytes := blocksPerRow * BLOCK_Q4_K_SIZE
 	if len(rows) < len(out)*rowBytes {
@@ -490,9 +459,7 @@ func GemvQ4kRange(rows []byte, blocksPerRow int, q8k []byte, out []float32) erro
 	return nil
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 func chunksExact[T any](s []T, size int) [][]T {
 	if len(s)%size != 0 {

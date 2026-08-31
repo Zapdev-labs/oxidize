@@ -6,7 +6,6 @@
 #include "oxidize/vision_config.h"
 #include "oxidize/vision_preprocess.h"
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static OcError make_image(OcImage *img, uint32_t w, uint32_t h)
 {
@@ -21,7 +20,6 @@ static OcError make_image(OcImage *img, uint32_t w, uint32_t h)
     return OC_OK;
 }
 
-/* ─── Init tests ────────────────────────────────────────────────────────── */
 
 Test(encoder, init_with_default_config)
 {
@@ -58,7 +56,6 @@ Test(encoder, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── n_output_features tests ───────────────────────────────────────────── */
 
 Test(encoder, n_output_features_default)
 {
@@ -80,7 +77,6 @@ Test(encoder, n_output_features_uninitialized)
     cr_assert_eq(oc_encoder_pipeline_n_output_features(&pipe), 0u);
 }
 
-/* ─── Process single image tests ────────────────────────────────────────── */
 
 Test(encoder, process_single_image)
 {
@@ -158,7 +154,6 @@ Test(encoder, process_deterministic)
     oc_encoder_pipeline_free(&pipe);
 }
 
-/* ─── Batch processing tests ────────────────────────────────────────────── */
 
 Test(encoder, process_batch)
 {

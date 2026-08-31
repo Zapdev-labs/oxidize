@@ -1,9 +1,4 @@
-/*
- * conversion.h — Model format conversion.
- *
- * Converts between SafeTensors and GGUF formats.
- * Port from oxidize-convert/ and oxidize-core/src/format/safetensors_to_gguf.rs.
- */
+/* conversion.h — Model format conversion. */
 #ifndef OXIDIZE_CONVERSION_H
 #define OXIDIZE_CONVERSION_H
 

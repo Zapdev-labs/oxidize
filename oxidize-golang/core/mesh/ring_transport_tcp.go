@@ -104,9 +104,6 @@ func (r *tcpRing) Close() error {
 }
 
 // CreateTcpRing spawns a TCP ring of numRanks backends on localhost ephemeral
-// ports. Each rank opens an outbound connection to its right neighbour and
-// accepts an inbound connection from its left neighbour, wrapping both in a
-// FullDuplexTcpTransport. Mirrors create_tcp_ring.
 func CreateTcpRing(ctx context.Context, numRanks int) ([]*RingBackend, func() error, error) {
 	listeners := make([]net.Listener, numRanks)
 	addrs := make([]string, numRanks)

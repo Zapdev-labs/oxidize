@@ -19,9 +19,7 @@ use crate::error::{FinetuneError, Result};
 use crate::fused::softmax_cross_entropy;
 use crate::lora::{LoRAAdapter, LoRATarget};
 
-// ---------------------------------------------------------------------------
 // Data types
-// ---------------------------------------------------------------------------
 
 /// A single DPO training example: a prompt with one chosen and one rejected
 /// continuation, each represented as a sequence of token ids.
@@ -37,9 +35,7 @@ pub struct DpoExample {
     pub ref_rejected_logprob: Option<f32>,
 }
 
-// ---------------------------------------------------------------------------
 // JSONL loading
-// ---------------------------------------------------------------------------
 
 /// Raw row schema for DPO JSONL files.
 ///
@@ -112,9 +108,7 @@ pub fn load_jsonl_dpo(path: impl AsRef<Path>) -> Result<Vec<DpoExample>> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------
 // DPO configuration
-// ---------------------------------------------------------------------------
 
 /// DPO-specific hyper-parameters that extend the base `FinetuneConfig`.
 #[derive(Debug, Clone)]
@@ -136,9 +130,7 @@ impl Default for DpoConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Training report
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct DpoReport {
@@ -147,9 +139,7 @@ pub struct DpoReport {
     pub elapsed_seconds: f32,
 }
 
-// ---------------------------------------------------------------------------
 // DPO trainer
-// ---------------------------------------------------------------------------
 
 /// DPO trainer: frozen reference policy + trainable LoRA on the LM head.
 ///
@@ -184,9 +174,7 @@ impl DpoTrainer {
         }
     }
 
-    // -----------------------------------------------------------------------
     // Core DPO loss
-    // -----------------------------------------------------------------------
 
     /// Compute the DPO loss scalar.
     ///
@@ -204,9 +192,7 @@ impl DpoTrainer {
         log1p_exp(-margin)
     }
 
-    // -----------------------------------------------------------------------
     // Per-sequence log-probability helpers
-    // -----------------------------------------------------------------------
 
     /// Compute the total log-probability of `targets` given hidden states
     /// `hiddens` ([len, in_dim]) using the frozen base LM-head logits plus the
@@ -247,9 +233,7 @@ impl DpoTrainer {
         Ok(log_prob)
     }
 
-    // -----------------------------------------------------------------------
     // Gradient of log-probability w.r.t. LoRA outputs
-    // -----------------------------------------------------------------------
 
     /// Fill `grad_out` ([len, vocab]) with ∂log_p / ∂logit = softmax(logit) - onehot(target).
     ///
@@ -282,9 +266,7 @@ impl DpoTrainer {
         }
     }
 
-    // -----------------------------------------------------------------------
     // Training step
-    // -----------------------------------------------------------------------
 
     /// Run one DPO step on a single example.
     ///
@@ -378,9 +360,7 @@ impl DpoTrainer {
         Ok(loss)
     }
 
-    // -----------------------------------------------------------------------
     // Full training loop
-    // -----------------------------------------------------------------------
 
     /// Train over all examples for `config.epochs` epochs.
     ///
@@ -449,9 +429,7 @@ impl DpoTrainer {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Math helpers
-// ---------------------------------------------------------------------------
 
 /// Numerically stable log(1 + exp(x)).
 #[inline]
@@ -476,10 +454,6 @@ fn warmup_lr(base: f32, step: usize, warmup: usize) -> f32 {
         base * (step as f32 / warmup as f32)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -515,9 +489,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
     // Math primitives
-    // -----------------------------------------------------------------------
 
     #[test]
     fn log1p_exp_positive_arg() {
@@ -556,9 +528,7 @@ mod tests {
         assert!(loss > 1.9, "loss={loss}");
     }
 
-    // -----------------------------------------------------------------------
     // Trainer construction
-    // -----------------------------------------------------------------------
 
     #[test]
     fn trainer_constructs() {
@@ -568,9 +538,7 @@ mod tests {
         assert_eq!(t.lora.rank, 2);
     }
 
-    // -----------------------------------------------------------------------
     // train_step runs without error and returns finite loss
-    // -----------------------------------------------------------------------
 
     #[test]
     fn train_step_returns_finite_loss() {
@@ -608,9 +576,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // Loss decreases over multiple steps on the same example
-    // -----------------------------------------------------------------------
 
     #[test]
     fn loss_decreases_over_steps() {
@@ -656,9 +622,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // Full train() call
-    // -----------------------------------------------------------------------
 
     #[test]
     fn train_produces_report() {
@@ -677,9 +641,7 @@ mod tests {
         assert!(matches!(result, Err(FinetuneError::EmptyDataset)));
     }
 
-    // -----------------------------------------------------------------------
     // JSONL loading (uses temp files written to std::env::temp_dir())
-    // -----------------------------------------------------------------------
 
     fn write_temp(name: &str, contents: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(name);

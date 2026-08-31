@@ -169,8 +169,6 @@ pub fn plan(inv: &HardwareInventory, model: &ModelFingerprint) -> TuningPlan {
     plan
 }
 
-// ---------- tier 0: hard rules (always apply) ----------
-
 fn tier0_hard_rules(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
     let ram_budget = effective_ram_bytes(inv);
     if ram_budget < model.file_size_bytes.saturating_mul(12) / 10 {
@@ -205,8 +203,6 @@ fn tier0_hard_rules(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
             .push("macOS + Metal build available → keep --backend cpu (Metal auto-promotion lives in runtime)".to_string());
     }
 }
-
-// ---------- tier 1: ISA + kernel ----------
 
 fn tier1_isa(inv: &HardwareInventory, plan: &mut TuningPlan) {
     match inv.simd {
@@ -254,8 +250,6 @@ fn tier1_isa(inv: &HardwareInventory, plan: &mut TuningPlan) {
         }
     }
 }
-
-// ---------- tier 2: GPU offload ----------
 
 fn tier2_gpu_offload(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
     if !inv.has_gpu && !inv.has_rocm && !inv.has_cuda {
@@ -311,8 +305,6 @@ fn tier2_gpu_offload(inv: &HardwareInventory, model: &ModelFingerprint, plan: &m
     // multiple GPUs; we don't know the count from `inv.gpu_vram_bytes`
     // alone. The CLI / server extend this with `--gpus`.
 }
-
-// ---------- tier 3: KV cache dtype + ctx size ----------
 
 fn tier3_kv_and_ctx(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
     let vram_gib = inv.gpu_vram_bytes / (1u64 << 30);
@@ -378,8 +370,6 @@ fn tier3_kv_and_ctx(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mu
     ));
 }
 
-// ---------- tier 4: layer cache + NUMA ----------
-
 fn tier4_layer_cache_and_numa(
     inv: &HardwareInventory,
     model: &ModelFingerprint,
@@ -411,8 +401,6 @@ fn tier4_layer_cache_and_numa(
     }
 }
 
-// ---------- tier 5: speculative ----------
-
 fn tier5_speculative(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
     if !inv.has_gpu {
         return;
@@ -435,8 +423,6 @@ fn tier5_speculative(inv: &HardwareInventory, model: &ModelFingerprint, plan: &m
 fn is_dflash_compatible(arch: &str) -> bool {
     matches!(arch, "qwen2" | "qwen3" | "llama" | "lfm2")
 }
-
-// ---------- tier 6: thread count ----------
 
 fn tier6_threads(inv: &HardwareInventory, plan: &mut TuningPlan) {
     if inv.has_gpu && plan.n_gpu_layers > 0 {
@@ -467,8 +453,6 @@ fn tier6_threads(inv: &HardwareInventory, plan: &mut TuningPlan) {
     ));
 }
 
-// ---------- tier 7: decode tile (split-K attention) ----------
-
 fn tier7_decode_tile(plan: &mut TuningPlan) {
     if plan.ctx_size > 8192 {
         plan.decode_tile_tokens = 1024;
@@ -480,8 +464,6 @@ fn tier7_decode_tile(plan: &mut TuningPlan) {
             .push("ctx > 4096 on AVX2 → split-K decode tile = 512".to_string());
     }
 }
-
-// ---------- tier 8: pipeline ----------
 
 fn tier8_pipeline(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
     if inv.has_gpu && plan.n_gpu_layers > 0 {
@@ -500,8 +482,6 @@ fn tier8_pipeline(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut 
     plan.rationale
         .push("low-resource or MoE → sequential (default)".to_string());
 }
-
-// ---------- tps estimates ----------
 
 fn estimate_tps(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
     let per_core = per_core_decode_tps(model);
@@ -575,8 +555,6 @@ fn effective_ram_bytes(inv: &HardwareInventory) -> u64 {
     }
     inv.total_ram_bytes
 }
-
-// ---------- tests ----------
 
 #[cfg(test)]
 mod tests {

@@ -1,9 +1,4 @@
-/*
- * attention_sink.h — StreamingLLM attention sinks.
- *
- * Keeps the first few K and V vectors fixed (sinks) and rotates the rest
- * using a sliding window, enabling efficient long-context generation.
- */
+/* attention_sink.h — StreamingLLM attention sinks. */
 #ifndef OXIDIZE_ATTENTION_SINK_H
 #define OXIDIZE_ATTENTION_SINK_H
 
@@ -17,13 +12,11 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_SINK_DEFAULT_SINK_SIZE 4
 #define OC_SINK_DEFAULT_WINDOW_SIZE 4096
 #define OC_SINK_MAX_SINK_SIZE 64
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct {
     uint32_t sink_size;       /* number of initial tokens to keep (default 4) */
@@ -52,17 +45,13 @@ typedef struct {
     bool initialized;
 } OcAttentionSink;
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 /* Initialize with config. Allocates K/V caches. */
 OcError oc_attn_sink_init(OcAttentionSink *sink,
                           const OcAttentionSinkConfig *config,
                           uint32_t head_dim, uint32_t n_heads);
 
-/* Append K/V vectors for a token at `seq_pos`.
- * If seq_pos < sink_size, stores in sink cache.
- * Otherwise stores in window cache (evicting oldest if full).
- * Returns the slot position (index into the combined sink+window cache). */
+/* Append K/V vectors for a token at `seq_pos`. If seq_pos < sink_size, stores in the sink cache; otherwise stores in the window cache (evicting oldest if full). out_slot receives the combined-cache slot index. */
 OcError oc_attn_sink_append(OcAttentionSink *sink,
                             const float *key, const float *value,
                             uint32_t seq_pos, uint32_t *out_slot);

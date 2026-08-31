@@ -1,17 +1,4 @@
-/*
- * test_openai.c — OpenAI-compatible route tests.
- *
- * VAL-OPENAI-001..005 cover:
- *   1. GET /v1/models returns 200 + a model list (placeholder when no model).
- *   2. POST /v1/completions returns 503 when no model is loaded.
- *   3. POST /v1/chat/completions returns 503 when no model is loaded.
- *   4. Unknown path returns 404 with a JSON error.
- *   5. oc_openai_error_json produces valid JSON.
- *
- * Full end-to-end generation tests (with a real loaded model) run on the
- * remote NUMA box as part of the cpu-qwen-benchmark-121 feature; here we
- * verify the routing + error contract only.
- */
+/* test_openai.c — OpenAI-compatible route tests. VAL-OPENAI-001..005 cover: */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 
@@ -25,7 +12,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static char *send_raw(uint16_t port, const char *raw, size_t raw_len,
                       size_t *out_len)
@@ -70,7 +56,6 @@ static char *send_raw(uint16_t port, const char *raw, size_t raw_len,
     return resp;
 }
 
-/* ─── error_json ────────────────────────────────────────────────────────── */
 
 Test(openai, error_json_is_valid)
 {
@@ -98,7 +83,6 @@ Test(openai, error_json_escapes_control_characters)
     free(e);
 }
 
-/* ─── Routing with no model loaded ─────────────────────────────────────── */
 
 static OcOpenaiState g_state = {0};
 

@@ -1,12 +1,4 @@
-/*
- * prune.h — Wanda and magnitude pruning utility.
- *
- * Prunes model weights by zeroing the least important parameters.
- * Wanda: importance = |W| * ||X||_2 (weight magnitude times activation norm).
- * Magnitude: importance = |W| (weight magnitude only).
- *
- * Port of oxidize-prune/ Rust crate.
- */
+/* prune.h — Wanda and magnitude pruning utility. */
 #ifndef OXIDIZE_PRUNE_H
 #define OXIDIZE_PRUNE_H
 

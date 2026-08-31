@@ -966,6 +966,14 @@ impl<'a> ByteReader<'a> {
     }
 }
 
+#[path = "gguf_write.rs"]
+mod gguf_write;
+pub use gguf_write::{
+    GgufOutputTensor, GgufTensorHeader, encode_gguf_header, gguf_align_up, pad_gguf,
+    relative_offsets, relative_offsets_from_sizes, write_gguf, write_gguf_string,
+    write_metadata_value,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1529,8 +1537,6 @@ mod tests {
         }
     }
 
-    // ── from_ggml_type correctness ────────────────────────────────────────────
-
     #[test]
     fn from_ggml_type_k_quants_map_correctly() {
         // These mappings must match the ggml spec (ggml.h enum ggml_type).
@@ -1569,8 +1575,6 @@ mod tests {
             GgufQuantizationType::Q8_0
         );
     }
-
-    // ── prefault_pages_locked ─────────────────────────────────────────────────
 
     /// Build a minimal GGUF with a small payload and verify that
     /// `prefault_pages_locked` returns and produces the same checksum as

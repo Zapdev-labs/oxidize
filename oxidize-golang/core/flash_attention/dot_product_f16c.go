@@ -33,9 +33,6 @@ func f16BitsToF32(bits uint16) float32 {
 }
 
 // DotProductF32F16 computes the dot product of an f32 query and an f16 key
-// (stored as uint16 bits), converting the f16 lanes to f32 on the fly. Mirrors
-// dot_product_f32_f16_avx2; on platforms without f16c it is functionally
-// identical (just scalar). Two accumulators hide conversion latency.
 func DotProductF32F16(a []float32, b []uint16) float32 {
 	n := len(a)
 	if len(b) < n {

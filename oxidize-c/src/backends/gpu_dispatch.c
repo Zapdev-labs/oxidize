@@ -1,18 +1,10 @@
-/*
- * gpu_dispatch.c — GPU task dispatch for inference workloads.
- *
- * Maintains a priority-ordered work queue of OcGpuTask records and a
- * registry of detected GPU devices. In the dependency-free C11 port, the
- * device detector returns 0 devices when CUDA is unavailable — the queue
- * still accepts submissions so callers can test the API surface.
- */
+/* gpu_dispatch.c — GPU task dispatch for inference workloads. */
 #include "oxidize/gpu_dispatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 OcError oc_gpu_dispatch_config_init(OcGpuDispatchConfig *cfg)
 {
@@ -34,7 +26,6 @@ const char *oc_gpu_task_type_name(OcGpuTaskType type)
     }
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_gpu_dispatch_init(const OcGpuDispatchConfig *config,
                              OcGpuDispatch **out)
@@ -96,7 +87,6 @@ void oc_gpu_dispatch_free(OcGpuDispatch *dispatch)
     free(dispatch);
 }
 
-/* ─── Task queue ────────────────────────────────────────────────────── */
 
 OcError oc_gpu_dispatch_submit(OcGpuDispatch *dispatch, OcGpuTask task)
 {
@@ -129,7 +119,6 @@ uint32_t oc_gpu_dispatch_n_pending(const OcGpuDispatch *dispatch)
     return dispatch ? dispatch->n_pending : 0;
 }
 
-/* ─── Device queries ────────────────────────────────────────────────── */
 
 OcError oc_gpu_dispatch_get_device(const OcGpuDispatch *dispatch,
                                    uint32_t device_id,

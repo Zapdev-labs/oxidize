@@ -1,16 +1,4 @@
-/*
- * video.c — Video multimodal frame sampling and temporal aggregation.
- *
- * Port of oxidize-core/src/video/. This module handles frame selection
- * strategies (uniform, FPS, scene-change detection), frame-to-embedding
- * temporal aggregation (mean, max, attention, concat), and video+text
- * multimodal prompt construction.
- *
- * The actual video decoding (demuxing, H.264/VP9 decoding) is handled by
- * the caller — this module receives already-decoded RGB frames. This
- * keeps the C port dependency-free while providing the full frame
- * sampling and aggregation pipeline.
- */
+/* video.c — Video multimodal frame sampling and temporal aggregation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/video.h"
 
@@ -18,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Frame sampler ────────────────────────────────────────────────────── */
 
 void oc_video_sampler_init(OcVideoFrameSampler *s, OcVideoFrameConfig cfg)
 {
@@ -69,10 +56,7 @@ bool oc_video_sampler_process(OcVideoFrameSampler *s, const OcVideoFrame *frame)
 
     switch (s->cfg.strategy) {
     case OC_FRAME_SAMPLE_UNIFORM: {
-        /* For uniform sampling, we need the total count upfront.
-         * If we don't know it, accept every Nth frame — but never more than
-         * the requested target (use oc_video_sampler_plan for exact uniform
-         * spacing when the total frame count is known). */
+        /* For uniform sampling, we need the total count upfront. */
         uint32_t target = s->cfg.n_frames ? s->cfg.n_frames : 8;
         if (target > s->cfg.max_frames) target = s->cfg.max_frames;
         if (s->frames_selected >= target) return false;
@@ -153,7 +137,6 @@ bool oc_video_sampler_process(OcVideoFrameSampler *s, const OcVideoFrame *frame)
     }
 }
 
-/* ─── Histogram utilities ──────────────────────────────────────────────── */
 
 void oc_video_compute_histogram(const OcVideoFrame *frame, uint32_t hist[64])
 {
@@ -204,7 +187,6 @@ float oc_video_histogram_diff(const uint32_t a[64], const uint32_t b[64])
     return diff * 0.5f;
 }
 
-/* ─── Frame-to-embedding aggregation ───────────────────────────────────── */
 
 OcError oc_video_aggregate(const float *frame_embeddings,
                             uint32_t n_frames, size_t dim,
@@ -323,7 +305,6 @@ void oc_video_embedding_free(OcVideoEmbedding *emb)
     emb->dim = 0;
 }
 
-/* ─── Video prompt ──────────────────────────────────────────────────────── */
 
 OcError oc_video_prompt_create(OcVideoEmbedding *video_emb,
                                 const char *text,

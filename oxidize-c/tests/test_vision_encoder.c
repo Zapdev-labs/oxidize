@@ -4,7 +4,6 @@
 #include <string.h>
 #include "oxidize/vision_encoder.h"
 
-/* ─── Config ──────────────────────────────────────────────────────── */
 
 Test(vision_encoder, config_init_defaults)
 {
@@ -23,7 +22,6 @@ Test(vision_encoder, config_init_null)
     cr_assert_eq(oc_vision_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Encoder lifecycle ─────────────────────────────────────────────── */
 
 Test(vision_encoder, init_with_default_config)
 {
@@ -90,7 +88,6 @@ Test(vision_encoder, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── Weight loading ───────────────────────────────────────────────── */
 
 Test(vision_encoder, load_weights_copies_data)
 {
@@ -131,7 +128,6 @@ Test(vision_encoder, load_weights_zero_size_clears)
     oc_vision_encoder_free(e);
 }
 
-/* ─── Encoding ─────────────────────────────────────────────────────── */
 
 Test(vision_encoder, encode_returns_features)
 {
@@ -219,7 +215,6 @@ Test(vision_encoder, patch_embed_extracts_real_pixels)
     cr_assert_float_eq(patches[0], 0.0f, 0.001f);
     /* patch[1] = pixel(1,0,0) = 1/10 = 0.1. */
     cr_assert_float_eq(patches[1], 0.1f, 0.001f);
-    /* patch[256] = pixel(0,0,1) = 1/10 = 0.1 (channel 1, dy=0, dx=0). */
     cr_assert_float_eq(patches[256], 0.1f, 0.001f);
     /* Verify non-zero data exists (not all zeros like the old stub). */
     bool has_nonzero = false;
@@ -232,7 +227,6 @@ Test(vision_encoder, patch_embed_extracts_real_pixels)
     oc_vision_encoder_free(e);
 }
 
-/* ─── Image patch helpers ──────────────────────────────────────────── */
 
 Test(vision_encoder, image_patch_init_allocates)
 {

@@ -1,0 +1,44 @@
+name: Cancel superseded
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    name: Cancel superseded runs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel queued and in-progress runs for older SHAs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref }}
+          PR: ${{ github.event.pull_request.number }}
+          SELF: ${{ github.run_id }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          LIVE=$(gh api "repos/${REPO}/pulls/${PR}" --jq .head.sha)
+          echo "event ${EVENT_SHA} live ${LIVE} self ${SELF}"
+          if [ "${EVENT_SHA}" != "${LIVE}" ]; then
+            echo "superseded by ${LIVE}; skip"
+            exit 0
+          fi
+          pr_ref="refs/pull/${PR}/head"
+          for status in queued in_progress; do
+            ids=$(gh run list --repo "$REPO" --status "$status" --limit 100 \
+              --json databaseId,headSha,headBranch \
+              --jq ".[] | select(.headSha != \"${LIVE}\" and .databaseId < ${SELF} and (.headBranch == \"${BRANCH}\" or .headBranch == \"${pr_ref}\")) | .databaseId")
+            for id in $ids; do
+              echo "cancel $id"
+              gh run cancel "$id" --repo "$REPO" || true
+            done
+          done

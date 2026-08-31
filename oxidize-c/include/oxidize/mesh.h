@@ -1,10 +1,4 @@
-/*
- * mesh.h — distributed inference mesh (libp2p-style peer discovery + sharding).
- *
- * Stub implementation providing the API surface for distributed inference.
- * When fully implemented, this will enable multi-node tensor parallelism
- * and pipeline parallelism for models too large for a single GPU.
- */
+/* mesh.h — distributed inference mesh (libp2p-style peer discovery + sharding). */
 #ifndef OXIDIZE_MESH_H
 #define OXIDIZE_MESH_H
 

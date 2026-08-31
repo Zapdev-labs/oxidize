@@ -1,13 +1,9 @@
-/* test_video_encoder.c — OcVideoEncoder tests.
- *
- * Unique suite name "video_encoder".
- */
+/* test_video_encoder.c — OcVideoEncoder tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 
 #include "oxidize/video_encoder.h"
 
-/* ─── init / free ──────────────────────────────────────────────────── */
 
 Test(video_encoder, init_good)
 {
@@ -52,7 +48,6 @@ Test(video_encoder, free_null_is_safe)
     cr_assert(true, "");
 }
 
-/* ─── encode ───────────────────────────────────────────────────────── */
 
 Test(video_encoder, encode_basic)
 {
@@ -137,7 +132,6 @@ Test(video_encoder, encode_multiple_calls_overwrite)
     oc_video_encoder_free(&enc);
 }
 
-/* ─── accessors ────────────────────────────────────────────────────── */
 
 Test(video_encoder, n_tokens_before_encode)
 {

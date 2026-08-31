@@ -1,13 +1,4 @@
-/*
- * spec_tree.h — Tree-based speculative decoding support.
- *
- * Stores a tree of candidate token continuations produced by a draft model,
- * allows the target model to verify leaves in a single batched forward, then
- * marks accepted nodes and prunes rejected branches.
- *
- * Distinct from speculative.h (linear K-token draft verification): this is
- * the tree variant where each node may branch up to `max_children` ways.
- */
+/* spec_tree.h — Tree-based speculative decoding support. */
 #ifndef OXIDIZE_SPEC_TREE_H
 #define OXIDIZE_SPEC_TREE_H
 
@@ -21,14 +12,12 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_SPEC_TREE_MAX_CHILDREN 8
 #define OC_SPEC_TREE_DEFAULT_MAX_DEPTH    4
 #define OC_SPEC_TREE_DEFAULT_MAX_CHILDREN 8
 #define OC_SPEC_TREE_DEFAULT_MAX_NODES    64
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct OcSpecNode {
     uint32_t token_id;
@@ -54,7 +43,6 @@ typedef struct OcSpecTree {
     OcSpecTreeConfig config;
 } OcSpecTree;
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 /* Initialize config with defaults. */
 OcError oc_spec_tree_config_init(OcSpecTreeConfig *cfg);

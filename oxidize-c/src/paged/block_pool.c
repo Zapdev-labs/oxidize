@@ -1,14 +1,9 @@
-/*
- * block_pool.c — memory block pool allocator implementation.
- *
- * See include/oxidize/block_pool.h for design notes.
- */
+/* block_pool.c — memory block pool allocator implementation. */
 #include "oxidize/block_pool.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Init / Free ─────────────────────────────────────────────────────── */
 
 OcError oc_blkpool_init(OcBlkPool *pool, uint32_t n_blocks, size_t block_size)
 {
@@ -75,7 +70,6 @@ void oc_blkpool_free_pool(OcBlkPool *pool)
     memset(pool, 0, sizeof(*pool));
 }
 
-/* ─── Alloc / Free ────────────────────────────────────────────────────── */
 
 uint32_t oc_blkpool_alloc(OcBlkPool *pool)
 {
@@ -103,7 +97,6 @@ void *oc_blkpool_get(const OcBlkPool *pool, uint32_t block_idx)
     return pool->blocks[block_idx];
 }
 
-/* ─── Reset ───────────────────────────────────────────────────────────── */
 
 void oc_blkpool_reset(OcBlkPool *pool)
 {
@@ -116,7 +109,6 @@ void oc_blkpool_reset(OcBlkPool *pool)
     memset(pool->slab, 0, (size_t)pool->n_blocks * pool->block_size);
 }
 
-/* ─── Accessors ───────────────────────────────────────────────────────── */
 
 uint32_t oc_blkpool_n_free(const OcBlkPool *pool)
 {

@@ -66,9 +66,7 @@ impl AdapterMerger {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Linear merge
-// ---------------------------------------------------------------------------
 
 /// Weighted arithmetic mean of A and B matrices across all adapters.
 ///
@@ -110,9 +108,7 @@ pub fn linear_merge(adapters: &[(LoRAAdapter, f32)]) -> Result<LoRAAdapter, Stri
     Ok(build_merged(template, merged_a, merged_b))
 }
 
-// ---------------------------------------------------------------------------
 // Slerp merge
-// ---------------------------------------------------------------------------
 
 /// Spherical linear interpolation between two adapters' flattened parameter
 /// vectors.  `t = 0` returns `a`, `t = 1` returns `b`.
@@ -185,9 +181,7 @@ fn lerp_vec(va: &[f32], vb: &[f32], t: f32) -> Vec<f32> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // TIES merge
-// ---------------------------------------------------------------------------
 
 /// TIES-merging (Trimming, Electing, and Disjoint merging).
 ///
@@ -284,9 +278,7 @@ fn ties_combine(trimmed: &[Vec<f32>], weights: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 /// Verify that all adapters share the same dimensions and rank.
 fn validate_compatibility(adapters: &[(LoRAAdapter, f32)]) -> Result<(), String> {
@@ -344,10 +336,6 @@ fn build_merged(template: &LoRAAdapter, a: Vec<f32>, b: Vec<f32>) -> LoRAAdapter
 fn l2_norm(v: &[f32]) -> f32 {
     v.par_iter().map(|x| x * x).sum::<f32>().sqrt()
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

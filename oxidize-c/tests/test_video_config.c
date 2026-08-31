@@ -1,15 +1,9 @@
-/* test_video_config.c — OcVideoConfig tests.
- *
- * Unique suite name "video_config" to avoid collision with the "video"
- * suite in test_video.c and the "video_error" suite in
- * test_video_error.c.
- */
+/* test_video_config.c — OcVideoConfig tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 
 #include "oxidize/video_config.h"
 
-/* ─── init ─────────────────────────────────────────────────────────── */
 
 Test(video_config, init_defaults)
 {
@@ -31,7 +25,6 @@ Test(video_config, init_null_is_noop)
     cr_assert(true, "init(NULL) did not crash");
 }
 
-/* ─── validate ─────────────────────────────────────────────────────── */
 
 Test(video_config, validate_good_default)
 {
@@ -111,7 +104,6 @@ Test(video_config, validate_zero_max_tokens)
     cr_assert_eq(oc_video_config_validate(&cfg), OC_ERR_INVALID_ARG, "");
 }
 
-/* ─── sampling names ──────────────────────────────────────────────── */
 
 Test(video_config, sampling_names)
 {
@@ -121,7 +113,6 @@ Test(video_config, sampling_names)
     cr_assert_str_eq(oc_video_sampling_name((OcFrameSamplingStrategy)42), "unknown", "");
 }
 
-/* ─── pool names ──────────────────────────────────────────────────── */
 
 Test(video_config, pool_names)
 {
@@ -133,7 +124,6 @@ Test(video_config, pool_names)
     cr_assert_str_eq(oc_video_pool_name((OcTemporalPool)42),    "unknown", "");
 }
 
-/* ─── n_tokens ────────────────────────────────────────────────────── */
 
 Test(video_config, n_tokens_default)
 {

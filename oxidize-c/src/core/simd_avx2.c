@@ -1,22 +1,4 @@
-/*
- * simd_avx2.c — AVX2 + FMA + F16C dequant kernels.
- *
- * Compiled into EVERY build (no -mavx2 on the compile line). Each kernel is
- * annotated `__attribute__((target("avx2,fma,f16c")))` so gcc/clang emit
- * AVX2 instructions for that function only; the dispatcher calls them solely
- * on hosts where `__builtin_cpu_supports("avx2")` (and fma + f16c) are true.
- *
- * Bit-exactness with the scalar reference in src/compute/quantization.c:
- *   - Q4_0: out = (nibble - 8) * d            → single rounded mul, exact.
- *   - Q4_1: out = nibble * d + m             → vmulps + vaddps (NOT FMA).
- *   - Q8_0: out = (int8) * d                  → single rounded mul, exact.
- *   - Q4_K: out = d_sub * nibble - min_sub   → vmulps + vsubps (NOT FMA).
- *   - f16 → f32: vcvtph2ps is the canonical conversion (f16 is a strict
- *     subset of f32); bit-identical to the scalar bit-twiddle.
- *
- * Tests/test_simd.c asserts byte-for-byte equality between each kernel and
- * the scalar reference on randomized inputs (VAL-SIMD-001..004).
- */
+/* simd_avx2.c — AVX2 + FMA + F16C dequant kernels. Bit-exact with the scalar reference in src/compute/quantization.c on randomized inputs (VAL-SIMD-001..004). Q4_1 uses separate mul+add, not FMA, to keep that parity. */
 #include "oxidize/simd.h"
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -24,7 +6,6 @@
 #include <immintrin.h>
 #include <stdint.h>
 
-/* ─── Shared helpers ──────────────────────────────────────────────────── */
 
 /* Broadcast a little-endian f16 pair at `p` to 8×f32 via F16C. The f16 → f32
  * conversion is the canonical one (f16 strictly representable in f32), so
@@ -51,7 +32,6 @@ cvtepu8_high(const __m128i v)
     return _mm256_cvtepu8_epi32(_mm_srli_si128(v, 8));
 }
 
-/* ─── Q8_0 (block: f16 d, 32×int8) ────────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 bool oc_simd_dequant_q8_0_avx2(const uint8_t *src, size_t src_len,
@@ -82,7 +62,6 @@ bool oc_simd_dequant_q8_0_avx2(const uint8_t *src, size_t src_len,
     return true;
 }
 
-/* ─── Q4_0 (block: f16 d, 16 packed bytes → 32 outputs) ────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 bool oc_simd_dequant_q4_0_avx2(const uint8_t *src, size_t src_len,
@@ -118,7 +97,6 @@ bool oc_simd_dequant_q4_0_avx2(const uint8_t *src, size_t src_len,
     return true;
 }
 
-/* ─── Q4_1 (block: f16 d, f16 m, 16 packed bytes → 32 outputs) ─────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 bool oc_simd_dequant_q4_1_avx2(const uint8_t *src, size_t src_len,
@@ -143,7 +121,6 @@ bool oc_simd_dequant_q4_1_avx2(const uint8_t *src, size_t src_len,
         /* ggml layout: out[j] = low nibble of byte j, out[j + 16] = high
          * nibble — the same half-split the Q4_0 kernel above uses. No
          * byte interleave is involved. */
-        /* out = nibble*d + m  — separate vmulps + vaddps (NO FMA) for parity. */
         __m256 il0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(lo)),  d), m);
         __m256 il1 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_high(lo)), d), m);
         __m256 ih0 = _mm256_add_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(cvtepu8_low(hi)),  d), m);
@@ -157,14 +134,6 @@ bool oc_simd_dequant_q4_1_avx2(const uint8_t *src, size_t src_len,
     return true;
 }
 
-/* ─── Q4_K (block: f16 d, f16 min, 12 scale bytes, 128 packed bytes) ─────
- *
- * 256 outputs per block, 4 groups × (2 sub-groups × 32 outputs). Each group
- * reads 32 bytes of qs: low nibbles → 32 outputs with (d1,min1), high
- * nibbles of the SAME 32 bytes → 32 outputs with (d2,min2). The 8 (sc,m)
- * pairs are extracted scalarly via the exact get_scale_min_k4 layout; the
- * nibble unpack + mul + sub is SIMD.
- */
 static inline void get_scale_min_k4_scalar(size_t j, const uint8_t *scales,
                                            uint8_t *sc, uint8_t *m)
 {
@@ -201,7 +170,6 @@ bool oc_simd_dequant_q4_k_avx2(const uint8_t *src, size_t src_len,
             get_scale_min_k4_scalar(is,     scales, &sc1, &m1);
             get_scale_min_k4_scalar(is + 1, scales, &sc2, &m2);
 
-            /* d_sub = d * sc  (single mul, exact: sc is integer ≤ 63). */
             __m256 d1  = _mm256_mul_ps(d_global,   _mm256_set1_ps((float)sc1));
             __m256 m1v = _mm256_mul_ps(min_global, _mm256_set1_ps((float)m1));
             __m256 d2  = _mm256_mul_ps(d_global,   _mm256_set1_ps((float)sc2));

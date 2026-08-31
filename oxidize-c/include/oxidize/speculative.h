@@ -1,17 +1,4 @@
-/*
- * speculative.h — speculative decoding (draft model + target verification).
- *
- * Port of oxidize-core/src/model/speculative.rs + sampling.rs::speculative_decode.
- * Two-phase generation: a small draft model proposes K tokens, the target
- * model verifies them in a single batched forward, and accepted tokens are
- * emitted. On rejection, a residual-sampled token (stochastic) or the
- * target argmax (greedy) is emitted instead. When all K draft tokens are
- * accepted, one bonus token is sampled from the target's logits — so every
- * step emits at least 1 token and at most K+1.
- *
- * Requires two loaded models (target + draft) sharing the same vocabulary.
- * The draft model can be any OcLlamaModel (typically a smaller checkpoint).
- */
+/* speculative.h — speculative decoding (draft model + target verification). */
 #ifndef OXIDIZE_SPECULATIVE_H
 #define OXIDIZE_SPECULATIVE_H
 
@@ -57,18 +44,7 @@ typedef struct OcSpeculativeResult {
     bool     used_residual;                   /* last token was residual     */
 } OcSpeculativeResult;
 
-/* Verification kernel: compare draft vs target logits, return accepted
- * tokens + one residual/bonus token.
- *
- *   draft_tokens  : [k] proposed token ids
- *   draft_logits  : [k] pointers to vocab_size-length logit arrays
- *   target_logits : [k+1] pointers (one per position, including bonus)
- *   k             : number of draft tokens
- *   vocab_size    : vocabulary dimension
- *   cfg           : config (greedy/stochastic, temperature, seed)
- *   seed_state    : in/out RNG state (xorshift64); advanced per use
- *   out           : result (tokens, count, accepted, used_residual)
- */
+/* Verification kernel: compare draft vs target logits, return accepted tokens + one residual/bonus token. */
 OcError oc_speculative_decode(
     const uint32_t *draft_tokens,
     float * const *draft_logits,
@@ -79,17 +55,7 @@ OcError oc_speculative_decode(
     uint64_t *seed_state,
     OcSpeculativeResult *out);
 
-/* Full speculative generation loop.
- *
- *   target/draft        : loaded models (same vocab)
- *   target_sess/draft_sess : sessions (will be prefilled + advanced)
- *   prompt / prompt_len : input token ids
- *   cfg                 : config
- *   out_tokens          : output buffer (caller-allocated)
- *   out_len             : set to number of tokens written
- *   out_cap             : capacity of out_tokens
- *   stats               : statistics (may be NULL)
- */
+/* Full speculative generation loop. */
 OcError oc_speculative_generate(
     OcLlamaModel *target, OcLlamaSession *target_sess,
     OcLlamaModel *draft, OcLlamaSession *draft_sess,
@@ -98,7 +64,6 @@ OcError oc_speculative_generate(
     uint32_t *out_tokens, size_t *out_len, size_t out_cap,
     OcSpeculativeStats *stats);
 
-/* ─── Speculative stats accessors (port of speculative.rs) ────────────── */
 
 /* Acceptance rate: accepted / total_draft (0.0 if no drafts). */
 double oc_speculative_acceptance_rate(const OcSpeculativeStats *stats);
@@ -109,7 +74,6 @@ double oc_speculative_tokens_per_target_forward(const OcSpeculativeStats *stats)
 /* Estimated speedup vs plain decoding (1.0 = no speedup). */
 double oc_speculative_estimated_speedup(const OcSpeculativeStats *stats);
 
-/* ─── Draft model loader convenience ──────────────────────────────────── */
 
 /* Load a GGUF file as a draft model for speculative decoding.
  * The caller owns the returned OcLlamaModel and must free it.

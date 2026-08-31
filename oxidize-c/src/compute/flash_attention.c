@@ -93,12 +93,7 @@ OcError oc_flash_attention_multi_head(const float *q,
         const float *k_h = k_cache + kv_head * head_dim;
         const float *v_h = v_cache + kv_head * head_dim;
 
-        /* We need to compute attention with the correct stride.
-         * k_cache layout: [seq_len, n_heads_kv, head_dim]
-         * So k_cache[t * kv_row_floats + kv_head * head_dim + i] = K[t][kv_head][i]
-         *
-         * For the flash attention call, we need a strided view; the shared
-         * helper handles the per-position stride. */
+        /* We need to compute attention with the correct stride. */
         flash_online_softmax(q_h, k_h, v_h, 0, seq_len, head_dim,
                              kv_row_floats, out_h);
     }
@@ -144,7 +139,6 @@ OcError oc_attention_scores(const float *q,
     return OC_OK;
 }
 
-/* ─── f16 conversion helpers ────────────────────────────────────────── */
 
 uint16_t oc_f32_to_f16_bits(float value)
 {
@@ -202,7 +196,6 @@ float oc_f16_to_f32_bits(uint16_t h)
     return sign ? -val : val;
 }
 
-/* ─── Multi-head decode flash attention (Rust port) ─────────────────── */
 
 /* Per-head decode with online-softmax block tiling.
  * key_layer/value_layer layout: [seq_len][kv_len] where kv_len = kv_heads * head_dim.

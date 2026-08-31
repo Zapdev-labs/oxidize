@@ -1,8 +1,4 @@
-/*
- * model_loader.c — Universal model loader implementation.
- *
- * Uses the existing GGUF parser to load and inspect model files.
- */
+/* model_loader.c — Universal model loader implementation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/model_loader.h"
 #include "oxidize/gguf.h"
@@ -185,7 +181,6 @@ OcError oc_model_loader_list_tensors(const OcModelLoader *loader,
     return OC_OK;
 }
 
-/* oc_model_arch_name and oc_model_arch_from_str are in model.h */
 
 uint64_t oc_model_loader_param_count(const OcModelLoader *loader)
 {

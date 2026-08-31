@@ -1,30 +1,4 @@
-/*
- * mistral_arch.h — Mistral architecture forward pass.
- *
- * Mistral uses SwiGLU activation (SiLU-gated FFN, same as Llama), Rotary
- * Positional Embeddings (RoPE) on Q/K, Grouped-Query Attention (GQA, where
- * n_kv_heads may be < n_heads), and Sliding Window Attention (SWA) with a
- * configurable sliding_window (default 4096). The architecture is
- * structurally close to Llama/Mistral dense in oxidize-core; the dedicated
- * module exists to surface the SWA + GQA configuration knobs and to mirror
- * the per-architecture module layout used for GLM, Gemma, and Phi.
- *
- * Port of oxidize-core/src/model/inference.rs::ModelArchitecture::Mistral
- * forward path to the C11 port. The forward function is a stub that
- * allocates a logits buffer sized by the model config, fills it with zeros,
- * and returns OC_OK. Real weight loading + token generation is wired up
- * later via oc_model_arch_from_str + the GGUF loader.
- *
- * Weight tensor canonical names (after HF → oxidize mapping, same as
- * Llama):
- *   tok_embeddings.weight
- *   output.weight
- *   norm.weight
- *   blk.N.attn_q.weight, blk.N.attn_k.weight, blk.N.attn_v.weight,
- *   blk.N.attn_output.weight
- *   blk.N.attn_norm.weight, blk.N.ffn_norm.weight
- *   blk.N.ffn_gate.weight, blk.N.ffn_up.weight, blk.N.ffn_down.weight
- */
+/* mistral_arch.h — Mistral architecture forward pass. */
 #ifndef OXIDIZE_MISTRAL_ARCH_H
 #define OXIDIZE_MISTRAL_ARCH_H
 
@@ -38,11 +12,7 @@
 extern "C" {
 #endif
 
-/* Mistral model configuration. Default values populated by
- * oc_mistral_config_init() match the Mistral-7B-v0.1 reference:
- *   n_layers=32, n_heads=32, n_kv_heads=8, head_dim=128, hidden_dim=4096,
- *   intermediate_dim=14336, vocab_size=32000, sliding_window=4096,
- *   rope_theta=10000.0, max_position=32768. */
+/* Mistral model configuration. */
 typedef struct OcMistralConfig {
     uint32_t n_layers;
     uint32_t n_heads;
@@ -71,12 +41,7 @@ typedef struct OcMistralLayer {
     float *w_down;         /* SwiGLU down                ([hidden_dim, intermediate_dim]) */
 } OcMistralLayer;
 
-/* Owning model struct. `layers` is heap-allocated (n_layers entries) and
- * freed by oc_mistral_free(). The weight buffers (tok_emb, output_norm,
- * output, and per-layer weights) are owned by the model and freed together
- * with the struct. The KV cache fields (kv_cache_k, kv_cache_v,
- * kv_cache_cap, kv_seq_len) provide per-session state for multi-token
- * generation. */
+/* Owning model struct. */
 typedef struct OcMistralModel {
     OcMistralConfig  config;
     OcMistralLayer  *layers;     /* heap array, length config.n_layers */
@@ -95,11 +60,7 @@ typedef struct OcMistralModel {
  * success, OC_ERR_INVALID_ARG if `cfg` is NULL. */
 OcError oc_mistral_config_init(OcMistralConfig *cfg);
 
-/* Allocate a stub Mistral model with `cfg` (or defaults if NULL).
- * Weight buffers are allocated and zeroed; layer pointers are wired
- * into the allocated storage so the struct is immediately usable as
- * a scaffold for the real forward pass. Returns OC_OK on success,
- * OC_ERR_OOM on allocation failure, OC_ERR_INVALID_ARG on bad args. */
+/* Allocate a stub Mistral model with `cfg` (or defaults if NULL). */
 OcError oc_mistral_model_init(OcMistralModel *model, const OcMistralConfig *cfg);
 
 /* Stub forward pass: writes zeros into `logits` (length config.vocab_size).

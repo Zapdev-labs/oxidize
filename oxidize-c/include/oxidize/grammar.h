@@ -1,14 +1,4 @@
-/*
- * grammar.h — grammar constraints for structured output (JSON, regex, CFG).
- *
- * Provides a simple grammar constraint system that filters logits during
- * sampling to ensure generated text conforms to a specified grammar (e.g.
- * JSON, specific field names, or a character-level CFG).
- *
- * This is a lightweight implementation focused on JSON schema constraints
- * and character-set filtering. Full CFG parsing (like llama.cpp's GBNF) is
- * left as a future enhancement.
- */
+/* grammar.h — grammar constraints for structured output (JSON, regex, CFG). */
 #ifndef OXIDIZE_GRAMMAR_H
 #define OXIDIZE_GRAMMAR_H
 

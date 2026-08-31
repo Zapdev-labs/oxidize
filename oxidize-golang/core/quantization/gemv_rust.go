@@ -52,9 +52,6 @@ func rustQuantType(t Type) (C.uint32_t, bool) {
 }
 
 // GemvRust calls the Rust AVX2+FMA optimized GEMV kernel via CGo.
-// It handles all quantization types supported by oxidize-core's
-// gemv_quantized_f32 (Q4_K, Q8_0, Q6_K, etc.).
-// Returns false if the type is not supported and the caller should fall back.
 func GemvRust(qbytes []byte, qtype Type, rows, cols int, vector, output []float32) (bool, error) {
 	rt, ok := rustQuantType(qtype)
 	if !ok {

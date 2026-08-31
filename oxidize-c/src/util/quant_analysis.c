@@ -11,7 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static int cmp_double(const void *a, const void *b)
 {
@@ -29,7 +28,6 @@ static double percentile(double *sorted, size_t n, double p)
     return sorted[idx];
 }
 
-/* ─── Quality metrics ──────────────────────────────────────────────────── */
 
 OcError oc_quant_analyze(const float *f32_data, const uint8_t *quant_data,
                           OcGgufQuantizationType qtype, size_t n,
@@ -107,7 +105,6 @@ OcError oc_quant_analyze(const float *f32_data, const uint8_t *quant_data,
     return OC_OK;
 }
 
-/* ─── Error distribution ──────────────────────────────────────────────── */
 
 OcError oc_quant_error_distribution(const float *f32_data,
                                      const uint8_t *quant_data,
@@ -167,7 +164,6 @@ OcError oc_quant_error_distribution(const float *f32_data,
     return OC_OK;
 }
 
-/* ─── Formatting ──────────────────────────────────────────────────────── */
 
 size_t oc_quant_metrics_format(const OcQuantMetrics *m, char *buf, size_t cap)
 {
@@ -211,7 +207,6 @@ size_t oc_quant_metrics_table(const OcQuantMetrics *m, char *buf, size_t cap)
     return (size_t)n;
 }
 
-/* ─── Quant type info ──────────────────────────────────────────────────── */
 
 const char *oc_quant_analysis_type_name(OcGgufQuantizationType t)
 {
@@ -271,7 +266,6 @@ double oc_quant_estimated_ppl_delta(OcGgufQuantizationType t)
     }
 }
 
-/* ─── Recommender ─────────────────────────────────────────────────────── */
 
 OcError oc_quant_recommend(uint64_t model_params, uint64_t available_ram,
                              OcQuantGoal goal,
@@ -406,7 +400,6 @@ size_t oc_quant_recommend_format(const OcQuantRecommendation *r, char *buf, size
     return (size_t)n;
 }
 
-/* ─── Comparison table ─────────────────────────────────────────────────── */
 
 size_t oc_quant_comparison_table(uint64_t model_params, char *buf, size_t cap)
 {

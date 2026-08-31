@@ -1,8 +1,4 @@
 // Package tensor mirrors oxidize_core::compute::tensor. It provides DType,
-// the Tensor type, and a comprehensive set of float32 kernels (GEMV, GEMM,
-// RoPE, RMSNorm, LayerNorm, softmax, scaled dot-product attention, SwiGLU,
-// linear activation, f16 conversion, bit extraction) plus the error types
-// associated with each kernel.
 package tensor
 
 import (

@@ -1,9 +1,4 @@
-/*
- * numa.c — NUMA awareness implementation.
- *
- * Uses Linux sysfs for NUMA topology detection. On non-Linux systems
- * or systems without NUMA, returns OC_OK with a single-node topology.
- */
+/* numa.c — NUMA awareness implementation. */
 #define _GNU_SOURCE
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1  /* expose _SC_NPROCESSORS_ONLN on macOS */
@@ -23,15 +18,6 @@
 #include <sys/syscall.h>
 #endif
 
-/* ─── Kernel NUMA memory policy (raw syscalls, no libnuma) ──────────────
- *
- * set_mempolicy(2)/mbind(2) are not exposed by glibc, so call them through
- * syscall(). Keeping this dependency-free matters: the whole point of the C
- * port is that it builds with nothing but a libc.
- *
- * These MPOL_* values are the kernel ABI (include/uapi/linux/mempolicy.h) and
- * deliberately do NOT match the OcNumaMemPolicy enum — map explicitly.
- */
 #if defined(__linux__)
 #define OC_MPOL_DEFAULT    0
 #define OC_MPOL_PREFERRED  1
@@ -64,7 +50,6 @@ static long sys_mbind(void *addr, unsigned long len, int mode,
 }
 #endif /* __linux__ */
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static bool read_file_to_buf(const char *path, char *buf, size_t cap)
 {
@@ -82,7 +67,6 @@ static uint64_t parse_meminfo_line(const char *line)
     return (uint64_t)strtoull(line, NULL, 10) * 1024; /* kB to bytes */
 }
 
-/* ─── API ──────────────────────────────────────────────────────────────── */
 
 bool oc_numa_available(void)
 {
@@ -196,14 +180,7 @@ OcError oc_numa_current_node(uint32_t *out_node)
 #endif
 }
 
-/* Set this thread's memory policy for SUBSEQUENT allocations and page faults.
- *
- * Call before faulting in the weights: set_mempolicy does not migrate pages
- * that already exist, so ordering is the whole game. In particular the kernel
- * default is MPOL_DEFAULT — first touch allocates node-LOCAL, not interleaved
- * — so a large model faulted in by threads that happen to sit on one socket
- * ends up with its pages on that socket and every read from the other socket
- * crosses the interconnect. Interleave has to be requested explicitly. */
+/* Set this thread's memory policy for SUBSEQUENT allocations and page faults. */
 OcError oc_numa_set_policy(OcNumaMemPolicy policy, uint32_t node)
 {
 #if defined(__linux__)
@@ -284,10 +261,7 @@ OcError oc_numa_pin_cpu(uint32_t cpu)
 #endif
 }
 
-/* Large allocations go through mmap so mbind() can place them; small ones
- * fall back to malloc, where per-node placement is not worth a syscall.
- * `mode`/`node` are applied with mbind before any page is touched, so the
- * placement takes effect on first fault. */
+/* Large allocations go through mmap so mbind() can place them; small ones fall back to malloc, where per-node placement is not worth a syscall. `mode`/`node` are applied with mbind before any page is touched, so the placement takes effect on first fault. */
 static void *numa_alloc_bound(size_t size, int mode, const unsigned long *mask)
 {
     if (size < (1u << 20)) return malloc(size);

@@ -149,9 +149,6 @@ impl MeshChatEngine {
 
         if self.is_master {
             // Simulate a distributed forward pass:
-            // 1. Pipeline stages pass activations through the ring.
-            // 2. Tensor parallelism all-sums partial outputs.
-            // 3. Sample tokens deterministically from the prompt.
             let mut tokens = Vec::with_capacity(max_tokens);
             let words: Vec<&str> = prompt.prompt.split_whitespace().collect();
             for i in 0..max_tokens {

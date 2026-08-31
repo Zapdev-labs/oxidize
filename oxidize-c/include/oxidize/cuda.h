@@ -1,15 +1,4 @@
-/*
- * cuda.h — CUDA backend for GPU-accelerated inference.
- *
- * When OC_CUDA is defined, the forward path dispatches to CUDA kernels
- * running on an NVIDIA GPU (e.g., L40S). Weights stay in their packed GGUF
- * form in device memory when a device kernel exists for the type (see
- * cuda_mmq.h — Q4_K/Q6_K/Q8_0), and are dequantized to f32 on upload only as
- * a fallback. The KV cache resides on the GPU in f16.
- *
- * When OC_CUDA is not defined, these functions are no-ops / stubs and
- * the CPU forward path is used.
- */
+/* cuda.h — CUDA backend for GPU-accelerated inference. */
 #ifndef OXIDIZE_CUDA_H
 #define OXIDIZE_CUDA_H
 
@@ -24,14 +13,7 @@
 extern "C" {
 #endif
 
-/* A weight tensor resident in device memory.
- *
- * `packed` distinguishes the two residency modes: when true, `data` holds the
- * raw GGUF blocks for `qtype` and rows are `row_bytes` apart, and the matvec
- * dispatches to a cuda_mmq.h kernel. When false, `data` is a plain f32
- * [rows, cols] buffer produced by host-side dequantization — the fallback for
- * types without a device kernel, and for shapes whose row length is not a
- * whole number of blocks (K-quants need cols % 256 == 0). */
+/* A weight tensor resident in device memory. */
 typedef struct OcCudaWeight {
     void *data;                 /* device buffer: packed blocks or f32      */
     size_t row_bytes;           /* device row stride in bytes               */
@@ -61,18 +43,12 @@ typedef struct OcCudaContext {
     OcCudaWeight *d_ffn_down;
     float **d_attn_norm;
     float **d_ffn_norm;
-    /* Gemma-family extra norms, per layer; entry is NULL when the model has
-     * no such tensor. attn_q/k_norm are per-head and are the LAYER's head_dim
-     * long (256 on Gemma 4 sliding layers, 512 on global), so they are not
-     * interchangeable between layers. */
+    /* Gemma-family extra norms, per layer; entry is NULL when the model has no such tensor. attn_q/k_norm are per-head and are the LAYER's head_dim long (256 on Gemma 4 sliding layers, 512 on global), so they are not interchangeable between layers. */
     float **d_attn_q_norm;
     float **d_attn_k_norm;
     float **d_post_attn_norm;
     float **d_post_ffw_norm;
-    /* MoE (Qwen3-MoE / Mixtral / MiniMax-style). Present only when
-     * num_experts > 0; the dense d_ffn_* above are then unused. Expert
-     * tensors are stacked — expert i occupies rows [i*i_size, (i+1)*i_size)
-     * in gate/up and [i*n_embd, (i+1)*n_embd) in down. */
+    /* MoE (Qwen3-MoE / Mixtral / MiniMax-style). Present only when num_experts > 0; the dense d_ffn_* above are then unused. Expert tensors are stacked — expert i occupies rows [i*i_size, (i+1)*i_size) in gate/up and [i*n_embd, (i+1)*n_embd) in down. */
     OcCudaWeight *d_ffn_gate_inp;    /* router: [num_experts, n_embd]      */
     OcCudaWeight *d_ffn_gate_exps;
     OcCudaWeight *d_ffn_up_exps;
@@ -82,10 +58,7 @@ typedef struct OcCudaContext {
     OcCudaWeight *d_ffn_up_shexp;
     OcCudaWeight *d_ffn_down_shexp;
     OcCudaWeight *d_ffn_gate_inp_shexp;  /* optional sigmoid gate          */
-    /* KV cache on GPU: [n_layer][n_ctx][n_head_kv*head_dim] for K and V,
-     * stored as __half (opaque here to keep this header C11-clean). f16
-     * halves the cache footprint versus f32 at no measurable quality cost —
-     * it is what the Rust CUDA backend stores as well. */
+    /* KV cache on GPU: [n_layer][n_ctx][n_head_kv*head_dim] for K and V, stored as __half (opaque here to keep this header C11-clean). */
     void *d_kv_k;
     void *d_kv_v;
     /* Workspace for activations. */
@@ -112,24 +85,13 @@ typedef struct OcCudaContext {
     float yarn_factor;
     uint32_t yarn_orig_ctx;
     bool uses_geglu;
-    /* ── Gemma 4 dual-geometry attention ──────────────────────────────────
-     *
-     * Sliding and global layers have different attention shapes (see
-     * OcLlamaConfig). The scalar n_head_kv/head_dim/rope_dim/rope_theta above
-     * carry the GLOBAL values; these host-side arrays carry the resolved
-     * per-layer geometry, mirroring OcLlamaLayer so the forward pass never
-     * re-derives it. Each is n_layer entries, or NULL for non-Gemma-4 models
-     * (in which case the scalars apply to every layer). */
     bool      uses_gemma4;
     uint32_t *l_head_dim;
     uint32_t *l_n_head_kv;
     uint32_t *l_rope_dim;
     float    *l_rope_theta;
     uint32_t *l_sliding;        /* window size, 0 = global attention        */
-    /* KV cache stride in elements per position per layer. The cache is
-     * indexed uniformly, so on Gemma 4 this is the MAX over both geometries
-     * (sliding 16*256 = 4096 beats global 4*512 = 2048); sizing it from
-     * n_head_kv*head_dim would under-allocate every sliding layer. */
+    /* KV cache stride in elements per position per layer. */
     size_t   kv_row;
     /* Final logit softcap: logits = tanh(l/c)*c. 0 = disabled (Gemma 4: 30). */
     float    logit_softcap;
@@ -188,10 +150,7 @@ typedef struct OcCudaContext {
     uint32_t n_f32_tensors;     /* tensors that fell back to f32            */
 } OcCudaContext;
 
-/* Initialize the CUDA context: allocate device memory and upload weights from
- * the loaded OcLlamaModel, keeping them packed where a device kernel exists.
- * Returns OC_ERR_UNSUPPORTED if CUDA is not available (compiled without
- * OC_CUDA or no GPU). */
+/* Initialize the CUDA context: allocate device memory and upload weights from the loaded OcLlamaModel, keeping them packed where a device kernel exists. Returns OC_ERR_UNSUPPORTED if CUDA is not available (compiled without OC_CUDA or no GPU). */
 OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model);
 
 /* Run one forward step on GPU: embed token, run all layers, output logits.

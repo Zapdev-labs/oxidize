@@ -1,10 +1,4 @@
-/*
- * video_encoder.c — Per-frame vision encoding + temporal projection.
- *
- * Port of oxidize-core/src/video/encoder.rs. When projection weights
- * are loaded, performs a real GEMV projection from vision_hidden to
- * llm_hidden. Without weights, falls back to copy/pad.
- */
+/* video_encoder.c — Per-frame vision encoding + temporal projection. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_encoder.h"
@@ -12,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── helpers ────────────────────────────────────────────────────────── */
 
 static OcError validate_cfg(const OcVideoEncoderConfig *cfg)
 {
@@ -26,7 +19,6 @@ static OcError validate_cfg(const OcVideoEncoderConfig *cfg)
     return OC_OK;
 }
 
-/* ─── lifecycle ──────────────────────────────────────────────────────── */
 
 OcError oc_video_encoder_init(OcVideoEncoder *enc,
                                const OcVideoEncoderConfig *cfg)
@@ -60,7 +52,6 @@ void oc_video_encoder_free(OcVideoEncoder *enc)
     enc->n_tokens      = 0;
 }
 
-/* ─── encode ─────────────────────────────────────────────────────────── */
 
 OcError oc_video_encoder_encode(OcVideoEncoder *enc,
                                  const float *frame_embeddings,
@@ -72,7 +63,6 @@ OcError oc_video_encoder_encode(OcVideoEncoder *enc,
     if (frame_dim != enc->config.vision_hidden) {
         return OC_ERR_INVALID_ARG;
     }
-    /* n_frames == 0 is allowed: it just produces zero tokens. */
     size_t need = n_frames * (size_t)enc->config.llm_hidden;
     float *buf = (float *)realloc(enc->output_tokens, need * sizeof(float));
     if (need > 0 && buf == NULL) {
@@ -114,7 +104,6 @@ OcError oc_video_encoder_encode(OcVideoEncoder *enc,
     return OC_OK;
 }
 
-/* ─── accessors ──────────────────────────────────────────────────────── */
 
 size_t oc_video_encoder_n_tokens(const OcVideoEncoder *enc)
 {

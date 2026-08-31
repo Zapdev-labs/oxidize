@@ -93,7 +93,6 @@ Test(det, print)
 Test(det, print_null)
 {
     oc_detect_print(NULL, NULL, 0);
-    /* should not crash */
 }
 
 Test(det, numa)

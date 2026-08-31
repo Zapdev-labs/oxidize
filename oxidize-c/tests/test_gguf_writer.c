@@ -1,13 +1,4 @@
-/* test_gguf_writer.c — Criterion tests for the GGUF v3 writer.
- *
- * Covers:
- *   - Header initialization (magic, version, counts)
- *   - Metadata KV of each type (string, uint32, uint64, float32, array<string>)
- *   - Tensor writing (single, multiple, alignment)
- *   - Finalize (count patching)
- *   - Round-trip: write then parse back with the GGUF parser
- *   - Error handling (NULL args, finalized writer, etc.)
- */
+/* test_gguf_writer.c — Criterion tests for the GGUF v3 writer. */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -31,7 +22,6 @@ static const char *make_temp_path(const char *suffix)
     return path;
 }
 
-/* ─── Header initialization ─────────────────────────────────────────────── */
 
 Test(gguf_writer, init_creates_valid_header)
 {
@@ -92,7 +82,6 @@ Test(gguf_writer, init_null_arch_skips_arch_kv)
     unlink(path);
 }
 
-/* ─── Metadata KV: string ───────────────────────────────────────────────── */
 
 Test(gguf_writer, add_string_metadata)
 {
@@ -130,7 +119,6 @@ Test(gguf_writer, add_string_null_args)
     unlink(make_temp_path("ns.gguf"));
 }
 
-/* ─── Metadata KV: uint32 ───────────────────────────────────────────────── */
 
 Test(gguf_writer, add_uint32_metadata)
 {
@@ -179,7 +167,6 @@ Test(gguf_writer, add_uint32_max_value)
     unlink(path);
 }
 
-/* ─── Metadata KV: uint64 ───────────────────────────────────────────────── */
 
 Test(gguf_writer, add_uint64_metadata)
 {
@@ -219,7 +206,6 @@ Test(gguf_writer, add_uint64_large_value)
     unlink(path);
 }
 
-/* ─── Metadata KV: float32 ──────────────────────────────────────────────── */
 
 Test(gguf_writer, add_float32_metadata)
 {
@@ -262,7 +248,6 @@ Test(gguf_writer, add_float32_zero_and_negative)
     unlink(path);
 }
 
-/* ─── Metadata KV: array<string> ────────────────────────────────────────── */
 
 Test(gguf_writer, add_array_string_metadata)
 {
@@ -312,7 +297,6 @@ Test(gguf_writer, add_array_string_empty)
     unlink(path);
 }
 
-/* ─── Tensor writing ─────────────────────────────────────────────────────── */
 
 Test(gguf_writer, add_single_tensor)
 {
@@ -416,7 +400,6 @@ Test(gguf_writer, add_tensor_data_null_with_size)
     unlink(make_temp_path("tdn.gguf"));
 }
 
-/* ─── Finalize ───────────────────────────────────────────────────────────── */
 
 Test(gguf_writer, finalize_patches_counts)
 {
@@ -588,7 +571,6 @@ Test(gguf_writer, zero_byte_tensor_data)
     OcGgufWriter w;
     oc_gguf_writer_init(path, "llama", &w);
     uint64_t dims[] = { 0 };
-    /* data_size = 0 is a degenerate but valid case. */
     OcError e = oc_gguf_writer_add_tensor(&w, "empty", 1, dims, 0, NULL, 0);
     cr_assert_eq(e, OC_OK, "");
     oc_gguf_writer_finalize(&w);
@@ -600,4 +582,60 @@ Test(gguf_writer, zero_byte_tensor_data)
     cr_assert_eq(f.tensor_count, 1, "");
     oc_gguf_free(&f);
     unlink(path);
+}
+
+Test(gguf_writer, init_from_file_copies_arrays_and_alignment)
+{
+    const char *src_path = make_temp_path("src_align.gguf");
+    const char *dst_path = make_temp_path("dst_align.gguf");
+    OcGgufWriter w;
+    OcError e;
+    cr_assert_eq(oc_gguf_writer_init(src_path, "llama", &w), OC_OK);
+    w.alignment = 64;
+    cr_assert_eq(oc_gguf_writer_add_uint32(&w, "general.alignment", 64), OC_OK);
+    const char *toks[] = { "hello", "world" };
+    cr_assert_eq(oc_gguf_writer_add_array_string(&w, "tokenizer.ggml.tokens", toks, 2), OC_OK);
+    OcGgufMetadataValue flag;
+    memset(&flag, 0, sizeof(flag));
+    flag.type = OC_GGUF_MT_BOOL;
+    flag.v.b = true;
+    cr_assert_eq(oc_gguf_writer_add_value(&w, "tokenizer.ggml.add_bos_token", &flag), OC_OK);
+    uint8_t payload[4] = { 1, 2, 3, 4 };
+    uint64_t dims[] = { 4 };
+    cr_assert_eq(oc_gguf_writer_add_tensor(&w, "t", 1, dims, 0, payload, 4), OC_OK);
+    oc_gguf_writer_free(&w);
+
+    OcGgufFile src;
+    e = oc_gguf_open(src_path, &src);
+    cr_assert_eq(e, OC_OK, "src parse: %s", oc_error_msg(e));
+    cr_assert_eq(src.alignment, 64);
+    cr_assert_eq(src.data_section_start % 64, 0);
+
+    cr_assert_eq(oc_gguf_writer_init_from_file(dst_path, &src, &w), OC_OK);
+    const OcGgufTensorInfo *ti = &src.tensors[0];
+    const void *data = src.backing_buf + ti->absolute_offset;
+    cr_assert_eq(oc_gguf_writer_add_tensor(&w, ti->name, ti->n_dims, ti->dims,
+                                           ti->ggml_type, data, 4), OC_OK);
+    oc_gguf_writer_free(&w);
+
+    OcGgufFile dst;
+    e = oc_gguf_open(dst_path, &dst);
+    cr_assert_eq(e, OC_OK, "dst parse: %s", oc_error_msg(e));
+    cr_assert_eq(dst.alignment, 64);
+    uint32_t alignment = 0;
+    cr_assert(oc_gguf_metadata_get_u32(&dst, "general.alignment", &alignment));
+    cr_assert_eq(alignment, 64);
+    bool add_bos = false;
+    cr_assert(oc_gguf_metadata_get_bool(&dst, "tokenizer.ggml.add_bos_token", &add_bos));
+    cr_assert_eq(add_bos, true);
+    const OcGgufMetadataValue *tokens = oc_gguf_metadata_get(&dst, "tokenizer.ggml.tokens");
+    cr_assert_not_null(tokens);
+    cr_assert_eq(tokens->type, OC_GGUF_MT_ARRAY);
+    cr_assert_eq(tokens->v.arr.elem_type, OC_GGUF_MT_STRING);
+    cr_assert_eq(tokens->v.arr.len, 2);
+    cr_assert_eq(dst.data_section_start % 64, 0);
+    oc_gguf_free(&src);
+    oc_gguf_free(&dst);
+    unlink(src_path);
+    unlink(dst_path);
 }

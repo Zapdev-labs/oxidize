@@ -1,11 +1,4 @@
-/*
- * merge.h — checkpoint merging utility.
- *
- * Merges two or more GGUF model checkpoints using various strategies
- * (linear, SLERP, TIES, DARE). Outputs a single merged GGUF file.
- *
- * Port of oxidize-merge/ Rust crate.
- */
+/* merge.h — checkpoint merging utility. */
 #ifndef OXIDIZE_MERGE_H
 #define OXIDIZE_MERGE_H
 

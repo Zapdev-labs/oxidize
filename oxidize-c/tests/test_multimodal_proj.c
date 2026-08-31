@@ -29,7 +29,6 @@ Test(mm_proj, init_valid)
     cr_assert_eq(proj->config.input_dim, 64);
     cr_assert_eq(proj->config.output_dim, 128);
     cr_assert_eq(proj->n_weights, 2);
-    /* layer 0: in=64, out=64 (hidden); layer 1: in=64, out=128 */
     cr_assert_eq(proj->in_dims[0], 64);
     cr_assert_eq(proj->out_dims[0], 64);
     cr_assert_eq(proj->in_dims[1], 64);
@@ -86,7 +85,6 @@ Test(mm_proj, init_hidden_dim_defaults_to_input)
     OcMultimodalProjection *proj = oc_mm_proj_init(&cfg);
     cr_assert_not_null(proj);
     cr_assert_eq(proj->config.hidden_dim, 48);
-    /* layer 0 out = hidden_dim = 48 */
     cr_assert_eq(proj->out_dims[0], 48);
     oc_mm_proj_free(proj);
 }
@@ -238,7 +236,7 @@ Test(mm_proj, forward_linear_bias)
     OcMultimodalProjection *proj = oc_mm_proj_init(&cfg);
     cr_assert_not_null(proj);
 
-    /* Identity weight, bias = [1, 1, 1, 1] */
+    /* Both layers: identity weight, zero bias. */
     float w[16] = {0};
     for (int i = 0; i < 4; i++) w[i * 4 + i] = 1.0f;
     float b[4] = {1.0f, 1.0f, 1.0f, 1.0f};

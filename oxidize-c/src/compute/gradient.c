@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_grad_config_init(OcGradientConfig *cfg)
 {
@@ -62,7 +61,6 @@ void oc_grad_free(OcGradientState *state)
     memset(state, 0, sizeof(*state));
 }
 
-/* ─── Gradient buffer ops ──────────────────────────────────────────── */
 
 OcError oc_grad_zero(OcGradientState *state)
 {
@@ -104,7 +102,6 @@ OcError oc_grad_clip(OcGradientState *state)
     return OC_OK;
 }
 
-/* ─── Optimizer steps ──────────────────────────────────────────────── */
 
 OcError oc_grad_sgd_step(OcGradientState *state, float *params, size_t n)
 {
@@ -177,7 +174,6 @@ OcError oc_grad_adamw_step(OcGradientState *state, float *params, size_t n)
     return OC_OK;
 }
 
-/* ─── Learning rate ────────────────────────────────────────────────── */
 
 OcError oc_grad_set_lr(OcGradientState *state, float lr)
 {
@@ -193,7 +189,6 @@ float oc_grad_get_lr(const OcGradientState *state)
     return state->config.learning_rate;
 }
 
-/* ─── Backprop primitives ─────────────────────────────────────────── */
 
 /* Forward declarations of the scalar activation kernels we reuse from
  * activation.c so the gradient path stays bit-exact with the forward path. */
@@ -214,7 +209,6 @@ OcError oc_grad_compute_linear_backward(
         return OC_ERR_INVALID_ARG;
     if (in_features == 0 || out_features == 0) return OC_ERR_INVALID_ARG;
 
-    /* grad_input[i] = sum_j(grad_output[j] * weight[j*in + i]) */
     for (size_t i = 0; i < in_features; i++) {
         float acc = 0.0f;
         for (size_t j = 0; j < out_features; j++) {
@@ -223,7 +217,6 @@ OcError oc_grad_compute_linear_backward(
         grad_input[i] = acc;
     }
 
-    /* grad_weight[j*in + i] = grad_output[j] * input[i] */
     for (size_t j = 0; j < out_features; j++) {
         float go = grad_output[j];
         float *gw_row = grad_weight + j * in_features;

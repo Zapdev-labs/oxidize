@@ -41,7 +41,6 @@ Test(temporal, init_and_free)
     cr_assert_eq(st.n_output, 4, "");
     oc_temporal_free(&st);
     cr_assert_null(st.output, "");
-    /* double free safe */
     oc_temporal_free(&st);
 }
 

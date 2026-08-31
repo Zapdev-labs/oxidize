@@ -10,9 +10,7 @@ use crate::gguf::GgufQuantizationType;
 #[cfg(target_os = "macos")]
 use crate::tensor::DType;
 
-// ---------------------------------------------------------------------------
 //  Build-info (always available, even on Linux)
-// ---------------------------------------------------------------------------
 
 /// Build-time detection info for the MLX backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +33,7 @@ pub enum MlxKernelError {
     InvalidOutputLength { expected: usize, actual: usize },
 }
 
-// ---------------------------------------------------------------------------
 //  macOS-only: MlxTensor, MlxWeightStorage, MlxComputeBackend
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
 mod mlx_impl {
@@ -685,9 +681,7 @@ mod mlx_impl {
         }
     }
 
-    // ------------------------------------------------------------------
     //  Helper: map mlx_rs::Dtype -> oxidize_core::tensor::DType
-    // ------------------------------------------------------------------
     fn mlx_dtype_to_core(dtype: mlx_rs::Dtype) -> DType {
         match dtype {
             mlx_rs::Dtype::Float32 => DType::F32,
@@ -701,16 +695,12 @@ mod mlx_impl {
     }
 }
 
-// ---------------------------------------------------------------------------
 //  Re-exports (only on macOS)
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
 pub use mlx_impl::{MlxComputeBackend, MlxTensor, MlxWeightStorage};
 
-// ---------------------------------------------------------------------------
 //  Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

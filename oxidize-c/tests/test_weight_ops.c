@@ -159,7 +159,6 @@ Test(wops, gemm_weight_f32_batch)
     float inputs[] = {1,0, 0,1, 1,1};
     float outputs[6];
     cr_assert_eq(oc_gemm_weight(&ws, 2, 2, inputs, outputs, 3), OC_OK);
-    /* batch 0: [1,3], batch 1: [2,4], batch 2: [3,7] */
     cr_assert_float_eq(outputs[0], 1.0f, 0.001f);
     cr_assert_float_eq(outputs[1], 3.0f, 0.001f);
     cr_assert_float_eq(outputs[2], 2.0f, 0.001f);
@@ -189,7 +188,6 @@ Test(wops, add_repeating_bias)
     float buf[] = {1, 2, 3, 4, 5, 6};
     float bias[] = {10, 20};
     oc_add_repeating_bias(buf, 6, bias, 2);
-    /* bias repeats: [10,20,10,20,10,20] */
     cr_assert_float_eq(buf[0], 11.0f, 0.001f);
     cr_assert_float_eq(buf[1], 22.0f, 0.001f);
     cr_assert_float_eq(buf[2], 13.0f, 0.001f);
@@ -242,7 +240,6 @@ Test(wops, gemv_weight_q8_0)
     oc_weight_storage_free(&ws);
 }
 
-/* ─── MoE FFN forward tests ───────────────────────────────────────────── */
 
 Test(wops, moe_softmax_gating)
 {
@@ -271,7 +268,6 @@ Test(wops, moe_softmax_gating)
     oc_weight_storage_init(&up_exps);
     oc_weight_storage_init(&down_exps);
 
-    /* gate = identity for all experts, up = ones, down = identity. */
     float *g = malloc(8 * sizeof(float));
     g[0]=1; g[1]=0; g[2]=0; g[3]=1;  /* expert 0: identity */
     g[4]=1; g[5]=0; g[6]=0; g[7]=1;  /* expert 1: identity */

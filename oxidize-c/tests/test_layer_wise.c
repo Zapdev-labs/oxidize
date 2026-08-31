@@ -297,7 +297,6 @@ Test(lw, free_null)
     oc_lw_state_free(NULL);
 }
 
-/* ─── Forward pass tests ────────────────────────────────────────────── */
 
 Test(lw, forward_single)
 {

@@ -1,9 +1,4 @@
-/*
- * cross_validation.c — Output cross-validation suite implementation.
- *
- * Port of oxidize-core/src/validation/cross_validation.rs. Side-effect free:
- * computes max |expected - actual| and reports against caller tolerance.
- */
+/* cross_validation.c — Output cross-validation suite implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/cross_validation.h"
@@ -11,7 +6,6 @@
 #include <math.h>
 #include <stddef.h>
 
-/* ─── Suite metadata ──────────────────────────────────────────────────── */
 
 static const char *const k_suite_names[] = {
     "VulkanDflashCpu",
@@ -19,7 +13,6 @@ static const char *const k_suite_names[] = {
     "SmokeCheck",
 };
 
-/* ─── API ─────────────────────────────────────────────────────────────── */
 
 OcError oc_cross_validation_compare(OcValidationSuite suite,
                                     const float *expected,

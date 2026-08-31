@@ -1,12 +1,4 @@
-/*
- * video_encoder.h — Per-frame vision encoding + temporal pooling stub.
- *
- * Port of oxidize-core/src/video/encoder.rs. The C port does not ship
- * a real vision backbone; this module provides a stub encoder that
- * runs a simple (mean/max) temporal pooling over per-frame embeddings
- * and projects them into the LLM hidden space via a 1:1 copy (the
- * projection is a placeholder until real weights are wired in).
- */
+/* video_encoder.h — Per-frame vision encoding + temporal pooling stub. */
 #ifndef OXIDIZE_VIDEO_ENCODER_H
 #define OXIDIZE_VIDEO_ENCODER_H
 
@@ -20,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Encoder config ──────────────────────────────────────────────────── */
 
 typedef struct {
     uint32_t vision_hidden;   /* per-frame vision embedding dim */
@@ -28,12 +19,6 @@ typedef struct {
     uint32_t llm_hidden;     /* LLM hidden size (output dim)   */
 } OcVideoEncoderConfig;
 
-/* ─── Encoder ────────────────────────────────────────────────────────────
- *
- * Holds the configured projection dims and the most recent output
- * token buffer. `output_tokens` is owned and sized
- * [n_tokens * llm_hidden] floats after a successful encode().
- */
 typedef struct OcVideoEncoder {
     OcVideoEncoderConfig config;
     float   *output_tokens;  /* owned; [n_tokens * llm_hidden] */
@@ -52,14 +37,9 @@ OcError oc_video_encoder_init(OcVideoEncoder *enc,
 /* Free an encoder and its output buffer. Safe on NULL. */
 void oc_video_encoder_free(OcVideoEncoder *enc);
 
-/* Encode frames: takes [n_frames * frame_dim] per-frame embeddings and
- * produces video tokens. The temporal pooling reduces across frames;
- * the resulting token count is `n_frames` (one token per frame in this
- * stub). `frame_dim` MUST equal config.vision_hidden. The output buffer
- * is (re)allocated to [n_frames * llm_hidden].
- *
- * Returns OC_OK on success, OC_ERR_INVALID_ARG on bad args or dim
- * mismatch, OC_ERR_OOM on allocation failure. */
+/* Encode frames: takes [n_frames * frame_dim] per-frame embeddings and produces
+ * video tokens. frame_dim MUST equal config.vision_hidden. Returns OC_OK,
+ * OC_ERR_INVALID_ARG on bad args or dim mismatch, OC_ERR_OOM on allocation failure. */
 OcError oc_video_encoder_encode(OcVideoEncoder *enc,
                                  const float *frame_embeddings,
                                  size_t n_frames, size_t frame_dim);

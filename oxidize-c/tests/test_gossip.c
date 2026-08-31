@@ -5,7 +5,6 @@
 #include <string.h>
 #include "oxidize/gossip.h"
 
-/* ─── Config ──────────────────────────────────────────────────────── */
 
 Test(gossip, config_init_defaults)
 {
@@ -22,7 +21,6 @@ Test(gossip, config_init_null)
     cr_assert_eq(oc_gossip_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Lifecycle ───────────────────────────────────────────────────── */
 
 Test(gossip, init_creates_self_node)
 {
@@ -79,7 +77,6 @@ Test(gossip, init_zero_fanout_normalized)
     oc_gossip_free(s);
 }
 
-/* ─── Add / remove ────────────────────────────────────────────────── */
 
 Test(gossip, add_node)
 {
@@ -156,7 +153,6 @@ Test(gossip, add_node_null_args)
     oc_gossip_free(s);
 }
 
-/* ─── Tick / health ───────────────────────────────────────────────── */
 
 Test(gossip, tick_marks_stale_unhealthy)
 {
@@ -196,7 +192,6 @@ Test(gossip, tick_null_is_error)
     cr_assert_eq(oc_gossip_tick(NULL, 0), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Queries ─────────────────────────────────────────────────────── */
 
 Test(gossip, get_nodes_copies)
 {
@@ -229,7 +224,6 @@ Test(gossip, get_healthy_count_empty_state)
     cr_assert_eq(oc_gossip_get_healthy_count(NULL), 0u);
 }
 
-/* ─── Merge ───────────────────────────────────────────────────────── */
 
 Test(gossip, merge_adds_new_nodes)
 {
@@ -298,7 +292,6 @@ Test(gossip, merge_null_remote_nonzero_count_is_error)
     oc_gossip_free(s);
 }
 
-/* ─── Serialize / deserialize ────────────────────────────────────── */
 
 Test(gossip, serialize_then_deserialize_roundtrip)
 {
@@ -379,7 +372,6 @@ Test(gossip, deserialize_count_exceeds_max_is_error)
     oc_gossip_free(s);
 }
 
-/* ─── End-to-end ──────────────────────────────────────────────────── */
 
 Test(gossip, full_gossip_cycle)
 {

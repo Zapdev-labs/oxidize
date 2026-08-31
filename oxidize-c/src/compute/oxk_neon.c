@@ -1,17 +1,4 @@
-/*
- * oxk_neon.c — AArch64 Advanced SIMD (NEON) OXK kernels.
- *
- * Compiled to an empty translation unit on every non-AArch64 target, so the
- * x86 build is bit-for-bit unaffected. See include/oxidize/oxk_neon.h for the
- * bit-exactness contract; the short version is that every integer
- * multiply-accumulate the scalar reference performs is performed in integer
- * arithmetic here too (int8 → int16 widening multiply, pairwise accumulate
- * into int32), and the surrounding f32 expressions are evaluated in scalar C
- * in the same source order as oxk.c. Q6_K is the single documented exception.
- *
- * Per CONTRIBUTING.md intrinsics stay confined to the ISA-specific kernel
- * files; this file contains all of the NEON intrinsics for OXK.
- */
+/* oxk_neon.c — AArch64 Advanced SIMD (NEON) OXK kernels. See include/oxidize/oxk_neon.h for the bit-exactness contract; every integer multiply-accumulate is performed in integer arithmetic here too. */
 #include "oxidize/oxk_neon.h"
 
 #if defined(__aarch64__)
@@ -21,15 +8,6 @@
 #include <arm_neon.h>
 #include <string.h>
 
-/* ─── Shared reduction helpers ──────────────────────────────────────────
- *
- * `dot16` computes the exact int32 sum of the 16 pairwise products of two
- * int8 vectors. Every intermediate fits: |a| <= 128, |b| <= 128 so each
- * product fits in int16 (max 16384), a pairwise sum of two fits in int16,
- * and vpadalq_s16 widens to int32 before any further accumulation. Because
- * the whole reduction is integer, lane order is irrelevant and the result is
- * identical to the scalar reference's left-to-right int32 accumulation.
- */
 static inline int32_t oc_neon_dot16(int8x16_t a, int8x16_t b)
 {
     int16x8_t p0 = vmull_s8(vget_low_s8(a), vget_low_s8(b));
@@ -45,7 +23,6 @@ static inline int32_t oc_neon_hsum_s8(int8x16_t a)
     return vaddlvq_s16(vpaddlq_s8(a));
 }
 
-/* ─── Q8_0 × Q8_0 ───────────────────────────────────────────────────────── */
 
 float oc_oxk_dot_q8_0_q8_0_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
@@ -68,7 +45,6 @@ float oc_oxk_dot_q8_0_q8_0_neon(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── Q4_0 × Q8_0 ───────────────────────────────────────────────────────── */
 
 float oc_oxk_dot_q4_0_q8_0_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
@@ -100,7 +76,6 @@ float oc_oxk_dot_q4_0_q8_0_neon(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── Q4_1 × Q8_0 ───────────────────────────────────────────────────────── */
 
 float oc_oxk_dot_q4_1_q8_0_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
@@ -133,7 +108,6 @@ float oc_oxk_dot_q4_1_q8_0_neon(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── Q4_K × Q8_K ───────────────────────────────────────────────────────── */
 
 float oc_oxk_dot_q4_k_q8_k_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
@@ -187,7 +161,6 @@ float oc_oxk_dot_q4_k_q8_k_neon(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── Q5_K × Q8_K ───────────────────────────────────────────────────────── */
 
 float oc_oxk_dot_q5_k_q8_k_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
@@ -217,10 +190,6 @@ float oc_oxk_dot_q5_k_q8_k_neon(const uint8_t *row, size_t blocks,
             uint8x16_t p0 = vld1q_u8(qs + gp * 32);
             uint8x16_t p1 = vld1q_u8(qs + gp * 32 + 16);
 
-            /* qh[l] carries one high bit per 64-element group: bit 2*gp for
-             * the low-nibble half, bit 2*gp+1 for the high-nibble half (the
-             * u1/u2 stepping masks in dequant_q5_k), NOT a flat 256-bit
-             * field. */
             const uint8x16_t qh0v = vld1q_u8(qh);
             const uint8x16_t qh1v = vld1q_u8(qh + 16);
             const uint8x16_t onev = vdupq_n_u8(1);
@@ -262,15 +231,11 @@ float oc_oxk_dot_q5_k_q8_k_neon(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── Q6_K × Q8_K ───────────────────────────────────────────────────────── */
 
-/*
- * PARITY CAVEAT (the one deviation in this file): the scalar reference adds
- * one f32 term per element. Here each 16-element scale group is reduced in
- * int32 and contributes a single f32 multiply-add, so the f32 addition tree
- * differs. Results agree to ~1e-6 relative; the NEON form is the more
- * accurate of the two (fewer roundings), but it is NOT bit-exact.
- */
+/* PARITY CAVEAT (the one deviation in this file): the scalar reference adds one
+ * f32 term per element. Here each 16-element scale group is reduced in int32
+ * and contributes a single f32 multiply-add. Results agree to ~1e-6 relative;
+ * the NEON form is more accurate (fewer roundings) but is NOT bit-exact. */
 float oc_oxk_dot_q6_k_q8_k_neon(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {

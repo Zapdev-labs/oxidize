@@ -1,10 +1,4 @@
-/*
- * dflash.h — DFlash speculative decoding for C port.
- *
- * Ports the DFlash algorithm from oxidize-core/src/model/dflash.rs.
- * DFlash uses a small draft model to generate candidate continuations
- * that are verified by the target model in a single forward pass.
- */
+/* dflash.h — DFlash speculative decoding for C port. */
 #ifndef OXIDIZE_DFLASH_H
 #define OXIDIZE_DFLASH_H
 
@@ -52,7 +46,6 @@ float oc_dflash_acceptance_rate(const OcDFlashState *state);
 uint32_t oc_dflash_avg_acceptance(const OcDFlashState *state);
 void oc_dflash_state_free(OcDFlashState *state);
 
-/* ─── Real DFlash draft model (port of dflash.rs) ───────────────────── */
 
 /* DFlash configuration matching HuggingFace config.json. */
 typedef struct OcDFlashModelConfig {

@@ -18,17 +18,13 @@ from typing import Final
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
 # Constants (match GGUF K-quants)
-# ---------------------------------------------------------------------------
 
 QK_K: Final = 256
 BLOCK_Q4_K_SIZE: Final = 144
 BLOCK_Q8_K_BYTES: Final = 4 + 256 + 32
 
-# ---------------------------------------------------------------------------
 # CPU vendor / ISA detection and tuning
-# ---------------------------------------------------------------------------
 
 
 class CpuVendor:
@@ -141,9 +137,7 @@ def _detect_cpuinfo() -> CpuInfo:
     return CpuInfo()
 
 
-# ---------------------------------------------------------------------------
 # Tile width selection (default 16 = widest, enabled by default)
-# ---------------------------------------------------------------------------
 
 _max_tile_once = threading.Lock()
 _max_tile_val: int | None = None
@@ -168,9 +162,7 @@ def max_tile() -> int:
     return _max_tile_val
 
 
-# ---------------------------------------------------------------------------
 # f16 helpers
-# ---------------------------------------------------------------------------
 
 
 def _f16_le_to_f32(bytes_: bytes | bytearray) -> float:
@@ -196,9 +188,7 @@ def _f16_le_to_f32(bytes_: bytes | bytearray) -> float:
     return struct.unpack("<f", struct.pack("<I", f32_bits))[0]
 
 
-# ---------------------------------------------------------------------------
 # Scale/min decoding
-# ---------------------------------------------------------------------------
 
 
 def get_scale_min_k4(j: int, scales: bytes | bytearray) -> tuple[int, int]:
@@ -210,9 +200,7 @@ def get_scale_min_k4(j: int, scales: bytes | bytearray) -> tuple[int, int]:
     )
 
 
-# ---------------------------------------------------------------------------
 # Q8_K activation quantization
-# ---------------------------------------------------------------------------
 
 
 def quantize_q8_k_into(vector: list[float], n_blocks: int, out: bytearray | memoryview) -> None:
@@ -257,9 +245,7 @@ def _quantize_q8_k_block(block_in: list[float], block_out: memoryview) -> None:
         struct.pack_into("<h", block_out, bsums_off + g * 2, s)
 
 
-# ---------------------------------------------------------------------------
 # NumPy-accelerated Q4_K x Q8_K row dot
-# ---------------------------------------------------------------------------
 
 
 def _int8_array(buf: bytes | bytearray) -> np.ndarray:
@@ -333,9 +319,7 @@ def q4k_q8k_row_dot_scalar(
     return acc
 
 
-# ---------------------------------------------------------------------------
 # Tile runners (multi-row variants) — enabled by default, scalar fallback
-# ---------------------------------------------------------------------------
 
 
 def q4k_q8k_row_dot_x1_scalar(
@@ -388,9 +372,7 @@ def q4k_q8k_row_dot_x16_scalar(
         out[r] = q4k_q8k_row_dot_scalar(row, blocks_per_row, q8k)
 
 
-# ---------------------------------------------------------------------------
 # Range GEMV — main entry point with tile runner enabled by default
-# ---------------------------------------------------------------------------
 
 
 def gemv_q4k_range(

@@ -9,9 +9,6 @@ import (
 )
 
 // FrameEncoder encodes one frame's patch tensor into a flattened
-// [num_patches, projection_dim] embedding matrix. It abstracts the per-frame
-// vision encoder so the video stack stays decoupled from a concrete
-// implementation. Mirrors the VisionEncoder::encode call used in encoder.rs.
 type FrameEncoder interface {
 	EncodeFrame(patches ImagePatches) ([]float32, error)
 }

@@ -1,13 +1,4 @@
-/*
- * profiler.h — Inference profiler for the C port.
- *
- * Provides fine-grained timing of individual operations during a forward
- * pass: embedding lookup, attention, MLP, normalization, sampling.
- * Results are aggregated across tokens and reported as a breakdown
- * showing where time is spent.
- *
- * This is the C port of oxidize-core's profiling infrastructure.
- */
+/* profiler.h — Inference profiler for the C port. */
 #ifndef OXIDIZE_PROFILER_H
 #define OXIDIZE_PROFILER_H
 
@@ -21,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Profiler events ──────────────────────────────────────────────────── */
 
 typedef enum {
     OC_PROF_EMBEDDING    = 0,
@@ -42,7 +32,6 @@ typedef enum {
     OC_PROF__COUNT,
 } OcProfEvent;
 
-/* ─── Profiler ─────────────────────────────────────────────────────────── */
 
 typedef struct OcProfileEntry {
     uint64_t total_ns;    /* total time in nanoseconds             */
@@ -90,13 +79,6 @@ void oc_profiler_print(const OcProfiler *p);
 /* Get event name. */
 const char *oc_prof_event_name(OcProfEvent e);
 
-/* ─── Scoped timing helper ───────────────────────────────────────────────
- *
- * Usage:
- *   OC_PROFILE_SCOPE(&profiler, OC_PROF_ATTENTION);
- *   // ... code to time ...
- *   // dtor records timing at end of scope
- */
 
 typedef struct OcProfileScope {
     OcProfiler *prof;
@@ -116,7 +98,6 @@ void oc_prof_scope_end(OcProfileScope *s);
 #define OC_PROFILE_SCOPE(prof_ptr, event) \
     OcProfileScope _oc_prof_scope; \
     oc_prof_scope_begin(&_oc_prof_scope, prof_ptr, event); \
-    /* end at scope exit via cleanup attribute */ \
     __attribute__((cleanup(oc_prof_scope_end))) OcProfileScope *_oc_prof_scope_ptr \
         __attribute__((unused)) = &_oc_prof_scope
 

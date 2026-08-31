@@ -4,7 +4,10 @@ use crate::conversion::{
     extract_layer_index, flatten_linear_attn_conv1d, map_flat_qwen_mtp_tensor_name,
     map_hf_tensor_name, preprocess_hf_tensors_for_gguf, split_fused_gate_up_proj,
 };
-use crate::gguf::{GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufQuantizationType};
+use crate::gguf::{
+    GgufMetadataArray, GgufMetadataType, GgufMetadataValue, GgufOutputTensor, GgufQuantizationType,
+    GgufTensorHeader, encode_gguf_header, gguf_align_up, relative_offsets_from_sizes, write_gguf,
+};
 use crate::quantization::{quantize_scalar, quantized_size};
 use anyhow::{Context, Result, anyhow, bail};
 use safetensors::tensor::{Dtype, SafeTensors};
@@ -31,14 +34,6 @@ impl Default for SafetensorsToGgufConfig {
             target_quantization: None,
         }
     }
-}
-
-#[derive(Debug)]
-struct OutputTensor {
-    name: String,
-    dimensions: Vec<u64>,
-    ggml_type: u32,
-    data: Vec<u8>,
 }
 
 /// Read the causal backbone layer count from a HF config.json, looking in both
@@ -96,7 +91,7 @@ pub fn quantize_gguf_to_target(input: &[u8], target: GgufQuantizationType) -> Re
         );
     }
 
-    let mut tensors: Vec<OutputTensor> = Vec::with_capacity(parsed.tensor_infos.len());
+    let mut tensors: Vec<GgufOutputTensor> = Vec::with_capacity(parsed.tensor_infos.len());
     for info in &parsed.tensor_infos {
         let source = GgufQuantizationType::from_ggml_type(info.ggml_type);
         let value_count: usize = info.dimensions.iter().map(|&d| d as usize).product();
@@ -147,7 +142,7 @@ pub fn quantize_gguf_to_target(input: &[u8], target: GgufQuantizationType) -> Re
             (info.ggml_type, tensor_bytes.to_vec())
         };
 
-        tensors.push(OutputTensor {
+        tensors.push(GgufOutputTensor {
             name: info.name.clone(),
             dimensions: info.dimensions.clone(),
             ggml_type,
@@ -855,8 +850,8 @@ fn f32_array(values: Vec<f32>) -> GgufMetadataValue {
 fn build_output_tensors(
     tensors: &[(String, Dtype, Vec<usize>, Vec<u8>)],
     map_hf_names: bool,
-) -> Result<Vec<OutputTensor>> {
-    let mut out: Vec<OutputTensor> = Vec::with_capacity(tensors.len());
+) -> Result<Vec<GgufOutputTensor>> {
+    let mut out: Vec<GgufOutputTensor> = Vec::with_capacity(tensors.len());
     for (name, dtype, shape, raw_data) in tensors {
         let output_name = if name.starts_with("blk.")
             || name == "tok_embeddings.weight"
@@ -892,7 +887,7 @@ fn build_output_tensors(
             Dtype::BF16 => (30_u32, raw_data.clone()),
             other => bail!("unsupported SafeTensors dtype {other:?} in tensor {name}"),
         };
-        out.push(OutputTensor {
+        out.push(GgufOutputTensor {
             name: output_name,
             dimensions,
             ggml_type,
@@ -1429,38 +1424,18 @@ fn write_gguf_streaming(
         );
     }
 
-    let mut relative_offsets = Vec::with_capacity(planned.len());
-    let mut cursor: u64 = 0;
-    for &len in &data_lens {
-        cursor = align_up(cursor, alignment)?;
-        relative_offsets.push(cursor);
-        cursor = cursor
-            .checked_add(len as u64)
-            .ok_or_else(|| anyhow!("tensor data offset overflow"))?;
-    }
-
-    let mut header = Vec::new();
-    header.extend_from_slice(b"GGUF");
-    header.extend_from_slice(&version.to_le_bytes());
-    header.extend_from_slice(&(planned.len() as u64).to_le_bytes());
-    header.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
-    for (key, value) in metadata {
-        write_string(&mut header, key);
-        write_metadata_value(&mut header, value)?;
-    }
-    for (plan, (&rel_offset, &out_type)) in planned
+    let relative_offsets =
+        relative_offsets_from_sizes(data_lens.iter().map(|&len| len as u64), alignment)?;
+    let headers: Vec<GgufTensorHeader<'_>> = planned
         .iter()
-        .zip(relative_offsets.iter().zip(output_types.iter()))
-    {
-        write_string(&mut header, &plan.name);
-        header.extend_from_slice(&(plan.dimensions.len() as u32).to_le_bytes());
-        for dim in &plan.dimensions {
-            header.extend_from_slice(&dim.to_le_bytes());
-        }
-        header.extend_from_slice(&out_type.to_le_bytes());
-        header.extend_from_slice(&rel_offset.to_le_bytes());
-    }
-    pad_to(&mut header, alignment)?;
+        .zip(output_types.iter())
+        .map(|(plan, &out_type)| GgufTensorHeader {
+            name: &plan.name,
+            dimensions: &plan.dimensions,
+            ggml_type: out_type,
+        })
+        .collect();
+    let header = encode_gguf_header(version, metadata, &headers, &relative_offsets, alignment)?;
     let data_start = header.len() as u64;
 
     if let Some(parent) = path.parent() {
@@ -1494,7 +1469,7 @@ fn write_gguf_streaming(
             );
         }
         out.write_all(&data)?;
-        let aligned_end = align_up(file_offset + data.len() as u64, alignment)? as u64;
+        let aligned_end = gguf_align_up(file_offset + data.len() as u64, alignment)?;
         let pad_len = aligned_end.saturating_sub(file_offset + data.len() as u64);
         if pad_len > 0 {
             out.write_all(&vec![0_u8; pad_len as usize])?;
@@ -1502,154 +1477,6 @@ fn write_gguf_streaming(
     }
     out.flush()?;
     Ok(())
-}
-
-fn write_gguf(
-    version: u32,
-    metadata: &BTreeMap<String, GgufMetadataValue>,
-    tensors: &[OutputTensor],
-    alignment: u64,
-) -> Result<Vec<u8>> {
-    if alignment == 0 || !alignment.is_power_of_two() {
-        bail!("invalid GGUF alignment: {alignment}");
-    }
-
-    let mut relative_offsets: Vec<u64> = Vec::with_capacity(tensors.len());
-    let mut cursor: u64 = 0;
-    for tensor in tensors {
-        cursor = align_up(cursor, alignment)?;
-        relative_offsets.push(cursor);
-        cursor = cursor
-            .checked_add(tensor.data.len() as u64)
-            .ok_or_else(|| anyhow!("tensor data offset overflow"))?;
-    }
-
-    let mut out: Vec<u8> = Vec::new();
-    out.extend_from_slice(b"GGUF");
-    out.extend_from_slice(&version.to_le_bytes());
-    out.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
-
-    for (key, value) in metadata {
-        write_string(&mut out, key);
-        write_metadata_value(&mut out, value)?;
-    }
-
-    for (tensor, &rel_offset) in tensors.iter().zip(relative_offsets.iter()) {
-        write_string(&mut out, &tensor.name);
-        out.extend_from_slice(&(tensor.dimensions.len() as u32).to_le_bytes());
-        for dim in &tensor.dimensions {
-            out.extend_from_slice(&dim.to_le_bytes());
-        }
-        out.extend_from_slice(&tensor.ggml_type.to_le_bytes());
-        out.extend_from_slice(&rel_offset.to_le_bytes());
-    }
-
-    pad_to(&mut out, alignment)?;
-    let data_start = out.len() as u64;
-
-    for (tensor, &rel_offset) in tensors.iter().zip(relative_offsets.iter()) {
-        let target = (data_start + rel_offset) as usize;
-        if out.len() < target {
-            out.resize(target, 0);
-        }
-        out.extend_from_slice(&tensor.data);
-        pad_to(&mut out, alignment)?;
-    }
-
-    Ok(out)
-}
-
-fn write_metadata_value(out: &mut Vec<u8>, value: &GgufMetadataValue) -> Result<()> {
-    let vtype = metadata_type(value);
-    out.extend_from_slice(&(vtype as u32).to_le_bytes());
-    write_metadata_payload(out, value, vtype)
-}
-
-fn write_metadata_payload(
-    out: &mut Vec<u8>,
-    value: &GgufMetadataValue,
-    vtype: GgufMetadataType,
-) -> Result<()> {
-    match (vtype, value) {
-        (GgufMetadataType::Uint8, GgufMetadataValue::Uint8(v)) => out.push(*v),
-        (GgufMetadataType::Int8, GgufMetadataValue::Int8(v)) => out.push(*v as u8),
-        (GgufMetadataType::Uint16, GgufMetadataValue::Uint16(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        (GgufMetadataType::Int16, GgufMetadataValue::Int16(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        (GgufMetadataType::Uint32, GgufMetadataValue::Uint32(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        (GgufMetadataType::Int32, GgufMetadataValue::Int32(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        (GgufMetadataType::Float32, GgufMetadataValue::Float32(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        (GgufMetadataType::Bool, GgufMetadataValue::Bool(v)) => out.push(u8::from(*v)),
-        (GgufMetadataType::String, GgufMetadataValue::String(v)) => write_string(out, v),
-        (GgufMetadataType::Array, GgufMetadataValue::Array(arr)) => write_metadata_array(out, arr)?,
-        (GgufMetadataType::Uint64, GgufMetadataValue::Uint64(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        (GgufMetadataType::Int64, GgufMetadataValue::Int64(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        (GgufMetadataType::Float64, GgufMetadataValue::Float64(v)) => {
-            out.extend_from_slice(&v.to_le_bytes())
-        }
-        _ => bail!("metadata type mismatch"),
-    }
-    Ok(())
-}
-
-fn write_metadata_array(out: &mut Vec<u8>, arr: &GgufMetadataArray) -> Result<()> {
-    out.extend_from_slice(&(arr.element_type as u32).to_le_bytes());
-    out.extend_from_slice(&(arr.values.len() as u64).to_le_bytes());
-    for value in &arr.values {
-        write_metadata_payload(out, value, arr.element_type)?;
-    }
-    Ok(())
-}
-
-fn metadata_type(value: &GgufMetadataValue) -> GgufMetadataType {
-    match value {
-        GgufMetadataValue::Uint8(_) => GgufMetadataType::Uint8,
-        GgufMetadataValue::Int8(_) => GgufMetadataType::Int8,
-        GgufMetadataValue::Uint16(_) => GgufMetadataType::Uint16,
-        GgufMetadataValue::Int16(_) => GgufMetadataType::Int16,
-        GgufMetadataValue::Uint32(_) => GgufMetadataType::Uint32,
-        GgufMetadataValue::Int32(_) => GgufMetadataType::Int32,
-        GgufMetadataValue::Float32(_) => GgufMetadataType::Float32,
-        GgufMetadataValue::Bool(_) => GgufMetadataType::Bool,
-        GgufMetadataValue::String(_) => GgufMetadataType::String,
-        GgufMetadataValue::Array(_) => GgufMetadataType::Array,
-        GgufMetadataValue::Uint64(_) => GgufMetadataType::Uint64,
-        GgufMetadataValue::Int64(_) => GgufMetadataType::Int64,
-        GgufMetadataValue::Float64(_) => GgufMetadataType::Float64,
-    }
-}
-
-fn write_string(out: &mut Vec<u8>, s: &str) {
-    out.extend_from_slice(&(s.len() as u64).to_le_bytes());
-    out.extend_from_slice(s.as_bytes());
-}
-
-fn pad_to(out: &mut Vec<u8>, alignment: u64) -> Result<()> {
-    let aligned = align_up(out.len() as u64, alignment)? as usize;
-    out.resize(aligned, 0);
-    Ok(())
-}
-
-fn align_up(value: u64, alignment: u64) -> Result<u64> {
-    let mask = alignment - 1;
-    value
-        .checked_add(mask)
-        .map(|v| v & !mask)
-        .ok_or_else(|| anyhow!("alignment overflow"))
 }
 
 #[cfg(test)]

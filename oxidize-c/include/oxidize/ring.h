@@ -1,9 +1,4 @@
-/*
- * ring.h — Ring topology for distributed inference.
- *
- * Implements a ring-based communication topology for pipeline and tensor
- * parallelism across multiple nodes.
- */
+/* ring.h — Ring topology for distributed inference. */
 #ifndef OXIDIZE_RING_H
 #define OXIDIZE_RING_H
 

@@ -41,10 +41,6 @@ enum Command {
     Merge(MergeArgs),
 }
 
-// ---------------------------------------------------------------------------
-// SFT
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Parser)]
 struct SftArgs {
     /// Base model GGUF path.
@@ -102,10 +98,6 @@ struct SftArgs {
     checkpoint_every: usize,
 }
 
-// ---------------------------------------------------------------------------
-// DPO
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Parser)]
 struct DpoArgs {
     /// Base model GGUF path.
@@ -141,10 +133,6 @@ struct DpoArgs {
     seed: u64,
 }
 
-// ---------------------------------------------------------------------------
-// PPO
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Parser)]
 struct PpoArgs {
     /// Base model GGUF path (actor).
@@ -172,9 +160,7 @@ struct PpoArgs {
     seed: u64,
 }
 
-// ---------------------------------------------------------------------------
 // Self-train (iterative SFT + self-dialogue)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Parser)]
 struct SelfTrainArgs {
@@ -233,10 +219,6 @@ struct SelfTrainArgs {
     resume_from: Option<PathBuf>,
 }
 
-// ---------------------------------------------------------------------------
-// Merge
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Parser)]
 struct MergeArgs {
     /// Adapter GGUF files to merge (repeat for each adapter).
@@ -256,9 +238,7 @@ struct MergeArgs {
     output: PathBuf,
 }
 
-// ---------------------------------------------------------------------------
 // Entry point
-// ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -288,9 +268,7 @@ fn main() -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // SFT implementation (original logic preserved)
-// ---------------------------------------------------------------------------
 
 fn run_sft(args: SftArgs) -> Result<()> {
     let config = FinetuneConfig {
@@ -404,9 +382,7 @@ fn run_sft(args: SftArgs) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // DPO stub
-// ---------------------------------------------------------------------------
 
 fn run_dpo(args: DpoArgs) -> Result<()> {
     let examples = load_jsonl_dpo(&args.data).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -434,9 +410,7 @@ fn run_dpo(args: DpoArgs) -> Result<()> {
     )
 }
 
-// ---------------------------------------------------------------------------
 // PPO stub
-// ---------------------------------------------------------------------------
 
 fn run_ppo(args: PpoArgs) -> Result<()> {
     println!(
@@ -461,9 +435,7 @@ fn run_ppo(args: PpoArgs) -> Result<()> {
     )
 }
 
-// ---------------------------------------------------------------------------
 // Self-train implementation
-// ---------------------------------------------------------------------------
 
 fn run_self_train(args: SelfTrainArgs) -> Result<()> {
     let finetune = FinetuneConfig {
@@ -577,9 +549,7 @@ fn run_self_train(args: SelfTrainArgs) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Merge implementation
-// ---------------------------------------------------------------------------
 
 fn run_merge(args: MergeArgs) -> Result<()> {
     let strategy = match args.strategy.to_lowercase().as_str() {

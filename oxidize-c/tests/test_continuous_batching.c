@@ -141,7 +141,6 @@ Test(continuous_batching, next_batch_sjf_order)
     c.scheduling_strategy = OC_BATCH_SHORTEST_JOB_FIRST;
     oc_batch_scheduler_init(&s, c);
     uint32_t prompt[] = {1};
-    /* r1 has larger max_tokens (10), r2 smaller (3). */
     OcBatchRequest r1 = make_request(10, prompt, 1, 10, 0.0f);
     OcBatchRequest r2 = make_request(20, prompt, 1, 3, 0.0f);
     cr_assert_eq(oc_batch_scheduler_add(s, &r1), OC_OK);
@@ -150,7 +149,6 @@ Test(continuous_batching, next_batch_sjf_order)
     size_t count = 0;
     oc_batch_scheduler_next_batch(s, slots, 4, &count);
     cr_assert_eq(count, 2u);
-    /* r2 has smaller remaining work so it should come first. */
     cr_assert_eq(slots[0]->request_id, 20u);
     cr_assert_eq(slots[1]->request_id, 10u);
     oc_batch_scheduler_free(s);

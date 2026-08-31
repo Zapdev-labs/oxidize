@@ -1,16 +1,4 @@
-/*
- * video_decoder.h — Video frame decoding primitives (no FFmpeg).
- *
- * Port of oxidize-core/src/video/decoder.rs. Because the C port stays
- * dependency-free, this module does NOT bind FFmpeg; instead it
- * provides a simple owning frame list and a repetitive-frame decoder
- * that synthesizes N copies of a single image — sufficient for tests
- * and for callers that supply pre-decoded frame data.
- *
- * NOTE: This is distinct from `video.h` which uses uint8_t RGB frames.
- * This module uses float RGB data (per-frame embeddings / normalized
- * pixels) to match the Rust decoder output contract.
- */
+/* video_decoder.h — Video frame decoding primitives (no FFmpeg). */
 #ifndef OXIDIZE_VIDEO_DECODER_H
 #define OXIDIZE_VIDEO_DECODER_H
 
@@ -24,11 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Frame ──────────────────────────────────────────────────────────────
- *
- * A single RGB frame. `data` is owned by the containing OcVideoFrameList
- * and is laid out row-major as [height * width * channels] floats.
- */
 typedef struct OcVideoFrameFloat {
     uint32_t width;
     uint32_t height;
@@ -64,12 +47,7 @@ OcError oc_video_frame_list_add(OcVideoFrameList *list,
  * caller. Returns OC_ERR_INVALID_ARG on NULL/zero-dim args or OOM. */
 OcError oc_video_frame_list_add_raw(OcVideoFrameList *list, OcVideoFrame *frame);
 
-/* RepetitiveFrameDecoder: synthesize `n_copies` copies of a single
- * image. Each copy is a freshly-allocated duplicate of
- * `single_frame_data` ([h * w * 3] floats). The output list is
- * initialized by this call; call oc_video_frame_list_free() after.
- * Returns OC_ERR_INVALID_ARG if any pointer/dim is bad, n_copies==0,
- * or OC_ERR_OOM. */
+/* RepetitiveFrameDecoder: synthesize `n_copies` copies of a single image. Each copy is a freshly-allocated duplicate of `single_frame_data` ([h * w * 3] floats). The output list is initialized by this call; call oc_video_frame_list_free() after. Returns OC_ERR_INVALID_ARG if any pointer/dim is bad, n_copies==0, or OC_ERR_OOM. */
 OcError oc_video_decoder_repetitive(OcVideoFrameList *out,
                                      uint32_t w, uint32_t h,
                                      const float *single_frame_data,

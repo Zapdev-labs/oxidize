@@ -1,29 +1,9 @@
 //! PPO-style RLHF components.
-//!
-//! Implements:
-//!   - `RewardModel`   — a linear scalar head over hidden states (dot + bias).
-//!   - `PpoConfig`     — PPO hyper-parameters.
-//!   - `RolloutBuffer` — trajectory storage with Generalized Advantage
-//!                       Estimation (GAE, Schulman et al. 2015).
-//!   - `PpoTrainer`    — clipped surrogate objective + value loss + entropy
-//!                       bonus + optional KL penalty, backed by the existing
-//!                       `LoRAAdapter` / `fused::adamw_step` infrastructure.
-//!
-//! Design contract
-//! ---------------
-//! The caller is responsible for running the frozen quantized backbone and
-//! collecting hidden states; this module handles only the reward head and the
-//! PPO update.  All maths is pure safe Rust with rayon parallelism on
-//! hot loops that are linear in `in_dim`.
 
 use rayon::prelude::*;
 
 use crate::config::FinetuneConfig;
 use crate::lora::{LoRAAdapter, LoRATarget};
-
-// ---------------------------------------------------------------------------
-// RewardModel
-// ---------------------------------------------------------------------------
 
 /// A linear scalar reward head: `r(h) = dot(w, h) + b`.
 ///
@@ -91,10 +71,6 @@ impl RewardModel {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PpoConfig
-// ---------------------------------------------------------------------------
-
 /// PPO hyper-parameters.
 #[derive(Debug, Clone)]
 pub struct PpoConfig {
@@ -124,10 +100,6 @@ impl Default for PpoConfig {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// RolloutBuffer
-// ---------------------------------------------------------------------------
 
 /// Trajectory storage for a single PPO rollout.
 ///
@@ -206,9 +178,7 @@ impl RolloutBuffer {
     }
 }
 
-// ---------------------------------------------------------------------------
 // PpoStepReport / PpoReport
-// ---------------------------------------------------------------------------
 
 /// Metrics returned by a single PPO gradient step.
 #[derive(Debug, Clone)]
@@ -246,29 +216,7 @@ pub struct PpoReport {
     pub elapsed_seconds: f32,
 }
 
-// ---------------------------------------------------------------------------
-// PpoTrainer
-// ---------------------------------------------------------------------------
-
 /// PPO trainer backed by a LoRA actor and a linear reward model.
-///
-/// Architecture
-/// ------------
-/// - **Actor**: a `LoRAAdapter` on the LM head that represents `π_θ` (the
-///   policy logit deltas).
-/// - **Critic/reward**: a `RewardModel` (linear scalar head) used both to
-///   assign rewards and as the value baseline.
-///
-/// Update rule (per transition in the rollout)
-/// -------------------------------------------
-/// ```text
-/// ratio = exp(new_log_prob − old_log_prob)
-/// L_clip = -min(ratio·A, clip(ratio, 1-ε, 1+ε)·A)
-/// L_value = (V(s) − (A + V_old))²
-/// L_entropy = -H(π(·|s))       (encourage exploration)
-/// L_kl = old_log_prob − new_log_prob
-/// L = L_clip + value_coef·L_value − entropy_coef·L_entropy + kl_penalty·L_kl
-/// ```
 ///
 /// Because the `LoRAAdapter` exposes a rayon-parallel batch
 /// forward/backward API, mini-batching a full rollout buffer is a single
@@ -309,9 +257,7 @@ impl PpoTrainer {
         }
     }
 
-    // -----------------------------------------------------------------------
     // PPO loss primitives
-    // -----------------------------------------------------------------------
 
     /// Clipped surrogate policy loss for a single transition.
     ///
@@ -356,10 +302,6 @@ impl PpoTrainer {
         let idx = (action as usize).min(logits.len().saturating_sub(1));
         logits[idx] - log_z
     }
-
-    // -----------------------------------------------------------------------
-    // train_step
-    // -----------------------------------------------------------------------
 
     /// Run one PPO gradient step over all transitions in `buffer`.
     ///
@@ -412,12 +354,10 @@ impl PpoTrainer {
             .forward_batch(&flat_states, &mut logits, n)
             .expect("PpoTrainer::train_step: forward_batch shape mismatch (internal bug)");
 
-        // -------------------------------------------------------------------
         // Per-transition losses and gradient signals.
         //
         // We compute a gradient direction for each logit row, then pass the
         // combined gradient slice to `backward_batch` in one shot.
-        // -------------------------------------------------------------------
 
         let mut grad_logits = vec![0.0_f32; n * vocab];
         let mut sum_policy_loss = 0.0_f32;
@@ -457,7 +397,6 @@ impl PpoTrainer {
             sum_entropy += h;
             sum_kl += kl_t;
 
-            // -------------------------------------------------------------------
             // Gradient of the combined loss w.r.t. the logit row.
             //
             // L_total = p_loss + value_coef·v_loss − entropy_coef·H + kl_penalty·kl
@@ -484,7 +423,6 @@ impl PpoTrainer {
             //                        = 1_{i==action} − p_i
             //
             // Combined in one pass below.
-            // -------------------------------------------------------------------
 
             let max_l = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let exp_sum: f32 = row.iter().map(|l| (l - max_l).exp()).sum();
@@ -562,10 +500,6 @@ impl PpoTrainer {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // train_epoch
-    // -----------------------------------------------------------------------
-
     /// Train over a list of rollout buffers (one gradient step per buffer).
     ///
     /// Each buffer should have its `compute_gae` already called.  Buffers with
@@ -608,9 +542,7 @@ impl PpoTrainer {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Math helpers
-// ---------------------------------------------------------------------------
 
 #[inline]
 fn dot(a: &[f32], b: &[f32]) -> f32 {
@@ -626,17 +558,9 @@ fn warmup_lr(base: f32, step: usize, warmup: usize) -> f32 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -----------------------------------------------------------------------
-    // RewardModel
-    // -----------------------------------------------------------------------
 
     #[test]
     fn reward_model_score_matches_score_batch() {
@@ -665,9 +589,7 @@ mod tests {
         assert!((s2 - s1 - 1.0).abs() < 1e-5);
     }
 
-    // -----------------------------------------------------------------------
     // PpoConfig defaults
-    // -----------------------------------------------------------------------
 
     #[test]
     fn ppo_config_defaults_are_sensible() {
@@ -680,9 +602,7 @@ mod tests {
         assert!((c.gamma - 1.0).abs() < 1e-6);
     }
 
-    // -----------------------------------------------------------------------
     // RolloutBuffer + GAE
-    // -----------------------------------------------------------------------
 
     fn make_buffer(rewards: &[f32], values: &[f32]) -> RolloutBuffer {
         let mut buf = RolloutBuffer::new();
@@ -745,10 +665,6 @@ mod tests {
             buf.advantages[0]
         );
     }
-
-    // -----------------------------------------------------------------------
-    // PpoTrainer
-    // -----------------------------------------------------------------------
 
     fn tiny_ppo_trainer() -> PpoTrainer {
         let ft = FinetuneConfig {

@@ -1,7 +1,4 @@
 // Package ggufcore extends the lower-level gguf package with the higher-level
-// abstractions found in oxidize_core::format::gguf: MappedFile, architecture
-// detection, quantization type extraction, tensor name remapping, and GGUF
-// writers used by the quantize tool.
 package ggufcore
 
 import (

@@ -1,9 +1,4 @@
-/*
- * args.h — CLI argument parsing (extracted for testability).
- *
- * OcCliArgs + parse_args are used by src/cli/main.c and tests/test_cli.c.
- * Kept in src/cli/ (not include/) because it's CLI-internal, not library API.
- */
+/* args.h — CLI argument parsing (extracted for testability). Kept in src/cli/ (not include/) because it's CLI-internal, not library API. */
 #ifndef OXIDIZE_CLI_ARGS_H
 #define OXIDIZE_CLI_ARGS_H
 
@@ -15,11 +10,7 @@ typedef struct OcCliArgs {
     const char *prompt;
     const char *prompt_file;
     uint32_t   n_predict;
-    /* --ctx N: cap the KV cache context below the model's advertised
-     * context_length. Long-context models make this mandatory rather than a
-     * tuning knob — Gemma 4 advertises 262144, which at its 4096-element KV
-     * row is 515 GB of f32 cache, so the default allocation cannot succeed on
-     * any machine. 0 = use the model's own value. */
+    /* --ctx N: cap the KV cache context below the model's advertised context_length. Long-context models make this mandatory rather than a tuning knob — Gemma 4 advertises 262144, which at its 4096-element KV row is 515 GB of f32 cache, so the default allocation cannot succeed on any machine. 0 = use the model's own value. */
     uint32_t   n_ctx;
     const char *kv_type;       /* --kv f32|q8; NULL = auto (q8 if ctx>=8192) */
     int        threads;
@@ -58,10 +49,7 @@ typedef struct OcCliArgs {
     /* Mirostat. */
     float      mirostat_tau;     /* 0 = disabled; target surprise         */
     float      mirostat_eta;     /* learning rate (default 0.1)           */
-    /* Prompt-prefill chunk: tokens fed through the weights per pass.
-     * 0 = library default. Larger amortizes the weight sweep across more
-     * tokens (and, on MoE, packs more tokens into each expert) at a linear
-     * cost in scratch memory. */
+    /* Prompt-prefill chunk: tokens fed through the weights per pass. 0 = library default. Larger amortizes the weight sweep (and MoE expert packing) at a linear cost in scratch memory. */
     uint32_t   batch_size;
     bool       verbose;
     bool       inspect;           /* print model info and exit             */
@@ -74,10 +62,7 @@ typedef struct OcCliArgs {
 void oc_cli_args_defaults(OcCliArgs *a);
 void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a);
 
-/* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext.
- * Returns true when argv[1] names a known subcommand (ctx is filled in and
- * ready for oc_cli_command_run), false otherwise — in which case the caller
- * should fall back to oc_cli_parse_args for the flag-only invocation. */
+/* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext. True when argv[1] names a known subcommand (ctx filled in for oc_cli_command_run); false otherwise — caller falls back to oc_cli_parse_args. */
 struct OcCliContext;
 bool oc_cli_context_parse(int argc, char **argv, struct OcCliContext *ctx);
 

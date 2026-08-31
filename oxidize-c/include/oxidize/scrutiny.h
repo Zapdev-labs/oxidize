@@ -1,9 +1,4 @@
-/*
- * scrutiny.h — Output scrutiny / validation module.
- *
- * Validates model outputs against safety and quality criteria.
- * Port from oxidize-core/src/mesh/scrutiny.rs.
- */
+/* scrutiny.h — Output scrutiny / validation module. */
 #ifndef OXIDIZE_SCRUTINY_H
 #define OXIDIZE_SCRUTINY_H
 

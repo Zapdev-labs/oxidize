@@ -1,16 +1,9 @@
-/*
- * encoder.c — Vision encoder pipeline integration.
- *
- * Ties together vision_config, vision_preprocess, and vision_encoder into
- * a single pipeline: preprocess -> encode -> output features.
- * See include/oxidize/encoder.h for design notes.
- */
+/* encoder.c — Vision encoder pipeline integration. */
 #include "oxidize/encoder.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 /* Compute the number of patches: (image_size / patch_size)^2. */
 static uint32_t pipeline_n_patches(const OcVisionConfig *cfg)
@@ -30,7 +23,6 @@ static size_t pipeline_output_size(const OcVisionConfig *cfg)
     return (size_t)n_patches * dim;
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────────── */
 
 OcError oc_encoder_pipeline_init(OcEncoderPipeline *pipe,
                                   const OcVisionConfig *vcfg)
@@ -52,7 +44,6 @@ OcError oc_encoder_pipeline_init(OcEncoderPipeline *pipe,
     return OC_OK;
 }
 
-/* ─── Process ──────────────────────────────────────────────────────────── */
 
 OcError oc_encoder_pipeline_process(OcEncoderPipeline *pipe,
                                      const OcImage *image,
@@ -132,7 +123,6 @@ OcError oc_encoder_pipeline_process_batch(OcEncoderPipeline *pipe,
     return OC_OK;
 }
 
-/* ─── Accessors ─────────────────────────────────────────────────────────── */
 
 size_t oc_encoder_pipeline_n_output_features(const OcEncoderPipeline *pipe)
 {
@@ -140,7 +130,6 @@ size_t oc_encoder_pipeline_n_output_features(const OcEncoderPipeline *pipe)
     return pipeline_output_size(&pipe->config);
 }
 
-/* ─── Free ──────────────────────────────────────────────────────────────── */
 
 void oc_encoder_pipeline_free(OcEncoderPipeline *pipe)
 {

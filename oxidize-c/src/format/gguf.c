@@ -1,26 +1,5 @@
-/* gguf.c — GGUF v3/v2 binary format parser.
- *
- * Port of oxidize-core/src/format/gguf.rs (parse_gguf, ByteReader, alignment
- * handling, metadata KV value type dispatch). The C port mirrors the Rust
- * logic 1:1 so bit-exact tensor inventory parity holds.
- *
- * Layout (little-endian throughout):
- *   header:   magic[4] | version:u32 | tensor_count:u64 | metadata_kv_count:u64
- *   metadata: for each KV: key_len:u64 | key:bytes | value_type:u32 | value
- *   tensors:  for each tensor:
- *       name_len:u64 | name:bytes | n_dims:u32 | dims[n_dims]:u64 |
- *       ggml_type:u32 | relative_offset:u64
- *   data:     aligned to `general.alignment` (default 32)
- *
- * Malformed input (bad magic, unsupported version, truncated reads, invalid
- * alignment, offsets beyond EOF) returns OC_ERR_FORMAT. No segfaults, no UB:
- * all reads are bounds-checked against the buffer length.
- *
- * Allocation strategy: a single OcArena owns every parser-lifetime allocation
- * (KV keys, string values, array buffers, tensor names). oc_gguf_free()
- * releases the arena in one shot. The metadata/tensors arrays themselves are
- * also arena-allocated for simplicity (single free, no per-entry tracking).
- */
+/* gguf.c — GGUF v3/v2 binary format parser. */
+/* logic 1:1 so bit-exact tensor inventory parity holds. */
 #include "oxidize/gguf.h"
 
 #include <stdio.h>
@@ -36,11 +15,6 @@
 #include "oxidize/util/mmap.h"
 #include "oxidize/util/string.h"
 
-/* ─── ByteReader: bounds-checked sequential cursor over a byte buffer ────────
- *
- * Mirrors the Rust `ByteReader` in gguf.rs. Every read checks bounds and
- * returns an OcError (OC_ERR_FORMAT on EOF/overflow) so the parser never
- * touches out-of-range memory. */
 typedef struct {
     const uint8_t *bytes;
     size_t        len;
@@ -141,10 +115,7 @@ static OcError reader_read_bool(ByteReader *r, bool *out)
     *out = (u != 0); return OC_OK;
 }
 
-/* Read a GGUF string (length-prefixed u64, no NUL terminator on disk).
- * On success writes an arena-owned, NUL-terminated copy to `*out_str` and
- * the byte length (excluding the NUL) to `*out_len`. The arena owns the
- * returned pointer. Returns OC_ERR_FORMAT on truncation. */
+/* Read a GGUF string (length-prefixed u64, no NUL terminator on disk). */
 static OcError reader_read_string(ByteReader *r, OcArena *arena,
                                   char **out_str, size_t *out_len)
 {
@@ -161,7 +132,6 @@ static OcError reader_read_string(ByteReader *r, OcArena *arena,
     const uint8_t *p = reader_read_exact(r, len, &e2);
     if (!p) return e2;
 
-    /* oc_arena_dup_n allocates len+1 bytes and NUL-terminates. */
     char *dst = oc_arena_dup_n(arena, (const char *)p, len);
     if (!dst) return OC_ERR_OOM;
 
@@ -170,11 +140,6 @@ static OcError reader_read_string(ByteReader *r, OcArena *arena,
     return OC_OK;
 }
 
-/* ─── Metadata value dispatch ───────────────────────────────────────────────
- *
- * Mirrors Rust `read_value_of_type`. Recursively handles ARRAY (which reads
- * its element_type then `len` elements of that type). Allocates array
- * payloads in the arena. */
 static OcError read_value_of_type(ByteReader *r, OcArena *arena,
                                   OcGgufMetadataType type,
                                   OcGgufMetadataValue *out);
@@ -187,12 +152,7 @@ static OcError read_array(ByteReader *r, OcArena *arena,
     if (e != OC_OK) return e;
     OcGgufMetadataType elem_type = oc_gguf_metadata_type_from_u32(et_raw);
     if (elem_type == OC_GGUF_MT_UNKNOWN) return OC_ERR_FORMAT;
-    /* Reject nested ARRAY (ARRAY-of-ARRAY) — non-spec: the GGUF format only
-     * permits arrays of scalar/string types. Permitting nested arrays would
-     * also leave the OcGgufMetadataArray recursion with no terminator and
-     * complicate the multi-shard deep-copy (dangling pointer risk on the
-     * shared-by-reference value storage). Mirrors Rust oxidize-core which
-     * returns Format error on recursive ARRAY. */
+    /* Reject nested ARRAY (ARRAY-of-ARRAY) — non-spec: the GGUF format only permits arrays of scalar/string types. Permitting nested arrays would also leave the OcGgufMetadataArray recursion with no terminator and complicate the multi-shard deep-copy (dangling pointer risk on the shared-by-reference value storage). Mirrors Rust oxidize-core which returns Format error on recursive ARRAY. */
     if (elem_type == OC_GGUF_MT_ARRAY) {
         oc_log(OC_LOG_ERROR, "gguf: nested ARRAY metadata type rejected "
                 "(non-spec, element_type=%u)", et_raw);
@@ -254,7 +214,6 @@ static OcError read_value_of_type(ByteReader *r, OcArena *arena,
     }
 }
 
-/* ─── Alignment ───────────────────────────────────────────────────────────── */
 
 static bool is_power_of_two_u64(uint64_t v) { return v != 0 && (v & (v - 1)) == 0; }
 
@@ -286,7 +245,6 @@ static OcError alignment_from_value(const OcGgufMetadataValue *v, uint64_t *out)
     return OC_ERR_FORMAT;
 }
 
-/* ─── Metadata type helpers ───────────────────────────────────────────────── */
 
 OcGgufMetadataType oc_gguf_metadata_type_from_u32(uint32_t raw)
 {
@@ -314,7 +272,6 @@ const char *oc_gguf_metadata_type_name(OcGgufMetadataType t)
     }
 }
 
-/* ─── Parser core ─────────────────────────────────────────────────────────── */
 
 OcError oc_gguf_parse(const uint8_t *buf, size_t len, OcGgufFile *out)
 {
@@ -439,7 +396,6 @@ OcError oc_gguf_parse(const uint8_t *buf, size_t len, OcGgufFile *out)
         return OC_ERR_FORMAT;
     }
 
-    /* data_section_start = align_up(reader.cursor, alignment). */
     bool overflow = false;
     uint64_t data_section_start = align_up_u64((uint64_t)reader_pos(&r), alignment, &overflow);
     if (overflow || data_section_start > (uint64_t)len) {
@@ -517,7 +473,6 @@ void oc_gguf_free(OcGgufFile *out)
     memset(out, 0, sizeof(*out));
 }
 
-/* ─── Lookups ─────────────────────────────────────────────────────────────── */
 
 const OcGgufMetadataValue *oc_gguf_metadata_get(const OcGgufFile *f,
                                                 const char *key)
@@ -658,7 +613,6 @@ const OcGgufTensorInfo *oc_gguf_tensor_get(const OcGgufFile *f, const char *name
     return NULL;
 }
 
-/* ─── Dump (debug aid for inspect_gguf) ───────────────────────────────────── */
 
 void oc_gguf_dump(const OcGgufFile *f)
 {
@@ -683,15 +637,7 @@ void oc_gguf_dump(const OcGgufFile *f)
     }
 }
 
-/* ─── Architecture detection (VAL-FOUND-012) ────────────────────────────────
- *
- * Mirrors Rust `GgufFile::architecture()`:
- *   1. Read `general.architecture` from metadata (STRING). If present, pass
- *      the value through `oc_model_arch_from_str()`.
- *   2. Otherwise, scan metadata keys for an `<arch>.*` namespace recognized
- *      by `oc_model_arch_from_str()` (mirrors Rust
- *      `detect_architecture_from_metadata_keys`).
- *   3. Return OC_ARCH_UNKNOWN if neither path yields a recognized arch. */
+/* ─── Architecture detection (VAL-FOUND-012) ──────────────────────────────── Mirrors Rust `GgufFile::architecture()`: 1. */
 OcModelArchitecture oc_gguf_arch_from_file(const OcGgufFile *f)
 {
     if (!f) return OC_ARCH_UNKNOWN;
@@ -724,15 +670,6 @@ OcModelArchitecture oc_gguf_arch_from_file(const OcGgufFile *f)
     return OC_ARCH_UNKNOWN;
 }
 
-/* ─── Multi-shard mmap-backed GGUF loading ──────────────────────────────────
- *
- * Port of oxidize-core::load_mapped_gguf + load_mapped_gguf_shards +
- * collect_split_shards. Detects the split-GGUF pattern
- * `<base>-NNNNN-of-MMMMM.gguf`, opens all sibling shards, mmaps each, parses
- * each, and merges their tensor tables into a single unified OcGgufFile view.
- *
- * For single-file GGUFs (no `-NNNNN-of-MMMMM.gguf` suffix, or suffix present
- * but siblings missing), falls back to a single-shard load. */
 
 /* Check whether `filename` matches the split-GGUF pattern
  * `<base>-NNNNN-of-MMMMM.gguf` and, if so, populate `out_total` with the
@@ -847,7 +784,6 @@ static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
     uint64_t total = 0;
     if (!parse_split_pattern(filename, &total)) return NULL;
 
-    /* filename = <base>-NNNNN-of-MMMMM.gguf. Find the last "-of-". */
     size_t fn_len = strlen(filename);
     const char *gguf_suffix = ".gguf";
     size_t suf_len = strlen(gguf_suffix);
@@ -873,7 +809,6 @@ static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
     }
     if (!prev_dash) return NULL;
 
-    /* base = filename[0 .. prev_dash). */
     size_t base_len = (size_t)(prev_dash - filename);
 
     /* Compose <dir>/<base>. */
@@ -888,10 +823,8 @@ static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
     return base_path;
 }
 
-/* Open + mmap a single shard. On success, `shard->mmap` is set (owned),
- * `shard->bytes` and `shard->len` are populated, and `shard->parsed` is
- * parsed from the mmap'd bytes. Returns OC_OK or an error; on error, the
- * shard is left zeroed. */
+/* Open + mmap a single shard. */
+/* parsed from the mmap'd bytes. */
 static OcError open_shard(const char *path, OcGgufShard *shard)
 {
     memset(shard, 0, sizeof(*shard));
@@ -899,10 +832,7 @@ static OcError open_shard(const char *path, OcGgufShard *shard)
     OcError e = oc_mmap_open_readonly(path, &m);
     if (e != OC_OK) return e;
 
-    /* Parse the mmap'd bytes. oc_gguf_parse dups the bytes it needs into the
-     * arena, so we can pass mmap'd bytes directly (the parse doesn't hold
-     * a reference to the buffer after return — strings/tensor names are
-     * arena-owned copies). */
+    /* Parse the mmap'd bytes. oc_gguf_parse dups the bytes it needs into the arena, so we can pass mmap'd bytes directly (the parse doesn't hold a reference to the buffer after return — strings/tensor names are arena-owned copies). */
     OcGgufFile parsed;
     e = oc_gguf_parse(oc_mmap_bytes(m), oc_mmap_len(m), &parsed);
     if (e != OC_OK) {
@@ -1033,14 +963,8 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
                 memset(merged, 0, (size_t)total_tensors * sizeof(*merged));
             }
 
-            /* Copy shard 0's tensors (deep-copy names into the unified arena
-             * so they outlive the per-shard arena). Stamp shard_index=0.
-             *
-             * Invariant: if total_tensors == 0 then every shard's
-             * tensor_count == 0, so the inner loop body never executes and
-             * `merged` (which would be NULL) is never dereferenced. The
-             * clang-analyzer can't prove this invariant, so we add an
-             * explicit assert to document it. */
+            /* Copy shard 0's tensors (deep-copy names into the unified arena so they outlive the per-shard arena). */
+            /* Invariant: if total_tensors == 0 then every shard's */
             uint64_t out_idx = 0;
             for (uint64_t s = 0; s < total; s++) {
                 OcGgufFile *src = &shards[s].parsed;
@@ -1185,10 +1109,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
             return e;
         }
 
-        /* Unified view = shard 0's parsed file, but with the tensor table
-         * deep-copied into a fresh unified arena (so the caller can free
-         * via oc_gguf_map_free() which frees the unified arena + each
-         * shard's per-shard arena). */
+        /* Unified view = shard 0's parsed file, but with the tensor table deep-copied into a fresh unified arena (so the caller can free via oc_gguf_map_free() which frees the unified arena + each shard's per-shard arena). */
         OcArena *unified_arena = oc_arena_new(0);
         if (!unified_arena) {
             close_shard(&shards[0]);
@@ -1328,10 +1249,7 @@ OcError oc_gguf_map_advise_hugepage(OcGgufMmappedFile *m)
 bool oc_gguf_map_mlock_with_headroom(OcGgufMmappedFile *m)
 {
     if (!m || !m->shards) return false;
-    /* Check the AGGREGATE size against the headroom policy first: each shard's
-     * own check only sees its individual length, so several shards could
-     * collectively exceed MemAvailable. If the total doesn't fit with >= 30%
-     * headroom, skip locking entirely (readahead + prefault only). */
+    /* Check the AGGREGATE size against the headroom policy first: each shard's own check only sees its individual length, so several shards could collectively exceed MemAvailable. If the total doesn't fit with >= 30% headroom, skip locking entirely (readahead + prefault only). */
     uint64_t available = 0;
     if (oc_linux_mem_available_bytes(&available)
         && oc_gguf_map_total_bytes(m) >= (available * 7ull) / 10ull) {
@@ -1457,4 +1375,3 @@ void oc_gguf_map_free(OcGgufMmappedFile *out)
     }
     memset(out, 0, sizeof(*out));
 }
-

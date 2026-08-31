@@ -1,12 +1,4 @@
-/*
- * layer_weights.h — Per-layer weight bundle for inference.
- *
- * Port of oxidize-core/src/model/inference.rs::LayerWeights.
- *
- * Contains all weight tensors for a single transformer layer:
- * attention norms, Q/K/V projections, output projection, FFN weights
- * (dense or MoE), SSM/Mamba tensors, short-conv, MLA, and per-head norms.
- */
+/* layer_weights.h — Per-layer weight bundle for inference. */
 #ifndef OXIDIZE_LAYER_WEIGHTS_H
 #define OXIDIZE_LAYER_WEIGHTS_H
 

@@ -1,22 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
-/* macOS hides _SC_NPROCESSORS_ONLN under strict _POSIX_C_SOURCE; restore it. */
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #endif
-/*
- * spinpool.c — Spin-waiting thread pool for low-latency parallel compute.
- *
- * Ports the spin-pool concept from oxidize-core/src/compute/spinpool.rs.
- * Workers spin for `spin_iterations` loops before parking on a condvar,
- * keeping handoff latency low for the bursty task pattern of token decode.
- */
 #include "oxidize/spinpool.h"
 
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Worker thread entry point ──────────────────────────────────────── */
 
 static void *worker_loop(void *arg)
 {
@@ -75,7 +66,6 @@ static void *worker_loop(void *arg)
     return NULL;
 }
 
-/* ─── Public API ─────────────────────────────────────────────────────── */
 
 OcSpinPoolConfig oc_spinpool_config_default(void)
 {
@@ -229,9 +219,7 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
     if (n_items == 0) return OC_OK;
     if (!items) return OC_ERR_INVALID_ARG;
 
-    /* Build a task list. We submit all tasks, then wait. Each task writes
-     * its result into the out_results slot. We use a per-task context that
-     * carries the item and the output slot. */
+    /* Per-item MapContext (fn, item, output slot) submitted via the file-scope trampoline. */
     typedef struct {
         void *(*fn)(void *);
         void  *item;
@@ -241,33 +229,13 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
     MapContext *ctxs = calloc(n_items, sizeof(MapContext));
     if (!ctxs) return OC_ERR_OOM;
 
-    /* Trampoline that extracts the context, calls fn, stores result. */
-    /* We need a stable function pointer; use a local function. */
-    /* Note: this is a static trampoline pattern. */
     for (size_t i = 0; i < n_items; i++) {
         ctxs[i].fn       = fn;
         ctxs[i].item     = items[i];
         ctxs[i].out_slot = out_results ? &out_results[i] : NULL;
     }
 
-    /* We cannot capture ctx in a plain function pointer easily, so we use
-     * a different approach: submit tasks that each run fn(item) and store
-     * the result. We use a thread-local-ish approach via the arg. */
-    /* Since the task fn signature is void *(*fn)(void *arg), and we need
-     * to write to a specific out_results slot, we use a wrapper. But
-     * C function pointers don't capture closures. So we use a static
-     * trampoline function and pass the context as arg. */
-
-    /* Actually, the simplest correct approach: use the arg as the item,
-     * call fn directly, and collect results after wait. But the task
-     * struct stores result internally. Let's use a simpler approach:
-     * submit n_items tasks where arg = items[i], then after wait, the
-     * result is stored in the task's result field. But tasks are
-     * dequeued and the task struct is overwritten.
-     *
-     * Better: use a shared results array and a trampoline. */
-
-    /* Allocate a results array if caller didn't provide one. */
+    /* Allocate a results array if the caller didn't provide one. */
     void **results = out_results;
     bool allocated_results = false;
     if (!results) {
@@ -279,16 +247,10 @@ OcError oc_spinpool_map(OcSpinPool *pool, void *(*fn)(void *),
         allocated_results = true;
     }
 
-    /* Submit tasks using the context as arg and a trampoline. */
-    /* Define trampoline as a local function — C11 allows nested function
-     * definitions? No, standard C does not. Use a file-scope function. */
-
-    /* Use ctxs[i].out_slot to store the result. */
     for (size_t i = 0; i < n_items; i++) {
         ctxs[i].out_slot = &results[i];
     }
 
-    /* File-scope trampoline defined below; we pass &ctxs[i] as arg. */
     extern void *oc_spinpool_map_trampoline(void *arg);
 
     for (size_t i = 0; i < n_items; i++) {

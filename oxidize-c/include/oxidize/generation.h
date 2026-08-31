@@ -1,9 +1,4 @@
-/*
- * generation.h — Token generation engine.
- *
- * Wraps the model forward pass with sampling, tokenizer, and timing
- * to provide a clean generation API. Port from oxidize-core/src/model/generation.rs.
- */
+/* generation.h — Token generation engine. */
 #ifndef OXIDIZE_GENERATION_H
 #define OXIDIZE_GENERATION_H
 
@@ -63,24 +58,8 @@ OcError oc_gen_config_from_cli(const OcGenConfig *cfg, OcSamplerConfig *out);
 const char *oc_gen_stop_reason(const OcGenResult *result);
 uint64_t oc_gen_total_tokens(const OcGenResult *result);
 
-/* ─── Full generation loop ────────────────────────────────────────────── */
 
-/* Run a full generation loop on an OcInferenceModel.
- *
- * model:     initialized inference model (must have weights loaded).
- * prompt:    array of token IDs to prefill.
- * n_prompt:  number of prompt tokens.
- * cfg:       generation config (max_tokens, temperature, etc.).
- * result:    output result (caller-allocated, call oc_gen_result_init first).
- * callback:  optional per-token callback (may be NULL).
- * user:      user data passed to callback.
- *
- * The function:
- *   1. Prefills all prompt tokens through the model.
- *   2. Samples the first generated token.
- *   3. Loops: forward_token -> sample -> callback until max_tokens or stop.
- *   4. Records timing (prefill + decode tok/s).
- */
+/* Run a full generation loop on an OcInferenceModel. */
 OcError oc_gen_run(void *model,
                     const uint32_t *prompt, size_t n_prompt,
                     const OcGenConfig *cfg,

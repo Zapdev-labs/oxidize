@@ -1,19 +1,4 @@
-/*
- * kv_cache.h — simple per-layer KV cache for transformer inference.
- *
- * This is a straightforward contiguous KV cache, separate from the paged
- * attention system (see kv_page.h). Each layer owns a contiguous block of
- * K and V storage sized [max_seq_len, n_heads * head_dim]. Tokens are
- * appended sequentially and the cache can be cleared or truncated.
- *
- * Design:
- *   - OcKvCacheConfig: tuning knobs (n_layers, n_heads, head_dim,
- *     max_seq_len, dtype).
- *   - OcKvCache: per-layer K/V buffers + current token count + capacity.
- *
- * Currently dtype is stored but only f32 storage is materialized; f16 is
- * reserved for future use and validated but treated as f32 in allocation.
- */
+/* kv_cache.h — simple per-layer KV cache for transformer inference. */
 #ifndef OXIDIZE_KV_CACHE_H
 #define OXIDIZE_KV_CACHE_H
 
@@ -27,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ────────────────────────────────────────────────────────── */
 
 #define OC_KV_CACHE_DEFAULT_N_LAYERS    32u
 #define OC_KV_CACHE_DEFAULT_N_HEADS     32u
@@ -36,17 +20,15 @@ extern "C" {
 #define OC_KV_CACHE_DTYPE_F32           0u
 #define OC_KV_CACHE_DTYPE_F16           1u
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 typedef struct OcKvCacheConfig {
     uint32_t n_layers;     /* number of model layers (default 32)        */
     uint32_t n_heads;      /* number of attention heads (default 32)     */
     uint32_t head_dim;     /* dimension per head (default 128)            */
     uint32_t max_seq_len;  /* max tokens storable (default 4096)          */
-    uint32_t dtype;        /* 0=f32, 1=f16 (default 0)                    */
+    uint32_t dtype;        /* 0=f32, 1=f16; only f32 storage is materialized today */
 } OcKvCacheConfig;
 
-/* ─── Cache ────────────────────────────────────────────────────────────── */
 
 typedef struct OcKvCache {
     OcKvCacheConfig config;

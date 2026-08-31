@@ -10,7 +10,6 @@
 
 namespace oxidize {
 
-// ---- Tape ----------------------------------------------------------------
 
 float* Tape::alloc(size_t n) {
   BufEntry e;
@@ -62,7 +61,6 @@ size_t Tape::size_of(const float* ptr) const {
   return bufs_[it->second].data.size();
 }
 
-// ---- Backward kernels ----------------------------------------------------
 
 void matmul_backward(float* dx, float* dW,
                      const float* W, const float* x, const float* dy,

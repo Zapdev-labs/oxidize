@@ -1,0 +1,40 @@
+{
+  "total": 324129,
+  "by_lang": {
+    "c": 137427,
+    "rust": 107673,
+    "go": 33934,
+    "python": 26993,
+    "cpp": 13632,
+    "sh": 2664,
+    "ts": 1806
+  },
+  "by_top": {
+    "oxidize-c": 137550,
+    "oxidize-core": 77664,
+    "oxidize-golang": 34019,
+    "oxidize-python": 21237,
+    "oxidize-cpp": 13956,
+    "oxidize-server": 6884,
+    "oxidize-cli": 5647,
+    "oxidize-finetuning": 5589,
+    "scripts": 5137,
+    "oxidize-train": 3638,
+    "oxidize-kernels": 2444,
+    "oxidize-tui": 1806,
+    "oxidize-prune": 1647,
+    "modal_app.py": 1624,
+    "oxidize-merge": 1453,
+    "oxidize-quantize": 1450,
+    "oxidize-py": 757,
+    "modal_c_app.py": 537,
+    "oxidize-ffi": 255,
+    "oxidize-convert": 245,
+    "bench_oxk.py": 165,
+    "modal_gemma4_bench.py": 154,
+    "modal_oxidize.py": 116,
+    "modal_bench.py": 102,
+    "run_codeneedle.sh": 45,
+    "tests": 8
+  }
+}

@@ -1,16 +1,4 @@
-/*
- * safetensors.c — HuggingFace SafeTensors file reader implementation.
- *
- * Implements a minimal JSON parser tailored to the SafeTensors header shape:
- *   {"tensor_name":{"dtype":"F32","shape":[1024,1024],
- *                   "data_offsets":[0,4194304]}, ...}
- *
- * The parser is a single-pass state machine that walks the JSON character
- * stream, tracking the current "key path" (top-level tensor name, then the
- * descriptor field name) and emitting values into the in-progress tensor
- * descriptor. It is NOT a general-purpose JSON parser: it assumes the
- * well-formed subset produced by real .safetensors files.
- */
+/* safetensors.c — HuggingFace SafeTensors file reader implementation. */
 #include "oxidize/safetensors.h"
 
 #include <ctype.h>
@@ -28,7 +16,6 @@
 #define OC_HAVE_MMAP 0
 #endif
 
-/* ─── Internal: JSON tokenizer state ──────────────────────────────────── */
 
 typedef enum {
     OC_STJ_TOP,         /* expecting '{' or ',' at top level */
@@ -46,12 +33,10 @@ typedef struct OcStParser {
     OcSafetensorsTensor cur;        /* in-progress tensor descriptor */
     bool                cur_valid;  /* true once a name has been captured */
     char                field[32];  /* current descriptor field name */
-    /* shape / data_offsets accumulation buffers */
     uint64_t shape_vals[OC_SAFETENSORS_MAX_DIMS];
     uint32_t shape_count;
     uint64_t offsets[2];
     uint32_t offset_count;
-    /* output collection */
     OcSafetensorsTensor *out_arr;
     size_t               out_cap;
     size_t               out_len;
@@ -88,10 +73,7 @@ static bool parser_emit(OcStParser *p)
     return true;
 }
 
-/* Copy a JSON string token (without quotes, with escapes unescaped) into a
- * fixed-size NUL-terminated buffer. Returns the decoded length, or -1 on
- * truncation. `src` points at the opening quote; `*endp` is set past the
- * closing quote. */
+/* Copy a JSON string token (without quotes, with escapes unescaped) into a fixed-size NUL-terminated buffer. Returns decoded length, or -1 if `src` is not at an opening quote (`*endp` stays at `src`). On success `*endp` is past the closing quote. Truncation still returns the written length. */
 static int json_decode_string(const char *src, const char **endp,
                               char *dst, size_t dst_cap)
 {
@@ -172,7 +154,6 @@ static void json_skip_value(const char *src, const char **endp)
         *endp = src;
         return;
     }
-    /* number / true / false / null: skip word chars */
     while (*src && !isspace((unsigned char)*src) && *src != ',' &&
            *src != ']' && *src != '}') {
         src++;
@@ -337,7 +318,6 @@ static OcError parse_header(const char *json, size_t json_len,
     return OC_OK;
 }
 
-/* ─── Public API ──────────────────────────────────────────────────────── */
 
 OcError oc_safetensors_open(const char *path, OcSafetensorsFile *out)
 {
@@ -485,7 +465,6 @@ void oc_safetensors_close(OcSafetensorsFile *st)
     if (st->mmapped) {
 #if OC_HAVE_MMAP
         if (st->raw_data != NULL) {
-            /* raw_data points at base + data_start; recover the mmap base. */
             void *base = (uint8_t *)st->raw_data - st->data_start;
             munmap(base, (size_t)st->file_size);
         }

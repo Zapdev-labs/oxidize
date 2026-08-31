@@ -1,10 +1,4 @@
-/*
- * advanced_features.h — Advanced inference features.
- *
- * Higher-level features like prompt caching, prefix matching,
- * speculative decoding orchestration, and multi-model serving.
- * Port from oxidize-core/src/model/advanced_features.rs.
- */
+/* advanced_features.h — Advanced inference features. */
 #ifndef OXIDIZE_ADVANCED_FEATURES_H
 #define OXIDIZE_ADVANCED_FEATURES_H
 

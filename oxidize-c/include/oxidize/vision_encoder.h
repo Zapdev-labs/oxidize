@@ -1,13 +1,4 @@
-/*
- * vision_encoder.h — CLIP-style vision encoder for multimodal models.
- *
- * Stub implementation providing the API surface for image → feature encoding
- * via a CLIP-style ViT (patch embedding → optional transformer → projection).
- * Real computation is deferred; this module returns deterministic placeholders
- * so callers can wire up the multimodal pipeline end-to-end.
- *
- * Port of the conceptual API from oxidize-core/src/vision/encoder.rs.
- */
+/* vision_encoder.h — CLIP-style vision encoder for multimodal models. */
 #ifndef OXIDIZE_VISION_ENCODER_H
 #define OXIDIZE_VISION_ENCODER_H
 
@@ -21,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_VISION_DEFAULT_IMAGE_SIZE   224u
 #define OC_VISION_DEFAULT_PATCH_SIZE   16u
@@ -30,7 +20,6 @@ extern "C" {
 #define OC_VISION_DEFAULT_HIDDEN_DIM   768u
 #define OC_VISION_DEFAULT_N_HEADS      12u
 
-/* ─── Config ────────────────────────────────────────────────────────── */
 
 typedef struct OcVisionEncoderConfig {
     uint32_t image_size;   /* default OC_VISION_DEFAULT_IMAGE_SIZE */
@@ -41,7 +30,6 @@ typedef struct OcVisionEncoderConfig {
     uint32_t n_heads;     /* default OC_VISION_DEFAULT_N_HEADS    */
 } OcVisionEncoderConfig;
 
-/* ─── Image patch ───────────────────────────────────────────────────── */
 
 typedef struct OcImagePatch {
     float   *pixels;     /* owned, size = width * height * channels */
@@ -50,7 +38,6 @@ typedef struct OcImagePatch {
     uint32_t channels;
 } OcImagePatch;
 
-/* ─── Encoder ────────────────────────────────────────────────────────── */
 
 /* Per-layer weights for ViT transformer blocks. */
 typedef struct OcViTLayer {
@@ -79,12 +66,10 @@ typedef struct OcVisionEncoder {
     bool      initialized;
 } OcVisionEncoder;
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 /* Initialize config with defaults. */
 OcError oc_vision_config_init(OcVisionEncoderConfig *cfg);
 
-/* ─── Encoder lifecycle ─────────────────────────────────────────────── */
 
 /* Allocate an encoder (heap-allocated) and store the config.
  * Free with oc_vision_encoder_free. */
@@ -96,19 +81,13 @@ OcError oc_vision_encoder_init(OcVisionEncoder **encoder,
 OcError oc_vision_encoder_load_weights(OcVisionEncoder *encoder,
                                        const void *data, size_t size);
 
-/* Encode an image patch to a feature vector. The stub returns a
- * deterministic vector of size n_patches * hidden_dim filled with a small
- * constant. `*out_features` is heap-allocated and owned by the caller.
- * `*out_n_features` is the number of floats written. */
+/* Encode an image to a feature vector. Without weights this is a stub: a deterministic placeholder of size n_patches * hidden_dim. `*out_features` is heap-allocated and caller-owned; `*out_n_features` is the number of floats written. */
 OcError oc_vision_encoder_encode(OcVisionEncoder *encoder,
                                  const OcImagePatch *image,
                                  float **out_features,
                                  size_t *out_n_features);
 
-/* Extract patches from an image patch grid. The stub returns a deterministic
- * vector of size n_patches * (patch_size^2 * channels) filled with a small
- * constant. `*out_patches` is heap-allocated and owned by the caller.
- * `*out_n_patches` is the number of patches. */
+/* Extract patches from an image patch grid. The stub returns a deterministic vector of size n_patches * (patch_size^2 * channels) filled with a small constant. `*out_patches` is heap-allocated and owned by the caller. `*out_n_patches` is the number of patches. */
 OcError oc_vision_encoder_patch_embed(OcVisionEncoder *encoder,
                                      const OcImagePatch *image,
                                      float **out_patches,
@@ -117,7 +96,6 @@ OcError oc_vision_encoder_patch_embed(OcVisionEncoder *encoder,
 /* Free the encoder and its owned weights. Safe on NULL / already-freed. */
 void oc_vision_encoder_free(OcVisionEncoder *encoder);
 
-/* ─── Image patch helpers ───────────────────────────────────────────── */
 
 /* Allocate an image patch of the given dimensions with zeroed pixel data.
  * Free with oc_image_patch_free. */

@@ -79,7 +79,6 @@ Test(act, layer_norm_with_weight_bias)
     float b[] = {1.0f, 2.0f};
     float out[2];
     oc_layer_norm_f32(in, w, b, out, 2, 1e-5f);
-    /* mean=0, var=0, inv_std=1/sqrt(eps) -> out = 0*inv_std*w + b = b */
     cr_assert_float_eq(out[0], 1.0f, 0.1f);
     cr_assert_float_eq(out[1], 2.0f, 0.1f);
 }
@@ -90,7 +89,6 @@ Test(act, swiglu_non_inplace)
     float up[] = {2.0f, 3.0f, 4.0f};
     float out[3];
     oc_swiglu_f32(gate, up, out, 3);
-    /* silu(0) = 0, silu(1) = 1*sigmoid(1) = 0.7311, silu(-1) = -1*sigmoid(-1) = -0.2689 */
     cr_assert_float_eq(out[0], 0.0f, 0.001f);
     cr_assert_float_eq(out[1], 0.7311f * 3.0f, 0.01f);
     cr_assert_float_eq(out[2], -0.2689f * 4.0f, 0.01f);
@@ -98,11 +96,7 @@ Test(act, swiglu_non_inplace)
 
 Test(act, scaled_dot_product_attention_basic)
 {
-    /* dim=2, seq_len=2.
-     * query = [1, 0], keys = [[1,0],[0,1]], values = [[10,20],[30,40]].
-     * score0 = 1/sqrt(2) ~ 0.707, score1 = 0.
-     * softmax([0.707, 0]) = [0.669, 0.331].
-     * output = 0.669*[10,20] + 0.331*[30,40] = [16.65, 26.62]. */
+    /* dim=2, seq_len=2. */
     float q[] = {1.0f, 0.0f};
     float k[] = {1.0f, 0.0f, 0.0f, 1.0f};
     float v[] = {10.0f, 20.0f, 30.0f, 40.0f};
@@ -141,7 +135,6 @@ Test(act, scaled_dot_product_attention_empty)
 
 Test(act, rms_norm_qwen_standard)
 {
-    /* weight_plus_one = false -> same as standard rms_norm. */
     float x[] = {3.0f, 4.0f};
     float w[] = {1.0f, 1.0f};
     float out[2];
@@ -155,7 +148,6 @@ Test(act, rms_norm_qwen_standard)
 
 Test(act, rms_norm_qwen_plus_one)
 {
-    /* weight_plus_one = true -> uses (1+w) instead of w. */
     float x[] = {3.0f, 4.0f};
     float w[] = {0.5f, 0.5f};
     float out[2];
@@ -170,7 +162,6 @@ Test(act, rms_norm_qwen_plus_one)
 
 Test(act, rms_norm_qwen_zero_weights)
 {
-    /* weight_plus_one = true with w=0 -> uses (1+0)=1, same as no weight. */
     float x[] = {1.0f, 2.0f, 3.0f};
     float w[] = {0.0f, 0.0f, 0.0f};
     float out[3];

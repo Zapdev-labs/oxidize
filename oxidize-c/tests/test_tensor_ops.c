@@ -129,7 +129,6 @@ Test(tensor, silu)
     float a[] = {0.0f, 1.0f, -1.0f};
     float out[3];
     oc_tensor_silu_f32(a, out, 3);
-    /* silu(0) = 0, silu(1) ≈ 0.7311, silu(-1) ≈ -0.2689 */
     cr_assert_float_eq(out[0], 0.0f, 1e-6f);
     cr_assert(out[1] > 0.7f && out[1] < 0.8f);
     cr_assert(out[2] > -0.3f && out[2] < -0.2f);
@@ -140,7 +139,6 @@ Test(tensor, gelu)
     float a[] = {0.0f, 1.0f, -1.0f};
     float out[3];
     oc_tensor_gelu_f32(a, out, 3);
-    /* gelu(0) = 0, gelu(1) ≈ 0.8412, gelu(-1) ≈ -0.1588 */
     cr_assert_float_eq(out[0], 0.0f, 1e-6f);
     cr_assert(out[1] > 0.8f && out[1] < 0.9f);
     cr_assert(out[2] > -0.2f && out[2] < -0.1f);
@@ -151,7 +149,6 @@ Test(tensor, transpose)
     float a[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}; /* 2×3 */
     float out[6]; /* 3×2 */
     oc_tensor_transpose_f32(a, out, 2, 3);
-    /* out[0] = a[0] = 1, out[1] = a[3] = 4, out[2] = a[1] = 2 */
     cr_assert_float_eq(out[0], 1.0f, 1e-6f);
     cr_assert_float_eq(out[1], 4.0f, 1e-6f);
     cr_assert_float_eq(out[2], 2.0f, 1e-6f);

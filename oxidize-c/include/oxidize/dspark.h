@@ -1,13 +1,4 @@
-/*
- * dspark.h — DSpark-style block drafting on native Qwen MTP.
- *
- * llama.cpp's draft-dspark is a DFlash variant with an anchor-first noise
- * block and a Markov/confidence head. This Qwen3.5/3.8 GGUF has no sidecar
- * DSpark drafter (those are DeepSeek-V4 4096-d). It does ship in-GGUF MTP
- * (`blk.N.nextn.*`). This module applies the DSpark draft policy to that
- * head: draft a full block from the last committed token, stop early when
- * pairwise confidence falls below p_min, then greedy-verify on the target.
- */
+/* dspark.h — DSpark-style block drafting on native Qwen MTP. */
 #ifndef OXIDIZE_DSPARK_H
 #define OXIDIZE_DSPARK_H
 

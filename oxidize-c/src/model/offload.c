@@ -92,7 +92,6 @@ uint32_t oc_offload_suggest_gpu_layers(uint64_t model_size_bytes,
     return n;
 }
 
-/* ─── Multi-GPU offload planning ──────────────────────────────────────── */
 
 /* Extract layer index from a tensor name.
  * Handles "blk.N." and "model.layers.N." prefixes.

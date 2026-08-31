@@ -243,7 +243,6 @@ impl RingBackend {
         let mut send_buf = vec![0.0_f32; chunk_size];
         let mut recv_f32 = vec![0.0_f32; chunk_size];
 
-        // ---------- Scatter-reduce: N-1 steps ----------
         // At step s, rank i sends chunk (i - s) mod N and receives into
         // chunk (i - s - 1) mod N from the left.
         let mut send_chunk = self.rank;
@@ -270,7 +269,6 @@ impl RingBackend {
             recv_chunk = (recv_chunk + self.num_ranks - 1) % self.num_ranks;
         }
 
-        // ---------- All-gather: N-1 steps ----------
         // At step s, rank i sends the chunk it acquired at step s-1
         // (starting with its fully-reduced chunk at index (i+1) mod N)
         // and receives into the next missing slot.

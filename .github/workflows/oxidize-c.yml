@@ -12,6 +12,10 @@ on:
       - "oxidize-c/**"
       - ".github/workflows/oxidize-c.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

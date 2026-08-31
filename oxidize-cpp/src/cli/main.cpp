@@ -301,7 +301,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  // ---- NUMA / affinity / thread binding ------------------------------------
   // Discover NUMA topology and pin threads + memory policy before model load
   // so that first-touch page allocation lands on the bound node.
   // Default (no --numa flag): single-node binding (node 0) with physical-core

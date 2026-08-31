@@ -1,22 +1,4 @@
-/*
- * test_glm_arch.c — tests for GLM / Hunyuan architecture support.
- *
- * Covers:
- *   - Config parsing (string → enum): GLM version detection from arch strings
- *   - Null handling: NULL inputs to config parsers and version detection
- *   - Config defaults: OcGlmConfig and OcHunyuanConfig default values
- *   - Version detection: ChatGLM-6B vs GLM-4 vs unknown
- *
- * The config-parse tests that require a real OcGgufFile use a minimal
- * in-memory GGUF buffer built via oc_gguf_parse(). This avoids a file
- * dependency and exercises the real metadata path.
- *
- * Compilation:
- *   cc -std=c11 -Wall -Wextra -Werror -O2 -c tests/test_glm_arch.c \
- *       -I include
- *   cc -std=c11 -Wall -Wextra -Werror -O2 tests/test_glm_arch.o \
- *       src/model/glm_arch.o ... -lcriterion -lm -o test_glm_arch
- */
+/* test_glm_arch.c — tests for GLM / Hunyuan architecture support. */
 #include <criterion/criterion.h>
 #include <string.h>
 
@@ -24,7 +6,6 @@
 #include "oxidize/glm_arch.h"
 #include "oxidize/model.h"
 
-/* ─── Version detection ────────────────────────────────────────────────── */
 
 Test(glm_arch, version_from_str_glm)
 {
@@ -95,7 +76,6 @@ Test(glm_arch, version_from_str_unknown)
         "hunyuan → unknown");
 }
 
-/* ─── Null handling ────────────────────────────────────────────────────── */
 
 Test(glm_arch, version_from_str_null)
 {
@@ -149,7 +129,6 @@ Test(glm_arch, config_defaults_null)
     oc_hunyuan_config_defaults(NULL);
 }
 
-/* ─── Config defaults ─────────────────────────────────────────────────── */
 
 Test(glm_arch, glm_config_defaults)
 {
@@ -202,27 +181,6 @@ Test(glm_arch, hunyuan_config_defaults)
     cr_assert_eq(cfg.tied_embeddings, false, "default tied_embeddings");
 }
 
-/* ─── Config parsing from a minimal in-memory GGUF ──────────────────────
- *
- * We build a tiny valid GGUF buffer with the metadata keys the GLM parser
- * reads, then call oc_glm_config_parse / oc_hunyuan_config_parse. This
- * exercises the real metadata lookup path (oc_gguf_metadata_get_u32 etc.).
- *
- * GGUF binary layout (v3, little-endian):
- *   magic:    "GGUF" (4 bytes)
- *   version:  u32 = 3
- *   n_tensors: u64 = 0
- *   n_kv:     u64 = <count>
- *   [KV pairs]
- *   alignment padding (to 32 bytes)
- *   (no tensor data)
- *
- * Each KV pair:
- *   key_len: u64 (string length, not including NUL)
- *   key:     bytes + NUL
- *   type:    u32
- *   value:   depends on type
- */
 
 /* Helper: append a u32 value to a buffer at offset, return new offset. */
 static size_t put_u32(uint8_t *buf, size_t off, uint32_t val)
@@ -253,10 +211,7 @@ static size_t put_str_key(uint8_t *buf, size_t off, const char *key)
     return off;
 }
 
-/* Build a minimal GGUF buffer with the given KV pairs.
- * kv_keys / kv_types / kv_u32_vals / kv_f32_vals must have `n_kv` entries.
- * type: 4 = u32, 6 = f32, 7 = bool, 8 = string.
- * For strings, we only store the u32/f32 path here (tests don't need strings). */
+/* Build a minimal GGUF buffer with the given KV pairs. For strings, we only store the u32/f32 path here (tests don't need strings). */
 static OcGgufFile build_minimal_gguf(const char **keys, const uint32_t *types,
                                       const uint32_t *u32_vals,
                                       const float *f32_vals, size_t n_kv)
@@ -455,7 +410,6 @@ Test(glm_arch, config_parse_hunyuan_metadata, .disabled=true)
 
 Test(glm_arch, config_parse_glm_invalid_dims, .disabled=true)
 {
-    /* hidden_size not divisible by num_attention_heads → OC_ERR_MODEL. */
     const char *keys[] = {
         "glm.hidden_size",
         "glm.num_attention_heads",
@@ -555,11 +509,9 @@ Test(glm_arch, config_parse_glm_defaults_for_missing_keys, .disabled=true)
     OcError e = oc_glm_config_parse(&f, "glm", &cfg);
     cr_assert_eq(e, OC_OK, "parse with missing keys should use defaults");
 
-    /* vocab_size falls back to default (32000) since not in GGUF. */
     cr_assert_eq(cfg.vocab_size, 32000, "default vocab_size when missing");
     cr_assert_eq(cfg.hidden_size, 4096, "parsed hidden_size");
     cr_assert_eq(cfg.max_position_embeddings, 4096, "parsed max_position");
-    /* rope_theta defaults to 10000 for GLM version 1 (< 4). */
     cr_assert_float_eq(cfg.rope_theta, 10000.0f, 1e-1f,
         "default rope_theta for ChatGLM");
     cr_assert_eq(cfg.glm_version, OC_GLM_VERSION_1, "version 1 from 'glm'");

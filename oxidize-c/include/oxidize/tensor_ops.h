@@ -1,20 +1,4 @@
-/*
- * tensor_ops.h — High-level tensor operations for the C port.
- *
- * Port of oxidize-core/src/compute/tensor.rs operations that are not
- * covered by the existing matvec/quantization modules. Provides:
- *   - Element-wise ops (add, mul, scale, exp, tanh)
- *   - Reductions (sum, max, argmax, norm)
- *   - Copy/transpose/concat
- *   - Softmax (online + naive)
- *   - Layer norm / RMS norm (f32 + quantized)
- *   - Rotary position embedding (RoPE) variants
- *   - GEMM (f32 × f32, quantized × f32)
- *
- * All operations work on flat f32 buffers (row-major) unless otherwise
- * noted. No tensor descriptor struct — just raw pointers + dims, keeping
- * with the C port's "no abstraction" convention.
- */
+/* tensor_ops.h — High-level tensor operations for the C port. */
 #ifndef OXIDIZE_TENSOR_OPS_H
 #define OXIDIZE_TENSOR_OPS_H
 
@@ -28,9 +12,7 @@
 extern "C" {
 #endif
 
-/* ─── Element-wise operations ──────────────────────────────────────────── */
 
-/* out = a + b (element-wise). n elements. */
 void oc_tensor_add_f32(const float *a, const float *b, float *out, size_t n);
 
 /* out = a * b (element-wise). */
@@ -69,7 +51,6 @@ void oc_tensor_imul_f32(float *a, const float *b, size_t n);
 /* In-place: a[i] = a[i] * scale. */
 void oc_tensor_iscale_f32(float *a, float scale, size_t n);
 
-/* ─── Reductions ────────────────────────────────────────────────────────── */
 
 /* Sum of n elements. */
 float oc_tensor_sum_f32(const float *a, size_t n);
@@ -89,7 +70,6 @@ float oc_tensor_mean_f32(const float *a, size_t n);
 /* Variance: sum((a[i] - mean)^2) / n. */
 float oc_tensor_variance_f32(const float *a, size_t n);
 
-/* ─── Copy / transpose / concat ─────────────────────────────────────────── */
 
 /* Copy n elements. */
 void oc_tensor_copy_f32(const float *src, float *dst, size_t n);
@@ -107,7 +87,6 @@ void oc_tensor_concat_f32(const float *a, const float *b, float *out,
 void oc_tensor_repeat_row_f32(const float *row, float *out,
                                 size_t m, size_t n);
 
-/* ─── Softmax ───────────────────────────────────────────────────────────── */
 
 /* Naive softmax: out = softmax(a). n elements. */
 void oc_tensor_softmax_f32(const float *a, float *out, size_t n);
@@ -121,7 +100,6 @@ void oc_tensor_softmax_temp_f32(const float *a, float *out, size_t n, float temp
 /* Log-softmax: out[i] = a[i] - logsumexp(a). */
 void oc_tensor_log_softmax_f32(const float *a, float *out, size_t n);
 
-/* ─── Normalization ──────────────────────────────────────────────────────── */
 
 /* LayerNorm: out = (a - mean) / sqrt(var + eps) * weight + bias.
  * a, out: [n], weight: [n], bias: [n] (or NULL). */
@@ -133,7 +111,6 @@ void oc_tensor_layer_norm_f32(const float *a, const float *weight,
 void oc_tensor_rms_norm_f32(const float *a, const float *weight,
                               float *out, size_t n, float eps);
 
-/* ─── Rotary position embedding (RoPE) ───────────────────────────────────── */
 
 /* Apply RoPE (GPT-NeoX style, split halves) to a single head.
  * x: [head_dim], position: token position, freq_base: theta. */
@@ -149,7 +126,6 @@ void oc_tensor_rope_gptj_f32(float *x, size_t head_dim,
 void oc_tensor_rope_neox_row_f32(float *x, size_t n_head, size_t head_dim,
                                    uint32_t position, float freq_base);
 
-/* ─── GEMM ──────────────────────────────────────────────────────────────── */
 
 /* C = A @ B where A: [M×K], B: [K×N], C: [M×N] (row-major). */
 void oc_tensor_gemm_f32(const float *A, const float *B, float *C,
@@ -163,27 +139,18 @@ void oc_tensor_gemm_at_f32(const float *A, const float *B, float *C,
 void oc_tensor_gemm_batch_f32(const float *A, const float *B, float *C,
                                 size_t batch, size_t M, size_t K, size_t N);
 
-/* ─── Attention helpers ────────────────────────────────────────────────── */
 
-/* Scaled dot-product attention for a single head.
- * Q: [d_head], K: [seq_len × d_head], V: [seq_len × d_head]
- * out: [d_head], scale: 1/sqrt(d_head)
- * On internal allocation failure, out is zero-filled. */
+/* Scaled dot-product attention for a single head. */
 void oc_tensor_attention_head_f32(const float *Q, const float *K,
                                     const float *V, float *out,
                                     size_t seq_len, size_t d_head, float scale);
 
-/* Multi-head attention with GQA.
- * Q: [n_head_q × d_head], K: [n_head_kv × seq_len × d_head], V: same.
- * out: [n_head_q × d_head]
- * n_head_kv must be > 0; a zero value yields a zero-filled out.
- * On internal allocation failure, out is zero-filled. */
+/* Multi-head attention with GQA. */
 void oc_tensor_attention_mha_f32(const float *Q, const float *K,
                                    const float *V, float *out,
                                    size_t n_head_q, size_t n_head_kv,
                                    size_t seq_len, size_t d_head);
 
-/* ─── Utility ───────────────────────────────────────────────────────────── */
 
 /* Fill with constant. */
 void oc_tensor_fill_f32(float *a, float val, size_t n);

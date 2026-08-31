@@ -1,24 +1,4 @@
-/*
- * test_simd.c — SIMD dispatch parity tests.
- *
- * Invariant (VAL-SIMD-001..004): for every quant type with a SIMD kernel,
- * the dispatched dequant output is byte-for-byte identical to the scalar
- * reference `oc_quant_dequant_row_scalar` on randomized inputs. The tests
- * also exercise the capability detector and the dispatch entry directly.
- *
- * Strategy:
- *   1. Generate random f32 source values.
- *   2. Pack via `oc_quant_pack_row` (the scalar encoder) to produce valid
- *      packed buffers for each quant type.
- *   3. Dequant once via `oc_quant_dequant_row` (SIMD on capable hosts, scalar
- *      otherwise) and once via `oc_quant_dequant_row_scalar` (forced scalar).
- *   4. memcmp the two f32 output buffers — they must be bit-identical.
- *
- * On a host without AVX2/AVX-512, `oc_simd_try_dequant` returns false for
- * every type; the parity test then trivially passes (both paths are scalar).
- * The kernels are still compiled in and exercised directly by the
- * kernel-level tests below, gated on `oc_simd_caps()->level`.
- */
+/* test_simd.c — SIMD dispatch parity tests. */
 #include <criterion/criterion.h>
 
 #include "oxidize/quant.h"
@@ -27,7 +7,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ─── Capability detection ─────────────────────────────────────────────── */
 
 Test(simd, caps_reports_known_level)
 {
@@ -39,7 +18,6 @@ Test(simd, caps_reports_known_level)
     cr_assert_str_neq(c->name, "", "name should not be empty");
 }
 
-/* ─── Deterministic PRNG (so failures are reproducible) ─────────────────── */
 
 static uint64_t g_rng_state = 0x0123456789abcdefULL;
 
@@ -61,13 +39,6 @@ static float rand_f32_in_range(float lo, float hi)
     return lo + t * (hi - lo);
 }
 
-/* ─── Parity test generator ──────────────────────────────────────────────
- *
- * Packs `n_blocks` blocks of random f32 values, then asserts SIMD dequant
- * output == scalar dequant output byte-for-byte. The packed buffer is
- * produced by the scalar encoder (oc_quant_pack_row), so it is always a
- * valid packed buffer for the given type.
- */
 static void assert_parity(OcGgufQuantizationType qtype, size_t n_blocks)
 {
     OcQuantBlockLayout bs = oc_quant_block_size(qtype);
@@ -152,7 +123,6 @@ Test(simd, parity_q8_0)  { assert_parity(OC_QUANT_Q8_0, 7); }
 Test(simd, parity_q4_k_s) { assert_parity(OC_QUANT_Q4_K_S, 3); }
 Test(simd, parity_q4_k_m) { assert_parity(OC_QUANT_Q4_K_M, 3); }
 
-/* ─── Kernel-level tests (exercised only when the host supports them) ──── */
 
 Test(simd, kernel_q4_0_avx2_present_when_caps_say_so)
 {

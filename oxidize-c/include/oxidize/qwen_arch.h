@@ -1,24 +1,4 @@
-/*
- * qwen_arch.h — Qwen architecture forward pass.
- *
- * Qwen2/Qwen3 models use SwiGLU FFN, RoPE, GQA with Q/K-norm,
- * and tie word embeddings. Qwen3 adds QK-norm (RMSNorm on Q and K
- * before RoPE). Key difference from Llama: no tied embeddings by default,
- * separate QK-norm weights per layer.
- *
- * Port of oxidize-core ModelArchitecture::Qwen forward path.
- * The forward function is a stub that zero-fills the logits buffer.
- *
- * Weight tensor names (GGUF):
- *   token_embd.weight
- *   output_norm.weight, output.weight (or tied to token_embd)
- *   blk.N.attn_norm.weight
- *   blk.N.attn_q.weight, blk.N.attn_q_norm.weight
- *   blk.N.attn_k.weight, blk.N.attn_k_norm.weight
- *   blk.N.attn_v.weight, blk.N.attn_output.weight
- *   blk.N.ffn_norm.weight
- *   blk.N.ffn_gate.weight, blk.N.ffn_up.weight, blk.N.ffn_down.weight
- */
+/* qwen_arch.h — Qwen architecture forward pass. */
 #ifndef OXIDIZE_QWEN_ARCH_H
 #define OXIDIZE_QWEN_ARCH_H
 
@@ -32,13 +12,7 @@
 extern "C" {
 #endif
 
-/* Qwen model configuration. Defaults match Qwen2.5-7B:
- *   n_layers=28, n_heads=28, n_kv_heads=4, head_dim=128,
- *   hidden_dim=3584, intermediate_dim=18944, vocab_size=152064,
- *   rope_theta=1000000.0, max_position=32768.
- * For Qwen3-0.6B: n_layers=28, n_heads=16, n_kv_heads=8,
- *   head_dim=128, hidden_dim=1024, intermediate_dim=3072,
- *   vocab_size=151936, rope_theta=1000000.0 */
+/* Qwen model configuration. Defaults match Qwen2.5-7B: n_layers=28, n_heads=28, n_kv_heads=4, head_dim=128, hidden_dim=3584, intermediate_dim=18944, vocab_size=152064, rope_theta=1000000.0, max_position=32768. For Qwen3-0.6B: n_layers=28, n_heads=16, n_kv_heads=8, head_dim=128, hidden_dim=1024, intermediate_dim=3072, vocab_size=151936, rope_theta=1000000.0 */
 typedef struct OcQwenConfig {
     uint32_t n_layers;
     uint32_t n_heads;

@@ -1,9 +1,4 @@
-/*
- * inference.h — High-level inference engine.
- *
- * Wraps model loading, tokenization, and generation into a clean API.
- * Port from oxidize-core/src/model/inference.rs.
- */
+/* inference.h — High-level inference engine. */
 #ifndef OXIDIZE_INFERENCE_H
 #define OXIDIZE_INFERENCE_H
 
@@ -81,10 +76,7 @@ typedef struct {
     float    yarn_mscale;
     float    yarn_mscale_all_dim;
 
-    /* LongCat: identity experts occupying router slots
-     * [num_experts, num_experts + zero_expert_count). They hold no weights
-     * and contribute their weighted normalized input to the FFN output.
-     * Appended to preserve the layout of the pre-existing configuration fields. */
+    /* LongCat: identity experts occupying router slots [num_experts, num_experts + zero_expert_count). They hold no weights and contribute their weighted normalized input to the FFN output. Appended to preserve the layout of the pre-existing configuration fields. */
     uint32_t zero_expert_count;
 } OcInferenceConfig;
 
@@ -103,10 +95,7 @@ uint32_t oc_inference_config_kv_head_dim(const OcInferenceConfig *cfg);
 /* Validate config: check hidden_size > 0, num_heads > 0, etc. */
 OcError oc_inference_config_validate(const OcInferenceConfig *cfg);
 
-/* Whether the given layer index uses global (full) attention vs sliding-window.
- * - No SWA (sliding_window == 0): every layer is global.
- * - Uniform SWA (pattern == 0): no layer is global.
- * - Interleaved (pattern > 0): every pattern-th layer (1-indexed) is global. */
+/* Whether layer_idx uses global attention. No SWA (sliding_window == 0): every layer. Uniform SWA (pattern == 0): none. Interleaved (pattern > 0): every pattern-th layer, 1-indexed. */
 bool oc_inference_config_layer_is_global(const OcInferenceConfig *cfg, uint32_t layer_idx);
 
 /* RoPE theta for the given layer: global layers use rope_theta;
@@ -123,7 +112,6 @@ void oc_inference_config_apply_rope_head(const OcInferenceConfig *cfg,
                                           size_t head_dim, size_t rope_len,
                                           int64_t position, float theta);
 
-/* ─── Legacy CLI config (still used by the CLI) ────────────────────────── */
 
 typedef struct {
     OcInfModelType model_type;

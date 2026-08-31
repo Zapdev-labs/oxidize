@@ -29,7 +29,6 @@ namespace {
 constexpr uint64_t kDefaultAlignment = 32;
 const unsigned char kGgufMagic[4] = {'G', 'G', 'U', 'F'};
 
-// ── ByteReader (mirror of gguf.rs::ByteReader) ────────────────────────────────
 class ByteReader {
  public:
   ByteReader(const uint8_t* bytes, size_t len) : bytes_(bytes), len_(len) {}
@@ -285,7 +284,6 @@ std::string detect_architecture_from_metadata_keys(
   return std::string();
 }
 
-// ── tensor name mapping (gguf.rs::map_*) ─────────────────────────────────────
 
 bool split_once(const std::string& s, char delim, std::string& left,
                 std::string& right) {
@@ -412,7 +410,6 @@ std::string map_tensor_name(const std::string& architecture, const std::string& 
 
 }  // namespace
 
-// ── GgufFile::architecture ───────────────────────────────────────────────────
 std::string GgufFile::architecture() const {
   auto it = metadata.find("general.architecture");
   if (it != metadata.end() && it->second.kind == GgufMetadataValue::Kind::String) {
@@ -421,7 +418,6 @@ std::string GgufFile::architecture() const {
   return detect_architecture_from_metadata_keys(metadata);
 }
 
-// ── architecture_from_name (config.hpp contract) ─────────────────────────────
 // Mirrors ModelArchitecture::from_gguf string matching in inference.rs.
 Architecture architecture_from_name(const std::string& name) {
   const std::string& a = name;
@@ -454,7 +450,6 @@ Architecture architecture_from_name(const std::string& name) {
   return Architecture::Llama;  // gguf.rs default
 }
 
-// ── GgufModel::parse ─────────────────────────────────────────────────────────
 GgufFile GgufModel::parse(const uint8_t* bytes, size_t len) {
   ByteReader reader(bytes, len);
 
@@ -538,7 +533,6 @@ GgufFile GgufModel::parse(const uint8_t* bytes, size_t len) {
   return file;
 }
 
-// ── GgufModel::load (POSIX mmap) ─────────────────────────────────────────────
 GgufModel GgufModel::load(const std::string& path) {
   int fd = ::open(path.c_str(), O_RDONLY);
   if (fd < 0) {
@@ -701,7 +695,6 @@ GgufModel::~GgufModel() {
   }
 }
 
-// ── metadata accessors ───────────────────────────────────────────────────────
 std::optional<uint32_t> GgufModel::get_u32(const std::string& key) const {
   auto it = parsed_.metadata.find(key);
   if (it == parsed_.metadata.end()) return std::nullopt;
@@ -757,7 +750,6 @@ TensorView GgufModel::tensor(const std::string& name) const {
   throw std::runtime_error("gguf: tensor not found: " + name);
 }
 
-// ── build_inference_config (inference.rs::InferenceConfig::from_gguf) ─────────
 namespace {
 
 // gguf_metadata_prefix: canonicalize qwen3.5 variants to "qwen35".

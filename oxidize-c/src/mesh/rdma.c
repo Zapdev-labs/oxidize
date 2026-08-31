@@ -1,7 +1,4 @@
-/*
- * rdma.c — RDMA transport implementation. See rdma.h for the loopback
- * staging-buffer design note.
- */
+/* rdma.c — RDMA transport implementation. */
 #include "oxidize/rdma.h"
 
 #include <stdlib.h>

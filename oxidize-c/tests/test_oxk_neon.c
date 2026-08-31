@@ -1,16 +1,6 @@
-/*
- * test_oxk_neon.c — AArch64 NEON ↔ scalar parity for the OXK dot products.
- *
- * The whole file compiles to nothing on x86 (the NEON symbols do not exist
- * there), so it is a no-op in the default CI build and only exercises
- * anything on Apple Silicon / Graviton / Ampere.
- *
- * Parity contract (see include/oxidize/oxk_neon.h):
- *   - Q4_0, Q4_1, Q8_0, Q4_K, Q5_K → bit-exact (tolerance 0.0f).
- *   - Q6_K → not bit-exact by construction (the scalar reference adds one f32
- *     term per element; the NEON kernel reduces each 16-element scale group in
- *     int32 first). Checked with a relative tolerance instead.
- */
+/* test_oxk_neon.c — AArch64 NEON ↔ scalar parity for the OXK dot products. */
+/* - Q4_0, Q4_1, Q8_0, Q4_K, Q5_K → bit-exact (tolerance 0.0f). */
+/* - Q6_K → not bit-exact by construction (the scalar reference adds one f32 */
 #include <criterion/criterion.h>
 
 #include "oxidize/oxk.h"

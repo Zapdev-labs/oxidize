@@ -13,50 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Open a GGUF writer for `output_path` and copy scalar/string metadata from
- * the source file so the output is a loadable GGUF, not raw tensor bytes.
- * ponytail: array metadata (e.g. tokenizer vocab) is not copied — the writer
- * only supports string arrays; extend when pruned models must retokenize. */
-static OcError open_writer_copy_meta(const OcGgufFile *gf,
-                                     const char *output_path, OcGgufWriter *w)
-{
-    char arch[64] = "llama";
-    const char *arch_p = NULL;
-    size_t arch_len = 0;
-    if (oc_gguf_metadata_get_str(gf, "general.architecture", &arch_p, &arch_len) &&
-        arch_len > 0 && arch_len < sizeof(arch)) {
-        memcpy(arch, arch_p, arch_len);
-        arch[arch_len] = '\0';
-    }
-    OcError e = oc_gguf_writer_init(output_path, arch, w);
-    if (e != OC_OK) return e;
-
-    for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
-        const OcGgufMetadataKV *kv = &gf->metadata[i];
-        if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
-        switch (kv->value.type) {
-        case OC_GGUF_MT_UINT32:
-            oc_gguf_writer_add_uint32(w, kv->key, kv->value.v.u32); break;
-        case OC_GGUF_MT_UINT64:
-            oc_gguf_writer_add_uint64(w, kv->key, kv->value.v.u64); break;
-        case OC_GGUF_MT_FLOAT32:
-            oc_gguf_writer_add_float32(w, kv->key, kv->value.v.f32); break;
-        case OC_GGUF_MT_STRING: {
-            char *s = malloc(kv->value.v.str.len + 1);
-            if (!s) { oc_gguf_writer_free(w); return OC_ERR_OOM; }
-            memcpy(s, kv->value.v.str.data, kv->value.v.str.len);
-            s[kv->value.v.str.len] = '\0';
-            oc_gguf_writer_add_string(w, kv->key, s);
-            free(s);
-            break;
-        }
-        default:
-            break; /* skipped: unsupported KV types */
-        }
-    }
-    return OC_OK;
-}
-
 const char *oc_prune_strategy_name(OcPruneStrategy s)
 {
     switch (s) {
@@ -118,10 +74,7 @@ static void prune_magnitude_inplace(float *data, size_t n, float sparsity)
     }
 }
 
-/* Wanda pruning: zero weights where |W| * ||X||_2 is below threshold.
- * `l2_norms` has `n_norms` entries (the layer's input dimension); weights are
- * laid out row-major so column index = i % n_norms.
- * If activation_stats is NULL, falls back to magnitude pruning. */
+/* Wanda pruning: zero weights where |W| * ||X||_2 is below threshold. */
 static void prune_wanda_inplace(float *data, size_t n, float sparsity,
                                  const float *l2_norms, size_t n_norms)
 {
@@ -162,7 +115,7 @@ OcError oc_prune_magnitude(const char *input_path, const char *output_path,
     const OcGgufFile *gf = &mf.unified;
 
     OcGgufWriter w;
-    e = open_writer_copy_meta(gf, output_path, &w);
+    e = oc_gguf_writer_init_from_file(output_path, gf, &w);
     if (e != OC_OK) { oc_gguf_map_free(&mf); return e; }
 
     /* Prune each tensor. */
@@ -214,7 +167,7 @@ OcError oc_prune_wanda(const char *input_path, const char *output_path,
 
     const OcGgufFile *gf = &mf.unified;
     OcGgufWriter w;
-    e = open_writer_copy_meta(gf, output_path, &w);
+    e = oc_gguf_writer_init_from_file(output_path, gf, &w);
     if (e != OC_OK) { oc_gguf_map_free(&mf); return e; }
 
     size_t layer_idx = 0;

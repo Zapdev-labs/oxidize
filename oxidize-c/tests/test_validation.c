@@ -4,7 +4,6 @@
 #include <string.h>
 #include "oxidize/validation.h"
 
-/* ─── Helpers ─────────────────────────────────────────────────────── */
 
 static void add_simple_sample(OcValidationState *s, uint32_t expected,
                               uint32_t predicted, float logprob, float weight)
@@ -20,7 +19,6 @@ static void add_simple_sample(OcValidationState *s, uint32_t expected,
     cr_assert_eq(oc_validation_add_sample(s, &sample), OC_OK);
 }
 
-/* ─── Config ──────────────────────────────────────────────────────── */
 
 Test(validation, config_init_defaults)
 {
@@ -36,7 +34,6 @@ Test(validation, config_init_null)
     cr_assert_eq(oc_validation_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Lifecycle ───────────────────────────────────────────────────── */
 
 Test(validation, init_default)
 {
@@ -90,7 +87,6 @@ Test(validation, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── Sample management ──────────────────────────────────────────── */
 
 Test(validation, add_sample)
 {
@@ -166,7 +162,6 @@ Test(validation, clear_empty_state)
     oc_validation_free(s);
 }
 
-/* ─── Single-pass validation ──────────────────────────────────────── */
 
 Test(validation, single_all_correct)
 {
@@ -245,7 +240,6 @@ Test(validation, single_null_args)
     oc_validation_free(s);
 }
 
-/* ─── K-fold ──────────────────────────────────────────────────────── */
 
 Test(validation, k_fold_deterministic_with_seed)
 {
@@ -304,7 +298,6 @@ Test(validation, k_fold_fewer_samples_than_folds)
     add_simple_sample(s, 2, 2, -0.1f, 1.0f);
     OcValidationResult r;
     cr_assert_eq(oc_validation_k_fold(s, &r), OC_OK);
-    /* n_folds is clamped down to the sample count. */
     cr_assert_eq(r.n_folds, 2u);
     oc_validation_free(s);
 }
@@ -326,7 +319,6 @@ Test(validation, k_fold_null_args)
     cr_assert_eq(oc_validation_k_fold(NULL, &r), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Confusion matrix ────────────────────────────────────────────── */
 
 Test(validation, confusion_matrix_diagonal)
 {
@@ -374,13 +366,11 @@ Test(validation, confusion_matrix_zero_classes)
     oc_validation_free(s);
 }
 
-/* ─── Perplexity ──────────────────────────────────────────────────── */
 
 Test(validation, perplexity_uniform)
 {
     OcValidationState *s = NULL;
     cr_assert_eq(oc_validation_init(NULL, &s), OC_OK);
-    /* logprob = -ln(N) for each sample -> perplexity = N. */
     add_simple_sample(s, 1, 1, -log(10.0), 1.0f);
     add_simple_sample(s, 2, 2, -log(10.0), 1.0f);
     double ppl = 0.0;

@@ -1,14 +1,5 @@
-/*
- * test_cli.c — CLI argument parser tests.
- *
- * The flag parser (oc_cli_parse_args) is extracted from main.c into
- * src/cli/args.h so it can be unit-tested without invoking the binary.
- * VAL-CLI-001..006 cover defaults, value flags, boolean flags, positional
- * prompt, unknown-flag tolerance, and sampler-config wiring.
- *
- * main.c's run_generation is exercised end-to-end by running the built
- * `oxidize-c` binary with --help / --version / --prompt (smoke, manual).
- */
+/* test_cli.c — CLI argument parser tests. */
+/* VAL-CLI-001..006 cover defaults, value flags, boolean flags, positional */
 #include <criterion/criterion.h>
 
 #include "../src/cli/args.h"

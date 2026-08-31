@@ -1,8 +1,4 @@
-/*
- * mistral_arch.c — Mistral architecture forward pass implementation.
- *
- * SwiGLU + RoPE + GQA + SWA (Sliding Window Attention).
- */
+/* mistral_arch.c — Mistral architecture forward pass implementation. */
 #include "oxidize/mistral_arch.h"
 #include "oxidize/flash_attention.h"
 
@@ -97,7 +93,6 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
     size_t vocab = cfg->vocab_size;
     float eps = 1e-5f;
 
-    /* 1. Token embedding lookup. */
     float *hidden = malloc(h * sizeof(float));
     if (!hidden) return OC_ERR_OOM;
     size_t tok_idx = (size_t)token;

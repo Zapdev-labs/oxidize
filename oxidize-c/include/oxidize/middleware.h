@@ -1,15 +1,4 @@
-/*
- * middleware.h — server middleware stack (auth, rate limit, metrics, audit, CORS).
- *
- * Implements the `server-middleware` feature on top of server-http-core.
- * Each incoming request passes through the configured middleware chain before
- * the route handler is dispatched, and each response passes back through for
- * post-processing (audit recording, metrics, CORS headers).
- *
- * Middleware is dependency-free (libc + libpthread only), matching the
- * project's convention. Atomic counters are used for metrics; a mutex
- * protects the per-IP rate-limit table and the audit ring buffer.
- */
+/* middleware.h — server middleware stack (auth, rate limit, metrics, audit, CORS). */
 #ifndef OXIDIZE_MIDDLEWARE_H
 #define OXIDIZE_MIDDLEWARE_H
 
@@ -26,7 +15,6 @@
 extern "C" {
 #endif
 
-/* ─── Middleware types ──────────────────────────────────────────────────── */
 
 typedef enum {
     OC_MW_AUTH       = 1u << 0,
@@ -37,34 +25,17 @@ typedef enum {
     OC_MW_ALL        = 0x1Fu,
 } OcMiddlewareType;
 
-/* ─── Auth config ─────────────────────────────────────────────────────────
- *
- * When `enabled` is true, requests must carry an `Authorization: Bearer
- * <api_key>` header whose value matches `api_key`. Requests without a
- * matching header are rejected with 401 Unauthorized. */
 typedef struct OcAuthConfig {
     char  *api_key;     /* owned, NUL-terminated; NULL disables auth     */
     bool   enabled;
 } OcAuthConfig;
 
-/* ─── Rate-limit config ───────────────────────────────────────────────────
- *
- * Token-bucket per client IP. `requests_per_minute` is the steady-state
- * refill rate; `burst_size` is the maximum tokens the bucket can hold.
- * When `per_ip` is true, each IP has its own bucket; when false, a single
- * global bucket is used. Requests that find an empty bucket are rejected
- * with 429 Too Many Requests. */
 typedef struct OcRateLimitConfig {
     uint32_t requests_per_minute;
     uint32_t burst_size;
     bool     per_ip;
 } OcRateLimitConfig;
 
-/* ─── Metrics ─────────────────────────────────────────────────────────────
- *
- * Atomic counters updated by every request. `avg_latency_ms` is a running
- * average maintained with a compare-and-swap loop. The latency histogram
- * has fixed buckets covering common latency bands. */
 #define OC_METRICS_HIST_BUCKETS 8u
 
 typedef struct OcMetrics {
@@ -75,11 +46,6 @@ typedef struct OcMetrics {
     _Atomic uint64_t latency_hist[OC_METRICS_HIST_BUCKETS];
 } OcMetrics;
 
-/* ─── Audit entry + ring buffer ───────────────────────────────────────────
- *
- * The audit log is a fixed-size ring buffer of the most recent N entries.
- * It is queryable via the /admin/audit endpoint (handler provided by the
- * caller). Entries are timestamped with `time(NULL)` (seconds since epoch). */
 #define OC_AUDIT_RING_SIZE 256u
 
 typedef struct OcAuditEntry {
@@ -98,11 +64,6 @@ typedef struct OcAuditLog {
     pthread_mutex_t lock;
 } OcAuditLog;
 
-/* ─── Per-IP rate-limit bucket table ──────────────────────────────────────
- *
- * Fixed-size open-addressing table keyed by client IP string. New IPs
- * evict the least-recently-used entry when the table is full. The token
- * count + last-refill timestamp live per bucket. */
 #define OC_RL_TABLE_SIZE 256u
 
 typedef struct OcRateBucket {
@@ -119,7 +80,6 @@ typedef struct OcRateLimiter {
     pthread_mutex_t   lock;
 } OcRateLimiter;
 
-/* ─── Request/response context (passed through the chain) ───────────────── */
 typedef struct OcRequestContext {
     OcHttpMethod method;
     const char   *path;            /* NUL-terminated                      */
@@ -133,7 +93,6 @@ typedef struct OcResponseContext {
     size_t   tokens_generated;
 } OcResponseContext;
 
-/* ─── Middleware stack ──────────────────────────────────────────────────── */
 typedef struct OcMiddleware {
     uint32_t         enabled;       /* bitmask of OcMiddlewareType       */
     OcAuthConfig     auth;
@@ -147,11 +106,7 @@ typedef struct OcMiddleware {
     bool             cors_enabled;
 } OcMiddleware;
 
-/* Initialize a middleware stack with the given enabled flags + configs.
- * `api_key` may be NULL (disables auth). `cors_origin` may be NULL
- * (defaults to "*"). Returns OC_OK on success, OC_ERR_INVALID_ARG if `mw`
- * is NULL, OC_ERR_OOM if the API key copy fails, or OC_ERR_INTERNAL if
- * mutex initialization fails. */
+/* Initialize a middleware stack with the given enabled flags + configs. `api_key` may be NULL (disables auth). `cors_origin` may be NULL (defaults to "*"). Returns OC_OK on success, OC_ERR_INVALID_ARG if `mw` is NULL, OC_ERR_OOM if the API key copy fails, or OC_ERR_INTERNAL if mutex initialization fails. */
 OcError oc_middleware_init(OcMiddleware *mw,
                            uint32_t enabled,
                            const char *api_key,
@@ -177,7 +132,6 @@ void oc_middleware_process_response(OcMiddleware *mw,
  * overflow). No-op if CORS is disabled (writes nothing). */
 size_t oc_middleware_cors_headers(const OcMiddleware *mw, char *buf, size_t cap);
 
-/* ─── Metrics helpers ──────────────────────────────────────────────────── */
 
 /* Record a single request's metrics atomically. */
 void oc_metrics_record(OcMetrics *m, int status, uint64_t duration_ms,
@@ -187,16 +141,9 @@ void oc_metrics_record(OcMetrics *m, int status, uint64_t duration_ms,
  * bytes written excluding the NUL, or 0 on overflow. */
 size_t oc_metrics_format(const OcMetrics *m, char *buf, size_t cap);
 
-/* Format metrics in the Prometheus text exposition format (version 0.0.4)
- * into `buf` (NUL-terminated). This is what `GET /metrics` serves, matching
- * the Rust server's `TextEncoder` output so existing scrape configs and
- * dashboards keep working. The latency histogram is emitted as a proper
- * Prometheus cumulative histogram (`_bucket`/`_sum`/`_count` with `le`
- * labels), which requires running the bucket counts into a running total.
- * Returns bytes written excluding the NUL, or 0 on overflow. */
+/* Format metrics in the Prometheus text exposition format (version 0.0.4) */
 size_t oc_metrics_format_prometheus(const OcMetrics *m, char *buf, size_t cap);
 
-/* ─── Audit helpers ─────────────────────────────────────────────────────── */
 
 /* Append an entry to the audit ring buffer. */
 void oc_audit_record(OcAuditLog *log, const OcRequestContext *req,
@@ -210,10 +157,6 @@ size_t oc_audit_get(const OcAuditLog *log, OcAuditEntry *out, size_t count);
  * excluding the NUL, or 0 on overflow. */
 size_t oc_audit_format(const OcAuditLog *log, char *buf, size_t cap);
 
-/* ─── Rate-limiter helpers ────────────────────────────────────────────────
- *
- * Returns true if the request is allowed (and consumes a token), false if
- * the rate limit is exceeded. Thread-safe. */
 bool oc_rate_limiter_allow(OcRateLimiter *rl, const char *client_ip);
 
 #ifdef __cplusplus

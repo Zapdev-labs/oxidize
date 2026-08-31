@@ -48,13 +48,6 @@ func GemvF32Transposed(matrix []float32, rows, cols int, vector, output []float3
 		return &GemvError{Message: "output buffer too small"}
 	}
 	// Parallelize over disjoint output-column ranges in a SINGLE barrier (the
-	// old code spawned a fresh worker pool for every 64-column chunk, so a wide
-	// output projection paid thousands of barriers and capped at ~1.9x scaling).
-	// Within each range we accumulate via rank-1 updates (output[c] += row[c]*v)
-	// so the matrix is streamed contiguously row-by-row instead of being read
-	// column-strided, which is both cache-friendly and ~2x faster per core.
-	// Summation order per output element is unchanged (r = 0..rows), so results
-	// are bit-identical to the naive definition.
 	parallelizeRows(cols, func(cstart, cend int) {
 		dst := output[cstart:cend]
 		for i := range dst {

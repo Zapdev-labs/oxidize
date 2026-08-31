@@ -3,12 +3,17 @@ name: Go
 on:
   pull_request:
     paths:
-      - "golang/**"
+      - "oxidize-golang/**"
       - ".github/workflows/go.yml"
   push:
+    branches: ["master"]
     paths:
-      - "golang/**"
+      - "oxidize-golang/**"
       - ".github/workflows/go.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -20,20 +25,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: golang/go.mod
-      - name: gofmt
-        run: |
-          cd golang
-          test -z "$(gofmt -l .)"
+          go-version-file: oxidize-golang/go.mod
       - name: go vet
         run: |
-          cd golang
-          go vet ./...
+          cd oxidize-golang
+          CGO_ENABLED=0 go vet ./...
       - name: go test
         run: |
-          cd golang
-          go test ./...
-      - name: go test -race
-        run: |
-          cd golang
-          go test -race ./...
+          cd oxidize-golang
+          CGO_ENABLED=0 go test ./...

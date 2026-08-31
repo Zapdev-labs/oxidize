@@ -1,8 +1,4 @@
-/*
- * grammar.c — grammar constraint implementation.
- *
- * Provides JSON validation and choice-based constraints for structured output.
- */
+/* grammar.c — grammar constraint implementation. */
 #include "oxidize/grammar.h"
 
 #include <stdlib.h>
@@ -84,7 +80,7 @@ void oc_grammar_init_choice(OcGrammarConstraint *g,
 /* Check if a character is valid in JSON outside a string. */
 static bool json_structural_char(char c)
 {
-    /* Outside strings, JSON allows: { } [ ] : , whitespace, digits, true/false/null */
+    /* Outside strings, JSON allows { } [ ] : , whitespace, digits, true/false/null. */
     switch (c) {
     case '{': case '}': case '[': case ']': case ':': case ',':
     case ' ': case '\t': case '\n': case '\r':

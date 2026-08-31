@@ -1,10 +1,4 @@
-/*
- * node.h — mesh node identity and state.
- *
- * Represents a single node in the distributed inference mesh: identity,
- * advertised capabilities, and live connection / traffic accounting.
- * Port of the conceptual API from oxidize-core/src/mesh/node.rs.
- */
+/* node.h — mesh node identity and state. */
 #ifndef OXIDIZE_NODE_H
 #define OXIDIZE_NODE_H
 
@@ -18,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_NODE_DEFAULT_MAX_CONNECTIONS 16u
 #define OC_NODE_MAX_ADDR_LEN            256u
@@ -28,7 +21,6 @@ extern "C" {
 #define OC_NODE_CAP_CPU      (1u << 1)
 #define OC_NODE_CAP_STORAGE  (1u << 2)
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct OcNodeConfig {
     uint64_t id;                          /* node id (0 is invalid)              */
@@ -55,7 +47,6 @@ typedef struct OcNode {
     uint64_t   created_time_sec;
 } OcNode;
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 /* Allocate a node. The config is copied in; `addr` may be empty.
  * Free with oc_node_free. */
@@ -64,7 +55,6 @@ OcError oc_node_init(const OcNodeConfig *config, OcNode **out);
 /* Free the node and its owned storage. Safe on NULL / already-freed. */
 void oc_node_free(OcNode *node);
 
-/* ─── Connection management ────────────────────────────────────────── */
 
 /* Add a connection to `peer_id`. If the peer is already connected, returns
  * OC_OK without changing the count. If at max_connections, returns
@@ -75,7 +65,6 @@ OcError oc_node_connect(OcNode *node, uint64_t peer_id);
  * OC_OK without changing the count. */
 OcError oc_node_disconnect(OcNode *node, uint64_t peer_id);
 
-/* ─── Queries ──────────────────────────────────────────────────────── */
 
 /* Copy the node info into `out_info`. */
 OcError oc_node_get_info(const OcNode *node, OcNodeInfo *out_info);
@@ -89,7 +78,6 @@ uint32_t oc_node_n_connections(const OcNode *node);
 /* True if the node advertises the given capability flag. */
 bool oc_node_has_capability(const OcNode *node, uint32_t cap);
 
-/* ─── Traffic accounting ───────────────────────────────────────────── */
 
 /* Record bytes sent. Updates info.bytes_sent. */
 OcError oc_node_record_sent(OcNode *node, uint64_t bytes);
@@ -97,7 +85,6 @@ OcError oc_node_record_sent(OcNode *node, uint64_t bytes);
 /* Record bytes received. Updates info.bytes_received. */
 OcError oc_node_record_received(OcNode *node, uint64_t bytes);
 
-/* ─── Capability names ──────────────────────────────────────────────── */
 
 /* Human-readable name for a single capability flag. Returns "unknown"
  * for unrecognized flags. Never returns NULL. */

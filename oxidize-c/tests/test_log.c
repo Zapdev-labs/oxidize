@@ -56,4 +56,3 @@ Test(log, emits_at_or_above)
     oc_log_debug("should be filtered out");
     oc_log_set_level(OC_LOG_INFO);
 }
-

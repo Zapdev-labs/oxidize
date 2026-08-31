@@ -353,7 +353,6 @@ def compute_block_hash(tokens: list[int]) -> BlockHash:
     return tuple(out)
 
 
-# ---------------------------------------------------------------------------
 # v2 budgeted three-phase scheduler.
 #
 # Ports the vLLM-style scheduler from oxidize-core/src/paged_attention/scheduler
@@ -362,7 +361,6 @@ def compute_block_hash(tokens: list[int]) -> BlockHash:
 # and ``BlockPool`` API above are left untouched so existing callers keep
 # working, while ``SchedulerV2`` provides budgeted batching, prefill chunking,
 # prefix caching, and copy-on-write.
-# ---------------------------------------------------------------------------
 
 SeqID = int
 

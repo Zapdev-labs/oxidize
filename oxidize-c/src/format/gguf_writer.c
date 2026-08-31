@@ -1,17 +1,4 @@
-/*
- * gguf_writer.c — GGUF v3 file writer implementation.
- *
- * See gguf_writer.h for the public API and on-disk layout.
- *
- * All multi-byte integers are written in little-endian byte order, matching
- * the GGUF spec (and the host is assumed LE, consistent with the parser).
- *
- * Tensor data layout: all tensor info entries are written first (streamed
- * during add_tensor), then at finalize() the data section is aligned to a
- * 32-byte boundary and all buffered tensor data is written. Each tensor
- * info's offset field is patched at finalize time once the data section
- * start is known.
- */
+/* gguf_writer.c — GGUF v3 file writer implementation. */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -23,11 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Constants ─────────────────────────────────────────────────────────── */
 
 #define GW_ALIGNMENT 32u
 
-/* ─── Low-level LE write helpers ────────────────────────────────────────── */
 
 static void gw_u32(FILE *fp, uint32_t v)
 {
@@ -55,13 +40,65 @@ static void gw_f32(FILE *fp, float v)
     gw_u32(fp, bits);
 }
 
+static void gw_string_n(FILE *fp, const char *s, size_t len)
+{
+    gw_u64(fp, (uint64_t)len);
+    if (len > 0 && s) {
+        fwrite(s, 1, len, fp);
+    }
+}
+
+static void gw_u8(FILE *fp, uint8_t v) { fwrite(&v, 1, 1, fp); }
+
+static void gw_u16(FILE *fp, uint16_t v)
+{
+    uint8_t b[2];
+    b[0] = (uint8_t)(v & 0xFF);
+    b[1] = (uint8_t)((v >> 8) & 0xFF);
+    fwrite(b, 1, 2, fp);
+}
+
+static OcError gw_write_payload(FILE *fp, const OcGgufMetadataValue *v,
+                                 OcGgufMetadataType type)
+{
+    if (!v) return OC_ERR_INVALID_ARG;
+    switch (type) {
+    case OC_GGUF_MT_UINT8:  gw_u8(fp, v->v.u8); break;
+    case OC_GGUF_MT_INT8:   gw_u8(fp, (uint8_t)v->v.i8); break;
+    case OC_GGUF_MT_UINT16: gw_u16(fp, v->v.u16); break;
+    case OC_GGUF_MT_INT16:  gw_u16(fp, (uint16_t)v->v.i16); break;
+    case OC_GGUF_MT_UINT32: gw_u32(fp, v->v.u32); break;
+    case OC_GGUF_MT_INT32:  gw_u32(fp, (uint32_t)v->v.i32); break;
+    case OC_GGUF_MT_FLOAT32: gw_f32(fp, v->v.f32); break;
+    case OC_GGUF_MT_BOOL:   gw_u8(fp, v->v.b ? 1u : 0u); break;
+    case OC_GGUF_MT_STRING:
+        gw_string_n(fp, v->v.str.data, v->v.str.len);
+        break;
+    case OC_GGUF_MT_ARRAY:
+        gw_u32(fp, (uint32_t)v->v.arr.elem_type);
+        gw_u64(fp, (uint64_t)v->v.arr.len);
+        for (size_t i = 0; i < v->v.arr.len; i++) {
+            OcError e = gw_write_payload(fp, &v->v.arr.values[i], v->v.arr.elem_type);
+            if (e != OC_OK) return e;
+        }
+        break;
+    case OC_GGUF_MT_UINT64: gw_u64(fp, v->v.u64); break;
+    case OC_GGUF_MT_INT64:  gw_u64(fp, (uint64_t)v->v.i64); break;
+    case OC_GGUF_MT_FLOAT64: {
+        uint64_t bits;
+        memcpy(&bits, &v->v.f64, sizeof(bits));
+        gw_u64(fp, bits);
+        break;
+    }
+    default:
+        return OC_ERR_FORMAT;
+    }
+    return OC_OK;
+}
+
 static void gw_string(FILE *fp, const char *s)
 {
-    uint64_t len = s ? strlen(s) : 0;
-    gw_u64(fp, len);
-    if (len > 0) {
-        fwrite(s, 1, (size_t)len, fp);
-    }
+    gw_string_n(fp, s, s ? strlen(s) : 0);
 }
 
 static void gw_pad(FILE *fp, uint32_t alignment)
@@ -80,7 +117,6 @@ static void gw_pad(FILE *fp, uint32_t alignment)
     }
 }
 
-/* ─── Buffered tensor data ──────────────────────────────────────────────── */
 
 /* Each pending tensor's data is buffered in memory; at finalize() we write
  * the aligned data section and patch each tensor info's offset field. */
@@ -124,7 +160,6 @@ static void gw_pending_free(GwPendingList *pl)
     pl->cap = 0;
 }
 
-/* ─── Init / free ──────────────────────────────────────────────────────── */
 
 OcError oc_gguf_writer_init(const char *path, const char *arch_name,
                             OcGgufWriter *w)
@@ -137,6 +172,7 @@ OcError oc_gguf_writer_init(const char *path, const char *arch_name,
     w->fp = fopen(path, "wb");
     if (!w->fp) return OC_ERR_IO;
     w->owns_fp = true;
+    w->alignment = GW_ALIGNMENT;
 
     /* Write header: magic, version, tensor_count=0, metadata_count=0. */
     gw_u32(w->fp, OC_GGUF_MAGIC);
@@ -161,7 +197,47 @@ OcError oc_gguf_writer_init(const char *path, const char *arch_name,
     return OC_OK;
 }
 
-/* ─── Metadata writers ─────────────────────────────────────────────────── */
+OcError oc_gguf_writer_init_from_file(const char *path, const OcGgufFile *gf,
+                                     OcGgufWriter *w)
+{
+    if (!gf) return OC_ERR_INVALID_ARG;
+    char arch[64] = "llama";
+    const char *arch_p = NULL;
+    size_t arch_len = 0;
+    if (oc_gguf_metadata_get_str(gf, "general.architecture", &arch_p, &arch_len) &&
+        arch_len > 0 && arch_len < sizeof(arch)) {
+        memcpy(arch, arch_p, arch_len);
+        arch[arch_len] = '\0';
+    }
+    OcError e = oc_gguf_writer_init(path, arch, w);
+    if (e != OC_OK) return e;
+
+    for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
+        const OcGgufMetadataKV *kv = &gf->metadata[i];
+        if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
+        if (strcmp(kv->key, "general.alignment") == 0) {
+            uint32_t a = 0;
+            if (kv->value.type == OC_GGUF_MT_UINT32) {
+                a = kv->value.v.u32;
+            } else if (kv->value.type == OC_GGUF_MT_UINT64 &&
+                       kv->value.v.u64 <= 4096u) {
+                a = (uint32_t)kv->value.v.u64;
+            }
+            if (a < 8u || a > 4096u || (a & (a - 1u)) != 0) {
+                oc_gguf_writer_free(w);
+                return OC_ERR_FORMAT;
+            }
+            w->alignment = a;
+        }
+        e = oc_gguf_writer_add_value(w, kv->key, &kv->value);
+        if (e != OC_OK) {
+            oc_gguf_writer_free(w);
+            return e;
+        }
+    }
+    return OC_OK;
+}
+
 
 OcError oc_gguf_writer_add_string(OcGgufWriter *w, const char *key,
                                   const char *value)
@@ -235,7 +311,20 @@ OcError oc_gguf_writer_add_array_string(OcGgufWriter *w, const char *key,
     return OC_OK;
 }
 
-/* ─── Tensor writer ────────────────────────────────────────────────────── */
+OcError oc_gguf_writer_add_value(OcGgufWriter *w, const char *key,
+                                 const OcGgufMetadataValue *value)
+{
+    if (!w || !w->fp || w->finalized || !key || !value) return OC_ERR_INVALID_ARG;
+    if (w->tensor_count > 0) return OC_ERR_INVALID_ARG;
+
+    gw_string(w->fp, key);
+    gw_u32(w->fp, (uint32_t)value->type);
+    OcError e = gw_write_payload(w->fp, value, value->type);
+    if (e != OC_OK) return e;
+    w->metadata_count++;
+    return OC_OK;
+}
+
 
 OcError oc_gguf_writer_add_tensor(OcGgufWriter *w, const char *name,
                                   uint32_t n_dims, const uint64_t *dims,
@@ -287,7 +376,6 @@ OcError oc_gguf_writer_add_tensor(OcGgufWriter *w, const char *name,
     return OC_OK;
 }
 
-/* ─── Finalize ──────────────────────────────────────────────────────────── */
 
 OcError oc_gguf_writer_finalize(OcGgufWriter *w)
 {
@@ -297,8 +385,9 @@ OcError oc_gguf_writer_finalize(OcGgufWriter *w)
     GwPendingList *pl = (GwPendingList *)w->pending;
 
     /* The data section starts at the current file position (after all tensor
-     * infos). Align to 32-byte boundary. */
-    gw_pad(w->fp, GW_ALIGNMENT);
+     * infos). Align to the writer alignment (default 32, or general.alignment). */
+    uint32_t align = w->alignment ? w->alignment : GW_ALIGNMENT;
+    gw_pad(w->fp, align);
     uint64_t data_section_start = (uint64_t)ftell(w->fp);
 
     /* Patch each tensor info's offset field and write the tensor data. */

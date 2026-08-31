@@ -1,14 +1,9 @@
-/*
- * scheduler.c — Higher-level request scheduler implementation.
- *
- * See include/oxidize/scheduler.h for design notes.
- */
+/* scheduler.c — Higher-level request scheduler implementation. */
 #include "oxidize/scheduler.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 OcError oc_sched_config_init(OcSchedConfig *cfg)
 {
@@ -20,7 +15,6 @@ OcError oc_sched_config_init(OcSchedConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Request helpers ─────────────────────────────────────────────────── */
 
 OcError oc_sched_request_init(OcSchedRequest *req, uint64_t id,
                                const uint32_t *prompt_tokens, uint32_t n_prompt,
@@ -57,7 +51,6 @@ void oc_sched_request_free(OcSchedRequest *req)
     req->n_prompt = 0;
 }
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static OcSchedRequest *request_clone(const OcSchedRequest *req, uint64_t id)
 {
@@ -111,7 +104,6 @@ static OcError sched_grow(OcScheduler *s)
     return OC_OK;
 }
 
-/* ─── Scheduler lifecycle ──────────────────────────────────────────────── */
 
 OcError oc_sched_init(OcScheduler *sched, const OcSchedConfig *cfg)
 {
@@ -198,7 +190,6 @@ OcError oc_sched_complete_request(OcScheduler *sched, uint64_t id)
     return OC_OK;
 }
 
-/* ─── Next batch ───────────────────────────────────────────────────────── */
 
 /* Sort pending requests by priority (desc), then created_ms (asc, FIFO).
  * Uses simple selection: we build an index array of pending slots. */
@@ -251,7 +242,6 @@ OcError oc_sched_next_batch(OcScheduler *sched, uint64_t *out_ids,
     return OC_OK;
 }
 
-/* ─── Accessors ─────────────────────────────────────────────────────────── */
 
 uint32_t oc_sched_n_pending(const OcScheduler *sched)
 {
@@ -278,7 +268,6 @@ uint32_t oc_sched_n_completed(const OcScheduler *sched)
     return sched->n_completed;
 }
 
-/* ─── Free ──────────────────────────────────────────────────────────────── */
 
 void oc_sched_free(OcScheduler *sched)
 {

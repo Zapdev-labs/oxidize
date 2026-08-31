@@ -1,22 +1,4 @@
-/* test_oxk_q23k.c — Q2_K / Q3_K integer dot kernels.
- *
- * These two types carry the bulk of a 2-bit K-quant model (Muse Glimmer's
- * UD-Q2_K_XL is 59% Q3_K + 19% Q2_K by weight bytes) and had no OXK kernel
- * at all, so every matmul touching them fell back to dequantize-to-f32.
- *
- * The contract under test is the same one the rest of OXK holds to:
- *
- *   1. the packed integer dot agrees with dequantize-then-f32-dot, which is
- *      the definition of what the weights mean;
- *   2. the prepared-row form agrees with the packed form, because the batched
- *      prefill path uses one and decode uses the other on the same weights;
- *   3. the multi-activation kernel — SIMD when the host has VNNI — agrees
- *      exactly with the scalar prepared dot, since the batch path picks
- *      between them purely on activation count.
- *
- * (3) compares multi vs prepared within 1 ULP: SIMD and scalar epilogues
- * can round the final float conversion differently.
- */
+/* test_oxk_q23k.c — Q2_K / Q3_K integer dot kernels. */
 #include <criterion/criterion.h>
 
 #include "oxidize/oxk.h"
@@ -154,10 +136,6 @@ static void run_case(const TypeUnderTest *t, uint32_t seed)
         const float packed = t->packed(row, N_BLOCKS, act);
         const float prepped = t->prepped(prep, N_BLOCKS, act);
 
-        /* The integer kernels and the dequant reference sum in different
-         * orders over ~1800 terms, so match on relative error rather than
-         * exactly. A wrong scale or bit layout misses by orders of
-         * magnitude, not by 1e-4. */
         const float tol = 1e-4f * (fabsf(ref) + 1.0f);
         cr_assert_float_eq(packed, ref, tol,
             "act %d: packed dot %f != dequant reference %f", a,

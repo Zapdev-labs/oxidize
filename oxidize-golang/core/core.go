@@ -1,10 +1,4 @@
 // Package core is the Go port of oxidize-core (Rust). It contains the entire
-// inference engine, format parsers (GGUF, SafeTensors), tokenizer families,
-// compute kernels, KV cache, paged-attention scheduler, mesh/distributed
-// primitives, vision encoder, and supporting utilities.
-//
-// The package layout mirrors the Rust crate's top-level modules; subpackages
-// are importable individually or re-exported through this top-level file.
 package core
 
 import (

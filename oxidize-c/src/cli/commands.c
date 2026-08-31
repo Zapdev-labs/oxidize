@@ -2,21 +2,6 @@
  * the first non-comment thing in the file, before any system header. */
 #define _POSIX_C_SOURCE 200809L
 
-/*
- * commands.c — CLI subcommand implementation for oxidize-c.
- *
- * Port of oxidize-cli subcommands to the C11 port. Provides:
- *   - Command name <-> enum mapping
- *   - OcCliContext initialization with defaults
- *   - Dispatch to per-command handlers
- *   - Each handler wires into the existing module APIs (benchmark.h,
- *     inspect.h, quantize_tool.h, safetensors_to_gguf.h, merge.h,
- *     prune.h, finetune.h, perplexity.h, realtime.h, openai.h, etc.)
- *   - Text and JSON output modes
- *   - Progress reporting to stderr
- *
- * Compile: cc -std=c11 -Wall -Wextra -Werror -O2 -c src/cli/commands.c -I include
- */
 #include "oxidize/cli_commands.h"
 
 #include "oxidize/benchmark.h"
@@ -53,7 +38,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static double wall_now(void)
 {
@@ -198,7 +182,6 @@ static bool has_gguf_ext(const char *name)
     return ieq(name + len - 5, ".gguf");
 }
 
-/* ─── Command name <-> enum ────────────────────────────────────────────── */
 
 const char *oc_cli_command_name(OcCliCommand cmd)
 {
@@ -252,7 +235,6 @@ OcCliCommand oc_cli_command_parse(const char *name)
     return OC_CLI_CMD_NONE;
 }
 
-/* ─── Context defaults ─────────────────────────────────────────────────── */
 
 void oc_cli_context_defaults(OcCliContext *ctx)
 {
@@ -291,7 +273,6 @@ void oc_cli_context_defaults(OcCliContext *ctx)
     ctx->ppl_max_tokens   = 0;
 }
 
-/* ─── Dispatch ─────────────────────────────────────────────────────────── */
 
 OcError oc_cli_command_run(OcCliContext *ctx)
 {
@@ -322,7 +303,6 @@ OcError oc_cli_command_run(OcCliContext *ctx)
     return OC_ERR_INVALID_ARG;
 }
 
-/* ─── Help text ───────────────────────────────────────────────────────── */
 
 void oc_cli_command_help(void)
 {
@@ -516,7 +496,6 @@ void oc_cli_command_help_for(OcCliCommand cmd)
     printf("\n");
 }
 
-/* ─── bench ────────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_bench(OcCliContext *ctx)
 {
@@ -676,7 +655,6 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── inspect ─────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_inspect(OcCliContext *ctx)
 {
@@ -718,7 +696,6 @@ OcError oc_cli_run_inspect(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── quantize ─────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_quantize(OcCliContext *ctx)
 {
@@ -753,7 +730,6 @@ OcError oc_cli_run_quantize(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── convert ──────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_convert(OcCliContext *ctx)
 {
@@ -792,7 +768,6 @@ OcError oc_cli_run_convert(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── merge ────────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_merge(OcCliContext *ctx)
 {
@@ -858,7 +833,6 @@ OcError oc_cli_run_merge(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── prune ────────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_prune(OcCliContext *ctx)
 {
@@ -913,7 +887,6 @@ OcError oc_cli_run_prune(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── finetune ─────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_finetune(OcCliContext *ctx)
 {
@@ -979,7 +952,6 @@ OcError oc_cli_run_finetune(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── list ─────────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_list(OcCliContext *ctx)
 {
@@ -1058,7 +1030,6 @@ OcError oc_cli_run_list(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── download ─────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_download(OcCliContext *ctx)
 {
@@ -1081,10 +1052,7 @@ OcError oc_cli_run_download(OcCliContext *ctx)
         snprintf(model.repo_id, sizeof(model.repo_id), "%s", ctx->hf_repo);
         snprintf(model.filename, sizeof(model.filename), "%s", ctx->hf_file);
 
-        /* Build download URL. repo_id and filename are already clamped to
-         * their own field sizes above, but the compiler cannot see that the
-         * concatenation fits, so check the result explicitly rather than
-         * letting a silent truncation produce a wrong URL. */
+        /* Build download URL. */
         int url_len = snprintf(model.download_url, sizeof(model.download_url),
                                "%s/%s/resolve/main/%s",
                                hcfg.api_base[0] ? hcfg.api_base
@@ -1170,7 +1138,6 @@ OcError oc_cli_run_download(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── tokenize ────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_tokenize(OcCliContext *ctx)
 {
@@ -1260,7 +1227,6 @@ OcError oc_cli_run_tokenize(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── detokenize ───────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_detokenize(OcCliContext *ctx)
 {
@@ -1341,7 +1307,6 @@ OcError oc_cli_run_detokenize(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── perplexity ───────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_perplexity(OcCliContext *ctx)
 {
@@ -1409,7 +1374,6 @@ OcError oc_cli_run_perplexity(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── serve ────────────────────────────────────────────────────────────── */
 
 OcError oc_cli_run_serve(OcCliContext *ctx)
 {
@@ -1453,10 +1417,7 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
                  ctx->host, ctx->port);
     }
 
-    /* Middleware stack. Metrics + audit are always on so /metrics has
-     * something to serve; auth and rate limiting turn on only when the
-     * corresponding flag is given, so the default local-dev invocation is
-     * unchanged. */
+    /* Middleware stack. Metrics + audit are always on so /metrics has something to serve; auth and rate limiting turn on only when the corresponding flag is given, so the default local-dev invocation is unchanged. */
     OcMiddleware mw;
     uint32_t mw_enabled = OC_MW_METRICS | OC_MW_AUDIT;
     if (ctx->api_key != NULL)        mw_enabled |= OC_MW_AUTH;
@@ -1535,7 +1496,6 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
     return OC_OK;
 }
 
-/* ─── serve-realtime ───────────────────────────────────────────────────── */
 
 OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
 {
@@ -1568,11 +1528,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
         return e;
     }
 
-    /* The realtime server uses the HTTP server to upgrade WebSocket
-     * connections. We start the HTTP server with the realtime handler.
-     * The actual WebSocket upgrade + realtime session handling is wired
-     * via the realtime module. For now, we start the HTTP server and
-     * accept connections at /v1/realtime. */
+    /* The realtime server uses the HTTP server to upgrade WebSocket connections. We start the HTTP server with the realtime handler. The actual WebSocket upgrade + realtime session handling is wired via the realtime module. For now, we start the HTTP server and accept connections at /v1/realtime. */
     OcHttpServer srv;
     memset(&srv, 0, sizeof(srv));
     /* We reuse the OpenAI handler as the base; WebSocket upgrade for

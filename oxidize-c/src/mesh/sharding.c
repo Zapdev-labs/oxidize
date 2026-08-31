@@ -1,17 +1,10 @@
-/*
- * sharding.c — Mesh model sharding for tensor parallelism.
- *
- * Computes per-shard row/column ranges for a tensor given the configured
- * strategy (ROW, COLUMN, BLOCK). Transport-agnostic: callers ship shard
- * data to the node owning shard_id.
- */
+/* sharding.c — Mesh model sharding for tensor parallelism. */
 #include "oxidize/sharding.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ───────────────────────────────────────────────────────── */
 
 static void shard_set_name(OcShardInfo *info, const char *name)
 {
@@ -30,7 +23,6 @@ static uint64_t shard_size_bytes(uint32_t rows, uint32_t cols)
     return (uint64_t)rows * (uint64_t)cols * sizeof(float);
 }
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 OcError oc_shard_config_init(OcShardConfig *cfg)
 {
@@ -51,7 +43,6 @@ const char *oc_shard_strategy_name(OcShardStrategy strategy)
     }
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_shard_init(const OcShardConfig *config, OcShardManager **out)
 {
@@ -82,7 +73,6 @@ void oc_shard_free(OcShardManager *mgr)
     free(mgr);
 }
 
-/* ─── Assignment ─────────────────────────────────────────────────────── */
 
 OcError oc_shard_assign(OcShardManager *mgr, const char *tensor_name,
                         uint32_t n_rows, uint32_t n_cols)
@@ -187,7 +177,6 @@ OcError oc_shard_get_all_assignments(const OcShardManager *mgr,
     return OC_OK;
 }
 
-/* ─── Queries ────────────────────────────────────────────────────────── */
 
 uint32_t oc_shard_n_shards(const OcShardManager *mgr)
 {

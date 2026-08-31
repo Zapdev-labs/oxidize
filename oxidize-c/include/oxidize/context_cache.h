@@ -1,35 +1,4 @@
-/*
- * context_cache.h — Persistent KV cache storage for fast session resume.
- *
- * Maintains a disk-backed, thread-safe hash table of KV cache snapshots keyed
- * by session id. Each snapshot captures the full KV state for a session so
- * that resuming a conversation does not recompute the prompt prefill.
- *
- * Layout on disk (binary, little-endian — host-endian on the supported
- * platforms):
- *
- *   magic        u32   = 0x4F434343  ('OCCC')
- *   version      u32   = 1
- *   session_id   char[64]  (NUL-padded)
- *   model_hash   u64
- *   n_tokens     u64
- *   n_layers     u32
- *   n_head_kv    u32
- *   head_dim     u32
- *   reserved     u32   = 0
- *   created_at   u64   (epoch seconds)
- *   last_access  u64   (epoch seconds)
- *   size_bytes   u64
- *   data         u8[size_bytes]
- *
- * One file per session is written under `cache_dir` with the filename
- * `<session_id>.bin`.
- *
- * The in-memory index is a fixed-capacity open-addressing hash table mapping
- * session_id (string) -> OcContextCacheEntry*. LRU eviction is applied when
- * either `max_entries` or `max_size_bytes` is exceeded, removing the
- * least-recently-used entry from both memory and disk.
- */
+/* context_cache.h — Persistent KV cache storage for fast session resume. */
 #ifndef OXIDIZE_CONTEXT_CACHE_H
 #define OXIDIZE_CONTEXT_CACHE_H
 
@@ -105,41 +74,21 @@ OcContextCache *oc_context_cache_init(const OcContextCacheConfig *cfg);
  * on NULL. */
 void oc_context_cache_free(OcContextCache *cc);
 
-/* Compute a model hash from a GGUF file size + tensor count. This is a cheap
- * identity proxy — not cryptographic. Two models with identical size and
- * tensor count collide; callers needing stronger guarantees should hash
- * weight bytes directly. */
+/* Compute a model hash from a GGUF file size + tensor count. This is a cheap identity proxy — not cryptographic. Two models with identical size and tensor count collide; callers needing stronger guarantees should hash weight bytes directly. */
 uint64_t oc_context_cache_model_hash(uint64_t file_size, uint32_t tensor_count);
 
-/* Generate a session id from a prompt + model hash. Writes a NUL-terminated
- * hex string into `out` (which MUST be at least OC_CONTEXT_CACHE_SESSION_ID_LEN
- * bytes). Returns OC_OK or OC_ERR_INVALID_ARG if `out` is NULL or `prompt`
- * is NULL. */
+/* Generate a session id from a prompt + model hash. Writes a NUL-terminated hex string into `out` (which MUST be at least OC_CONTEXT_CACHE_SESSION_ID_LEN bytes). Returns OC_OK or OC_ERR_INVALID_ARG if `out` is NULL or `prompt` is NULL. */
 OcError oc_context_cache_session_id(const char *prompt, uint64_t model_hash,
                                     char *out, size_t out_len);
 
-/* Store a KV cache snapshot for `session_id`. The cache takes ownership of
- * `data` (it is freed when the entry is evicted). If an entry for the same
- * session id already exists, it is replaced (the old data is freed and the
- * old on-disk file overwritten). LRU eviction is applied as needed.
- *
- * Returns OC_OK on success, OC_ERR_OOM on allocation failure, OC_ERR_IO on
- * disk write failure (the in-memory entry is still inserted). */
+/* Store a KV cache snapshot for `session_id`. Takes ownership of `data` (freed on eviction or replace). Returns OC_ERR_INVALID_ARG on bad args, OC_ERR_OOM on alloc; disk write failure returns OC_ERR_IO but the in-memory entry is still inserted. */
 OcError oc_context_cache_store(OcContextCache *cc, const char *session_id,
                                uint64_t model_hash, uint64_t n_tokens,
                                uint32_t n_layers, uint32_t n_head_kv,
                                uint32_t head_dim, uint8_t *data,
                                uint64_t size_bytes);
 
-/* Load a KV cache snapshot for `session_id`. On success, fills `*out` with
- * a freshly malloc'd copy of the data (caller frees `out->data`). Updates
- * LRU. If `model_hash != 0` and the stored entry's model hash differs, the
- * load is treated as a miss.
- *
- * Returns OC_OK on success, OC_ERR_NOT_FOUND-equivalent (returns OC_OK with
- * `*found = false`) — actually returns OC_OK only when found; otherwise
- * returns OC_ERR_INVALID_ARG on bad args and leaves `*found` false. The
- * `found` out-parameter is the canonical miss signal. */
+/* Load a KV cache snapshot for `session_id`. Returns OC_ERR_INVALID_ARG on NULL cc/session_id/out. A miss (including a hash mismatch when `model_hash != 0`) returns OC_OK with `*found` false; inspect `*found` before using `out`. On a hit, fills `*out` with a freshly malloc'd copy (caller frees `out->data`). */
 OcError oc_context_cache_load(OcContextCache *cc, const char *session_id,
                               uint64_t model_hash, OcContextCacheEntry *out,
                               bool *found);

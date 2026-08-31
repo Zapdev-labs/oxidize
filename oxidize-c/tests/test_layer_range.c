@@ -160,7 +160,6 @@ Test(layer_range, out_of_bounds)
     oc_inf_model_free(&m);
 }
 
-/* ─── Speculative stats accessors ──────────────────────────────────────── */
 
 Test(spec_stats, acceptance_rate)
 {

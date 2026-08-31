@@ -3,10 +3,6 @@ package tensor
 import "testing"
 
 // BenchmarkGemvF32Transposed exercises the dense transposed GEMV at lm_head
-// scale (the largest single matmul in a decode step). Guards against regressing
-// the single-barrier, cache-friendly implementation.
-//
-//	go test -bench BenchmarkGemvF32Transposed ./core/tensor/
 func BenchmarkGemvF32Transposed(b *testing.B) {
 	const rows, cols = 896, 151936 // matrix is [inDim][outDim]; out length = cols
 	mat := make([]float32, rows*cols)

@@ -10,7 +10,6 @@ Test(hashtable, fnv1a_known_values)
 {
     /* FNV-1a 64-bit: hash of "" is the offset basis; "a" multiplies once. */
     cr_assert_eq(oc_fnv1a_hash(""), 0xcbf29ce484222325ULL, "empty hash");
-    /* hash("a") = (basis ^ 'a') * prime */
     uint64_t expected = (0xcbf29ce484222325ULL ^ (uint64_t)'a') * 0x100000001b3ULL;
     cr_assert_eq(oc_fnv1a_hash("a"), expected, "single-char hash");
 }
@@ -134,4 +133,3 @@ Test(hashtable, iterator_visits_all)
     cr_assert_eq(seen, 3, "should have seen 3 distinct keys");
     oc_hashtable_free(ht);
 }
-

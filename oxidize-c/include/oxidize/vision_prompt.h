@@ -1,9 +1,4 @@
-/*
- * vision_prompt.h — Multimodal prompt construction.
- *
- * Combines text and image features into a unified prompt for vision LLMs.
- * Port from oxidize-core/src/vision/prompt.rs.
- */
+/* vision_prompt.h — Multimodal prompt construction. */
 #ifndef OXIDIZE_VISION_PROMPT_H
 #define OXIDIZE_VISION_PROMPT_H
 

@@ -1,10 +1,4 @@
-/*
- * temporal.c — Video temporal aggregation.
- *
- * Combines per-frame features into video-level representations via pooling
- * (mean / max / last), temporal self-attention, or weighted averaging.
- * Port concept: oxidize-core/src/video/temporal.rs.
- */
+/* temporal.c — Video temporal aggregation. */
 #include "oxidize/temporal.h"
 
 #include <math.h>

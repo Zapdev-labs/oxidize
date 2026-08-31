@@ -1,8 +1,4 @@
-/*
- * llama_swap.c — Llama-family model swap implementation.
- *
- * Uses mmap to load GGUF files into memory for fast model switching.
- */
+/* llama_swap.c — Llama-family model swap implementation. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/llama_swap.h"
 
@@ -10,7 +6,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* mmap headers */
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>

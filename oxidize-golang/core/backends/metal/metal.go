@@ -1,7 +1,4 @@
 // Package metalbackend mirrors oxidize_core::backends::metal. The Metal
-// backend is macOS-only in Rust; in this Go port the package is purely a
-// stub that exposes the BuildInfo and selector helpers. A real build could
-// swap the stubs for a CGo-based implementation.
 package metalbackend
 
 import "fmt"

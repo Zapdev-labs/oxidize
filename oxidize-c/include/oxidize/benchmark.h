@@ -1,15 +1,4 @@
-/*
- * benchmark.h — Inference benchmarking utility.
- *
- * Port of oxidize-core/src/util/benchmark.rs. Provides structured
- * benchmarking for forward passes (prefill + decode), measuring:
- *   - Tokens per second (prefill and decode separately)
- *   - Wall-clock latency per token
- *   - Memory usage before/after
- *   - Throughput vs. context length scaling
- *
- * Results are formatted as JSON for integration with CI gating.
- */
+/* benchmark.h — Inference benchmarking utility. */
 #ifndef OXIDIZE_BENCHMARK_H
 #define OXIDIZE_BENCHMARK_H
 
@@ -24,7 +13,6 @@
 extern "C" {
 #endif
 
-/* ─── Benchmark configuration ──────────────────────────────────────────── */
 
 typedef struct OcBenchmarkConfig {
     uint32_t n_warmup;          /* warmup tokens (not measured)            */
@@ -42,7 +30,6 @@ typedef struct OcBenchmarkConfig {
 #define OC_BENCHMARK_DEFAULT ((OcBenchmarkConfig){ \
     5, 50, 1, 3, true, true, 32 })
 
-/* ─── Benchmark results ────────────────────────────────────────────────── */
 
 typedef struct OcBenchmarkResult {
     /* Prefill (batch) metrics. */
@@ -78,10 +65,7 @@ typedef struct OcBenchmarkResult {
 OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
                           OcBenchmarkResult *out);
 
-/* Run a throughput scaling benchmark: measure tok/s at multiple context
- * lengths. Fills the throughput_at_* fields. Context lengths larger than the
- * model's n_ctx are skipped (field stays 0); a failed run returns its error
- * instead of reporting success. */
+/* Run a throughput scaling benchmark: measure tok/s at multiple context lengths. Fills the throughput_at_* fields. Context lengths larger than the model's n_ctx are skipped (field stays 0); a failed run returns its error instead of reporting success. */
 OcError oc_benchmark_scaling(OcLlamaModel *model,
                               OcBenchmarkResult *out);
 
@@ -94,7 +78,6 @@ size_t oc_benchmark_format_table(const OcBenchmarkResult *r, char *buf, size_t c
 /* Print results to stderr. */
 void oc_benchmark_print(const OcBenchmarkResult *r);
 
-/* ─── Micro-benchmarks ────────────────────────────────────────────────── */
 
 /* FP32 scalar-loop matvec reference microbenchmark. Returns rows/sec. This
  * does NOT exercise quantized kernels — use oc_benchmark_oxk for those. */

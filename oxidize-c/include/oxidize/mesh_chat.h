@@ -1,10 +1,4 @@
-/*
- * mesh_chat.h — Chat message routing over the mesh network.
- *
- * Port from oxidize-core/src/mesh/chat.rs. Provides conversation state with
- * up to 256 messages, role filtering, and a simple text serialization
- * suitable for transport over the mesh gossip layer.
- */
+/* mesh_chat.h — Chat message routing over the mesh network. */
 #ifndef OXIDIZE_MESH_CHAT_H
 #define OXIDIZE_MESH_CHAT_H
 
@@ -77,10 +71,7 @@ size_t oc_mesh_chat_message_count(const OcMeshChatConversation *conv, OcMeshChat
  * and resetting the timestamp counter to zero. */
 OcError oc_mesh_chat_clear(OcMeshChatConversation *conv);
 
-/* Serialize the conversation into a text format into `out`. Each message
- * is rendered as "<role>: <content>\n". The conversation_id is included
- * as a header line. Returns OC_ERR_INVALID_ARG if `conv`/`out` is NULL,
- * OC_ERR_INTERNAL if the serialized form does not fit in `out_len`. */
+/* Serialize the conversation into a text format into `out`. Each message is rendered as "<role>: <content>\n". The conversation_id is included as a header line. Returns OC_ERR_INVALID_ARG if `conv`/`out` is NULL, OC_ERR_INTERNAL if the serialized form does not fit in `out_len`. */
 OcError oc_mesh_chat_serialize(const OcMeshChatConversation *conv,
                                char *out, size_t out_len);
 

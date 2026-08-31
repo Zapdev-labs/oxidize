@@ -1,13 +1,4 @@
-/*
- * moe.c — Mixture-of-Experts routing and expert forward pass implementation.
- *
- * Implements the gate router, top-k/top-p/softmax routing, per-expert
- * matvec forward, weighted combine, and stats tracking (per-expert usage
- * counts + mean Shannon routing entropy).
- *
- * Port conventions mirror lora.c: scalar f32 throughout, owned malloc'd
- * weight buffers, NULL-safe public functions, OcError return codes.
- */
+/* moe.c — Mixture-of-Experts routing and expert forward pass implementation. */
 #include "oxidize/moe.h"
 
 #include <math.h>
@@ -15,14 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ─────────────────────────────────────────────────────────── */
 
 static bool config_valid(const OcMoeConfig *c)
 {
     if (!c) return false;
     if (c->n_experts == 0) return false;
     if (c->hidden_dim == 0) return false;
-    /* n_active_experts == 0 means "use the default of 1" (see moe.h). */
     if (c->n_active_experts > c->n_experts) return false;
     if (c->n_active_experts > OC_MOE_MAX_EXPERTS_PER_TOKEN) return false;
     /* TOP_P/SOFTMAX may select every expert, but OcMoeRouteResult only
@@ -89,7 +78,6 @@ static void sort_descending(IdxVal *arr, size_t n)
     }
 }
 
-/* ─── Routing method name ─────────────────────────────────────────────── */
 
 const char *oc_moe_routing_method_name(OcMoeRoutingMethod method)
 {
@@ -101,7 +89,6 @@ const char *oc_moe_routing_method_name(OcMoeRoutingMethod method)
     }
 }
 
-/* ─── Init / free ─────────────────────────────────────────────────────── */
 
 OcError oc_moe_router_init(OcMoeRouter *r, const OcMoeConfig *config)
 {
@@ -208,9 +195,8 @@ void oc_moe_router_free(OcMoeRouter *r)
     memset(r, 0, sizeof(*r));
 }
 
-/* ─── Route ──────────────────────────────────────────────────────────── */
 
-/* Compute gate logits = gate_weights @ hidden.  logits[e] = dot(row_e, hidden). */
+/* Compute gate logits = gate_weights @ hidden. logits[e] = dot(row_e, hidden). */
 static void compute_gate_logits(const OcMoeRouter *r,
                                 const float *hidden,
                                 float *logits)
@@ -328,7 +314,6 @@ OcError oc_moe_route(OcMoeRouter *r,
     return OC_OK;
 }
 
-/* ─── Expert forward ──────────────────────────────────────────────────── */
 
 OcError oc_moe_expert_forward(const OcMoeRouter *r,
                               uint32_t expert_idx,
@@ -351,9 +336,9 @@ OcError oc_moe_expert_forward(const OcMoeRouter *r,
         const float *up_w   = r->expert_up   + expert_off;
         const float *down_w = r->expert_down + (size_t)expert_idx * hd * es;
 
-        /* gate = silu(gate_proj @ x)  [length es] */
-        /* up   = up_proj @ x           [length es] */
-        /* combined into temp as [gate * up] */
+        /* Single-projection path: out = expert_weights @ x [length es]. */
+        /* Single-projection path: out = expert_weights @ x [length es]. */
+        /* Single-projection path: out = expert_weights @ x [length es]. */
         for (size_t j = 0; j < es; j++) {
             const float *gw_row = gate_w + j * hd;
             const float *uw_row = up_w   + j * hd;
@@ -365,7 +350,6 @@ OcError oc_moe_expert_forward(const OcMoeRouter *r,
             temp[j] = silu_f(g) * u;
         }
 
-        /* out = down_proj @ temp  [length hd] */
         for (size_t j = 0; j < hd; j++) {
             const float *dw_row = down_w + j * es;
             float acc = 0.0f;
@@ -391,7 +375,6 @@ OcError oc_moe_expert_forward(const OcMoeRouter *r,
     return OC_OK;
 }
 
-/* ─── Combine ─────────────────────────────────────────────────────────── */
 
 OcError oc_moe_combine(const OcMoeRouteResult *result,
                        const float *const *expert_outs,
@@ -415,7 +398,6 @@ OcError oc_moe_combine(const OcMoeRouteResult *result,
     return OC_OK;
 }
 
-/* ─── Stats ───────────────────────────────────────────────────────────── */
 
 OcError oc_moe_get_stats(const OcMoeRouter *r, OcMoeStats *stats)
 {
@@ -441,7 +423,6 @@ void oc_moe_stats_free(OcMoeStats *stats)
     memset(stats, 0, sizeof(*stats));
 }
 
-/* ─── JSON format ─────────────────────────────────────────────────────── */
 
 /* Write a uint64 array as JSON into buf. Returns chars written. */
 static size_t format_u64_array(char *buf, size_t cap, size_t *off,

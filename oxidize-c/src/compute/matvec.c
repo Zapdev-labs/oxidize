@@ -1,11 +1,4 @@
-/*
- * matvec.c — quantized/f32 matrix-vector products (scalar reference).
- *
- * Port of oxidize-core/src/compute/tensor/kernels/gemv.rs
- * (`gemv_f32`, `gemv_dequant_scalar_fallback`). The dequant step reuses
- * the SIMD-accelerated `oc_quant_dequant_row`, so this path inherits the
- * AVX2/AVX-512 speedups on capable hosts.
- */
+/* matvec.c — quantized/f32 matrix-vector products (scalar reference). */
 #include "oxidize/matvec.h"
 #include "oxidize/attn_kernels.h"
 #include "oxidize/flash_attention.h"
@@ -30,25 +23,6 @@ static bool size_mul(size_t a, size_t b, size_t *out)
     return true;
 }
 
-/* ─── Fused integer GEMV ─────────────────────────────────────────────────
- *
- * The old path dequantized each weight row to f32 and did an f32 dot. For
- * Q4_K that expands 144 bytes into 1 KB per 256 weights, so a 4096-wide row
- * writes and re-reads 16 KB of scratch to consume 2.25 KB of weights — the
- * kernel ends up bound on scratch traffic rather than on the weights.
- *
- * The OXK kernels instead quantize the ACTIVATION to Q8 once per matvec and
- * take integer dot products straight against the packed weights, which is
- * what llama.cpp does and roughly what the measured 25x per-core gap was.
- * Those kernels already existed here (including the AVX2/AVX-512/NEON
- * variants) but nothing outside a synthetic benchmark ever called them.
- *
- * This changes results: the activation carries int8 quantization error it did
- * not before. That is the standard trade — Q8 activations are ~lossless in
- * practice and it is how every fast CPU inference engine works — but it is a
- * real numerical change, so oc_matvec_set_fused() can turn it off, and the
- * dequant path stays as the reference the parity tests compare against.
- */
 
 static atomic_bool g_fused_enabled = true;
 static atomic_bool g_fused_env_checked = false;
@@ -72,10 +46,7 @@ void oc_matvec_set_fused(bool enabled)
 
 bool oc_matvec_fused_enabled(void)
 {
-    /* OC_NO_FUSED=1 forces the dequant reference path. This exists so the
-     * fused and reference paths can be compared in one binary — an A/B on a
-     * real model is the only way to tell a kernel that is exact on synthetic
-     * dot products from one that is wrong on real weights. */
+    /* OC_NO_FUSED=1 forces the dequant reference path. */
     if (!atomic_load(&g_fused_env_checked)) {
         const char *e = getenv("OC_NO_FUSED");
         if (e != NULL && e[0] != '\0' && e[0] != '0')
@@ -88,14 +59,7 @@ bool oc_matvec_fused_enabled(void)
 /* Which Q8 flavour a weight type pairs with. */
 typedef enum { ACT_NONE = 0, ACT_Q8_0, ACT_Q8_K } ActKind;
 
-/* Every OXK kernel here is verified against the GGUF layout by
- * test_oxk_gguf_layout.c, which dots the dequantized weights with the same
- * dequantized activation the kernel consumes — that removes int8 error from
- * the comparison, so any difference is a real disagreement.
- *
- * Q5_K shares the scale decoding Q4_K needed fixed; it is verified against
- * the dequant reference on a real model (OC_NO_FUSED=1 A/B) rather than by
- * test_oxk_gguf_layout, because oc_quant_pack_row cannot produce Q5_K. */
+/* Every OXK kernel here is verified against the GGUF layout by test_oxk_gguf_layout, because oc_quant_pack_row cannot produce Q5_K. */
 static ActKind fused_act_kind(OcGgufQuantizationType qtype, size_t cols)
 {
     switch (qtype) {
@@ -147,10 +111,7 @@ static void quantize_act_q8_0(const float *x, size_t n, uint8_t *out)
     }
 }
 
-/* Quantize an f32 activation to Q8_K: per 256 values,
- * [f32 d][256 int8][16 int16 bsums], bsums[i] summing q[i*16 .. i*16+15].
- * The K-quant kernels fold the block minimum out using those partial sums,
- * so they must match the stored q exactly or the correction term is wrong. */
+/* Quantize an f32 activation to Q8_0: per 32 values, [f16 d][32 int8]. */
 #if defined(__x86_64__) || defined(__i386__)
 __attribute__((target("avx512f,avx512bw,avx512dq,avx512vl")))
 static void quantize_act_q8_k_avx512(const float *x, size_t n, uint8_t *out)
@@ -284,15 +245,7 @@ static bool fused_stride_ok(OcGgufQuantizationType qtype, size_t blocks,
 static size_t act_block_bytes(ActKind kind);
 static size_t act_blocks_for(ActKind kind, size_t cols);
 
-/* These matvecs are the bulk of a forward pass, and each output row is an
- * independent dot product, so the row loop is split across the worker pool.
- *
- * Splitting by row does NOT change the result: every output[j] is still
- * accumulated by one thread in ascending i, exactly as the serial loop did.
- * The output is therefore bit-identical at any thread count, which is what
- * lets the parity tests stay exact. Reductions (a shared accumulator, or
- * splitting one row across threads) would not have that property and are
- * deliberately avoided. */
+/* These matvecs are the bulk of a forward pass, and each output row is an independent dot product, so the row loop is split across the worker pool. */
 
 typedef struct {
     const float *data;
@@ -420,11 +373,7 @@ typedef struct {
     const uint8_t *act;
     size_t         blocks;
     float        (*row_dot)(const uint8_t *row, size_t blocks, const uint8_t *act);
-    /* Prepared-row path: types whose only integer kernel works off a decoded
-     * row (Q2_K / Q3_K). The row is decoded into per-thread scratch and
-     * dotted once — decode has a single activation, so there is nothing to
-     * amortize a wider kernel over, but this still beats dequantizing to f32
-     * and doing the dot in floating point. */
+    /* Prepared-row path: types whose only integer kernel works off a decoded row (Q2_K / Q3_K). The row is decoded into per-thread scratch and dotted once — decode has a single activation, so there is nothing to amortize a wider kernel over, but this still beats dequantizing to f32 and doing the dot in floating point. */
     size_t         prep_bytes;
     void         (*prep_fn)(const uint8_t *row, size_t blocks, void *scratch);
     float        (*prep_dot)(const void *prep, size_t blocks,
@@ -616,13 +565,7 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
          * it assumes; a padded or interleaved row would be read wrong. */
         if (act_kind != ACT_NONE &&
             fused_stride_ok(qtype, blocks, row_bytes)) {
-            /* The activation lives in the caller's dequant buffer, not in
-             * thread 0's scratch: the prepared-row path below hands every
-             * worker — thread 0 included — its scratch for the decoded row,
-             * and there is only one scratch per thread, so sharing it would
-             * let the row decode overwrite the activation mid-region.
-             * `temp` is cols floats, always at least the ~1.14 bytes per
-             * column a Q8_K/Q8_0 encoding needs. */
+            /* The activation lives in the caller's dequant buffer, not in thread 0's scratch: the prepared-row path below hands every worker — thread 0 included — its scratch for the decoded row, and there is only one scratch per thread, so sharing it would let the row decode overwrite the activation mid-region. `temp` is cols floats, always at least the ~1.14 bytes per column a Q8_K/Q8_0 encoding needs. */
             uint8_t *act = (uint8_t *)temp;
             if (act != NULL && temp_bytes >= act_bytes) {
                 if (act_kind == ACT_Q8_K) quantize_act_q8_k(input, cols, act);
@@ -652,10 +595,6 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
         }
     }
 
-    /* A scratch allocation failure inside a slice would silently leave that
-     * slice's outputs untouched, so pre-zero and pre-reserve: after this,
-     * every worker's buffer is already large enough and the slice cannot
-     * fail. The function returns void and has no way to report OOM. */
     const size_t nt = oc_parallel_n_threads();
     if (nt > 1 && rows >= 8) {
         for (size_t t = 1; t < nt; t++) {
@@ -674,20 +613,6 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
     oc_parallel_for(rows, matvec_quant_slice, &job);
 }
 
-/* ─── Batched matvec ─────────────────────────────────────────────────────
- *
- * Prefill reads the same weight matrix once per prompt token. At 18 GB of
- * weights and ~1.5 GB touched per token on a 30B MoE, a 500-token prompt
- * moves ~750 GB through DRAM — which is why per-token prefill measured 2.9
- * tok/s against llama.cpp's 129. Dotting each weight row against a TILE of
- * activations while it is still in L1 cuts that by the tile width.
- *
- * Why tile rather than loop over all n_vec inside the row loop: the row is
- * ~1 KB but n_vec activations are ~2.3 KB each, so an untiled inner loop
- * streams 1.2 MB of activations per row and simply swaps which operand is
- * DRAM-bound. Tiling to ACT_TILE_BYTES keeps the activation tile in L2 and
- * leaves the weights as the only streamed operand.
- */
 
 /* Target footprint for one activation tile. Sized to sit comfortably inside
  * a typical 1 MB private L2 alongside the streaming weight rows. */
@@ -757,10 +682,7 @@ static size_t act_tile_for(size_t abytes, size_t n_vec, size_t budget)
 
 size_t oc_matvec_batch_scratch_bytes(size_t max_cols)
 {
-    /* Largest single-activation encoding at this width, over both Q8
-     * flavours. Computed from the block sizes directly rather than from
-     * fused_act_kind(), so the bound does not depend on `max_cols` itself
-     * being block-aligned. */
+    /* Largest single-activation encoding at this width, over both Q8 flavours. Computed from the block sizes directly rather than from fused_act_kind(), so the bound does not depend on `max_cols` itself being block-aligned. */
     size_t q8k, q80;
     if (!size_mul(max_cols / OC_OXK_QK_K, OC_OXK_BLOCK_Q8_K_SIZE, &q8k) ||
         !size_mul(max_cols / OC_OXK_QK8_0, OC_OXK_BLOCK_Q8_0_SIZE, &q80))
@@ -834,14 +756,7 @@ static void matvec_batch_packed_slice(size_t begin, size_t end, size_t tid,
     }
 }
 
-/* K-quants with the row decode hoisted out of the activation loop.
- *
- * The generic slice above still pays the full unpack — 256 codes and the
- * scale decode per block — once per (row, activation) pair, so a 112-wide
- * tile decodes every row 112 times. Decoding once per row and dotting the
- * prepared form against the tile removes all but 1/tile of that work.
- * Bit-exact with the packed kernels; see oc_oxk_dot_q4_k_prepped() /
- * oc_oxk_dot_q6_k_prepped(). */
+/* K-quants with the row decode hoisted out of the activation loop. */
 static void matvec_batch_prep_slice(size_t begin, size_t end, size_t tid,
                                     void *ud)
 {
@@ -1008,10 +923,7 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
         return;
     }
 
-    /* Dequant reference path. Pre-reserve worker scratch for the same reason
-     * oc_matvec_quantized() does: a failure inside a slice would silently
-     * leave that slice's outputs unwritten, and this function cannot report
-     * OOM. Falling back to serial is correct, just slower. */
+    /* Dequant reference path. Pre-reserve worker scratch for the same reason oc_matvec_quantized() does: a failure inside a slice would silently leave that slice's outputs unwritten, and this function cannot report OOM. Falling back to serial is correct, just slower. */
     const size_t nt = oc_parallel_n_threads();
     bool serial = false;
     if (nt > 1 && rows >= 8) {

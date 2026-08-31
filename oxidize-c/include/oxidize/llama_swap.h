@@ -1,10 +1,4 @@
-/*
- * llama_swap.h — Llama-family model swap support.
- *
- * Enables hot-swapping between different quantized models without
- * re-initializing the inference engine. Useful for A/B testing
- * different quantization levels.
- */
+/* llama_swap.h — Llama-family model swap support. */
 #ifndef OXIDIZE_LLAMA_SWAP_H
 #define OXIDIZE_LLAMA_SWAP_H
 
@@ -18,13 +12,11 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_SWAP_MAX_MODELS 8
 #define OC_SWAP_MAX_PATH 512
 #define OC_SWAP_MAX_NAME 128
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct OcSwapModelEntry {
     char path[OC_SWAP_MAX_PATH];
@@ -43,7 +35,6 @@ typedef struct OcModelSwap {
     uint64_t total_loaded_bytes;
 } OcModelSwap;
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 /* Initialize the swap manager. */
 OcError oc_model_swap_init(OcModelSwap *sw);

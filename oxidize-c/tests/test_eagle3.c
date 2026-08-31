@@ -158,7 +158,6 @@ Test(eagle, multiple_generate)
     oc_eagle_state_free(&state);
 }
 
-/* ─── Real Eagle3 draft model tests ─────────────────────────────────── */
 
 Test(eagle3, config_init)
 {

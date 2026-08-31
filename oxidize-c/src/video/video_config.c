@@ -1,16 +1,10 @@
-/*
- * video_config.c — Video pipeline configuration implementation.
- *
- * Port of oxidize-core/src/video/config.rs. Provides default init,
- * validation, and small helpers for the OcVideoConfig type.
- */
+/* video_config.c — Video pipeline configuration implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_config.h"
 
 #include <stddef.h>
 
-/* ─── Defaults ────────────────────────────────────────────────────────── */
 
 #define OC_VID_DEFAULT_TARGET_FRAMES    8u
 #define OC_VID_DEFAULT_DENSE_STRIDE     1u
@@ -18,7 +12,6 @@
 #define OC_VID_DEFAULT_LLM_HIDDEN      4096u
 #define OC_VID_DEFAULT_MAX_VIDEO_TOKENS 256u
 
-/* ─── Init ────────────────────────────────────────────────────────────── */
 
 void oc_video_config_init(OcVideoConfig *cfg)
 {
@@ -36,7 +29,6 @@ void oc_video_config_init(OcVideoConfig *cfg)
     cfg->max_video_tokens = OC_VID_DEFAULT_MAX_VIDEO_TOKENS;
 }
 
-/* ─── Validation ─────────────────────────────────────────────────────── */
 
 OcError oc_video_config_validate(const OcVideoConfig *cfg)
 {
@@ -70,7 +62,6 @@ OcError oc_video_config_validate(const OcVideoConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Name helpers ────────────────────────────────────────────────────── */
 
 const char *oc_video_sampling_name(OcFrameSamplingStrategy s)
 {
@@ -104,7 +95,6 @@ const char *oc_video_pool_name(OcTemporalPool p)
     }
 }
 
-/* ─── Token count ────────────────────────────────────────────────────── */
 
 uint32_t oc_video_config_n_tokens(const OcVideoConfig *cfg)
 {

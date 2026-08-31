@@ -1,9 +1,4 @@
-/*
- * decoder.h — Text decoder for token IDs to text.
- *
- * Converts token IDs to text with special token handling, BOS/EOS
- * awareness, and streaming support. Port from oxidize-core/src/model/.
- */
+/* decoder.h — Text decoder for token IDs to text. */
 #ifndef OXIDIZE_DECODER_H
 #define OXIDIZE_DECODER_H
 
@@ -17,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Config ─────────────────────────────────────────────────────────── */
 
 typedef struct OcDecoderConfig {
     bool    skip_special_tokens;   /* default true  */
@@ -26,7 +20,6 @@ typedef struct OcDecoderConfig {
     bool    add_space_prefix;      /* default true  */
 } OcDecoderConfig;
 
-/* ─── Decoder ────────────────────────────────────────────────────────── */
 
 typedef struct OcDecoder {
     OcDecoderConfig config;
@@ -34,12 +27,10 @@ typedef struct OcDecoder {
     bool            last_was_space;
 } OcDecoder;
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 /* Initialize config with defaults. Returns OC_ERR_INVALID_ARG if NULL. */
 OcError oc_decoder_config_init(OcDecoderConfig *cfg);
 
-/* ─── Lifecycle ──────────────────────────────────────────────────────── */
 
 /* Initialize a decoder with the given config (or defaults if NULL). */
 OcError oc_decoder_init(OcDecoder *dec, const OcDecoderConfig *cfg);

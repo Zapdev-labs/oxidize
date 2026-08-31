@@ -4,7 +4,6 @@
 #include <string.h>
 #include "oxidize/decoder.h"
 
-/* ─── Config tests ─────────────────────────────────────────────────────── */
 
 Test(decoder, config_init_defaults)
 {
@@ -21,7 +20,6 @@ Test(decoder, config_init_null)
     cr_assert_eq(oc_decoder_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Init tests ────────────────────────────────────────────────────────── */
 
 Test(decoder, init_default)
 {
@@ -57,7 +55,6 @@ Test(decoder, free_null_safe)
     cr_assert(true);
 }
 
-/* ─── Decode single token tests ─────────────────────────────────────────── */
 
 Test(decoder, decode_simple_token)
 {
@@ -122,7 +119,6 @@ Test(decoder, decode_eos_token)
     oc_decoder_free(&dec);
 }
 
-/* ─── Decode multiple tokens tests ──────────────────────────────────────── */
 
 Test(decoder, decode_tokens_basic)
 {
@@ -163,7 +159,6 @@ Test(decoder, decode_tokens_empty)
     oc_decoder_free(&dec);
 }
 
-/* ─── Reset / state tests ───────────────────────────────────────────────── */
 
 Test(decoder, reset_clears_state)
 {

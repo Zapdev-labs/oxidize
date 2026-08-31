@@ -1,15 +1,4 @@
-/* test_tokenizer_train.c — Criterion tests for the BPE tokenizer trainer.
- *
- * Covers:
- *   - Trainer init with config
- *   - Training on simple corpora
- *   - Vocab extraction (size, entries, character tokens)
- *   - Merge rule extraction (count, correctness)
- *   - Save to JSON (file exists, parseable)
- *   - Config limits (max_vocab_size, max_merges, min_frequency)
- *   - Error handling (NULL args, empty corpus, etc.)
- *   - Repeated characters, punctuation, multi-word corpora
- */
+/* test_tokenizer_train.c — Criterion tests for the BPE tokenizer trainer. */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -32,7 +21,6 @@ static const char *make_temp_path(const char *suffix)
     return path;
 }
 
-/* ─── Init / config ─────────────────────────────────────────────────────── */
 
 Test(bpe_train, init_basic)
 {
@@ -70,7 +58,6 @@ Test(bpe_train, free_null_safe)
     oc_bpe_trainer_free(NULL);
 }
 
-/* ─── Training: basic ───────────────────────────────────────────────────── */
 
 Test(bpe_train, train_simple_corpus)
 {
@@ -103,7 +90,6 @@ Test(bpe_train, train_null_corpus_fails)
     oc_bpe_trainer_free(t);
 }
 
-/* ─── Vocab extraction ─────────────────────────────────────────────────── */
 
 Test(bpe_train, vocab_contains_individual_chars)
 {
@@ -152,7 +138,6 @@ Test(bpe_train, vocab_getter_null_args)
     cr_assert_eq(oc_bpe_trainer_vocab(NULL, NULL, NULL), OC_ERR_INVALID_ARG, "");
 }
 
-/* ─── Merge extraction ─────────────────────────────────────────────────── */
 
 Test(bpe_train, merge_rule_correctness)
 {
@@ -204,7 +189,6 @@ Test(bpe_train, multiple_merges)
     oc_bpe_trainer_free(t);
 }
 
-/* ─── Config limits ────────────────────────────────────────────────────── */
 
 Test(bpe_train, max_merges_limit)
 {
@@ -238,7 +222,6 @@ Test(bpe_train, min_frequency_threshold)
     oc_bpe_trainer_free(t);
 }
 
-/* ─── Save to JSON ──────────────────────────────────────────────────────── */
 
 Test(bpe_train, save_creates_file)
 {
@@ -302,7 +285,6 @@ Test(bpe_train, save_json_contains_vocab_and_merges)
     oc_bpe_trainer_free(t);
 }
 
-/* ─── Punctuation and special chars ─────────────────────────────────────── */
 
 Test(bpe_train, punctuation_handled)
 {
@@ -344,7 +326,6 @@ Test(bpe_train, repeated_chars_merge)
     oc_bpe_trainer_free(t);
 }
 
-/* ─── Retraining ────────────────────────────────────────────────────────── */
 
 Test(bpe_train, retrain_resets_state)
 {
@@ -378,7 +359,6 @@ Test(bpe_train, retrain_resets_state)
     oc_bpe_trainer_free(t);
 }
 
-/* ─── Multi-word corpus ─────────────────────────────────────────────────── */
 
 Test(bpe_train, multi_word_corpus)
 {

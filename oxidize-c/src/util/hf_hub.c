@@ -1,17 +1,4 @@
-/*
- * hf_hub.c — HuggingFace Hub GGUF model downloader implementation.
- *
- * Ports the HF resolver from oxidize-golang/hf/hub.go and the pure-Python
- * oxidize_python.hf.hub module into the dependency-free C11 port. Uses a
- * raw-socket HTTP/1.1 client (no libcurl) consistent with mesh.c/http.c.
- *
- * TLS note: HuggingFace's production API is HTTPS-only. This client
- * speaks plain HTTP/1.1 over TCP — point api_base at an HTTPS-terminating
- * proxy or local mirror for production use, or compile with a TLS shim.
- *
- * Rate limiting: oc_hf_download() holds a process-global mutex for the
- * duration of the transfer (max 1 concurrent download per process).
- */
+/* hf_hub.c — HuggingFace Hub GGUF model downloader implementation. */
 #define _POSIX_C_SOURCE 200809L  /* getpwuid, stat, ssize_t */
 
 #include "oxidize/hf_hub.h"
@@ -38,7 +25,6 @@
 #include <dirent.h>
 #include <arpa/inet.h>
 
-/* ─── Internal constants ──────────────────────────────────────────────── */
 
 #define OC_HF_DEFAULT_HOST_PORT 80u
 #define OC_HF_RECV_BUF (1u << 16)   /* 64 KiB recv buffer */
@@ -46,7 +32,6 @@
 /* Process-global single-download mutex (rate limiter). */
 static pthread_mutex_t g_hf_dl_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* ─── Small helpers ──────────────────────────────────────────────────── */
 
 static void oc_copy_str(char *dst, size_t cap, const char *src)
 {
@@ -91,7 +76,6 @@ static bool oc_ci_ends_with(const char *s, const char *suffix)
     return true;
 }
 
-/* ─── Default cache dir ──────────────────────────────────────────────── */
 
 OcError oc_hf_default_cache_dir(char *out, size_t cap)
 {
@@ -133,18 +117,13 @@ OcError oc_hf_config_init(OcHfConfig *cfg, const char *cache_dir)
     return OC_OK;
 }
 
-/* ─── Filename parsing ───────────────────────────────────────────────── */
 
 bool oc_hf_is_gguf(const char *filename)
 {
     return oc_ci_ends_with(filename, ".gguf");
 }
 
-/* Parse a quant tag from a filename. Looks for a token matching the
- * pattern (Q|F|BF|I|IQ|NX)\d+[_-]?[A-Za-z0-9_]* at the end of the basename
- * (before .gguf). This is a heuristic, not a strict spec — it mirrors the
- * common GGUF naming conventions (Q4_K_M.gguf, Q8_0.gguf, F16.gguf,
- * IQ2_XXS.gguf, etc.). */
+/* Parse a quant tag from a filename. */
 bool oc_hf_parse_quant_type(const char *filename, char *out, size_t cap)
 {
     if (!out || cap == 0) return false;
@@ -165,10 +144,7 @@ bool oc_hf_parse_quant_type(const char *filename, char *out, size_t cap)
     }
     if (len == 0) return false;
 
-    /* Scan backward from the end of the stripped name, accumulating the
-     * quant tag. A quant tag starts at one of: Q, F, BF, I, IQ, NX, B
-     * followed by a digit. We walk backwards while the char is [A-Z0-9_]
-     * (excluding '-' since that separates the tag from the model name). */
+    /* Scan backward from the end of the stripped name, accumulating the quant tag. */
     char buf[OC_HF_MAX_QUANT_TYPE];
     /* Walk from end of basename backward while alnum or '_'. */
     size_t i = len;
@@ -273,13 +249,8 @@ OcError oc_hf_cache_path(const OcHfConfig *cfg,
     return OC_OK;
 }
 
-/* ─── Minimal JSON sibling parser ────────────────────────────────────── */
 
-/* Scans a JSON buffer for `"rfilename":"..."` string values, collecting
- * them into a caller-provided array. Returns the count written. We don't
- * build a full JSON tree — the HF /api/models response shape is stable
- * enough that a streaming substring scan is sufficient and ~10x smaller
- * than a real parser. */
+/* Scans a JSON buffer for `"rfilename":"..."` string values, collecting them into a caller-provided array. Returns the count written. We don't */
 static size_t oc_hf_extract_rfilenames(const char *json, size_t json_len,
                                        char **out, size_t max_out)
 {
@@ -338,7 +309,6 @@ static size_t oc_hf_extract_rfilenames(const char *json, size_t json_len,
     return found;
 }
 
-/* ─── Raw-socket HTTP client ─────────────────────────────────────────── */
 
 typedef struct {
     int fd;
@@ -375,7 +345,6 @@ static OcError parse_url(const char *url,
     uint16_t port = OC_HF_DEFAULT_HOST_PORT;
     if (colon) {
         host_len = (size_t)(colon - s);
-        /* parse port after colon up to hostport_len */
         char pb[16];
         size_t plen = hostport_len - host_len - 1;
         if (plen == 0 || plen >= sizeof(pb)) return OC_ERR_INVALID_ARG;
@@ -503,7 +472,6 @@ static OcError recv_all(int fd, char **out_buf, size_t *out_len,
     return OC_OK;
 }
 
-/* ─── SHA-256 (minimal, public-domain style) ─────────────────────────── */
 
 typedef struct {
     uint32_t state[8];
@@ -611,7 +579,6 @@ static void oc_sha256_hex(const uint8_t digest[32], char *out, size_t cap)
     out[64] = '\0';
 }
 
-/* ─── HTTP GET (text body, headers + body in one malloc'd buffer) ────── */
 
 /* Performs a GET and returns the body (malloc'd) + body_len. Optionally
  * sends a Range header (resume_from > 0). Parses Content-Length from
@@ -735,7 +702,6 @@ static bool oc_ci_ends_with_prefix(const char *line, size_t line_len,
     return true;
 }
 
-/* ─── Directory helpers ──────────────────────────────────────────────── */
 
 static bool oc_mkdir_p(const char *path)
 {
@@ -748,7 +714,6 @@ static bool oc_mkdir_p(const char *path)
         if (buf[i] == '/') {
             buf[i] = '\0';
             if (mkdir(buf, 0755) != 0 && errno != EEXIST) {
-                /* ignore; final mkdir below will report */
             }
             buf[i] = '/';
         }
@@ -757,7 +722,6 @@ static bool oc_mkdir_p(const char *path)
     return true;
 }
 
-/* ─── oc_hf_list_models ──────────────────────────────────────────────── */
 
 OcError oc_hf_list_models(const OcHfConfig *cfg,
                           OcHfModel *out_models, size_t *inout_count)
@@ -817,7 +781,6 @@ OcError oc_hf_list_models(const OcHfConfig *cfg,
     return OC_OK;
 }
 
-/* ─── oc_hf_resolve ─────────────────────────────────────────────────── */
 
 OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model)
 {
@@ -873,7 +836,6 @@ OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model)
     return OC_OK;
 }
 
-/* ─── oc_hf_download ─────────────────────────────────────────────────── */
 
 /* Stream a body to an open FILE* while hashing. Uses Range to resume from
  * `resume_from` if > 0. */
@@ -1145,7 +1107,6 @@ OcError oc_hf_download(const OcHfConfig *cfg, const OcHfModel *model,
     return OC_OK;
 }
 
-/* ─── Cache management ───────────────────────────────────────────────── */
 
 OcError oc_hf_cache_list(const OcHfConfig *cfg,
                          OcHfModel *out_models, size_t *inout_count)
@@ -1289,10 +1250,7 @@ OcError oc_hf_cache_clean(const OcHfConfig *cfg, uint64_t max_age_seconds,
         int dfd = dirfd(sd);
         while ((sent = readdir(sd)) != NULL) {
             if (sent->d_name[0] == '.') continue;
-            /* Stat and unlink relative to the open directory fd (with
-             * AT_SYMLINK_NOFOLLOW) so a concurrent swap of a path component
-             * between the check and the unlink cannot redirect the delete
-             * outside the cache directory (TOCTOU). */
+            /* If dest exists and matches expected SHA, skip. */
             struct stat st;
             if (dfd < 0 ||
                 fstatat(dfd, sent->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 ||

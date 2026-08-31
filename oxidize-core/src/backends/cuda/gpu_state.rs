@@ -85,9 +85,7 @@ pub(super) fn stringify<E: std::fmt::Display>(error: E) -> String {
     error.to_string()
 }
 
-// ---------------------------------------------------------------------------
 // Layer-by-layer VRAM management public API
-// ---------------------------------------------------------------------------
 
 /// Configure the layer cache budget.  Must be called before any kernels run.
 #[cfg(feature = "cuda")]

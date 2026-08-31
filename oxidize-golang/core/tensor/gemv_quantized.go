@@ -5,18 +5,6 @@ import (
 )
 
 // GemvQuantizedDispatch computes output = dequant(matrix) * vector, dispatching
-// to fused integer kernels where available. For Q4_K weights it quantizes the
-// input vector to Q8_K once and reuses it across all rows, using the fused
-// Q4_K×Q8_K integer row-dot kernels (with a 4-row unroll for cache locality)
-// that mirror gemv_quantized_f32 in oxidize-core. For other quantization types
-// it falls back to a per-row scalar dequant-then-dot path.
-//
-//   qbytes : row-major quantized weights (rows × cols), rows*bytesPerRow bytes
-//   qtype  : quantization scheme of the weight matrix
-//   rows   : number of output rows
-//   cols   : number of input columns (must be a multiple of 256 for Q4_K)
-//   vector : input activation of length cols
-//   output : result of length rows
 func GemvQuantizedDispatch(
 	qbytes []byte,
 	qtype quantization.Type,

@@ -1,7 +1,4 @@
-/*
- * qwen_arch.c — Qwen architecture forward pass implementation.
- * SwiGLU + RoPE + GQA + optional QK-norm.
- */
+/* qwen_arch.c — Qwen architecture forward pass implementation. */
 #include "oxidize/qwen_arch.h"
 #include "oxidize/flash_attention.h"
 
@@ -117,7 +114,6 @@ OcError oc_qwen_forward(OcQwenModel *model, uint32_t token, float *logits)
     size_t vocab = cfg->vocab_size;
     float eps = cfg->norm_eps;
 
-    /* 1. Token embedding. */
     float *hidden = malloc(h * sizeof(float));
     if (!hidden) return OC_ERR_OOM;
     size_t tok_idx = (size_t)token;

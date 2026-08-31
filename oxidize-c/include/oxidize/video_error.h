@@ -1,14 +1,4 @@
-/*
- * video_error.h — Error type for the video multimodal pipeline.
- *
- * Port of oxidize-core/src/video/error.rs. Provides a small enum of
- * video-specific failure modes distinct from the generic OcError codes,
- * along with conversion helpers to OcError and recoverability flags.
- *
- * Video errors are produced by the frame sampler / decoder glue and are
- * meant to be surfaced to callers via oc_video_error_to_oc() when a
- * generic OcError return contract is required.
- */
+/* video_error.h — Error type for the video multimodal pipeline. */
 #ifndef OXIDIZE_VIDEO_ERROR_H
 #define OXIDIZE_VIDEO_ERROR_H
 
@@ -20,7 +10,6 @@
 extern "C" {
 #endif
 
-/* ─── Video error codes ───────────────────────────────────────────────── */
 
 typedef enum {
     OC_VIDEO_ERR_NONE = 0,
@@ -30,11 +19,9 @@ typedef enum {
     OC_VIDEO_ERR_UNSUPPORTED_FORMAT, /* container/codec not supported      */
     OC_VIDEO_ERR_TIMEOUT,            /* frame extraction timed out         */
     OC_VIDEO_ERR_OOM,                /* allocation failure                 */
-    /* sentinel for bounds checking; not a valid error code */
     OC_VIDEO_ERR__COUNT,
 } OcVideoError;
 
-/* ─── API ─────────────────────────────────────────────────────────────── */
 
 /* Human-readable, NUL-terminated error message. Returns "unknown" for codes
  * outside the enum range. Never returns NULL. */

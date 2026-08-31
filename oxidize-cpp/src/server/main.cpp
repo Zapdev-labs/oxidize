@@ -105,7 +105,6 @@ std::string generate(Engine& eng, const std::string& prompt, size_t max_tokens,
   return eng.tok->decode(out);
 }
 
-// --- tiny HTTP plumbing ----------------------------------------------------
 
 void send_all(int fd, const std::string& data) {
   size_t sent = 0;

@@ -1,47 +1,5 @@
-/* tokenizer_bpe.c — byte-level BPE tokenizer (tiktoken-style) for
- * Qwen / GPT-2 / LFM2.
- *
- * Faithful port of oxidize-core/src/format/tokenizer.rs::BpeTokenizer.
- *
- * Encode path (matches Rust `BpeTokenizer::encode` / `encode_segment`):
- *   1. If `special_pieces` is non-empty and policy allows special tokens,
- *      scan the input for the longest control/user-defined piece (e.g.
- *      `<|im_start|>`) and emit it as a single id; byte-level BPE runs on
- *      the text between matches.
- *   2. For each segment: map each input byte through the GPT-2
- *      `bytes_to_unicode` table to a placeholder character (space → 'Ġ'),
- *      look up the resulting 1-char string in the vocab hash, and push the
- *      matching id (or the unknown-token id when the byte's char is not in
- *      the vocab — happens for unmapped code points in non-byte-fallback
- *      mode). When `use_byte_fallback == false` the input is iterated by
- *      Unicode codepoint (not byte) and each codepoint's string is looked
- *      up directly.
- *   3. Run the BPE merge loop: repeatedly find the adjacent (left, right)
- *      id pair present in the sequence with the lowest merge rank, replace
- *      every non-overlapping occurrence of that pair with its merged id,
- *      and repeat until no merge applies. This is the standard byte-level
- *      BPE algorithm without regex pre-tokenization — matching the Rust
- *      reference exactly (VAL-TOK-001 / VAL-TOK-011 require bit-exact
- *      parity with Rust `LoadedTokenizer::Bpe`).
- *
- * Decode path (matches Rust `BpeTokenizer::decode`):
- *   - Concatenate the token string for each id, then reverse the GPT-2
- *     `bytes_to_unicode` mapping to recover the original bytes.
- *
- * ChatML rendering (matches Rust `process_chat_template` fast path):
- *   `<|im_start|>{role}\n{content}<|im_end|>\n` per message, plus an
- *   optional trailing `<|im_start|>assistant\n`.
- *
- * The Qwen pre-tokenization regex
- *   `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|...`
- * is NOT applied here because the Rust reference does not apply it either.
- * Running BPE merges over the full byte sequence produces identical ids
- * because the Qwen merge table (trained with regex pre-tokenization)
- * contains no merges that cross natural pre-token boundaries. Skipping
- * the regex avoids a PCRE2 link dependency and any risk of a regex bug
- * breaking bit-exact parity with Rust. (See skill deviation note in the
- * handoff.)
- */
+/* tokenizer_bpe.c — byte-level BPE tokenizer (tiktoken-style) for Qwen / GPT-2 / LFM2. */
+/* breaking bit-exact parity with Rust. */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup, strndup */
 
@@ -63,15 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── GPT-2 bytes_to_unicode mapping ──────────────────────────────────── */
 
-/* Printable byte ranges (match Rust `gpt2_byte_is_printable`). A byte is
- * "printable" (maps to itself as a codepoint) iff it falls in one of:
- *   33..=126  (ASCII printable excluding space)
- *   161..=172 (Latin-1 supplement symbols)
- *   174..=255 (Latin-1 supplement symbols / letters)
- * The 68 non-printable bytes (0..=32, 127..=160, 173) map to codepoints
- * 256..=323 in ascending byte order. */
 static bool gpt2_byte_is_printable(uint32_t b)
 {
     return (b >= 33 && b <= 126)
@@ -100,10 +50,7 @@ static uint32_t byte_to_gpt2_codepoint(uint8_t b)
     return 0xFFFDu;  /* unreachable for b in 0..=255 */
 }
 
-/* Precomputed byte → GPT-2 UTF-8 string. `byte_to_gpt2_str[b]` is a
- * NUL-terminated UTF-8 string (up to 4 bytes + NUL). Initialized on first
- * use, guarded by a C11 atomic state so concurrent construction is safe:
- *   0 = uninitialized, 1 = one thread is initializing, 2 = done. */
+/* Precomputed byte → GPT-2 UTF-8 string. */
 static char byte_to_gpt2_str[256][5];
 static atomic_int byte_to_gpt2_str_state;  /* zero-initialized */
 
@@ -134,10 +81,7 @@ static void init_byte_to_gpt2_str(void)
     }
 }
 
-/* Reverse map: GPT-2 codepoint → original byte. Returns true and writes
- * `*out_byte` if `cp` is in the GPT-2 byte mapping (printable ranges or
- * 256..=323). Returns false otherwise (caller should emit the char's UTF-8
- * bytes verbatim — mirrors Rust's `None` branch in `gpt2_char_to_byte`). */
+/* Reverse map: GPT-2 codepoint → original byte. Returns true and writes `*out_byte` if `cp` is in the GPT-2 byte mapping (printable ranges or 256..=323). Returns false otherwise (caller should emit the char's UTF-8 bytes verbatim — mirrors Rust's `None` branch in `gpt2_char_to_byte`). */
 static bool gpt2_codepoint_to_byte(uint32_t cp, uint8_t *out_byte)
 {
     if ((cp >= 33 && cp <= 126)
@@ -165,7 +109,6 @@ static bool gpt2_codepoint_to_byte(uint32_t cp, uint8_t *out_byte)
     return false;
 }
 
-/* ─── u64 → u32 open-addressing hash map (for merge ranks / merged ids) ── */
 
 /* FNV-1a 64-bit hash of a u64 key (mixes the bits; the raw key is already
  * well-distributed from token-id pairs so this mainly avoids pathological
@@ -302,7 +245,6 @@ static inline uint64_t pair_key(uint32_t left, uint32_t right)
     return ((uint64_t)left << 32) | (uint64_t)right;
 }
 
-/* ─── BPE tokenizer state ──────────────────────────────────────────────── */
 
 /* A CONTROL / USER_DEFINED special token piece (e.g. `<|im_start|>`). */
 struct OcBpeSpecialPiece {
@@ -316,10 +258,8 @@ struct OcBpeTokenizer {
      * NUL-terminated strings (the GPT-2 mapping never produces embedded
      * NULs — codepoints 256..323 encode as multi-byte UTF-8). */
     OcHashtable *vocab;          /* string → (void*)(uintptr_t) id */
-    /* id → token string (dense array indexed by id). Arena-owned. */
     char    **id_to_token;
     size_t    vocab_size;
-    /* merge ranks: pair_key → rank (lowest rank wins, matching Rust). */
     OcU64Map *merge_ranks;
     /* merged ids: pair_key → merged_token_id. */
     OcU64Map *merged_ids;
@@ -341,13 +281,8 @@ struct OcBpeTokenizer {
     size_t    n_special_pieces;
 };
 
-/* ─── Train (toy constructor, mirrors Rust BpeTokenizer::train) ────────── */
 
-/* Count adjacent (left, right) id pairs across all sequences and return the
- * most frequent pair. Mirrors Rust `count_adjacent_pairs` + the max_by_key
- * selection in `train`. Writes `*out_found = false` when no pair exists.
- * Returns OC_ERR_OOM on allocation failure (distinct from "no pair" so the
- * caller can abort training instead of silently truncating the merge table). */
+/* Count adjacent (left, right) id pairs across all sequences and return the most frequent pair. */
 static OcError find_most_frequent_pair(const OcVector *sequences,
                                        uint32_t *out_left,
                                        uint32_t *out_right,
@@ -533,11 +468,7 @@ OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
         /* If the merged token is already in the vocab, skip (mirrors Rust). */
         void *existing;
         if (oc_hashtable_get(bpe->vocab, merged, &existing)) {
-            /* Still apply the merge to the sequences so counts are correct
-             * for subsequent rounds. Rust `continue`s here but has already
-             * applied the merge in the previous iteration's loop. Actually
-             * Rust does NOT apply the merge when the merged token already
-             * exists — it just skips to the next rank. Match that. */
+            /* No unknown token: skip this byte (Rust's filter_map drops it). */
             /* Wait — re-reading Rust: when `vocab.contains_key(&merged)`,
              * it `continue`s WITHOUT applying the merge. So the pair stays
              * unmerged in the sequences. Match that exactly. */
@@ -625,12 +556,8 @@ OcError oc_bpe_with_unknown_token(OcBpeTokenizer *bpe, OcArena *arena,
     return OC_OK;
 }
 
-/* ─── Encode ──────────────────────────────────────────────────────────── */
 
-/* Find the best merge for a sequence: the (left, right) pair present in the
- * sequence with the lowest rank. Mirrors Rust `best_merge_for_sequence`.
- * Writes the pair and its merged id to the out params. Returns true if a
- * merge was found. */
+/* Find the best merge for a sequence: the (left, right) pair present in the sequence with the lowest rank. */
 static bool find_best_merge(const OcBpeTokenizer *bpe,
                             const uint32_t *seq, size_t n,
                             uint32_t *out_left, uint32_t *out_right,
@@ -847,7 +774,6 @@ OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
     return OC_OK;
 }
 
-/* ─── Decode ──────────────────────────────────────────────────────────── */
 
 OcError oc_bpe_decode_raw(const OcBpeTokenizer *bpe, const uint32_t *ids,
                           size_t count, uint8_t **out_bytes, size_t *out_len)
@@ -926,10 +852,7 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
     OcError e = oc_bpe_decode_raw(bpe, ids, count, &bytes, &byte_len);
     if (e != OC_OK) return e;
 
-    /* The bytes may not be valid UTF-8 (e.g. mid-multibyte sequences split
-     * across tokens, or placeholder tokens mapping to lone invalid bytes).
-     * Apply lossy conversion like Rust's `String::from_utf8_lossy`: each
-     * maximal invalid subsequence becomes one U+FFFD. */
+    /* The bytes may not be valid UTF-8 (e.g. mid-multibyte sequences split across tokens, or placeholder tokens mapping to lone invalid bytes). Apply lossy conversion like Rust's `String::from_utf8_lossy`: each maximal invalid subsequence becomes one U+FFFD. */
     uint8_t *lossy = (uint8_t *)malloc(byte_len * 3 + 1);
     if (!lossy) { free(bytes); return OC_ERR_OOM; }
     size_t lossy_len = oc_utf8_lossy(bytes, byte_len, lossy);
@@ -940,7 +863,6 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
     return OC_OK;
 }
 
-/* ─── ChatML template rendering ───────────────────────────────────────── */
 
 OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
                                          size_t n_messages,
@@ -987,7 +909,6 @@ OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
     return OC_OK;
 }
 
-/* ─── Load from GGUF metadata ─────────────────────────────────────────── */
 
 /* Helper: get a metadata string array as a vector of arena-owned strings.
  * Returns OC_OK, OC_ERR_TOKENIZER (missing/invalid), or OC_ERR_OOM. */
@@ -1209,7 +1130,6 @@ void oc_bpe_fill_special_tokens(const OcBpeTokenizer *bpe, OcTokenizer *out)
     out->has_mask = bpe->has_mask;           out->mask_id = bpe->mask_id;
 }
 
-/* ─── OcTokenizer wrapper dispatch ────────────────────────────────────── */
 
 OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
                             OcSpecialTokenPolicy policy,
@@ -1224,11 +1144,7 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
      * true }` — the BOS id is prepended only when the tokenizer has one. */
     bool prepend_bos = (policy == OC_TOK_ADD_BOS) && t->has_bos;
 
-    /* For BPE, OC_TOK_DISALLOW_SPECIAL suppresses special-piece matching.
-     * The other kinds (SP/WP/Tiktoken) have no special-piece pre-split, but
-     * their vocab lookups can still resolve marker text (e.g. `</s>`) to a
-     * special-token id; those are filtered from the output below so the
-     * injection-prevention promise (VAL-TOK-004) holds for every kind. */
+    /* For BPE, OC_TOK_DISALLOW_SPECIAL suppresses special-piece matching. injection-prevention promise (VAL-TOK-004) holds for every kind. */
     OcError e;
     if (t->kind == OC_TOK_KIND_BPE && t->bpe) {
         const OcBpeTokenizer *bpe = t->bpe;
@@ -1250,10 +1166,7 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
     }
     if (e != OC_OK) return e;
 
-    /* Enforce OC_TOK_DISALLOW_SPECIAL for the non-BPE kinds: drop any
-     * special-token id that surfaced from ordinary vocab lookups.
-     * ponytail: dropped rather than re-segmented as ordinary pieces; add
-     * per-kind byte-fallback segmentation if fidelity matters. */
+    /* Enforce OC_TOK_DISALLOW_SPECIAL for the non-BPE kinds: drop any special-token id that surfaced from ordinary vocab lookups. ponytail: dropped rather than re-segmented as ordinary pieces; add per-kind byte-fallback segmentation if fidelity matters. */
     if (policy == OC_TOK_DISALLOW_SPECIAL && t->kind != OC_TOK_KIND_BPE
         && *out_ids) {
         uint32_t *ids = *out_ids;
@@ -1336,7 +1249,6 @@ bool oc_tokenizer_add_bos_default(const OcTokenizer *t)
     return t->kind == OC_TOK_KIND_SENTENCEPIECE;
 }
 
-/* ─── Free ────────────────────────────────────────────────────────────── */
 
 void oc_bpe_free(OcBpeTokenizer *bpe)
 {

@@ -1,8 +1,4 @@
-/*
- * chat.c — chat template formatting.
- *
- * Renders OpenAI-style messages into model-specific prompt strings.
- */
+/* chat.c — chat template formatting. */
 #include "oxidize/chat.h"
 
 #include <stdarg.h>

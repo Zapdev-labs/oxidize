@@ -1,19 +1,6 @@
-/* test_mmap.c — tests for OcMmap (read-only memory mapping).
- *
- * Covers:
- *   - VAL-FOUND-006 (mmap with MADV_HUGEPAGE): the mmap path is exercised,
- *     MADV_HUGEPAGE is applied (best-effort, may not stick for tiny files),
- *     and the mapped bytes are readable.
- *   - VAL-FOUND-015 (mmap/arena lifecycle valgrind-clean): the test_runner
- *     is built with ASan + UBSan, which substitutes for valgrind locally
- *     (valgrind is not installed). 1000 open/close cycles verify no leaks.
- *
- * These tests use the tiny GGUF fixture `valid-v3.gguf` (132 bytes). The
- * mmap path works the same for tiny files as for multi-GB models — the
- * kernel just maps a single page. The MADV_HUGEPAGE call succeeds but
- * doesn't actually collapse to a 2 MiB page (the mapping is too small);
- * the call's success is what we verify here.
- */
+/* test_mmap.c — tests for OcMmap (read-only memory mapping). */
+/* - VAL-FOUND-006 (mmap with MADV_HUGEPAGE): the mmap path is exercised, */
+/* - VAL-FOUND-015 (mmap/arena lifecycle valgrind-clean): the test_runner */
 #include <criterion/criterion.h>
 #include "oxidize/arena.h"
 #include "oxidize/error.h"
@@ -76,10 +63,7 @@ Test(mmap, missing_file_returns_io_error)
 
 Test(mmap, advise_hugepage_best_effort)
 {
-    /* VAL-FOUND-006: MADV_HUGEPAGE is applied (best-effort). For a tiny
-     * fixture, the call may succeed (kernel accepts the hint) but won't
-     * actually collapse to 2 MiB pages. We verify the call doesn't error
-     * out and the hugepage flag reflects the result. */
+    /* VAL-FOUND-006: MADV_HUGEPAGE is applied (best-effort). For a tiny */
     OcMmap *m = NULL;
     OcError e = oc_mmap_open_readonly(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "open: %s", oc_error_msg(e));
@@ -133,10 +117,7 @@ Test(mmap, prefault_parallel_matches_single_threaded)
 
 Test(mmap, lifecycle_1000_open_close_cycles_no_leak)
 {
-    /* VAL-FOUND-015 (valgrind-clean): run 1000 open/close cycles. The
-     * test_runner is built with ASan, which reports leaks at process exit.
-     * If any cycle leaks (forgets to munmap, free, or close fd), ASan will
-     * flag it. */
+    /* VAL-FOUND-015 (valgrind-clean): run 1000 open/close cycles. */
     for (int i = 0; i < 1000; i++) {
         OcMmap *m = NULL;
         OcError e = oc_mmap_open_readonly(FIXTURE("valid-v3.gguf"), &m);
@@ -155,11 +136,6 @@ Test(mmap, open_fd_succeeds_and_takes_ownership_of_fd)
 #ifndef __linux__
     cr_skip_test("oc_mmap_open_fd is only supported on Linux");
 #endif
-    /* oc_mmap_open_fd takes ownership of the caller-provided fd: on success
-     * it stores fd in the OcMmap struct and oc_mmap_close() will close it.
-     * This test verifies the success path produces a usable mapping and
-     * that oc_mmap_close releases the fd (verified by reusing the fd slot
-     * via a fresh open after close). */
     int fd = open(FIXTURE("valid-v3.gguf"), O_RDONLY);
     cr_assert_geq(fd, 0, "open() should succeed on the fixture");
 
@@ -178,11 +154,7 @@ Test(mmap, open_fd_succeeds_and_takes_ownership_of_fd)
 
 Test(mmap, open_fd_invalid_args_rejected_without_closing_caller_fd)
 {
-    /* When oc_mmap_open_fd rejects args BEFORE attempting mmap (NULL out,
-     * negative fd, zero len), it must NOT close the caller's fd — the caller
-     * retains ownership on the validation-failure path. We verify by opening
-     * a real fd, passing invalid args, and confirming the fd is still valid
-     * (readable) afterwards. */
+    /* When oc_mmap_open_fd rejects args BEFORE attempting mmap (NULL out, negative fd, zero len), it must NOT close the caller's fd — the caller retains ownership on the validation-failure path. We verify by opening a real fd, passing invalid args, and confirming the fd is still valid (readable) afterwards. */
     int fd = open(FIXTURE("valid-v3.gguf"), O_RDONLY);
     cr_assert_geq(fd, 0, "open() should succeed on the fixture");
 
@@ -190,7 +162,6 @@ Test(mmap, open_fd_invalid_args_rejected_without_closing_caller_fd)
     /* NULL out: must NOT close fd (caller retains ownership). */
     cr_assert_eq(oc_mmap_open_fd(fd, 132, NULL), OC_ERR_INVALID_ARG,
         "NULL out must return OC_ERR_INVALID_ARG");
-    /* fd is still ours — verify it's still a valid open fd by reading. */
     char c = 0;
     ssize_t n = read(fd, &c, 1);
     cr_assert_eq(n, 1, "fd should still be valid after NULL-out rejection");
@@ -215,15 +186,7 @@ Test(mmap, open_fd_map_failure_closes_fd_no_leak)
 #ifndef __linux__
     cr_skip_test("fd ownership and /proc fdinfo checks are Linux-specific");
 #endif
-    /* Scrutiny fix: when mmap() fails inside oc_mmap_open_fd (MAP_FAILED),
-     * the function must close(fd) before free(m) — otherwise the caller-
-     * provided fd leaks (the caller has no way to reclaim it once ownership
-     * has been "handed off" to oc_mmap_open_fd). Verify by counting open
-     * file descriptors before and after a guaranteed-to-fail mmap call.
-     *
-     * We trigger MAP_FAILED by passing a length that would overflow the
-     * address space (a huge len like 2^62 forces mmap to fail with ENOMEM
-     * on any real system). */
+    /* Scrutiny fix: when mmap() fails inside oc_mmap_open_fd (MAP_FAILED), the function must close(fd) before free(m) — otherwise the caller- provided fd leaks (the caller has no way to reclaim it once ownership has been "handed off" to oc_mmap_open_fd). */
     int fd = open(FIXTURE("valid-v3.gguf"), O_RDONLY);
     cr_assert_geq(fd, 0, "open() should succeed on the fixture");
 
@@ -236,10 +199,6 @@ Test(mmap, open_fd_map_failure_closes_fd_no_leak)
     cr_assert_not_null(fb, "fdinfo/%d should exist before open_fd", fd);
     fclose(fb);
 
-    /* len = 2^62 far exceeds the fixture's size; oc_mmap_open_fd now
-     * validates len against fstat st_size and rejects with
-     * OC_ERR_INVALID_ARG before ever calling mmap. The fix under test
-     * ensures close(fd) runs on this error path. */
     OcMmap *m = NULL;
     OcError e = oc_mmap_open_fd(fd, (size_t)1 << 62, &m);
     cr_assert_eq(e, OC_ERR_INVALID_ARG,
@@ -323,7 +282,6 @@ Test(gguf_map, open_via_mmap_returns_unified_view)
 
 Test(gguf_map, tensor_data_accessible_via_mmap)
 {
-    /* oc_gguf_map_tensor_data() returns a pointer into the mmap'd region. */
     OcGgufMmappedFile m;
     OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
@@ -331,11 +289,7 @@ Test(gguf_map, tensor_data_accessible_via_mmap)
     const OcGgufTensorInfo *t = &m.unified.tensors[0];
     const uint8_t *data = oc_gguf_map_tensor_data(&m, t);
     cr_assert_not_null(data, "tensor data should be non-NULL");
-    /* The tensor's absolute_offset is 128; the fixture stores [1,2,3,4]
-     * there (4 bytes for a 1-element F32 tensor — but the dims say
-     * [32000, 4096] which doesn't match the 4 data bytes. That's expected:
-     * the fixture is a synthetic minimal GGUF, not a real model. We just
-     * verify the pointer arithmetic: data should point at bytes[128]. */
+    /* The tensor's absolute_offset is 128; the fixture stores [1,2,3,4] there (4 bytes for a 1-element F32 tensor — but the dims say [32000, 4096] which doesn't match the 4 data bytes. That's expected: the fixture is a synthetic minimal GGUF, not a real model. We just verify the pointer arithmetic: data should point at bytes[128]. */
     cr_assert_eq(data, m.shards[0].bytes + 128, "tensor data pointer arithmetic");
     cr_assert_eq(data[0], 1, "data[0]");
     cr_assert_eq(data[1], 2, "data[1]");
@@ -347,13 +301,6 @@ Test(gguf_map, tensor_data_accessible_via_mmap)
 
 Test(gguf_map, arch_detection_from_mapped_file)
 {
-    /* oc_gguf_arch_from_file() reads general.architecture (or scans metadata
-     * namespaces) to detect the architecture. The valid-v3 fixture has no
-     * general.architecture key and no arch-namespaced metadata, so it should
-     * return OC_ARCH_UNKNOWN (mirrors Rust fallback to Llama only when
-     * architecture() returns Some — Rust's ModelArchitecture::from_gguf
-     * falls back to Llama for None, but our arch_from_file returns UNKNOWN
-     * to let callers decide; they can fall back to Llama themselves). */
     OcGgufMmappedFile m;
     OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
@@ -370,7 +317,6 @@ Test(gguf_map, arch_detection_from_mapped_file)
 
 Test(gguf_map, free_is_safe_on_zeroed)
 {
-    /* oc_gguf_map_free should be safe on a zeroed OcGgufMmappedFile. */
     OcGgufMmappedFile m;
     memset(&m, 0, sizeof(m));
     oc_gguf_map_free(&m);

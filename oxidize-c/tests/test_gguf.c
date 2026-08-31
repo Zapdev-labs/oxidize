@@ -1,21 +1,4 @@
-/* test_gguf.c — Criterion tests for the GGUF v3/v2 parser.
- *
- * Covers VAL-FOUND-001 (v3 header), VAL-FOUND-002 (v2 compat),
- * VAL-FOUND-003 (all 11 metadata KV value types round-trip),
- * VAL-FOUND-004 (tensor table extraction), VAL-FOUND-013 (malformed →
- * OC_ERR_FORMAT, no crash), VAL-FOUND-014 (bit-exact tensor inventory vs
- * Rust on valid-v3.gguf), VAL-FOUND-005 (multi-shard unified view),
- * VAL-FOUND-006 (mmap with MADV_HUGEPAGE), VAL-FOUND-015 (mmap/arena
- * lifecycle valgrind-clean — ASan substitutes locally).
- *
- * Fixtures live in oxidize-core/tests/fixtures/ (shared with the Rust
- * reference). The fixtures are tiny (132 bytes each) so they live in the
- * repo and need no network/model download.
- *
- * Parity reference: Rust `oxidize-core/src/format/gguf.rs::parse_gguf`
- * captured expectations in its `#[cfg(test)] mod tests` (see the
- * `parses_v3_header_tensor_info_and_alignment` test for the exact values).
- */
+/* test_gguf.c — Criterion tests for the GGUF v3/v2 parser. */
 
 /* Expose POSIX helpers used by the multi-shard test (mkdtemp, rmdir, remove). */
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
@@ -65,14 +48,6 @@ Test(gguf, v3_header_parses_correctly)
 
 Test(gguf, v3_tensor_inventory_bit_exact_vs_rust)
 {
-    /* Rust reference expectations (from oxidize-core/src/format/gguf.rs
-     * `parses_v3_header_tensor_info_and_alignment`):
-     *   tensor_infos.len() == 1
-     *   tensor_infos[0].name == "tok_embeddings.weight"
-     *   tensor_infos[0].dimensions == vec![32000, 4096]
-     *   tensor_infos[0].absolute_offset == 128
-     *   tensor_infos[0].ggml_type == 0 (F32)
-     */
     OcGgufFile f;
     OcError e = oc_gguf_open(FIXTURE("valid-v3.gguf"), &f);
     cr_assert_eq(e, OC_OK, "parse failed: %s", oc_error_msg(e));
@@ -118,10 +93,6 @@ Test(gguf, v3_data_section_first_four_bytes)
 
 Test(gguf, v2_backward_compat)
 {
-    /* Synthesize a v2 GGUF by copying valid-v3 and rewriting the version
-     * byte from 3 to 2. The Rust parser accepts v2 with the same parse
-     * path (no v1-specific layout), and so must we. The resulting tensor
-     * table and metadata must match the v3 fixture exactly. */
     OcGgufFile v3;
     OcError e = oc_gguf_open(FIXTURE("valid-v3.gguf"), &v3);
     cr_assert_eq(e, OC_OK, "open v3: %s", oc_error_msg(e));
@@ -316,7 +287,6 @@ Test(gguf, all_11_metadata_value_types_round_trip)
         const OcGgufMetadataValue *v = oc_gguf_metadata_get(&f, "k.f32");
         cr_assert_not_null(v, "k.f32 missing");
         cr_assert_eq(v->type, OC_GGUF_MT_FLOAT32, "k.f32 type");
-        /* bit-exact compare avoids FP equality surprises */
         cr_assert_eq(v->v.f32, 3.5f, "k.f32 value");
         float g = 0; cr_assert(oc_gguf_metadata_get_f32(&f, "k.f32", &g), "getter f32");
         cr_assert_eq(g, 3.5f, "getter f32 value");
@@ -520,10 +490,6 @@ Test(gguf, unknown_metadata_value_type_rejected)
 
 Test(gguf, nested_array_metadata_rejected)
 {
-    /* GGUF spec forbids arrays-of-arrays (ARRAY element_type must be a scalar
-     * or STRING). Verify the parser rejects a KV whose value_type=ARRAY and
-     * whose array's element_type is also ARRAY — returns OC_ERR_FORMAT, no
-     * crash, no infinite recursion. */
     uint8_t buf[64];
     size_t off = 0;
     uint32_t magic = OC_GGUF_MAGIC, ver = 3;
@@ -567,7 +533,6 @@ Test(gguf, null_args_rejected)
     oc_gguf_free(NULL);  /* safe on NULL */
 }
 
-/* ─── Type/name helpers ──────────────────────────────────────────────────── */
 
 Test(gguf, metadata_type_round_trip)
 {
@@ -624,17 +589,11 @@ static uint8_t *build_minimal_shard(const char *tensor_name,
                                     const uint8_t data[4],
                                     size_t *out_len)
 {
-    /* Layout:
-     *   header: magic(4) | version(4) | tensor_count(8) | kv_count(8)  = 24 bytes
-     *   tensor: name_len(8) | name(N) | n_dims(4) | dims[2](16) | type(4) | offset(8) = 40+N
-     *   data_section_start = align_up(24 + 40 + N, 32)
-     *   data: 4 bytes
-     */
+    /* Layout: */
     size_t name_len = strlen(tensor_name);
     size_t header = 24;
     size_t tensor_info = 8 + name_len + 4 + 16 + 4 + 8;
     size_t pre_data = header + tensor_info;
-    /* align to 32 */
     size_t data_start = (pre_data + 31) & ~(size_t)31;
     size_t total = data_start + 4;
 
@@ -648,11 +607,9 @@ static uint8_t *build_minimal_shard(const char *tensor_name,
     memcpy(buf + off, &ver,   4); off += 4;
     memcpy(buf + off, &tc,    8); off += 8;
     memcpy(buf + off, &kvc,   8); off += 8;
-    /* tensor name */
     uint64_t nl = name_len;
     memcpy(buf + off, &nl, 8); off += 8;
     memcpy(buf + off, tensor_name, name_len); off += name_len;
-    /* n_dims = 2 */
     uint32_t nd = 2;
     memcpy(buf + off, &nd, 4); off += 4;
     /* dims = [1, 1] (1 element, 1 row) */
@@ -662,14 +619,11 @@ static uint8_t *build_minimal_shard(const char *tensor_name,
     /* ggml_type = 0 (F32) */
     uint32_t gt = 0;
     memcpy(buf + off, &gt, 4); off += 4;
-    /* relative_offset = 0 (data starts at data_section_start) */
     uint64_t ro = 0;
     memcpy(buf + off, &ro, 8); off += 8;
-    /* pad to data_start */
     while (off < data_start) {
         buf[off++] = 0;
     }
-    /* data */
     memcpy(buf + data_start, data, 4);
 
     *out_len = total;
@@ -779,11 +733,6 @@ Test(gguf, multishard_falls_back_to_single_when_siblings_missing)
 
 Test(gguf, mapped_tensor_infos_returns_mapped_names)
 {
-    /* oc_gguf_map_mapped_tensor_infos() returns a fresh array with mapped
-     * tensor names. The fixture has no architecture metadata, so the arch
-     * defaults to UNKNOWN and names pass through unchanged. We verify the
-     * function works end-to-end (allocates from the caller's arena, returns
-     * the right count). */
     OcGgufMmappedFile m;
     OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));

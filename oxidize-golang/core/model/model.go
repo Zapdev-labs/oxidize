@@ -1,9 +1,4 @@
 // Package model mirrors oxidize_core::model. It contains the Model trait
-// (Session, ModelError, Token, Logits, Boxed), all model implementations
-// (LlamaModel, InferenceModel, LayerWiseModel, DFlashDraftModel), the
-// generation and sampling pipelines, the speculative decoder, advanced
-// samplers (XTC, DRY, dynamic temperature, grammar, tool calling), and
-// helpers (lora, loader, offload, prefix cache).
 package model
 
 import (

@@ -55,9 +55,6 @@ type VideoPreprocessor struct {
 }
 
 // NewVideoPreprocessor builds a preprocessor with a default patch extractor
-// derived from the vision config. The default extractor performs a
-// nearest-neighbor resize to ImageSize and splits the frame into a grid of
-// flattened RGB patches, normalized with the config's mean/std.
 func NewVideoPreprocessor(config VisionConfig) *VideoPreprocessor {
 	vp := &VideoPreprocessor{Config: config}
 	vp.Preprocess = vp.defaultPreprocess

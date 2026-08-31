@@ -13,35 +13,30 @@ Test(oxk, f16_to_f32_zero)
 
 Test(oxk, f16_to_f32_one)
 {
-    /* f16 1.0 = 0x3C00 → bytes [0x00, 0x3C] */
     uint8_t p[2] = {0x00, 0x3C};
     cr_assert_float_eq(oc_oxk_f16_le_to_f32(p), 1.0f, 1e-6f);
 }
 
 Test(oxk, f16_to_f32_neg_one)
 {
-    /* f16 -1.0 = 0xBC00 → bytes [0x00, 0xBC] */
     uint8_t p[2] = {0x00, 0xBC};
     cr_assert_float_eq(oc_oxk_f16_le_to_f32(p), -1.0f, 1e-6f);
 }
 
 Test(oxk, f16_to_f32_half)
 {
-    /* f16 0.5 = 0x3800 → bytes [0x00, 0x38] */
     uint8_t p[2] = {0x00, 0x38};
     cr_assert_float_eq(oc_oxk_f16_le_to_f32(p), 0.5f, 1e-6f);
 }
 
 Test(oxk, f16_to_f32_two)
 {
-    /* f16 2.0 = 0x4000 → bytes [0x00, 0x40] */
     uint8_t p[2] = {0x00, 0x40};
     cr_assert_float_eq(oc_oxk_f16_le_to_f32(p), 2.0f, 1e-6f);
 }
 
 Test(oxk, f16_to_f32_large)
 {
-    /* f16 1024 = 0x6400 → bytes [0x00, 0x64] */
     uint8_t p[2] = {0x00, 0x64};
     cr_assert_float_eq(oc_oxk_f16_le_to_f32(p), 1024.0f, 1e-3f);
 }
@@ -80,15 +75,6 @@ Test(oxk, get_scale_min_k4_low)
     cr_assert_eq(m, 17);
 }
 
-/* j >= 4 packs the 6-bit scale and min across three bytes, per ggml:
- *   scale = (scales[j+4] & 0x0F) | ((scales[j-4] >> 6) << 4)
- *   min   = ((scales[j+4] >> 4) & 0x0F) | ((scales[j] >> 6) << 4)
- *
- * This previously asserted a different assembly — the wrong bit positions and
- * the wrong source byte — which is why every Q4_K and Q5_K block decoded its
- * upper four scale/min pairs incorrectly while the test still passed. The
- * expected values below are computed from the formula above, and match
- * quantization.c, which is bit-identical to the ggml reference. */
 Test(oxk, get_scale_min_k4_high)
 {
     uint8_t scales[12] = {0};
@@ -104,9 +90,8 @@ Test(oxk, get_scale_min_k4_high)
 
 Test(oxk, dot_q8_0_q8_0_basic)
 {
-    /* One block: Q8_0 weight = [f16 d=1.0][32 × int8=1] */
+    /* Verify dispatched == scalar for Q8_0. */
     uint8_t w[34], q[34];
-    /* f16 1.0 = 0x3C00 */
     w[0] = 0x00; w[1] = 0x3C;
     q[0] = 0x00; q[1] = 0x3C;
     for (int i = 0; i < 32; i++) {
@@ -114,7 +99,6 @@ Test(oxk, dot_q8_0_q8_0_basic)
         q[2 + i] = 1;  /* int8 1 */
     }
     float result = oc_oxk_dot_q8_0_q8_0_scalar(w, 1, q);
-    /* d_w * d_q * sum(1*1) = 1.0 * 1.0 * 32 = 32.0 */
     cr_assert_float_eq(result, 32.0f, 0.01f);
 }
 
@@ -141,13 +125,11 @@ Test(oxk, dot_q4_0_q8_0_basic)
     q[0] = 0x00; q[1] = 0x3C;  /* f16 1.0 */
     for (int i = 0; i < 32; i++) q[2 + i] = 1;  /* int8 1 */
     float result = oc_oxk_dot_q4_0_q8_0_scalar(w, 1, q);
-    /* (8-8)*1 = 0 for all 32 elements → dot = 0 */
     cr_assert_float_eq(result, 0.0f, 0.01f);
 }
 
 Test(oxk, dot_q4_0_q8_0_nonzero)
 {
-    /* nibble = 9 → (9-8)=1, q8=1 → dot = 32 * 1 * 1 * 1 = 32 */
     uint8_t w[18], q[34];
     w[0] = 0x00; w[1] = 0x3C;
     for (int i = 0; i < 16; i++) w[2 + i] = 0x99;  /* nibbles all 9 */
@@ -168,7 +150,6 @@ Test(oxk, dot_q4_1_q8_0_basic)
     q[0] = 0x00; q[1] = 0x3C;  /* d=1.0 */
     for (int i = 0; i < 32; i++) q[2 + i] = 1;
     float result = oc_oxk_dot_q4_1_q8_0_scalar(w, 1, q);
-    /* d*dq*sum(0*1) + m*dq*sum(1) = 0 + 0 = 0 */
     cr_assert_float_eq(result, 0.0f, 0.01f);
 }
 
@@ -184,7 +165,6 @@ Test(oxk, matvec_q8_0_f32_basic)
     }
     for (int i = 0; i < 32; i++) x[i] = 2.0f;
     oc_oxk_matvec_q8_0_f32_scalar(w, 2, 34, x, out);
-    /* d=1.0, w=1, x=2.0 → sum = 32 * 1 * 2 = 64 */
     cr_assert_float_eq(out[0], 64.0f, 0.01f);
     cr_assert_float_eq(out[1], 64.0f, 0.01f);
 }
@@ -194,7 +174,6 @@ Test(oxk, read_q8_k_bsum)
     uint8_t bsums[32] = {0};
     /* bsums[0] = 100 (little-endian) */
     bsums[0] = 100; bsums[1] = 0;
-    /* bsums[1] = -50 (little-endian, two's complement) */
     bsums[2] = 0xCE; bsums[3] = 0xFF;  /* 0xFFCE = -50 */
     cr_assert_eq(oc_oxk_read_q8_k_bsum(bsums, 0), 100);
     cr_assert_eq(oc_oxk_read_q8_k_bsum(bsums, 1), -50);

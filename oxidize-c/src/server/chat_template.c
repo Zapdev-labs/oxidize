@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static size_t buf_append(char *buf, size_t cap, size_t *off, const char *s)
 {
@@ -33,7 +32,6 @@ static size_t buf_appendf(char *buf, size_t cap, size_t *off,
     return n;
 }
 
-/* ─── API ──────────────────────────────────────────────────────────────── */
 
 OcError oc_chat_tpl_init(OcChatTemplate *tpl, OcChatTemplateType type)
 {

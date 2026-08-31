@@ -1,19 +1,10 @@
-/*
- * turboquant.c — Fast online quantization with calibration.
- *
- * Ports the block-wise INT4/INT8 quantization concept from
- * oxidize-core/src/compute/turboquant.rs. Uses the existing
- * oc_quant_pack_row / oc_quant_dequant_row_scalar functions from quant.h
- * for the actual packing, layering calibration-based scale adjustment and
- * quality statistics on top.
- */
+/* turboquant.c — Fast online quantization with calibration. */
 #include "oxidize/turboquant.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Public API ─────────────────────────────────────────────────────── */
 
 OcTurboQuantConfig oc_turboquant_config_default(OcGgufQuantizationType target_type)
 {

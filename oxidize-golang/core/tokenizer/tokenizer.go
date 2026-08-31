@@ -1,7 +1,4 @@
 // Package tokenizer mirrors oxidize_core::format::tokenizer. It implements
-// 4 tokenizer families (BPE, SentencePiece Unigram, WordPiece, Tiktoken),
-// chat template processing (a small Jinja subset), and streaming detokenizers
-// used for incremental generation.
 package tokenizer
 
 import (
@@ -345,12 +342,6 @@ func scalarMetadataString(v ggufcore.MetadataValue) (string, bool) {
 }
 
 // ProcessChatTemplate mirrors process_chat_template. It implements a small
-// subset of Jinja sufficient to render standard chat templates:
-//
-//   - `{% for message in messages %}` / `{% endfor %}`
-//   - `{{ message["role"] }}` / `{{ message["content"] }}`
-//   - `{{ messages[0]["content"] }}` style index access
-//   - `{% if add_generation_prompt %}` / `{% endif %}`
 func ProcessChatTemplate(template string, messages []ChatMessage, addGenerationPrompt bool) string {
 	// First, substitute `{% for ... %}` loops and conditionals.
 	out := expandForLoops(template, messages)

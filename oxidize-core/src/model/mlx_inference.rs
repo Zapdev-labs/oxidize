@@ -17,9 +17,7 @@ use crate::quantization::{dequantize_scalar, quantized_size};
 #[cfg(target_os = "macos")]
 use crate::tensor::{apply_rope_f32, rms_norm_f32};
 
-// ---------------------------------------------------------------------------
 //  macOS-only: MlxInferenceModel
-// ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
@@ -1350,9 +1348,7 @@ impl Model for MlxInferenceModel {
     }
 }
 
-// ---------------------------------------------------------------------------
 //  Linux stub
-// ---------------------------------------------------------------------------
 
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone)]
@@ -1399,9 +1395,7 @@ impl crate::model::Model for MlxInferenceModel {
     }
 }
 
-// ---------------------------------------------------------------------------
 //  Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -7,7 +7,6 @@
 /* Unique suite name "video_error" to avoid collision with test_video.c's
  * "video" suite. */
 
-/* ─── error messages ────────────────────────────────────────────────── */
 
 Test(video_error, message_none)
 {
@@ -55,7 +54,6 @@ Test(video_error, message_unknown_code)
     cr_assert_str_eq(oc_video_error_message((OcVideoError)999), "unknown");
 }
 
-/* ─── error names ───────────────────────────────────────────────────── */
 
 Test(video_error, name_none)
 {
@@ -104,7 +102,6 @@ Test(video_error, name_unknown_code)
     cr_assert_str_eq(oc_video_error_name((OcVideoError)999), "unknown");
 }
 
-/* ─── recoverable ───────────────────────────────────────────────────── */
 
 Test(video_error, recoverable_none_is_false)
 {
@@ -146,7 +143,6 @@ Test(video_error, recoverable_unknown_code_is_false)
     cr_assert(!oc_video_error_is_recoverable((OcVideoError)999));
 }
 
-/* ─── mapping to OcError ────────────────────────────────────────────── */
 
 Test(video_error, to_oc_none)
 {
@@ -190,7 +186,6 @@ Test(video_error, to_oc_unknown_code)
     cr_assert_eq(oc_video_error_to_oc((OcVideoError)999), OC_ERR_INTERNAL);
 }
 
-/* ─── enum coverage sanity ───────────────────────────────────────────── */
 
 Test(video_error, all_codes_have_nonnull_message_and_name)
 {

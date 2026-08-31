@@ -1,13 +1,9 @@
-/* test_video_decoder.c — OcVideoFrameList + repetitive decoder tests.
- *
- * Unique suite name "video_decoder".
- */
+/* test_video_decoder.c — OcVideoFrameList + repetitive decoder tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 
 #include "oxidize/video_decoder.h"
 
-/* ─── list lifecycle ────────────────────────────────────────────────── */
 
 Test(video_decoder, list_init_zero_capacity)
 {
@@ -49,7 +45,6 @@ Test(video_decoder, list_free_double_is_safe)
     cr_assert(true, "");
 }
 
-/* ─── add ──────────────────────────────────────────────────────────── */
 
 Test(video_decoder, add_frame_basic)
 {
@@ -122,7 +117,6 @@ Test(video_decoder, add_raw_bad_channels)
     oc_video_frame_list_free(&list);
 }
 
-/* ─── repetitive decoder ──────────────────────────────────────────── */
 
 Test(video_decoder, repetitive_basic)
 {
@@ -156,7 +150,6 @@ Test(video_decoder, repetitive_null_args)
                  OC_ERR_INVALID_ARG, "");
 }
 
-/* ─── get ─────────────────────────────────────────────────────────── */
 
 Test(video_decoder, get_by_index)
 {
@@ -185,7 +178,6 @@ Test(video_decoder, get_out_of_range)
     oc_video_frame_list_free(&list);
 }
 
-/* ─── size helpers ────────────────────────────────────────────────── */
 
 Test(video_decoder, frame_size_bytes)
 {

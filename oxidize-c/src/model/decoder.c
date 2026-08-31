@@ -1,16 +1,9 @@
-/*
- * decoder.c — Text decoder implementation.
- *
- * Converts token IDs to text with special token handling, BOS/EOS
- * awareness, and streaming support.
- * See include/oxidize/decoder.h for design notes.
- */
+/* decoder.c — Text decoder implementation. */
 #include "oxidize/decoder.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Special token detection ──────────────────────────────────────────── */
 
 /* Common special token prefixes used by SentencePiece, Tiktoken, etc. */
 static bool is_special_token(const char *text)
@@ -46,7 +39,6 @@ static bool is_eos_token(const char *text)
            strcmp(text, "<|im_end|>") == 0;
 }
 
-/* ─── String helpers ────────────────────────────────────────────────────── */
 
 __attribute__((unused))
 static size_t str_len(const char *s)
@@ -72,7 +64,6 @@ static OcError append_str(char *dst, size_t out_size, size_t *pos,
     return OC_OK;
 }
 
-/* ─── Config ────────────────────────────────────────────────────────────── */
 
 OcError oc_decoder_config_init(OcDecoderConfig *cfg)
 {
@@ -84,7 +75,6 @@ OcError oc_decoder_config_init(OcDecoderConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────────── */
 
 OcError oc_decoder_init(OcDecoder *dec, const OcDecoderConfig *cfg)
 {
@@ -99,7 +89,6 @@ OcError oc_decoder_init(OcDecoder *dec, const OcDecoderConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Decoding ──────────────────────────────────────────────────────────── */
 
 OcError oc_decoder_decode_token(OcDecoder *dec, const char *token_text,
                                  char *out, size_t out_size)
@@ -248,7 +237,6 @@ OcError oc_decoder_decode_tokens(OcDecoder *dec, const char **token_texts,
     return OC_OK;
 }
 
-/* ─── State ─────────────────────────────────────────────────────────────── */
 
 OcError oc_decoder_reset(OcDecoder *dec)
 {

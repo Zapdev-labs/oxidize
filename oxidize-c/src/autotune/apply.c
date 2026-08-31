@@ -1,14 +1,4 @@
-/*
- * apply.c — Apply a tuning plan to the runtime.
- *
- * Reads fields from an OcPlan (from autotune_rules.h) and populates an
- * OcApplyResult with concrete runtime overrides. Port concept:
- * oxidize-core/src/autotune/apply.rs.
- *
- * The runtime-setter functions (oc_apply_set_threads, etc.) write to a
- * process-global mutable state that mirrors the OcApplyResult, modeling the
- * Rust side's "apply only overrides the user didn't set" behavior.
- */
+/* apply.c — Apply a tuning plan to the runtime. */
 #include "oxidize/apply.h"
 
 #include <stdio.h>

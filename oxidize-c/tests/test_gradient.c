@@ -5,7 +5,6 @@
 
 #include "oxidize/gradient.h"
 
-/* ─── Config / lifecycle ───────────────────────────────────────────── */
 
 Test(grad, config_init_defaults)
 {
@@ -61,7 +60,6 @@ Test(grad, free_null_safe)
     oc_grad_free(&st);
 }
 
-/* ─── Buffer ops ───────────────────────────────────────────────────── */
 
 Test(grad, zero_gradients)
 {
@@ -112,7 +110,6 @@ Test(grad, clip_above_norm_scales)
 {
     OcGradientState st;
     cr_assert_eq(oc_grad_init(NULL, 2, &st), OC_OK);
-    /* norm = sqrt(3^2 + 4^2) = 5; clip_norm default 1.0 -> scale 0.2 */
     st.gradients[0] = 3.0f;
     st.gradients[1] = 4.0f;
     cr_assert_eq(oc_grad_clip(&st), OC_OK);
@@ -125,7 +122,6 @@ Test(grad, clip_above_norm_scales)
     oc_grad_free(&st);
 }
 
-/* ─── Optimizers ───────────────────────────────────────────────────── */
 
 Test(grad, sgd_step_updates_params)
 {
@@ -199,7 +195,6 @@ Test(grad, adam_step_with_zero_grad_no_change)
     oc_grad_free(&st);
 }
 
-/* ─── LR get/set ───────────────────────────────────────────────────── */
 
 Test(grad, set_get_lr)
 {
@@ -217,14 +212,9 @@ Test(grad, get_lr_null)
     cr_assert_float_eq(oc_grad_get_lr(NULL), 0.0f, 1e-9f);
 }
 
-/* ─── Linear backward ──────────────────────────────────────────────── */
 
 Test(grad, linear_backward_grad_input)
 {
-    /* input = [1, 2], weight = [[1,0],[0,1]] (identity 2x2),
-     * grad_output = [3, 4].
-     * grad_input  = weight^T @ grad_output = [3, 4].
-     * grad_weight = grad_output outer input = [[3,6],[4,8]]. */
     float input[2]  = {1.0f, 2.0f};
     float weight[4] = {1.0f, 0.0f, 0.0f, 1.0f};
     float grad_out[2] = {3.0f, 4.0f};
@@ -253,7 +243,6 @@ Test(grad, linear_backward_bad_args)
                   OC_OK);
 }
 
-/* ─── Activation backward ─────────────────────────────────────────── */
 
 Test(grad, activation_relu_backward)
 {
@@ -269,7 +258,6 @@ Test(grad, activation_relu_backward)
 
 Test(grad, activation_tanh_backward)
 {
-    /* d/dx tanh(x) = 1 - tanh(x)^2; at x=0 -> 1; grad_out=1 -> out=1 */
     float go[1] = {1.0f};
     float in_[1] = {0.0f};
     float out[1] = {0};
@@ -280,7 +268,6 @@ Test(grad, activation_tanh_backward)
 
 Test(grad, activation_silu_backward_at_zero)
 {
-    /* silu'(0) = sigmoid(0)*(1 + 0*(1-sigmoid(0))) = 0.5 */
     float go[1] = {1.0f};
     float in_[1] = {0.0f};
     float out[1] = {0};
@@ -291,7 +278,6 @@ Test(grad, activation_silu_backward_at_zero)
 
 Test(grad, activation_gelu_backward_at_zero)
 {
-    /* gelu'(0) = 0.5*(1 + erf(0)) + 0*pdf(0)/sqrt2 = 0.5 */
     float go[1] = {1.0f};
     float in_[1] = {0.0f};
     float out[1] = {0};

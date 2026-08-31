@@ -1,16 +1,10 @@
-/*
- * video_error.c — Video pipeline error type implementation.
- *
- * Port of oxidize-core/src/video/error.rs. Provides stable message/name
- * strings, recoverability flags, and mapping to generic OcError codes.
- */
+/* video_error.c — Video pipeline error type implementation. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/video_error.h"
 
 #include <stddef.h>
 
-/* ─── Error metadata tables ──────────────────────────────────────────── */
 
 static const char *const k_messages[] = {
     "no error",
@@ -42,7 +36,6 @@ static const bool k_recoverable[] = {
     false, /* OOM                  */
 };
 
-/* ─── API ─────────────────────────────────────────────────────────────── */
 
 const char *oc_video_error_message(OcVideoError err)
 {

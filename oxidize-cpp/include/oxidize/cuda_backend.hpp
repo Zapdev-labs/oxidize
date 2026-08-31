@@ -52,7 +52,6 @@ class CudaBackend {
   // keyed by host pointer + content hash so it is safe to share across layers).
   static CudaBackend& instance();
 
-  // --- Op set mirroring tensor.hpp ------------------------------------------
 
   // out[i] = x[i] * inv_rms * scale_i  (see tensor.hpp::rms_norm).
   void rms_norm(float* out, const float* x, const float* weight, size_t n,
@@ -94,7 +93,6 @@ class CudaBackend {
   // computed on the GPU. Mirrors sampler.hpp::greedy semantics.
   uint32_t argmax(const float* logits, size_t n);
 
-  // --- GPU-resident decode ---------------------------------------------------
   // Keeps activations + KV cache on device; one sync/token. Weights upload once
   // via content-addressed cache. CUDA graphs replay the layer loop on decode when
   // no sliding-window layers are present (--no-cuda-graph to disable).

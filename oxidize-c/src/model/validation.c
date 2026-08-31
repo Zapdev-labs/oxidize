@@ -1,20 +1,10 @@
-/*
- * validation.c — cross-validation and model quality assessment utilities.
- *
- * Stores validation samples, then computes k-fold / single-pass accuracy,
- * cross-entropy loss, confusion matrices, and perplexity. Folds are
- * assigned deterministically via an LCG seeded from OcValidationConfig.seed
- * so results are reproducible across runs.
- */
+/* validation.c — cross-validation and model quality assessment utilities. */
 #include "oxidize/validation.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── State ─────────────────────────────────────────────────────────── */
-
-/* ─── Helpers ───────────────────────────────────────────────────────── */
 
 /* Deterministic LCG for reproducible fold assignment. */
 static uint32_t lcg_next(uint32_t *state)
@@ -39,7 +29,6 @@ static OcError ensure_cap(OcValidationState *s, uint32_t needed)
     return OC_OK;
 }
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 OcError oc_validation_config_init(OcValidationConfig *cfg)
 {
@@ -50,7 +39,6 @@ OcError oc_validation_config_init(OcValidationConfig *cfg)
     return OC_OK;
 }
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_validation_init(const OcValidationConfig *config,
                            OcValidationState **out)
@@ -96,7 +84,6 @@ void oc_validation_free(OcValidationState *state)
     free(state);
 }
 
-/* ─── Sample management ────────────────────────────────────────────── */
 
 OcError oc_validation_add_sample(OcValidationState *state,
                                  const OcValidationSample *sample)
@@ -122,7 +109,6 @@ OcError oc_validation_clear(OcValidationState *state)
     return OC_OK;
 }
 
-/* ─── Metric primitives ────────────────────────────────────────────── */
 
 /* Accuracy over a subset: correct = predicted == expected. */
 static float subset_accuracy(const OcValidationSample *s, uint32_t n)
@@ -154,7 +140,6 @@ static float subset_loss(const OcValidationSample *s, uint32_t n)
     return (float)(sum / total_w);
 }
 
-/* ─── Metrics ───────────────────────────────────────────────────────── */
 
 OcError oc_validation_k_fold(const OcValidationState *state,
                               OcValidationResult *out_result)

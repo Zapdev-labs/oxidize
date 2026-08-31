@@ -1,13 +1,4 @@
-/*
- * prefix_cache.h — LRU prefix cache for KV cache reuse.
- *
- * Caches KV cache snapshots keyed by token sequence hashes. When multiple
- * requests share a common prefix (e.g., system prompt), the KV cache for
- * that prefix can be reused instead of recomputing.
- *
- * Uses FNV-1a cumulative hashing: the hash of tokens[0..n] can be computed
- * incrementally from the hash of tokens[0..n-1].
- */
+/* prefix_cache.h — LRU prefix cache for KV cache reuse. */
 #ifndef OXIDIZE_PREFIX_CACHE_H
 #define OXIDIZE_PREFIX_CACHE_H
 

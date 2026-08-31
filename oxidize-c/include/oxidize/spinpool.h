@@ -1,11 +1,4 @@
-/*
- * spinpool.h — Thread pool with spin-waiting for low-latency parallel compute.
- *
- * Ports the spin-pool concept from oxidize-core/src/compute/spinpool.rs.
- * Workers stay resident and spin between regions (with condvar fallback for
- * truly idle periods) so per-region handoff cost is minimal. Tasks are
- * submitted into a bounded queue and processed by the worker threads.
- */
+/* spinpool.h — Thread pool with spin-waiting for low-latency parallel compute. */
 #ifndef OXIDIZE_SPINPOOL_H
 #define OXIDIZE_SPINPOOL_H
 
@@ -20,12 +13,10 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_SP_DEFAULT_SPIN_ITERATIONS 1000u
 #define OC_SP_DEFAULT_QUEUE_SIZE      256u
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 /* Configuration. Use oc_spinpool_config_default() for sensible defaults. */
 typedef struct OcSpinPoolConfig {
@@ -59,7 +50,6 @@ typedef struct OcSpinPool {
     pthread_cond_t     idle;          /* signaled when all workers idle    */
 } OcSpinPool;
 
-/* ─── Public API ─────────────────────────────────────────────────────── */
 
 /* Produce a default config: n_threads=0 (auto), spin=1000, queue=256. */
 OcSpinPoolConfig oc_spinpool_config_default(void);

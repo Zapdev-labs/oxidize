@@ -1,13 +1,4 @@
-/*
- * arena.h — OcArena bump-pointer allocator.
- *
- * Allocates from a single contiguous backing buffer; `oc_arena_free()` frees
- * everything at once (no per-allocation free tracking). Used for model-lifetime
- * allocations: config structs, tensor name strings, temp buffers. mmap'd
- * weights are NOT arena-allocated (their lifetime is tied to mmap).
- *
- * Port concept: architecture.md §3.6.
- */
+/* arena.h — OcArena bump-pointer allocator. */
 #ifndef OXIDIZE_ARENA_H
 #define OXIDIZE_ARENA_H
 
@@ -27,10 +18,7 @@ typedef struct OcArena OcArena;
  * If `initial_cap == 0`, uses OC_ARENA_DEFAULT_CAP. Returns NULL on OOM. */
 OcArena *oc_arena_new(size_t initial_cap);
 
-/* Allocate `n` bytes aligned to `align` (must be a power of two and
- * <= 256). `n == 0` returns a non-NULL unique pointer. Returns
- * NULL on OOM (the arena grows automatically up to a hard cap). The returned
- * pointer is valid until `oc_arena_free()` is called. */
+/* Allocate `n` bytes aligned to `align` (must be a power of two and <= 256). `n == 0` returns a non-NULL unique pointer. Returns NULL on OOM (the arena grows automatically up to a hard cap). The returned pointer is valid until `oc_arena_free()`. */
 void *oc_arena_alloc(OcArena *a, size_t n, size_t align);
 
 /* Convenience: allocate `n_bytes` bytes with default alignment (16). */

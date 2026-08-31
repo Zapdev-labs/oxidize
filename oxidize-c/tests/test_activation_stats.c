@@ -18,11 +18,7 @@ Test(act_stats, observe_and_get_norms)
     OcActivationStats stats;
     oc_activation_stats_init(&stats, 1);
 
-    /* Observe a batch of 2 samples, 3 features each.
-     * Sample 0: [1, 0, 0]
-     * Sample 1: [0, 2, 0]
-     * sum_sq = [1, 4, 0], n_samples = 2
-     * L2 norms = [sqrt(0.5), sqrt(2), 0] = [0.707, 1.414, 0] */
+    /* Observe a batch of 2 samples, 3 features each. */
     float activations[] = {1.0f, 0.0f, 0.0f, 0.0f, 2.0f, 0.0f};
     cr_assert_eq(oc_activation_stats_observe(&stats, 0, activations, 2, 3), OC_OK);
 
@@ -45,12 +41,11 @@ Test(act_stats, multiple_observations)
     cr_assert_eq(oc_activation_stats_observe(&stats, 0, a1, 1, 2), OC_OK);
     float a2[] = {1.0f, 1.0f};
     cr_assert_eq(oc_activation_stats_observe(&stats, 0, a2, 1, 2), OC_OK);
-    /* sum_sq = [2, 2], n_samples = 2, L2 = [1, 1] */
+    /* Layer 1: observe once. */
 
     /* Layer 1: observe once. */
     float a3[] = {3.0f, 4.0f};
     cr_assert_eq(oc_activation_stats_observe(&stats, 1, a3, 1, 2), OC_OK);
-    /* sum_sq = [9, 16], n_samples = 1, L2 = [3, 4] */
 
     float norms0[2], norms1[2];
     oc_activation_stats_get_l2_norms(&stats, 0, norms0, 2);

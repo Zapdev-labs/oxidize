@@ -1,23 +1,9 @@
-/*
- * simd.c — runtime SIMD dispatch hub.
- *
- * Detects host CPU capabilities once (via __builtin_cpu_supports on gcc/clang,
- * falling back to SCALAR on other compilers) and routes dequant kernels to
- * the best available SIMD implementation. Intrinsics live ONLY in
- * simd_avx2.c / simd_avx512.c (per CONTRIBUTING.md); this file contains no
- * intrinsics, only function-pointer routing.
- *
- * Bit-exactness contract: the dispatched kernel MUST produce output
- * byte-identical to the scalar reference in src/compute/quantization.c.
- * Tests/test_simd.c asserts this on randomized inputs for every accelerated
- * type (VAL-SIMD-001..004).
- */
+/* simd.c — runtime SIMD dispatch hub. Bit-exactness: the dispatched kernel MUST produce output byte-identical to the scalar reference in src/compute/quantization.c (VAL-SIMD-001..004). */
 #include "oxidize/simd.h"
 
 #include <stdatomic.h>
 #include <string.h>
 
-/* ─── Capability detection ────────────────────────────────────────────── */
 
 /* Raw cpuid instead of __builtin_cpu_supports: older clang rejects feature
  * strings like "f16c" and "avx512vnni", so builtin-based detection does not
@@ -61,10 +47,7 @@ static OcSimdCaps detect_caps(void)
     uint32_t b7 = 0, c7 = 0, d7 = 0, a7 = 0;
     if (__get_cpuid_count(7, 0, &a7, &b7, &c7, &d7) == 0) { b7 = 0; c7 = 0; }
 
-    /* AVX-512 BW + DQ + VNNI together define the "useful for quant" tier
-     * (skylake-x without VNNI is intentionally not preferred over AVX2
-     * because VNNI is the win for int8 dot products; plain AVX-512 F is
-     * rarely worth the frequency penalty). */
+    /* AVX-512 BW + DQ + VNNI together define the "useful for quant" tier (skylake-x without VNNI is intentionally not preferred over AVX2 because VNNI is the win for int8 dot products; plain AVX-512 F is rarely worth the frequency penalty). */
     bool avx512bw   = os_avx512 && ((b7 >> 30) & 1);
     bool avx512dq   = os_avx512 && ((b7 >> 17) & 1);
     bool avx512vnni = os_avx512 && ((c7 >> 11) & 1);
@@ -83,10 +66,7 @@ static OcSimdCaps detect_caps(void)
         c.name  = "scalar";
     }
 #elif defined(__aarch64__)
-    /* NEON (Advanced SIMD) is mandatory in the AArch64 base architecture —
-     * there is no HWCAP bit worth testing, so detection is compile-time.
-     * Optional extensions (dotprod / i8mm) would need getauxval(AT_HWCAP);
-     * the OXK NEON kernels deliberately do not use them. */
+    /* NEON is mandatory in AArch64; optional extensions (dotprod / i8mm) are deliberately unused. */
     c.level    = OC_SIMD_NEON;
     c.has_neon = true;
     c.name     = "neon";
@@ -113,7 +93,6 @@ const OcSimdCaps *oc_simd_caps(void)
     return &s_caps;
 }
 
-/* ─── Dispatch entry ──────────────────────────────────────────────────── */
 
 bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
                          const uint8_t *src, size_t src_len,
@@ -134,11 +113,7 @@ bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
 
     const OcSimdCaps *caps = oc_simd_caps();
     switch (caps->level) {
-/* The AVX kernels are only *defined* on x86 (simd_avx2.c / simd_avx512.c are
- * wholly inside an `#if defined(__x86_64__) || defined(__i386__)`). These
- * branches are unreachable elsewhere — caps->level can never report an x86
- * tier on another architecture — but an unguarded call still needs the symbol
- * at link time, which is what broke the aarch64 link. */
+/* The AVX kernels are only *defined* on x86 (simd_avx2.c / simd_avx512.c are wholly inside an `#if defined(__x86_64__) || defined(__i386__)`). These branches are unreachable elsewhere — caps->level can never report an x86 tier on another architecture — but an unguarded call still needs the symbol at link time, which is what broke the aarch64 link. */
 #if defined(__x86_64__) || defined(__i386__)
     case OC_SIMD_AVX512:
         switch (qtype) {

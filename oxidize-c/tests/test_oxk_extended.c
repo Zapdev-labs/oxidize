@@ -1,12 +1,4 @@
-/*
- * test_oxk_extended.c — Comprehensive OXK kernel tests.
- *
- * Tests correctness across all quant types, verifies parity between scalar
- * and SIMD implementations, and exercises capability detection, dispatcher,
- * block-size constants, large inputs, edge cases (zeros, negatives).
- *
- * Uses the vendored Criterion framework (see tests/criterion/).
- */
+/* test_oxk_extended.c — Comprehensive OXK kernel tests. */
 #include <criterion/criterion.h>
 #include "oxidize/oxk.h"
 #include "oxidize/oxk_avx512.h"
@@ -15,7 +7,6 @@
 #include <math.h>
 #include <stdlib.h>
 
-/* ─── Block-size constant tests ────────────────────────────────────────── */
 
 Test(oxk_ext, block_size_q4_0)
 {
@@ -44,7 +35,6 @@ Test(oxk_ext, block_size_k_quants)
     cr_assert_eq(OC_OXK_BLOCK_Q8_K_SIZE, 292u);
 }
 
-/* ─── Capability detection ──────────────────────────────────────────────── */
 
 Test(oxk_ext, caps_valid_level)
 {
@@ -74,7 +64,6 @@ Test(oxk_ext, caps_name_matches_level)
     }
 }
 
-/* ─── Dispatcher tests ─────────────────────────────────────────────────── */
 
 Test(oxk_ext, dispatcher_q8_0_matches_scalar)
 {
@@ -116,16 +105,13 @@ Test(oxk_ext, dispatcher_q4_1_matches_scalar)
     cr_assert_float_eq(s, d, 0.0f);
 }
 
-/* ─── Q8_0 dot product tests ───────────────────────────────────────────── */
 
 Test(oxk_ext, dot_q8_0_known_result)
 {
     /* d_w=2.0, d_q=3.0, all weights=4, all activations=5
      * result = 2*3 * sum(4*5) = 6 * 32 * 20 = 6 * 640 = 3840 */
     uint8_t w[34], q[34];
-    /* f16 2.0 = 0x4000 → [0x00, 0x40] */
     w[0] = 0x00; w[1] = 0x40;
-    /* f16 3.0 = 0x4200 → [0x00, 0x42] */
     q[0] = 0x00; q[1] = 0x42;
     for (int i = 0; i < 32; i++) {
         w[2 + i] = 4;
@@ -163,7 +149,6 @@ Test(oxk_ext, dot_q8_0_zero_input)
     cr_assert_float_eq(result, 0.0f, 0.0f);
 }
 
-/* ─── Q4_0 dot product tests ───────────────────────────────────────────── */
 
 Test(oxk_ext, dot_q4_0_known_result)
 {
@@ -180,7 +165,6 @@ Test(oxk_ext, dot_q4_0_known_result)
 
 Test(oxk_ext, dot_q4_0_zero_when_nibble_is_8)
 {
-    /* nibble=8 → value=0, so dot product = 0 regardless of q8 */
     uint8_t w[18], q[34];
     w[0] = 0x00; w[1] = 0x3C;
     for (int i = 0; i < 16; i++) w[2 + i] = 0x88;  /* nibbles all 8 → 0 */
@@ -190,14 +174,9 @@ Test(oxk_ext, dot_q4_0_zero_when_nibble_is_8)
     cr_assert_float_eq(result, 0.0f, 0.0f);
 }
 
-/* ─── Q4_1 dot product tests ───────────────────────────────────────────── */
 
 Test(oxk_ext, dot_q4_1_known_result)
 {
-    /* d=1.0, m=2.0, nibbles all 5, q8 all 3, d_q=1.0
-     * dot_prod = sum(5 * 3) = 32 * 15 = 480
-     * q8_sum = sum(3) = 32 * 3 = 96
-     * result = d*dq*dot_prod + m*dq*q8_sum = 1*1*480 + 2*1*96 = 480 + 192 = 672 */
     uint8_t w[20], q[34];
     w[0] = 0x00; w[1] = 0x3C;  /* d=1.0 */
     w[2] = 0x00; w[3] = 0x40;  /* m=2.0 (f16 0x4000) */
@@ -208,7 +187,6 @@ Test(oxk_ext, dot_q4_1_known_result)
     cr_assert_float_eq(result, 672.0f, 0.5f);
 }
 
-/* ─── Q4_K dot product tests ───────────────────────────────────────────── */
 
 Test(oxk_ext, dot_q4_k_basic)
 {
@@ -234,7 +212,6 @@ Test(oxk_ext, dot_q4_k_dispatched_matches_scalar)
     cr_assert_float_eq(s, d, 0.0f);
 }
 
-/* ─── Q5_K dot product tests ───────────────────────────────────────────── */
 
 Test(oxk_ext, dot_q5_k_basic)
 {
@@ -257,7 +234,6 @@ Test(oxk_ext, dot_q5_k_dispatched_matches_scalar)
     cr_assert_float_eq(s, d, 0.0f);
 }
 
-/* ─── Q6_K dot product tests ───────────────────────────────────────────── */
 
 Test(oxk_ext, dot_q6_k_basic)
 {
@@ -280,7 +256,6 @@ Test(oxk_ext, dot_q6_k_dispatched_matches_scalar)
     cr_assert_float_eq(s, d, 0.0f);
 }
 
-/* ─── Q8_0 matvec tests ────────────────────────────────────────────────── */
 
 Test(oxk_ext, matvec_q8_0_known_result)
 {
@@ -310,13 +285,11 @@ Test(oxk_ext, matvec_q8_0_multiple_rows)
         for (int i = 0; i < 32; i++) w[r * 34 + 2 + i] = (int8_t)(r + 1);
     }
     oc_oxk_matvec_q8_0_f32_scalar(w, 3, 34, x, out);
-    /* row 0: sum(1*1) = 32, row 1: sum(2*1) = 64, row 2: sum(3*1) = 96 */
     cr_assert_float_eq(out[0], 32.0f, 0.1f);
     cr_assert_float_eq(out[1], 64.0f, 0.1f);
     cr_assert_float_eq(out[2], 96.0f, 0.1f);
 }
 
-/* ─── Q4_0 matvec tests ────────────────────────────────────────────────── */
 
 Test(oxk_ext, matvec_q4_0_known_result)
 {
@@ -332,7 +305,6 @@ Test(oxk_ext, matvec_q4_0_known_result)
     cr_assert_float_eq(out[0], 96.0f, 0.1f);
 }
 
-/* ─── Q4_K matvec tests ────────────────────────────────────────────────── */
 
 Test(oxk_ext, matvec_q4_k_zero_block)
 {
@@ -357,7 +329,6 @@ Test(oxk_ext, matvec_q4_k_dispatched_matches_scalar)
     cr_assert_float_eq(out_s[0], out_d[0], 0.0f);
 }
 
-/* ─── Large dot product (256+ blocks) ──────────────────────────────────── */
 
 Test(oxk_ext, dot_q8_0_large_256_blocks)
 {
@@ -369,7 +340,6 @@ Test(oxk_ext, dot_q8_0_large_256_blocks)
     cr_assert_not_null(q);
 
     for (size_t b = 0; b < N; b++) {
-        /* d_w = 1.0, d_q = 1.0 */
         w[b * 34] = 0x00; w[b * 34 + 1] = 0x3C;
         q[b * 34] = 0x00; q[b * 34 + 1] = 0x3C;
         for (int i = 0; i < 32; i++) {
@@ -413,7 +383,6 @@ Test(oxk_ext, dot_q4_0_large_300_blocks)
     free(q);
 }
 
-/* ─── Parity: scalar vs AVX2 (when available) ──────────────────────────── */
 
 Test(oxk_ext, parity_q8_0_scalar_vs_avx2)
 {
@@ -470,7 +439,6 @@ Test(oxk_ext, parity_q4_1_scalar_vs_avx2)
     cr_assert_float_eq(s, a, 0.0f);
 }
 
-/* ─── Parity: scalar vs AVX-512 VNNI/BW (when available) ────────────────── */
 
 Test(oxk_ext, parity_q8_0_scalar_vs_avx512_vnni)
 {
@@ -565,7 +533,6 @@ Test(oxk_ext, parity_q4_0_matvec_scalar_vs_avx512_bw)
                        out_a[1], out_s[1]);
 }
 
-/* ─── Edge case: all-zero Q8_0 matvec ──────────────────────────────────── */
 
 Test(oxk_ext, matvec_q8_0_zero_input)
 {

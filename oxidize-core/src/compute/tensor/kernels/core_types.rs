@@ -22,7 +22,6 @@ impl Tensor {
     }
 }
 
-// ---------------------------------------------------------------------------
 // GPU-native activation stubs
 //
 // These functions provide GPU-routed versions of the most common per-token
@@ -40,4 +39,3 @@ impl Tensor {
 //   • `hidden_size` must be ≤ 8192 — the GPU buffer pool only pre-allocates
 //     up to that size; larger hidden states fall back to CPU to avoid
 //     unbounded allocation on the first call.
-// ---------------------------------------------------------------------------

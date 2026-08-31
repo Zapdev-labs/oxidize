@@ -1,18 +1,4 @@
-/* test_tokenizer_tiktoken.c — Criterion tests for the raw Tiktoken
- * tokenizer (byte-level, no GPT-2 mapping).
- *
- * Covers:
- *   VAL-TOK-009 — Tiktoken format encode/decode (round-trip)
- *   VAL-TOK-010 — Dispatch by tokenizer.ggml.model key (tiktoken)
- *   VAL-TOK-011 — Parity vs Rust LoadedTokenizer (toy parity with Rust
- *                 `TiktokenTokenizer` unit tests).
- *   <unk> fallback for OOV bytes (VAL-TOK-009 OOV clause).
- *
- * Parity reference: oxidize-core/src/format/tokenizer.rs `#[cfg(test)]`:
- *   - `tiktoken_merges_by_rank_and_round_trips`
- *   - `tiktoken_supports_utf8_bytes`
- *   - `tiktoken_uses_unknown_token_for_missing_bytes`
- */
+/* test_tokenizer_tiktoken.c — Criterion tests for the raw Tiktoken VAL-TOK-009 — Tiktoken format encode/decode (round-trip) VAL-TOK-010 — Dispatch by tokenizer.ggml.model key (tiktoken) */
 
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 
@@ -29,7 +15,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static void assert_ids_eq(const uint32_t *actual, size_t actual_count,
                           const uint32_t *expected, size_t expected_count)
@@ -50,11 +35,7 @@ static OcByteSlice bs(const uint8_t *data, size_t len)
     OcByteSlice s; s.data = data; s.len = len; return s;
 }
 
-/* ─── Merge-by-rank + round-trip (VAL-TOK-009) ──────────────────────────
- * Mirrors Rust `tiktoken_merges_by_rank_and_round_trips`:
- *   vocab = [b"h", b"e", b"l", b"o", b"he", b"ll", b"hell", b"hello"]
- *   merges = [(h,e), (l,l), (he,ll), (hell,o)]
- *   encode("hello") -> len 1, decode -> "hello" */
+/* ─── Merge-by-rank + round-trip (VAL-TOK-009) ────────────────────────── Mirrors Rust `tiktoken_merges_by_rank_and_round_trips`: vocab = [b"h", b"e", b"l", b"o", b"he", b"ll", b"hell", b"hello"] merges = [(h,e), (l,l), (he,ll), (hell,o)] encode("hello") -> len 1, decode -> "hello" */
 
 Test(tokenizer_tiktoken, merges_by_rank_and_round_trips)
 {
@@ -104,14 +85,7 @@ Test(tokenizer_tiktoken, merges_by_rank_and_round_trips)
     oc_arena_free(arena);
 }
 
-/* ─── UTF-8 bytes (VAL-TOK-009) ──────────────────────────────────────────
- * Mirrors Rust `tiktoken_supports_utf8_bytes`:
- *   vocab = [b"h", b"i", b" ", &[0xc3], &[0xa9], b"\xc3\xa9"]
- *   encode("hi é") -> decode -> "hi é"
- *
- * The multi-byte é (U+00E9) is stored as two single-byte tokens (0xc3, 0xa9)
- * plus the merged two-byte form. With no merges, each byte maps to its
- * single-byte token. */
+/* ─── UTF-8 bytes (VAL-TOK-009) ────────────────────────────────────────── Mirrors Rust `tiktoken_supports_utf8_bytes`: vocab = [b"h", b"i", b" ", &[0xc3], &[0xa9], b"\xc3\xa9"] encode("hi é") -> decode -> "hi é" The multi-byte é (U+00E9) is stored as two single-byte tokens (0xc3, 0xa9) plus the merged two-byte form. With no merges, each byte maps to its single-byte token. */
 
 Test(tokenizer_tiktoken, supports_utf8_bytes)
 {
@@ -219,12 +193,7 @@ Test(tokenizer_tiktoken, streaming_replaces_malformed_utf8)
     oc_arena_free(arena);
 }
 
-/* ─── Unknown token fallback for missing bytes (VAL-TOK-009 OOV) ────────
- * Mirrors Rust `tiktoken_uses_unknown_token_for_missing_bytes`:
- *   vocab = [b"a"] + unk(b"<unk>")
- *   encode("ab") -> decode -> "a<unk>"
- *
- * 'b' (0x62) is not in the single-byte vocab, so it maps to <unk>. */
+/* ─── Unknown token fallback for missing bytes (VAL-TOK-009 OOV) ──────── Mirrors Rust `tiktoken_uses_unknown_token_for_missing_bytes`: vocab = [b"a"] + unk(b"<unk>") encode("ab") -> decode -> "a<unk>" 'b' (0x62) is not in the single-byte vocab, so it maps to <unk>. */
 
 Test(tokenizer_tiktoken, unknown_for_missing_bytes)
 {
@@ -259,7 +228,6 @@ Test(tokenizer_tiktoken, unknown_for_missing_bytes)
     oc_arena_free(arena);
 }
 
-/* ─── Decode unknown id returns error ──────────────────────────────────── */
 
 Test(tokenizer_tiktoken, decode_unknown_id_returns_error)
 {
@@ -280,7 +248,6 @@ Test(tokenizer_tiktoken, decode_unknown_id_returns_error)
     oc_arena_free(arena);
 }
 
-/* ─── Empty input ──────────────────────────────────────────────────────── */
 
 Test(tokenizer_tiktoken, empty_input_returns_empty)
 {
@@ -308,9 +275,6 @@ Test(tokenizer_tiktoken, empty_input_returns_empty)
     oc_arena_free(arena);
 }
 
-/* ─── Lossy UTF-8 decode ──────────────────────────────────────────────────
- * Mirrors Rust `String::from_utf8_lossy`: invalid UTF-8 byte sequences are
- * replaced with U+FFFD (0xEF 0xBF 0xBD). */
 
 Test(tokenizer_tiktoken, lossy_utf8_decode)
 {
@@ -398,7 +362,6 @@ Test(tokenizer_tiktoken, load_from_gguf_tiktoken)
     cr_assert_eq(e, OC_OK, "load: %s", oc_error_msg(e));
     cr_assert_eq(tok.kind, OC_TOK_KIND_TIKTOKEN, "tiktoken -> Tiktoken");
 
-    /* encode("hello") should fully merge to [7]. */
     uint32_t *ids = NULL;
     size_t count = 0;
     e = oc_tokenizer_encode(&tok, "hello", OC_TOK_DEFAULT, &ids, &count);

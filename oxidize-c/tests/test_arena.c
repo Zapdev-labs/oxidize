@@ -1,9 +1,4 @@
-/* test_arena.c — OcArena bump allocator tests.
- *
- * Verifies bump-pointer semantics, alignment, growth, dup/printf helpers, and
- * 1000 alloc/free cycles (ASan-clean substitutes for valgrind which is not
- * installed locally).
- */
+/* test_arena.c — OcArena bump allocator tests. */
 #include <criterion/criterion.h>
 #include "oxidize/arena.h"
 
@@ -112,4 +107,3 @@ Test(arena, null_arena_returns_null)
     cr_assert_eq(oc_arena_used(NULL), 0, "");
     oc_arena_free(NULL);  /* must not crash */
 }
-

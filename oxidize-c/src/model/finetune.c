@@ -37,21 +37,7 @@ OcError oc_finetune_run(const OcFtConfig *cfg)
                 cfg->learning_rate, cfg->max_seq_length);
     }
 
-    /* The full training loop requires:
-     * 1. Load base model
-     * 2. Initialize LoRA adapters (A=random, B=zero)
-     * 3. For each epoch:
-     *    a. Load batch from dataset (JSONL)
-     *    b. Tokenize prompt + response
-     *    c. Forward pass with LoRA applied
-     *    d. Compute loss (cross-entropy on response tokens)
-     *    e. Backward pass (compute gradients for A, B)
-     *    f. Update A, B with optimizer (Adam)
-     * 4. Save LoRA adapters
-     *
-     * Steps d-g require autograd which is not implemented in the C port.
-     * For now, we provide the infrastructure and return OC_ERR_UNSUPPORTED.
-     */
+    /* The C path has no autograd, so the training loop is not implemented. */
 
     fprintf(stderr, "finetune: training loop not yet implemented (requires autograd)\n");
     fprintf(stderr, "  Use the Rust oxidize-finetuning crate for actual training.\n");

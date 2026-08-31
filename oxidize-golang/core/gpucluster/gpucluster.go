@@ -1,9 +1,4 @@
 // Package gpucluster models the Oxidize GPU cluster specification
-// (docs/gpu_cluster_spec.md) as code: typed GPU tier profiles, Kubernetes/Helm
-// manifest generation, and runtime GPU detection via nvidia-smi.
-//
-// It is a feature-parity port of the Rust oxidize_core::gpu_cluster module.
-// YAML is emitted via string building to keep the package dependency-free.
 package gpucluster
 
 import (

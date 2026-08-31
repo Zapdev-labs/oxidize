@@ -25,10 +25,6 @@ func TestWorkspace(t *testing.T) {
 
 func TestFusedRMSNormGEMV(t *testing.T) {
 	// Convention (mirrors oxidize_core::compute::cpu_kernels::fused_rms_norm_gemv_f32_transposed):
-	//   - input/normalized length = rows
-	//   - output length = cols
-	//   - matrix is rows*cols row-major
-	// output[c] = sum_r matrix[r][c] * normalized[r]
 	rows := 4
 	cols := 3
 	input := []float32{1, 2, 3, 4}

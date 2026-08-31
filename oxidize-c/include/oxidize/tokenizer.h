@@ -1,23 +1,4 @@
-/*
- * tokenizer.h — LoadedTokenizer (BPE/SP/WP/Tiktoken) public API.
- *
- * Port of oxidize-core/src/format/tokenizer.rs to C11.
- *
- * Dispatch: `oc_tokenizer_load_from_gguf()` reads `tokenizer.ggml.model`
- * from GGUF metadata and dispatches to the format-specific loader:
- *   - "gpt2" | "lfm2" | "lfm2moe"  → BPE (byte-level, tiktoken-style)
- *   - "llama" | "gemma" | "gemma4" → SentencePiece (unigram, Viterbi)
- *   - "bert"                       → WordPiece (## continuation)
- *   - "tiktoken"                   → Tiktoken (raw byte-level)
- *   - <other>                      → OC_ERR_TOKENIZER
- *
- * All four paths are faithful ports of the Rust `LoadedTokenizer` variants.
- * Round-trip parity with Rust is a hard invariant (VAL-TOK-006..011):
- *   - SentencePiece unigram Viterbi segmentation (Llama/Gemma)
- *   - WordPiece greedy longest-match with `##` continuation (BERT)
- *   - Tiktoken raw byte-level merge ranks (no GPT-2 byte_to_unicode mapping)
- *   - BPE byte-level with GPT-2 byte_to_unicode mapping (Qwen/GPT2/LFM2)
- */
+/* tokenizer.h — LoadedTokenizer (BPE/SP/WP/Tiktoken) public API. Round-trip parity with Rust is a hard invariant (VAL-TOK-006..011): SentencePiece Viterbi, WordPiece `##` greedy match, Tiktoken raw byte-level, BPE with GPT-2 byte_to_unicode. */
 #ifndef OXIDIZE_TOKENIZER_H
 #define OXIDIZE_TOKENIZER_H
 
@@ -33,7 +14,6 @@
 extern "C" {
 #endif
 
-/* ─── Kinds ────────────────────────────────────────────────────────────── */
 
 typedef enum {
     OC_TOK_KIND_NONE = 0,
@@ -43,30 +23,7 @@ typedef enum {
     OC_TOK_KIND_TIKTOKEN,
 } OcTokenizerKind;
 
-/* Policy for handling special-token strings in user input.
- *
- *   OC_TOK_DISALLOW_SPECIAL — no special-token id is ever emitted. This is
- *     the injection-prevention mode (VAL-TOK-004). For BPE, marker text such
- *     as `<|im_start|>` is tokenized via the byte-level BPE path instead;
- *     for SentencePiece/WordPiece/Tiktoken, any special-token id produced by
- *     ordinary vocab lookups is filtered from the output.
- *
- *   OC_TOK_ALLOW_SPECIAL    — control / user-defined pieces (e.g. `<|im_start|>`,
- *     `<|im_end|>`) are matched verbatim and emitted as their single id before
- *     byte-level BPE runs on the surrounding text (mirrors Rust
- *     `BpeTokenizer::encode` with non-empty `special_pieces`).
- *
- *   OC_TOK_DEFAULT          — alias for `OC_TOK_ALLOW_SPECIAL` (the Rust
- *     `encode` path always honors `special_pieces` when present). Kept as a
- *     distinct value so callers can request "the tokenizer's default
- *     behavior" without having to know which kind is loaded.
- *
- *   OC_TOK_ADD_BOS          — like `OC_TOK_ALLOW_SPECIAL`, but additionally
- *     prepends the BOS token id when the tokenizer has one configured
- *     (`has_bos == true`). Mirrors Rust `EncodeOptions { add_bos: true, .. }`
- *     (VAL-TOK-007). Used by Llama/Gemma callers that need the leading BOS
- *     per arch convention.
- */
+/* ─── Kinds ────────────────────────────────────────────────────────────── */
 typedef enum {
     OC_TOK_DEFAULT          = 0,
     OC_TOK_ALLOW_SPECIAL    = 1,
@@ -74,10 +31,7 @@ typedef enum {
     OC_TOK_ADD_BOS          = 3,
 } OcSpecialTokenPolicy;
 
-/* Chat template kinds. `OC_TEMPLATE_CHATML` is the fast-path ChatML renderer
- * (mirrors Rust `process_chat_template` when the template contains
- * `<|im_start|>`). The raw Jinja2 path is NOT implemented — callers that
- * need it should use the Rust reference. */
+/* ─── Kinds ────────────────────────────────────────────────────────────── */
 typedef enum {
     OC_TEMPLATE_CHATML = 0,
 } OcTemplateKind;
@@ -88,13 +42,8 @@ typedef struct OcChatMessage {
     const char *content;
 } OcChatMessage;
 
-/* ─── Helper types for tokenizer constructors (test/advanced use) ────── */
 
-/* A (piece, score) pair for constructing a SentencePiece unigram tokenizer.
- * Mirrors the Rust `(&str, f32)` tuple passed to
- * `SentencePieceUnigramTokenizer::new`. `score` is the log-probability of
- * the piece (higher = more probable); the Viterbi best-path search
- * maximizes the summed score. */
+/* A (piece, score) pair for constructing a SentencePiece unigram tokenizer. */
 typedef struct OcSpPiece {
     const char *piece;
     float       score;
@@ -114,7 +63,6 @@ typedef struct OcByteSlicePair {
     OcByteSlice right;
 } OcByteSlicePair;
 
-/* ─── Loaded tokenizer ─────────────────────────────────────────────────── */
 
 /* Opaque per-kind tokenizer states (defined in their respective .c files). */
 typedef struct OcBpeTokenizer           OcBpeTokenizer;
@@ -146,64 +94,32 @@ typedef struct OcTokenizer {
     bool has_add_bos_token;
 } OcTokenizer;
 
-/* ─── Lifecycle ────────────────────────────────────────────────────────── */
 
-/* Load a tokenizer from parsed GGUF metadata. Reads `tokenizer.ggml.model`
- * and dispatches to the format-specific loader. On success, `*out` is
- * initialized with `kind`, the implementation pointer, and the special-token
- * ids pulled from `tokenizer.ggml.*_token_id` metadata keys.
- *
- * Returns OC_OK, OC_ERR_TOKENIZER (unknown model string, missing required
- * metadata, or invalid merge entry), OC_ERR_OOM, or OC_ERR_INVALID_ARG. */
+/* Load a tokenizer from parsed GGUF metadata. Reads `tokenizer.ggml.model` and dispatches to the format-specific loader. On success, `*out` is initialized with `kind`, the implementation pointer, and the special-token ids pulled from `tokenizer.ggml.*_token_id` metadata keys. Returns OC_OK, OC_ERR_TOKENIZER (unknown model string, missing required metadata, or invalid merge entry), OC_ERR_OOM, or OC_ERR_INVALID_ARG. */
 OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out);
 
 /* Free a loaded tokenizer and all its allocations. Safe on NULL or zeroed
  * OcTokenizer. After this call, `*t` is zeroed. */
 void oc_tokenizer_free(OcTokenizer *t);
 
-/* ─── Encode / Decode ──────────────────────────────────────────────────── */
 
-/* Encode `text` (UTF-8, NUL-terminated) into a sequence of token ids.
- * `policy` controls special-token handling (see OcSpecialTokenPolicy).
- *
- * On success, `*out_ids` points to a freshly malloc'd array of `*out_count`
- * u32 ids owned by the caller (free with `free()`). Returns OC_OK,
- * OC_ERR_TOKENIZER, OC_ERR_OOM, or OC_ERR_INVALID_ARG. */
+/* Encode `text` (UTF-8, NUL-terminated) into a sequence of token ids. */
 OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
                             OcSpecialTokenPolicy policy,
                             uint32_t **out_ids, size_t *out_count);
 
-/* Decode `ids` (array of `count` token ids) back into text. On success,
- * `*out_text` points to a freshly malloc'd NUL-terminated UTF-8 string owned
- * by the caller (free with `free()`). Unknown ids return OC_ERR_TOKENIZER.
- * Mirrors Rust `BpeTokenizer::decode` (byte-level GPT-2 reversal when
- * `use_byte_fallback` is set). */
+/* Decode `ids` (array of `count` token ids) back into text. */
 OcError oc_tokenizer_decode(const OcTokenizer *t, const uint32_t *ids,
                             size_t count, char **out_text);
 
-/* ─── Chat templates ───────────────────────────────────────────────────── */
 
-/* Render a chat template for `messages` (array of `n_messages` entries).
- * `OC_TEMPLATE_CHATML` produces the canonical ChatML formatting:
- *
- *   <|im_start|>{role}\n{content}<|im_end|>\n
- *   ...
- *   <|im_start|>assistant\n     (when add_generation_prompt is true)
- *
- * On success, `*out_text` points to a freshly malloc'd NUL-terminated string
- * owned by the caller. Returns OC_OK, OC_ERR_OOM, or OC_ERR_INVALID_ARG. */
+/* Render a chat template for `messages` (array of `n_messages` entries). */
 OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
                                          size_t n_messages,
                                          OcTemplateKind kind,
                                          bool add_generation_prompt,
                                          char **out_text);
 
-/* ─── Streaming detokenizer ──────────────────────────────────────────────
- *
- * Handles incremental token-by-token decoding where tokens may split UTF-8
- * characters across boundaries. Maintains a pending-byte buffer so that
- * partial UTF-8 sequences are held until completed by the next token.
- */
 typedef struct OcStreamingDetokenizer {
     const OcTokenizer *tokenizer;
     /* Pending bytes from previous tokens that form incomplete UTF-8. */
@@ -217,10 +133,7 @@ typedef struct OcStreamingDetokenizer {
 void oc_streaming_detok_init(OcStreamingDetokenizer *sd,
                              const OcTokenizer *tok);
 
-/* Push a single token id and get back the printable text delta.
- * `*out_delta` points into `sd`'s internal buffer (valid until next call).
- * If the token produces partial UTF-8, the delta may be empty (bytes are
- * buffered). Returns OC_OK or OC_ERR_INVALID_ARG. */
+/* Push a single token id and get back the printable text delta. */
 OcError oc_streaming_detok_push(OcStreamingDetokenizer *sd, uint32_t token,
                                 const char **out_delta, size_t *out_len);
 
@@ -231,34 +144,16 @@ OcError oc_streaming_detok_flush(OcStreamingDetokenizer *sd,
 /* Reset the streaming detokenizer (clear pending buffer). */
 void oc_streaming_detok_reset(OcStreamingDetokenizer *sd);
 
-/* ─── Token healing ──────────────────────────────────────────────────────
- *
- * "Heals" a token sequence by finding a better token boundary at the end.
- * Given a sequence ending with partial tokens, this function finds the
- * set of alternative token sequences that end at a cleaner boundary,
- * and returns the best alternative.
- *
- * This is useful when the last token in a prompt is a partial word;
- * healing finds a longer token that extends the last few tokens into a
- * complete word, reducing generation artifacts.
- */
 
-/* Given a token sequence and the tokenizer, try to heal the last 1-3 tokens.
- * If healing produces a different token sequence, writes it to `*out_ids`
- * (caller frees) and returns OC_OK. If no healing is needed, `*out_ids`
- * is NULL and `*out_count` is 0. */
+/* Given a token sequence and the tokenizer, try to heal the last 1-3 tokens. */
 OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
                                  const uint32_t *ids, size_t n_ids,
                                  uint32_t **out_ids, size_t *out_count);
 void oc_streaming_detok_free(OcStreamingDetokenizer *sd);
 
-/* ─── BPE direct API (for testing / advanced callers) ─────────────────── */
 
-/* Load a BPE tokenizer from parsed GGUF metadata. Reads
- * `tokenizer.ggml.tokens`, `tokenizer.ggml.merges` (optional), and
- * `tokenizer.ggml.token_type` (optional, for CONTROL/USER_DEFINED special
- * pieces). All allocations live in `arena`. On success, `*out` points to an
- * arena-owned `OcBpeTokenizer`. Mirrors Rust `load_bpe`. */
+/* Load a BPE tokenizer from parsed GGUF metadata. Reads tokenizer.ggml.tokens
+ * plus optional merges and token_type. */
 OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                               OcBpeTokenizer **out);
 
@@ -266,11 +161,7 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
  * Used by `oc_tokenizer_load_from_gguf()` after loading the BPE impl. */
 void oc_bpe_fill_special_tokens(const OcBpeTokenizer *bpe, OcTokenizer *out);
 
-/* Train a toy BPE tokenizer from a corpus (mirrors Rust
- * `BpeTokenizer::train`). Used by the test suite to construct a known
- * vocab + merge table without needing a real Qwen GGUF fixture. The
- * returned tokenizer is owned by `arena`. `use_byte_fallback` is set to
- * false (char-level, matching the Rust `train` constructor). */
+/* Train a toy BPE tokenizer from a corpus (mirrors Rust `BpeTokenizer::train`). Used by the test suite to construct a known vocab + merge table without needing a real Qwen GGUF fixture. The returned tokenizer is owned by `arena`. `use_byte_fallback` is set to false (char-level, matching the Rust `train` constructor). */
 OcError oc_bpe_train(const char *const *corpus, size_t n_corpus,
                      size_t merge_limit, OcArena *arena,
                      OcBpeTokenizer **out);
@@ -291,29 +182,19 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
 OcError oc_bpe_decode_raw(const OcBpeTokenizer *bpe, const uint32_t *ids,
                           size_t count, uint8_t **out_bytes, size_t *out_len);
 
-/* Free the malloc'd internals of a BPE tokenizer (vocab hashtable, u64
- * maps). Does NOT free the OcBpeTokenizer struct itself (arena-owned) nor
- * the arena. Call before oc_arena_free() when the tokenizer was created via
- * oc_bpe_train(). When the tokenizer was loaded via oc_tokenizer_load_from_gguf(),
- * oc_tokenizer_free() already calls this. */
+/* Free the malloc'd internals of a BPE tokenizer (vocab hashtable, u64 maps). Does NOT free the OcBpeTokenizer struct itself (arena-owned) nor the arena. Call before oc_arena_free() when the tokenizer was created via oc_bpe_train(). When the tokenizer was loaded via oc_tokenizer_load_from_gguf(), oc_tokenizer_free() already calls this. */
 void oc_bpe_free(OcBpeTokenizer *bpe);
 
-/* ─── SentencePiece direct API (for testing / advanced callers) ──────── */
 
 /* Load a SentencePiece unigram tokenizer from GGUF metadata. Reads
- * `tokenizer.ggml.tokens` and `tokenizer.ggml.scores` (both required).
- * `scores` is the per-token log-probability used by the Viterbi best-path
- * search. All allocations live in `arena`. Mirrors Rust `load_sentencepiece`. */
+ * tokenizer.ggml.tokens and tokenizer.ggml.scores. */
 OcError oc_sp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                              OcSentencePieceTokenizer **out);
 
 /* Copy the SentencePiece tokenizer's special-token ids into the wrapper. */
 void oc_sp_fill_special_tokens(const OcSentencePieceTokenizer *sp, OcTokenizer *out);
 
-/* Construct a SentencePiece tokenizer from an explicit (piece, score) list.
- * Mirrors Rust `SentencePieceUnigramTokenizer::new`. Used by the test
- * suite. `pieces` is an array of `n_pieces` (const char *piece, float score)
- * pairs. The returned tokenizer is arena-owned. */
+/* Construct a SentencePiece tokenizer from an explicit (piece, score) list. */
 OcError oc_sp_new(const OcSpPiece *pieces, size_t n_pieces,
                   OcArena *arena, OcSentencePieceTokenizer **out);
 
@@ -336,7 +217,6 @@ OcError oc_sp_decode(const OcSentencePieceTokenizer *sp, const uint32_t *ids,
  * hashtable, score array). Does NOT free the struct itself (arena-owned). */
 void oc_sp_free(OcSentencePieceTokenizer *sp);
 
-/* ─── WordPiece direct API (for testing / advanced callers) ──────────── */
 
 /* Load a WordPiece tokenizer from GGUF metadata. Reads
  * `tokenizer.ggml.tokens` (required). All allocations live in `arena`.
@@ -370,22 +250,16 @@ OcError oc_wp_decode(const OcWordPieceTokenizer *wp, const uint32_t *ids,
 /* Free the malloc'd internals of a WordPiece tokenizer. */
 void oc_wp_free(OcWordPieceTokenizer *wp);
 
-/* ─── Tiktoken direct API (for testing / advanced callers) ──────────── */
 
-/* Load a raw Tiktoken tokenizer from GGUF metadata. Reads
- * `tokenizer.ggml.tokens` and `tokenizer.ggml.merges` (optional). The vocab
- * is keyed by raw byte sequences (no GPT-2 byte_to_unicode mapping).
- * Mirrors Rust `load_tiktoken`. */
+/* Load a raw Tiktoken tokenizer from GGUF metadata. Reads tokenizer.ggml.tokens
+ * and optional tokenizer.ggml.merges. */
 OcError oc_tiktoken_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                                   OcTiktokenTokenizer **out);
 
 /* Copy the Tiktoken tokenizer's special-token ids into the wrapper. */
 void oc_tiktoken_fill_special_tokens(const OcTiktokenTokenizer *t, OcTokenizer *out);
 
-/* Construct a Tiktoken tokenizer from explicit vocab + merge-pair lists.
- * Mirrors Rust `TiktokenTokenizer::new`. Used by the test suite.
- * `vocab_tokens` is an array of `n_vocab` byte slices; `merge_pairs` is an
- * array of `n_merges` (left, right) byte-slice pairs. */
+/* Construct a Tiktoken tokenizer from explicit vocab + merge-pair lists. */
 OcError oc_tiktoken_new(const OcByteSlice *vocab_tokens, size_t n_vocab,
                         const OcByteSlicePair *merge_pairs, size_t n_merges,
                         OcArena *arena, OcTiktokenTokenizer **out);
@@ -411,7 +285,6 @@ OcError oc_tiktoken_decode_raw(const OcTiktokenTokenizer *t,
 /* Free the malloc'd internals of a Tiktoken tokenizer. */
 void oc_tiktoken_free(OcTiktokenTokenizer *t);
 
-/* ─── Shared helpers ──────────────────────────────────────────────────── */
 
 /* Whether a token id is a special token (bos/eos/pad/unk/sep/cls/mask). */
 bool oc_tokenizer_is_special(const OcTokenizer *t, uint32_t id);

@@ -1,14 +1,9 @@
-/*
- * kv_cache.c — simple per-layer KV cache implementation.
- *
- * See include/oxidize/kv_cache.h for design notes.
- */
+/* kv_cache.c — simple per-layer KV cache implementation. */
 #include "oxidize/kv_cache.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 /* Per-layer element count for K or V:
  *   max_seq_len * n_heads * head_dim
@@ -26,7 +21,6 @@ static size_t kv_total_count(const OcKvCacheConfig *cfg)
     return (size_t)cfg->n_layers * kv_layer_count(cfg);
 }
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 void oc_kv_cache_config_init(OcKvCacheConfig *cfg)
 {
@@ -38,7 +32,6 @@ void oc_kv_cache_config_init(OcKvCacheConfig *cfg)
     cfg->dtype       = OC_KV_CACHE_DTYPE_F32;
 }
 
-/* ─── Init / Free ─────────────────────────────────────────────────────── */
 
 OcError oc_kv_cache_init(OcKvCache *cache, const OcKvCacheConfig *cfg)
 {
@@ -84,7 +77,6 @@ void oc_kv_cache_free(OcKvCache *cache)
     cache->capacity = 0;
 }
 
-/* ─── Append / Get ────────────────────────────────────────────────────── */
 
 OcError oc_kv_cache_append(OcKvCache *cache, uint32_t layer,
                             const float *k, const float *v, uint32_t n)
@@ -99,11 +91,7 @@ OcError oc_kv_cache_append(OcKvCache *cache, uint32_t layer,
     size_t row_size     = (size_t)cfg->n_heads * (size_t)cfg->head_dim;
     size_t layer_offset = (size_t)layer * per_layer;
 
-    /* Write position: for layer 0, the current n_tokens (before advance).
-     * For other layers, n_tokens has already been advanced by the layer 0
-     * call for this step, so back up by n to write at the same position.
-     * This matches the typical inference loop where layer 0 is written
-     * first, then layers 1..N-1 for the same token(s). */
+    /* Write position: for layer 0, the current n_tokens (before advance); other layers were already advanced by the layer-0 call, so back up by n to write the same token step. */
     size_t write_token;
     if (layer == 0) {
         write_token = cache->n_tokens;
@@ -142,7 +130,6 @@ OcError oc_kv_cache_get(const OcKvCache *cache, uint32_t layer,
     return OC_OK;
 }
 
-/* ─── Clear / Truncate ────────────────────────────────────────────────── */
 
 void oc_kv_cache_clear(OcKvCache *cache)
 {
@@ -162,7 +149,6 @@ OcError oc_kv_cache_truncate(OcKvCache *cache, uint32_t n)
     return OC_OK;
 }
 
-/* ─── Accessors ────────────────────────────────────────────────────────── */
 
 uint32_t oc_kv_cache_n_tokens(const OcKvCache *cache)
 {

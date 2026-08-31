@@ -1,12 +1,4 @@
-/*
- * oxk.c — OXK (Oxidize Kernels) scalar reference implementations + dispatcher.
- *
- * Scalar implementations are the reference every SIMD variant must match
- * bit-for-bit. Most x86 variants still forward here; the ones that do not
- * (the Q4_K and Q8_0 dots) are installed by the dispatcher below. Check a
- * variant's body, not its name, before wiring it up — several _avx2 symbols
- * are forwarding stubs.
- */
+/* oxk.c — OXK (Oxidize Kernels) scalar reference implementations + dispatcher. */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/oxk.h"
 #include "oxidize/log.h"
@@ -19,7 +11,6 @@
  * so call_once/once_flag break the macOS build. pthread is already linked. */
 #include <pthread.h>
 
-/* ─── f16 → f32 (bit-twiddle, no libm) ──────────────────────────────────── */
 
 float oc_oxk_f16_le_to_f32(const uint8_t p[2])
 {
@@ -53,16 +44,11 @@ float oc_oxk_f16_le_to_f32(const uint8_t p[2])
     return result;
 }
 
-/* ─── Q4_K scale/min extraction ─────────────────────────────────────────── */
 
 void oc_oxk_get_scale_min_k4(unsigned j, const uint8_t scales[12],
                               uint8_t *scale, uint8_t *min)
 {
-    /* Must match quantization.c's get_scale_min_k4, which is bit-identical to
-     * ggml's. The j >= 4 branch here previously assembled the 6-bit values
-     * from the wrong bit positions AND the wrong source byte (scales[j]
-     * rather than scales[j+4]), so the upper four scale/min pairs of every
-     * Q4_K and Q5_K block were decoded wrong. */
+    /* Must match quantization.c's get_scale_min_k4, which is bit-identical to ggml's. */
     if (j < 4) {
         *scale = scales[j] & 63;
         *min   = scales[j + 4] & 63;
@@ -72,7 +58,6 @@ void oc_oxk_get_scale_min_k4(unsigned j, const uint8_t scales[12],
     }
 }
 
-/* ─── Q8_K bsum read ────────────────────────────────────────────────────── */
 
 int16_t oc_oxk_read_q8_k_bsum(const uint8_t *bsums, size_t index)
 {
@@ -81,7 +66,6 @@ int16_t oc_oxk_read_q8_k_bsum(const uint8_t *bsums, size_t index)
     return (int16_t)(p[0] | (p[1] << 8));
 }
 
-/* ─── Scalar dot products ──────────────────────────────────────────────── */
 
 float oc_oxk_dot_q4_0_q8_0_scalar(const uint8_t *row, size_t blocks,
                                    const uint8_t *q8)
@@ -95,10 +79,6 @@ float oc_oxk_dot_q4_0_q8_0_scalar(const uint8_t *row, size_t blocks,
         const uint8_t *qs = wb + 2; /* 16 packed bytes → 32 nibbles */
         const int8_t  *qv = (const int8_t *)(qb + 2); /* 32 int8 values */
         int32_t isum = 0;
-        /* GGUF Q4_0 splits a block into halves: the low nibble of byte i is
-         * element i, the high nibble is element i+16. Pairing them with
-         * activation elements 2i and 2i+1 (as this did) shuffles the whole
-         * dot product. */
         for (int i = 0; i < 16; i++) {
             int lo = qs[i] & 0x0F;
             int hi = qs[i] >> 4;
@@ -190,42 +170,17 @@ float oc_oxk_dot_q4_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            /* Accumulate the scaled sums in int32 across the whole block and
-             * convert once, rather than two float multiply-adds per group.
-             * This matches the Rust reference in oxidize-kernels, and it is
-             * what lets a vectorized kernel be bit-exact against this one:
-             * the SIMD version accumulates integers too, so there is no float
-             * reassociation for the two to disagree about. Bounds are
-             * comfortable — scale and min are 6-bit and each group sum is at
-             * most 32*15*127, so block totals stay well inside int32. */
+            /* Accumulate the scaled sums in int32 across the whole block and convert once, rather than two float multiply-adds per group. */
             pos     += (int32_t)sc1 * sum1 + (int32_t)sc2 * sum2;
             min_acc += (int32_t)m1  * bs1  + (int32_t)m2  * bs2;
         }
 
-        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
-         * dequantized weight is d*sc*q - dmin*m, so the minimum carries its
-         * own scale. Multiplying it by dw as well left the positive term
-         * right and the correction term wrong by a factor of dw. */
+        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the dequantized weight is d*sc*q - dmin*m, so the minimum carries its own scale. Multiplying it by dw as well left the positive term right and the correction term wrong by a factor of dw. */
         sum += dw * dq * (float)pos - dmin * dq * (float)min_acc;
     }
     return sum;
 }
 
-/* ─── Prepared Q4_K rows ────────────────────────────────────────────────
- *
- * Layout of the prep scratch, one contiguous block (floats first so the
- * whole thing only needs float alignment):
- *
- *   float d[blocks]           per-block weight scale
- *   float dmin[blocks]        per-block minimum scale
- *   uint8 codes[blocks*256]   nibbles expanded to bytes, in element order
- *   uint8 sc[blocks*8]        6-bit scale per 32-element sub-group
- *   uint8 mn[blocks*8]        6-bit min   per 32-element sub-group
- *
- * Sub-group j covers elements [j*32, j*32+32) of the block, matching the
- * activation's own layout, so the dot is a straight elementwise product
- * with no index arithmetic.
- */
 #define OC_Q4K_SUBGROUPS 8u
 
 size_t oc_oxk_q4_k_prep_bytes(size_t blocks)
@@ -263,10 +218,6 @@ void oc_oxk_q4_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
                                     &mn[b * OC_Q4K_SUBGROUPS + j]);
         }
 
-        /* Nibble order: within group gp, the low nibble of qs[gp*32+l] is
-         * element gp*64+l and the high nibble is element gp*64+32+l — i.e.
-         * sub-groups 2gp and 2gp+1. Same unpacking the scalar dot does
-         * inline, hoisted out of the activation loop. */
         uint8_t *c = codes + b * OC_OXK_QK_K;
         for (unsigned gp = 0; gp < 4; gp++) {
             const uint8_t *src = qs + gp * 32;
@@ -280,11 +231,7 @@ void oc_oxk_q4_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
     }
 }
 
-/* Q5_K prep into the SAME layout as Q4_K: codes are the 5-bit values
- * (0..31), which still fit an unsigned byte, and the scale/min decode is
- * identical — so a prepared Q5_K row is consumed by the very same
- * oc_oxk_dot_q4_k_prepped()/_multi() kernels, bit-exact against
- * oc_oxk_dot_q5_k_q8_k_scalar(). */
+/* Q5_K prep into the SAME layout as Q4_K: codes are the 5-bit values (0..31), which still fit an unsigned byte, and the scale/min decode is identical — so a prepared Q5_K row is consumed by the very same oc_oxk_dot_q4_k_prepped()/_multi() kernels, bit-exact against oc_oxk_dot_q5_k_q8_k_scalar(). */
 void oc_oxk_q5_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
 {
     float *d, *dmin;
@@ -321,16 +268,6 @@ void oc_oxk_q5_k_prep_row(const uint8_t *row, size_t blocks, void *scratch)
     }
 }
 
-/* ─── Prepared Q6_K rows ────────────────────────────────────────────────
- *
- * Layout (floats first, so float alignment suffices):
- *   float  d[blocks]          per-block weight scale
- *   uint8  codes[blocks*256]  6-bit values 0..63, in element order
- *   int8   sc[blocks*16]      signed scale per 16-element group
- *
- * The -32 value offset is not applied to the codes (they stay unsigned for
- * VNNI); the dot folds it out through the activation's block sums exactly
- * like the packed kernels do. */
 size_t oc_oxk_q6_k_prep_bytes(size_t blocks)
 {
     return blocks * (sizeof(float) + OC_OXK_QK_K + 16u);
@@ -412,18 +349,6 @@ float oc_oxk_dot_q6_k_prepped(const void *scratch, size_t blocks,
     return sum;
 }
 
-/* ─── Q2_K / Q3_K ────────────────────────────────────────────────────────
- *
- * Both pack 256 weights as 16 groups of 16, and both decode to a small
- * unsigned code plus a per-group affine correction. Writing the unpack once
- * per type and sharing it between the packed dot and the row prep keeps the
- * two in lockstep — a divergence there is exactly the kind of bug that shows
- * up only as slightly-wrong logits.
- *
- * Group g addresses its 2-bit codes as qs[(g/8)*32 + (g%2)*16 + l] shifted
- * right by ((g%8)/2)*2, which is the traversal order dequant_q2_k /
- * dequant_q3_k walk with their outer/inner/is loops.
- */
 
 /* Q2_K block: scales[16] (4-bit scale | 4-bit min), qs[64], f16 d, f16 dmin.
  * codes are the raw 2-bit values 0..3; the group minimum is returned
@@ -439,12 +364,7 @@ static void q2k_unpack_block(const uint8_t *wb, uint8_t *codes, uint8_t *sc,
         sc[g] = (uint8_t)(scales[g] & 0x0Fu);
         mn[g] = (uint8_t)(scales[g] >> 4);
     }
-    /* Groups 2k and 2k+1 are adjacent in `codes` and their source bytes are
-     * the same 32-byte run of qs at the same shift, so the decode is 8
-     * contiguous 32-byte passes rather than 16 strided 16-byte ones. Written
-     * this way (contiguous, branchless) so the compiler vectorizes it: this
-     * loop is the whole cost of a decode-time matvec, where there is no
-     * activation tile to amortize it over. */
+    /* Groups 2k and 2k+1 are adjacent in `codes` and their source bytes are the same 32-byte run of qs at the same shift, so the decode is 8 contiguous 32-byte passes rather than 16 strided 16-byte ones. Written this way (contiguous, branchless) so the compiler vectorizes it: this loop is the whole cost of a decode-time matvec, where there is no activation tile to amortize it over. */
     for (unsigned outer = 0; outer < 2; outer++) {
         for (unsigned inner = 0; inner < 4; inner++) {
             const uint8_t *q = qs + outer * 32;
@@ -456,10 +376,7 @@ static void q2k_unpack_block(const uint8_t *wb, uint8_t *codes, uint8_t *sc,
     }
 }
 
-/* Q3_K block: hmask[32], qs[64], 12 packed 6-bit scales, f16 d.
- * The third bit lives in hmask and is INVERTED relative to the value: a set
- * mask bit means "no -4". Folding that into the code gives raw = q | (bit ? 4
- * : 0) in 0..7 with a uniform -4 offset, which is the Q6_K shape. */
+/* Q3_K block: hmask[32], qs[64], 12 packed 6-bit scales, f16 d. */
 static void q3k_unpack_block(const uint8_t *wb, uint8_t *codes, int8_t *sc,
                              float *d)
 {
@@ -789,10 +706,6 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t sum1 = 0, sum2 = 0;
             for (int l = 0; l < 32; l++) {
                 uint8_t byte = qs[gp * 32 + l];
-                /* qh[l] carries one high bit per 64-element group: bit 2*gp
-                 * for the low-nibble half, bit 2*gp+1 for the high-nibble
-                 * half (the u1/u2 stepping masks in dequant_q5_k). A flat
-                 * 256-bit indexing here is what kept this kernel off. */
                 int lo = (byte & 0x0F) + (((qh[l] >> (2 * gp))     & 1) << 4);
                 int hi = (byte >> 4)   + (((qh[l] >> (2 * gp + 1)) & 1) << 4);
                 sum1 += lo * (int)q8v[gp * 64 + l];
@@ -804,22 +717,12 @@ float oc_oxk_dot_q5_k_q8_k_scalar(const uint8_t *row, size_t blocks,
             int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 2) +
                           oc_oxk_read_q8_k_bsum(bsums, gp * 4 + 3);
 
-            /* Accumulate the scaled sums in int32 across the whole block and
-             * convert once, rather than two float multiply-adds per group.
-             * This matches the Rust reference in oxidize-kernels, and it is
-             * what lets a vectorized kernel be bit-exact against this one:
-             * the SIMD version accumulates integers too, so there is no float
-             * reassociation for the two to disagree about. Bounds are
-             * comfortable — scale and min are 6-bit and each group sum is at
-             * most 32*15*127, so block totals stay well inside int32. */
+            /* Accumulate the scaled sums in int32 across the whole block and convert once, rather than two float multiply-adds per group. */
             pos     += (int32_t)sc1 * sum1 + (int32_t)sc2 * sum2;
             min_acc += (int32_t)m1  * bs1  + (int32_t)m2  * bs2;
         }
 
-        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the
-         * dequantized weight is d*sc*q - dmin*m, so the minimum carries its
-         * own scale. Multiplying it by dw as well left the positive term
-         * right and the correction term wrong by a factor of dw. */
+        /* The offset term is scaled by dmin alone, NOT by dw*dmin: the dequantized weight is d*sc*q - dmin*m, so the minimum carries its own scale. Multiplying it by dw as well left the positive term right and the correction term wrong by a factor of dw. */
         sum += dw * dq * (float)pos - dmin * dq * (float)min_acc;
     }
     return sum;
@@ -843,13 +746,7 @@ float oc_oxk_dot_q6_k_q8_k_scalar(const uint8_t *row, size_t blocks,
         const int8_t  *q8v   = (const int8_t *)(qb + 4);
         const uint8_t *bsums = qb + 4 + 256;
 
-        /* Integer accumulation per 16-element scale group, one float
-         * multiply per block. Restructured from per-product float
-         * accumulation so the SIMD kernels can be bit-exact against this
-         * reference (the same restructure Q4_K got): all sub-group products
-         * stay in int32, where reassociation is exact. The -32 value offset
-         * is folded out through the activation's stored block sums:
-         * sum(sc*(q-32)*a) = sum(sc*q*a) - 32*sum(sc*bsum). */
+        /* Integer accumulation per 16-element scale group, one float multiply per block. Restructured from per-product float accumulation so the SIMD kernels can be bit-exact against this reference (the same restructure Q4_K got): all sub-group products stay in int32, where reassociation is exact. The -32 value offset is folded out through the activation's stored block sums: sum(sc*(q-32)*a) = sum(sc*q*a) - 32*sum(sc*bsum). */
         int32_t grp[16] = {0};
         for (int n = 0; n < 2; n++) {
             const uint8_t *ql_chunk = ql + n * 64;
@@ -878,7 +775,6 @@ float oc_oxk_dot_q6_k_q8_k_scalar(const uint8_t *row, size_t blocks,
     return sum;
 }
 
-/* ─── Scalar matvec ────────────────────────────────────────────────────── */
 
 void oc_oxk_matvec_q4_0_f32_scalar(const uint8_t *w, size_t n_rows,
                                     size_t row_bytes, const float *x, float *out)
@@ -953,9 +849,8 @@ void oc_oxk_matvec_q8_0_f32_scalar(const uint8_t *w, size_t n_rows,
     }
 }
 
-/* AVX2 / AVX-512 implementations are in oxk_avx2.c */
-
 /* ─── Capability detection + dispatcher ──────────────────────────────────── */
+
 
 static OcOxkContext g_ctx;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
@@ -994,11 +889,7 @@ static void oc_oxk_init_once(void)
     g_ctx.caps.has_neon = has_neon;
     g_ctx.caps.name     = name;
 
-    /* Dispatch table. Scalar is the baseline every architecture falls back
-     * to; the SIMD variants below replace the entries they actually
-     * implement. Each is bit-exact against the scalar reference
-     * (test_oxk_avx2_parity.c, test_oxk_gguf_layout.c) — that is the hard
-     * invariant here, so installing them changes speed and nothing else. */
+    /* Dispatch table. Scalar is the baseline every architecture falls back to; SIMD entries replace what they implement. Each is bit-exact against the scalar reference. */
     g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_scalar;
     g_ctx.dot_q4_1_q8_0 = oc_oxk_dot_q4_1_q8_0_scalar;
     g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_scalar;
@@ -1015,17 +906,7 @@ static void oc_oxk_init_once(void)
     g_ctx.dot_q3_k_prepped_1 = oc_oxk_dot_q3_k_prepped;
 
 #if defined(__x86_64__) || defined(__i386__)
-    /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0
-     * dots, but nothing ever installed them: this table was written when
-     * every x86 variant forwarded to scalar and was not revisited when the
-     * kernels landed. The effect was that an AVX-512 host ran the SLOWEST
-     * kernel available for Q4_K — which is the dominant weight type for
-     * K-quant models, so the whole OXK fast path was silently off.
-     *
-     * Only these two are installed because only these two are implemented;
-     * q4_0 / q4_1 / q5_k / q6_k still have scalar-forwarding _avx2 symbols,
-     * and routing through them would add a call for no gain. Check the body
-     * before adding an entry here, not just the symbol name. */
+    /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0 dots, but nothing ever installed them: this table was written when every x86 variant forwarded to scalar and was not revisited when the kernels landed. */
     if (level >= OC_OXK_AVX2) {
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
@@ -1079,7 +960,6 @@ const OcOxkCaps *oc_oxk_caps(void)
     return &g_ctx.caps;
 }
 
-/* ─── Dispatched entry points ───────────────────────────────────────────── */
 
 float oc_oxk_dot_q4_0_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
 { oc_oxk_init(); return g_ctx.dot_q4_0_q8_0(row, blocks, q8); }

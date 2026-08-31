@@ -1,9 +1,4 @@
-/*
- * diffusion_gemma.h — Gemma diffusion model support.
- *
- * Gemma models with diffusion-based generation (instead of autoregressive).
- * Port from oxidize-core/src/model/diffusion_gemma.rs.
- */
+/* diffusion_gemma.h — Gemma diffusion model support. */
 #ifndef OXIDIZE_DIFFUSION_GEMMA_H
 #define OXIDIZE_DIFFUSION_GEMMA_H
 

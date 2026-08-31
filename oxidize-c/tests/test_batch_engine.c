@@ -114,7 +114,6 @@ Test(batch, stop_token)
     oc_batch_engine_init(&engine, NULL, 32, 4096);
     uint32_t prompt[] = {1};
     OcSeqId id;
-    /* stop_token = 2. The stub increments last_token each step. */
     oc_batch_submit(engine, prompt, 1, 100, 2, true, &id);
 
     OcBatchStepOutput out[16];
@@ -213,7 +212,6 @@ Test(batch, free_null)
     oc_batch_engine_free(NULL);
 }
 
-/* ─── Forward callback tests ─────────────────────────────────────────── */
 
 static OcError test_forward_fn(void *ctx, uint32_t token, size_t pos,
                                 OcSeqId seq_id, uint32_t *out_token)
@@ -246,11 +244,10 @@ Test(batch, forward_callback_generates_tokens)
     cr_assert_eq(out[0].token, 64);
     cr_assert(!out[0].finished);  /* generated=2 < max_new=3 */
 
-    /* Second step: forward_fn(64, 4, ...) = 64*2 + 1 + 4 = 133 */
+    /* Third step: no active sequences. */
     oc_batch_step(engine, out, 16, &n_out);
     cr_assert_eq(n_out, 1);
     cr_assert_eq(out[0].token, 133);
-    /* generated=3 == max_new=3 → finished */
     cr_assert(out[0].finished);
 
     /* Third step: no active sequences. */

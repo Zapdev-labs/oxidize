@@ -1,16 +1,10 @@
-/*
- * node.c — mesh node identity and state.
- *
- * Represents a single node in the distributed inference mesh: identity,
- * advertised capabilities, and live connection / traffic accounting.
- */
+/* node.c — mesh node identity and state. */
 #include "oxidize/node.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 OcError oc_node_init(const OcNodeConfig *config, OcNode **out)
 {
@@ -56,7 +50,6 @@ void oc_node_free(OcNode *node)
     free(node);
 }
 
-/* ─── Connection management ────────────────────────────────────────── */
 
 static int32_t node_find_connection(const OcNode *node, uint64_t peer_id)
 {
@@ -100,7 +93,6 @@ OcError oc_node_disconnect(OcNode *node, uint64_t peer_id)
     return OC_OK;
 }
 
-/* ─── Queries ──────────────────────────────────────────────────────── */
 
 OcError oc_node_get_info(const OcNode *node, OcNodeInfo *out_info)
 {
@@ -127,7 +119,6 @@ bool oc_node_has_capability(const OcNode *node, uint32_t cap)
     return (node->info.config.capabilities & cap) != 0;
 }
 
-/* ─── Traffic accounting ───────────────────────────────────────────── */
 
 OcError oc_node_record_sent(OcNode *node, uint64_t bytes)
 {
@@ -143,7 +134,6 @@ OcError oc_node_record_received(OcNode *node, uint64_t bytes)
     return OC_OK;
 }
 
-/* ─── Capability names ──────────────────────────────────────────────── */
 
 const char *oc_node_capability_name(uint32_t cap)
 {

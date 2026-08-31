@@ -1,11 +1,4 @@
-/*
- * turboquant.h — Fast online quantization with calibration.
- *
- * Ports the block-wise INT4/INT8 quantization concept from
- * oxidize-core/src/compute/turboquant.rs. Uses configurable block sizes
- * (default 32) with per-block scale, optional importance weighting from
- * calibration data, and quality statistics (MSE, max error, avg error).
- */
+/* turboquant.h — Fast online quantization with calibration. */
 #ifndef OXIDIZE_TURBOQUANT_H
 #define OXIDIZE_TURBOQUANT_H
 
@@ -20,12 +13,10 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_TQ_DEFAULT_CALIBRATION_SAMPLES 128u
 #define OC_TQ_DEFAULT_BLOCK_SIZE          32u
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 /* Quality statistics collected across all quantize calls. */
 typedef struct OcTurboQuantStats {
@@ -54,7 +45,6 @@ typedef struct OcTurboQuant {
     OcTurboQuantStats   stats;
 } OcTurboQuant;
 
-/* ─── Public API ─────────────────────────────────────────────────────── */
 
 /* Produce a default config for the given target type. */
 OcTurboQuantConfig oc_turboquant_config_default(OcGgufQuantizationType target_type);
@@ -68,11 +58,7 @@ OcError oc_turboquant_init(OcTurboQuant *tq, OcTurboQuantConfig config);
  * OC_ERR_INVALID_ARG. */
 OcError oc_turboquant_calibrate(OcTurboQuant *tq, const float *data, size_t n);
 
-/* Quantize `input` (length `n` f32 values) into the output buffer.
- * `output` must be at least oc_quantized_size(config.target_type, n) bytes.
- * Writes the actual byte count to `*out_size`. Uses calibrated scale
- * adjustment when calibration data is available. Returns OC_OK,
- * OC_ERR_INVALID_ARG, or OC_ERR_QUANT. */
+/* Quantize `input` (length `n` f32) into `output`, which must be at least `oc_quantized_size(config.target_type, n)` bytes. Writes the byte count to `*out_size`. Uses calibrated scale adjustment when calibration data is available. Returns OC_OK, OC_ERR_INVALID_ARG, or OC_ERR_QUANT. */
 OcError oc_turboquant_quantize(OcTurboQuant *tq, const float *input,
                                size_t n, uint8_t *output, size_t *out_size);
 

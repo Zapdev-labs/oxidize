@@ -3,7 +3,6 @@
 #include "oxidize/advanced_features.h"
 #include <string.h>
 
-/* ─── Prompt Cache ────────────────────────────────────────────────── */
 
 Test(af, prompt_cache_init)
 {
@@ -86,7 +85,6 @@ Test(af, prompt_cache_free_null)
     oc_prompt_cache_free(NULL);
 }
 
-/* ─── Speculative Decoding Stats ──────────────────────────────────── */
 
 Test(af, spec_stats_init)
 {
@@ -139,7 +137,6 @@ Test(af, spec_mode_name)
     cr_assert_str_eq(oc_spec_mode_name(OC_SPEC_MODE_LOOKUP), "lookup");
 }
 
-/* ─── Multi-Model Serving ─────────────────────────────────────────── */
 
 Test(af, multi_model_init)
 {

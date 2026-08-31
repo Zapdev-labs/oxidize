@@ -1,15 +1,4 @@
-/*
- * openai.c — OpenAI-compatible HTTP route handlers.
- *
- * Implements GET /v1/models, POST /v1/completions, POST /v1/chat/completions
- * on top of the server-http-core. JSON parsing is minimal (substring search
- * for the fields we need) — robust for the OpenAI request shape, no JSON dep.
- *
- * Generation drives oc_llama_forward + oc_sample. Each request gets a fresh
- * OcLlamaSession (correct, not optimal — concurrent-request pooling is a
- * later feature). When no model is loaded, /v1/models returns a placeholder
- * and completions return 503.
- */
+/* openai.c — OpenAI-compatible HTTP route handlers. */
 #define _POSIX_C_SOURCE 200809L   /* strdup */
 #include "oxidize/openai.h"
 
@@ -44,10 +33,7 @@ static OcPromptPrefixCache g_prompt_prefix_cache = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
 };
 
-/* The model workspace and persistent compute pool are process-global. HTTP
- * workers must not enter inference concurrently: a second dispatch replaces
- * the first region's function and stack-backed job pointer while its compute
- * workers are still using them. */
+/* The model workspace and persistent compute pool are process-global. HTTP workers must not enter inference concurrently: a second dispatch replaces the first region's function and stack-backed job pointer while its compute workers are still using them. */
 static pthread_mutex_t g_generation_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define OC_OPENAI_MAX_PROMPT_BYTES (1024u * 1024u)
@@ -66,13 +52,6 @@ static OcChatTemplate chat_template_for_state(const OcOpenaiState *st)
     return oc_chat_detect_full(arch, st != NULL ? st->model_id : NULL, tmpl);
 }
 
-/* ─── Minimal JSON field extraction ──────────────────────────────────────
- *
- * Finds "key":"value" or "key":number in a JSON body. Returns a pointer to
- * the start of the value (NUL-terminated via a local copy) or NULL. For
- * strings, handles escaped quotes minimally (no \\uXXXX). For numbers,
- * returns a pointer to the digits.
- */
 
 static const char *find_json_string_field(const char *json, const char *key,
                                           char *out, size_t out_cap)
@@ -173,10 +152,7 @@ static double find_json_double_field(const char *json, const char *key, double d
     return strtod(p, NULL);
 }
 
-/* Extract the content of the LAST "assistant"/"user"/"system" message's
- * "content" field. For chat completions we render the full message array
- * as plain text (a real chat-template renderer is wired by the tokenizer
- * feature — for now we concatenate contents). */
+/* Extract the content of the LAST "assistant"/"user"/"system" message's "content" field. For chat completions we render the full message array as plain text (a real chat-template renderer is wired by the tokenizer feature — for now we concatenate contents). */
 static bool next_message_object(const char **cursor, const char **start,
                                 const char **end)
 {
@@ -296,7 +272,6 @@ static bool extract_messages_content(const char *json, OcChatTemplate template,
     return message_count > 0;
 }
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static char *json_escape(const char *src)
 {
@@ -470,7 +445,6 @@ char *oc_openai_error_json(const char *message, const char *type)
     return buf;
 }
 
-/* ─── Generation core ──────────────────────────────────────────────────── */
 
 /* Run generation for `prompt` and return a malloc'd completion string. */
 static bool restore_system_prefix(OcOpenaiState *st, OcLlamaSession *sess,
@@ -634,7 +608,6 @@ static char *generate_completion(OcOpenaiState *st, const char *prompt,
     return result;
 }
 
-/* ─── Route handlers ──────────────────────────────────────────────────── */
 
 static void handle_list_models(OcOpenaiState *st, int *out_status,
                                const char **out_body)
@@ -872,7 +845,6 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
     *out_body = buf;
 }
 
-/* ─── POST /v1/embeddings ────────────────────────────────────────────── */
 
 static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
                               int *out_status, const char **out_body)
@@ -967,7 +939,6 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
     *out_body = buf;
 }
 
-/* ─── POST /v1/responses ──────────────────────────────────────────────── */
 
 static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
                               int *out_status, const char **out_body)
@@ -1017,7 +988,6 @@ static void handle_responses(OcOpenaiState *st, const OcHttpRequest *req,
     *out_body = buf;
 }
 
-/* ─── Operational endpoints ─────────────────────────────────────────────── */
 
 /* A 200/503 probe reply. Bodies are always malloc'd — http.c frees them. */
 static void handle_probe(bool ready, int *out_status, const char **out_body)

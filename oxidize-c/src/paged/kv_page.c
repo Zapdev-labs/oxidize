@@ -1,14 +1,9 @@
-/*
- * kv_page.c — paged KV cache management implementation.
- *
- * See include/oxidize/kv_page.h for design notes.
- */
+/* kv_page.c — paged KV cache management implementation. */
 #include "oxidize/kv_page.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Config ───────────────────────────────────────────────────────────── */
 
 OcKvPageConfig oc_kv_page_config_default(void)
 {
@@ -31,7 +26,6 @@ size_t oc_kv_page_kv_bytes(const OcKvPageConfig *cfg)
            sizeof(float);
 }
 
-/* ─── Page Manager ─────────────────────────────────────────────────────── */
 
 /* Per-slot element count for layer_k / layer_v:
  *   n_layers * page_size * head_dim * n_heads

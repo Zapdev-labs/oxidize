@@ -1,17 +1,4 @@
-/* test_arch.c — tests for OcModelArchitecture detection + tensor name mapping.
- *
- * Covers:
- *   - VAL-FOUND-007: Llama arch tensor name mapping
- *   - VAL-FOUND-008: Qwen2 dense tensor name mapping (identical to Llama)
- *   - VAL-FOUND-009: Qwen2-MoE tensor name mapping (block_sparse_moe.experts.M.*)
- *   - VAL-FOUND-010: Qwen3-MoE shared+routed expert tensor mapping
- *   - VAL-FOUND-011: DeepSeek MLA tensor name mapping
- *   - VAL-FOUND-012: All 18 architecture strings detected (17 recognized +
- *     OC_ARCH_UNKNOWN = 18 enum values).
- *
- * Reference: Rust oxidize-core/src/format/gguf.rs::map_tensor_name +
- * oxidize-core/src/model/inference.rs::ModelArchitecture::from_gguf.
- */
+/* test_arch.c — tests for OcModelArchitecture detection + tensor name mapping. - VAL-FOUND-007: Llama arch tensor name mapping - VAL-FOUND-008: Qwen2 dense tensor name mapping (identical to Llama) */
 #include <criterion/criterion.h>
 #include "oxidize/arena.h"
 #include "oxidize/model.h"
@@ -147,7 +134,6 @@ Test(arch, all_19_arch_strings_detected)
 
 Test(arch, arch_name_round_trip)
 {
-    /* oc_model_arch_name should return a non-NULL string for every variant. */
     for (int i = 0; i < (int)OC_ARCH__COUNT; i++) {
         const char *name = oc_model_arch_name((OcModelArchitecture)i);
         cr_assert_not_null(name, "arch_name(%d) returned NULL", i);
@@ -247,14 +233,9 @@ Test(arch_mapping, qwen2_dense_identical_to_llama)
     check_map(OC_ARCH_QWEN, "model.layers.1.mlp.down_proj.weight",  "blk.1.ffn_down.weight");
 }
 
-/* ─── VAL-FOUND-009: Qwen2-MoE tensor mapping ──────────────────────────────
- *
- * Mirrors Rust test:
- *   qwen2moe_mapped[0].name == "blk.4.ffn_gate.2.weight"
- * where the input was "model.layers.4.block_sparse_moe.experts.2.w1.weight". */
+/* ─── VAL-FOUND-007: Llama arch tensor name mapping ──────────────────────── */
 Test(arch_mapping, qwen2moe_block_sparse_moe_experts)
 {
-    /* block_sparse_moe.experts.<M>.<w1|w2|w3>.weight → blk.<N>.ffn_<gate|down|up>.<M>.weight */
     check_map(OC_ARCH_QWEN, "model.layers.4.block_sparse_moe.experts.2.w1.weight",
               "blk.4.ffn_gate.2.weight");
     check_map(OC_ARCH_QWEN, "model.layers.4.block_sparse_moe.experts.2.w2.weight",
@@ -270,16 +251,11 @@ Test(arch_mapping, qwen2moe_block_sparse_moe_experts)
     check_map(OC_ARCH_MIXTRAL, "model.layers.2.block_sparse_moe.experts.3.w3.weight",
               "blk.2.ffn_up.3.weight");
 
-    /* block_sparse_moe.gate.weight → blk.<N>.ffn_gate_inp.weight */
     check_map(OC_ARCH_MIXTRAL, "model.layers.2.block_sparse_moe.gate.weight",
               "blk.2.ffn_gate_inp.weight");
 }
 
-/* ─── VAL-FOUND-010: Qwen3-MoE shared + routed experts ──────────────────────
- *
- * Qwen3-MoE uses both routed experts (mlp.experts.<M>.*) and a shared
- * expert (mlp.shared_expert.*). The shared expert uses the
- * `*_shexp` suffix per Rust `map_hf_decoder_name`. */
+/* ─── VAL-FOUND-012: All 18 architecture strings detected ───────────────── */
 Test(arch_mapping, qwen3moe_shared_and_routed_experts)
 {
     /* Routed experts via mlp.experts.<M>.<gate|up|down>_proj.weight. */
@@ -301,15 +277,7 @@ Test(arch_mapping, qwen3moe_shared_and_routed_experts)
               "blk.1.ffn_gate_inp_shexp.weight");
 }
 
-/* ─── VAL-FOUND-011: DeepSeek MLA tensor mapping ────────────────────────────
- *
- * Mirrors Rust test:
- *   mapped[1].name == "blk.1.attn_kv_a_mqa.weight"
- *   mapped[3].name == "blk.1.ffn_gate.42.weight"
- *   mapped[4].name == "blk.1.ffn_gate_shexp.weight"
- *   mapped[5].name == "blk.1.ffn_up_shexp.weight"
- *   mapped[6].name == "blk.1.ffn_gate_inp_shexp.weight"
- * for DeepSeek2 architecture. */
+/* ─── VAL-FOUND-012: All 18 architecture strings detected ───────────────── */
 Test(arch_mapping, deepseek_mla_attention_tensors)
 {
     /* MLA (Multi-head Latent Attention) compressed KV cache tensors. */
@@ -346,7 +314,6 @@ Test(arch_mapping, deepseek_moe_shared_expert)
               "blk.1.ffn_gate_inp_shexp.weight");
 }
 
-/* ─── Falcon / GPT2 / GPTJ / GPTNeoX mappings ─────────────────────────── */
 
 Test(arch_mapping, falcon_top_level_tensors)
 {

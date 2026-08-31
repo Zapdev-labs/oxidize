@@ -1,19 +1,4 @@
-/*
- * test_sampling.c — sampler tests.
- *
- * Asserts:
- *   - greedy = argmax (VAL-SAMP-001)
- *   - temperature=0 falls back to greedy (VAL-SAMP-002)
- *   - repeat-penalty reduces the probability of recent tokens (VAL-SAMP-003)
- *   - top-k restricts sampling to the K highest logits (VAL-SAMP-004)
- *   - top-p restricts to the nucleus (VAL-SAMP-005)
- *   - deterministic given seed (VAL-SAMP-006)
- *
- * Stochastic assertions are statistical: with a fixed seed the result is
- * reproducible; we verify the sampled token is within the allowed candidate
- * set rather than asserting an exact token (which would be brittle to RNG
- * ordering changes).
- */
+/* test_sampling.c — sampler tests. - greedy = argmax (VAL-SAMP-001) - temperature=0 falls back to greedy (VAL-SAMP-002) */
 #include <criterion/criterion.h>
 
 #include "oxidize/sampling.h"
@@ -139,7 +124,6 @@ Test(sampling, temperature_scales_logits_before_softmax)
 
 Test(sampling, out_of_range_recent_token_ignored)
 {
-    /* recent token id >= vocab_size must not crash. */
     float logits[] = {0.0f, 1.0f, 2.0f};
     uint32_t recent[] = {999};
     OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;
@@ -213,10 +197,6 @@ Test(sampling, typical_zero_uses_unfiltered_distribution)
 
 Test(sampling, mirostat_v2_clamps_mu_to_zero)
 {
-    /* If tau is very small (near-zero target surprise) and the sampled token
-     * has high surprise, mu should be driven down to 0 and clamped. Use a
-     * peaked distribution so the sampled token has low probability → high
-     * surprise. */
     float logits[] = {10.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;
     cfg.type = OC_SAMPLER_MIROSTAT_V2;

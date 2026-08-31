@@ -1,9 +1,4 @@
-/*
- * chat_template.h — Chat template rendering for various model formats.
- *
- * Supports rendering chat templates for ChatML, Llama-2, Llama-3,
- * Mistral, Alpaca, Vicuna, and custom formats.
- */
+/* chat_template.h — Chat template rendering for various model formats. */
 #ifndef OXIDIZE_CHAT_TEMPLATE_H
 #define OXIDIZE_CHAT_TEMPLATE_H
 
@@ -17,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_TPL_MAX_ROLES 4
 #define OC_TPL_MAX_MESSAGES 128
@@ -25,7 +19,6 @@ extern "C" {
 #define OC_TPL_MAX_CONTENT_LEN 8192
 #define OC_TPL_MAX_OUTPUT 65536
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef enum {
     OC_TPL_CHATML    = 0,
@@ -61,7 +54,6 @@ typedef struct {
     char system_tag[64];
 } OcChatTemplate;
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 /* Initialize a template with default tokens for the given type. */
 OcError oc_chat_tpl_init(OcChatTemplate *tpl, OcChatTemplateType type);

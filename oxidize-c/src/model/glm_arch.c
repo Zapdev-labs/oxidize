@@ -1,72 +1,4 @@
-/*
- * glm_arch.c — GLM (ChatGLM/Zhipu) and Hunyuan architecture forward passes.
- *
- * Implements:
- *   - GLM config parsing from GGUF metadata (oc_glm_config_parse)
- *   - Hunyuan config parsing from GGUF metadata (oc_hunyuan_config_parse)
- *   - GLM-4 / ChatGLM forward pass (oc_arch_forward_glm)
- *   - Hunyuan MoE forward pass with MLA support (oc_arch_forward_hunyuan)
- *
- * The forward passes reuse the OcLlamaSession workspace (x, normed, q, k, v,
- * attn_out, ffn_gate, ffn_up, dequant_temp, logits) and OcWeightView
- * weight tensors from OcLlamaModel. The session must be initialized via
- * oc_llama_session_init() before calling either forward function.
- *
- * Architectural notes:
- *
- *   GLM-4 layer (oc_arch_forward_glm):
- *     1. RMSNorm(x, attn_norm) → normed
- *     2. Q = attn_q(normed); K = attn_k(normed); V = attn_v(normed)
- *     3. (GLM-4 only) Q = RMSNorm(Q, q_norm); K = RMSNorm(K, k_norm)
- *     4. RoPE on Q (per head) and K (per kv head)
- *        - GPT-J interleaved for ChatGLM-6B (version 1)
- *        - NeoX split-halves for GLM-4 (version >= 4)
- *     5. KV cache write
- *     6. Attention per head → attn_out; o_proj → residual add
- *     7. RMSNorm(x, ffn_norm) → normed
- *     8. SwiGLU FFN: gate = silu(W_gate · normed); up = W_up · normed;
- *        intermediate = gate * up; out = W_down · intermediate; x += out
- *     9. Final RMSNorm + lm_head → logits
- *
- *   Hunyuan layer (oc_arch_forward_hunyuan):
- *     - Layers < moe_layer_start: dense SwiGLU FFN (like GLM-4)
- *     - Layers >= moe_layer_start: MoE routing + top-k experts + shared expert
- *     - Attention: standard GQA when uses_mla == false; MLA (latent
- *       compression with q_a → q_b, kv_a → k_b/v_b) when uses_mla == true
- *     - Shared expert: always active, weight 1.0, output added to the MoE
- *       sum before the residual
- *
- * MoE routing (Hunyuan):
- *   - router_logits = ffn_gate_inp(normed)  [length n_routed_experts]
- *   - softmax over router_logits
- *   - select top-k (n_active_experts) experts by softmax score
- *   - renormalize selected weights to sum to 1
- *   - for each selected expert: compute SwiGLU FFN, weight by score, sum
- *   - add shared expert output (weight 1.0)
- *
- * MLA attention (Hunyuan-Large, uses_mla == true):
- *   - c_q = q_a_proj(normed); c_q = RMSNorm(c_q, q_a_norm)
- *     q = q_b_proj(c_q)  [n_head * (q_nope_dim + q_rope_dim)]
- *   - c_kv = kv_a_proj(normed)  [kv_lora_dim + kv_pe_dim]
- *     split: c_kv_nope = c_kv[:kv_lora_dim]; kv_pe = c_kv[kv_lora_dim:]
- *     c_kv_nope = RMSNorm(c_kv_nope, kv_a_norm)
- *     k = k_b_proj(c_kv_nope)  [n_head * kv_nope_dim]
- *     v = v_b_proj(c_kv_nope)  [n_head * v_head_dim]
- *   - apply RoPE to q's rope portion and to kv_pe
- *   - concat k = [k_nope | kv_pe_broadcast] per head
- *   - KV cache stores the compressed c_kv (kv_lora_dim + kv_pe_dim per
- *     position) rather than full K/V — this is the "latent" compression.
- *     For the scalar reference we decompress per-position during attention.
- *   - attention: standard online softmax with the decompressed K/V
- *
- * The MLA path reuses the OcLlamaSession's mla_* scratch buffers (allocated
- * by oc_llama_session_init when cfg.uses_mla is true). For Hunyuan, the
- * session is initialized from an OcLlamaModel whose cfg.uses_mla flag has
- * been set by the caller (or by the config parser).
- *
- * Compilation:
- *   cc -std=c11 -Wall -Wextra -Werror -O2 -c src/model/glm_arch.c -I include
- */
+/* glm_arch.c — GLM (ChatGLM/Zhipu) and Hunyuan architecture forward passes. */
 #include "oxidize/glm_arch.h"
 
 #include <ctype.h>
@@ -87,11 +19,6 @@
 #include "oxidize/quant.h"
 #include "oxidize/tensor_ops.h"
 
-/* ─── Helpers ────────────────────────────────────────────────────────────
- *
- * These mirror the static helpers in arch_forward.c / llama.c. We keep
- * local copies to remain self-contained (the llama.c originals are static).
- */
 
 static uint32_t glm_cfg_u32(const OcGgufFile *f, const char *key, uint32_t def)
 {
@@ -126,7 +53,6 @@ static void glm_embed_token(OcLlamaSession *s, uint32_t token)
     }
 }
 
-/* matvec wrapper: pick f32 or quantized path based on qtype. */
 static void glm_matvec(const OcWeightView *w, const float *in, float *out,
                        float *temp)
 {
@@ -177,7 +103,6 @@ static void glm_attention_head(const OcLlamaSession *s, uint32_t head,
     for (size_t i = 0; i < hd; i++) out_vec[i] *= inv;
 }
 
-/* ─── Validation helpers ──────────────────────────────────────────────── */
 
 static OcError glm_validate_session(OcLlamaSession *sess)
 {
@@ -228,7 +153,6 @@ static OcError glm_final_norm_and_logits(OcLlamaSession *s, float *logits_out)
     return OC_OK;
 }
 
-/* ─── GLM version detection ───────────────────────────────────────────── */
 
 OcGlmVersion oc_glm_version_from_str(const char *s)
 {
@@ -264,7 +188,6 @@ OcGlmVersion oc_glm_version_from_str(const char *s)
     return OC_GLM_VERSION_UNKNOWN;
 }
 
-/* ─── Config defaults ─────────────────────────────────────────────────── */
 
 void oc_glm_config_defaults(OcGlmConfig *cfg)
 {
@@ -321,7 +244,6 @@ void oc_hunyuan_config_defaults(OcHunyuanConfig *cfg)
     cfg->tied_embeddings     = false;
 }
 
-/* ─── GLM config parsing ───────────────────────────────────────────────── */
 
 OcError oc_glm_config_parse(const OcGgufFile *f, const char *arch_str,
                              OcGlmConfig *cfg)
@@ -438,7 +360,6 @@ OcError oc_glm_config_parse(const OcGgufFile *f, const char *arch_str,
     return OC_OK;
 }
 
-/* ─── Hunyuan config parsing ──────────────────────────────────────────── */
 
 OcError oc_hunyuan_config_parse(const OcGgufFile *f, const char *arch_str,
                                  OcHunyuanConfig *cfg)
@@ -599,44 +520,14 @@ OcError oc_hunyuan_config_parse(const OcGgufFile *f, const char *arch_str,
     return OC_OK;
 }
 
-/* ─── GLM-4 / ChatGLM layer forward ──────────────────────────────────────
- *
- * GLM block (sequential, matching HF transformers GLMBlock):
- *   1. RMSNorm(x, attn_norm) → normed
- *   2. Q/K/V projections from normed
- *   3. (GLM-4) qk_norm: RMSNorm on Q and K (per-head or full vector)
- *   4. RoPE on Q (per head) and K (per kv head)
- *      - Interleaved (GPT-J) for ChatGLM-6B
- *      - Split-halves (NeoX) for GLM-4
- *   5. KV cache write
- *   6. Attention per head → attn_out; o_proj → residual
- *   7. RMSNorm(x, ffn_norm) → normed
- *   8. SwiGLU FFN: gate=silu(W_gate·normed); intermediate=gate*W_up·normed;
- *      out=W_down·intermediate; x += out
- *
- * The qk_norm weights (attn_q_norm, attn_k_norm) are stored as f32* arrays
- * in OcLlamaLayer (length n_embd or head_dim). When absent (apply_qk_norm
- * is false), the qk_norm step is skipped. We access them via the
- * mla_q_a_norm / mla_kv_a_norm fields which are repurposed here as generic
- * per-layer norm pointers — but since those are MLA-specific, we instead
- * store qk_norm weights directly in the layer's attn_norm/ffn_norm slots
- * is wrong. Instead, the loader (llama.c) populates the MLA norm slots for
- * GLM-4 qk_norm; here we check the config flag and use the mla_q_a_norm
- * slot as q_norm, mla_kv_a_norm as k_norm.
- */
 static void glm_apply_qk_norm(const OcLlamaSession *s, OcLlamaLayer *L,
                               float *q, float *k)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     size_t hd = c->head_dim;
 
-    /* q_norm: one weight vector per head (length head_dim) or a single
-     * shared vector (length n_embd). We use the mla_q_a_norm slot which
-     * the loader populates with the q_norm weight (length head_dim or
-     * n_embd). Apply per-head when length == head_dim, else globally. */
     if (L->mla_q_a_norm != NULL) {
         if (c->n_head * hd == c->n_embd) {
-            /* head_dim * n_head == n_embd: apply as a single n_embd pass. */
             oc_rms_norm_f32(q, L->mla_q_a_norm, q, c->n_embd, c->rms_norm_eps);
         } else {
             for (uint32_t h = 0; h < c->n_head; h++) {
@@ -666,25 +557,15 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
     size_t n_embd = c->n_embd;
     bool interleaved = false;
 
-    /* The GLM-specific config is not stored in OcLlamaConfig; we infer the
-     * RoPE layout from the model's architecture field. ChatGLM-6B
-     * (OC_ARCH_GLM_MOE_DSA with version 1) uses interleaved. Since the
-     * OcLlamaConfig doesn't carry glm_version, we check the model's arch
-     * field: for now, the standard NeoX layout is the safe default. The
-     * interleaved path is exercised when the model arch is GLM and the
-     * GGUF indicates ChatGLM-6B. */
+    /* The GLM-specific config is not stored in OcLlamaConfig; we infer the RoPE layout from the model's architecture field. */
     (void)interleaved;
 
-    /* 1. Pre-attention RMSNorm. */
     oc_rms_norm_f32(s->x, L->attn_norm, s->normed, n_embd, c->rms_norm_eps);
 
-    /* 2. Q/K/V projections. */
     glm_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
     glm_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
     glm_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
-    /* 3. qk_norm (GLM-4). The q_norm/k_norm weights are stored in the
-     *    mla_q_a_norm / mla_kv_a_norm slots by the loader. */
     if (c->uses_mla == false) {
         /* GLM-4 qk_norm uses these slots even though they're named mla_*.
          * The loader sets them when the GGUF has attn_q_norm / attn_k_norm
@@ -692,7 +573,6 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
         glm_apply_qk_norm(s, L, s->q, s->k);
     }
 
-    /* 4. RoPE on Q (per head) and K (per kv head). */
     for (uint32_t h = 0; h < c->n_head; h++) {
         oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, c->rope_dim,
                           s->pos, c->rope_theta);
@@ -702,13 +582,11 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
                           s->pos, c->rope_theta);
     }
 
-    /* 5. KV cache write. */
     size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos)
                   * s->kv_row_floats;
     memcpy(s->kv_k + kv_off, s->k, s->kv_row_floats * sizeof(float));
     memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
 
-    /* 6. Attention per head → attn_out. */
     for (uint32_t h = 0; h < c->n_head; h++) {
         glm_attention_head(s, h, layer, s->q + h * hd,
                            s->attn_out + h * hd);
@@ -718,10 +596,8 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
     glm_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
-    /* 7. Pre-FFN RMSNorm. */
     oc_rms_norm_f32(s->x, L->ffn_norm, s->normed, n_embd, c->rms_norm_eps);
 
-    /* 8. SwiGLU FFN. */
     glm_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
     glm_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
     oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
@@ -729,7 +605,6 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
 
-/* ─── GLM forward pass ─────────────────────────────────────────────────── */
 
 OcError oc_arch_forward_glm(OcLlamaSession *sess, uint32_t token,
                              float *logits_out)
@@ -739,15 +614,12 @@ OcError oc_arch_forward_glm(OcLlamaSession *sess, uint32_t token,
     e = glm_validate_layers(sess->model);
     if (e != OC_OK) return e;
 
-    /* 1. Token embedding lookup. */
     glm_embed_token(sess, token);
 
-    /* 2. Per-layer forward. */
     for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++) {
         glm_layer(sess, l);
     }
 
-    /* 3. Final RMSNorm + lm_head → logits. */
     e = glm_final_norm_and_logits(sess, logits_out);
     if (e != OC_OK) return e;
 
@@ -755,14 +627,6 @@ OcError oc_arch_forward_glm(OcLlamaSession *sess, uint32_t token,
     return OC_OK;
 }
 
-/* ─── Hunyuan MoE helpers ────────────────────────────────────────────────
- *
- * Top-k expert selection with softmax + renormalization. Mirrors the
- * Mixtral/DeepSeek-MoE routing pattern. Writes the selected expert indices
- * and renormalized weights into `sel_idx` / `sel_w`.
- *
- * The softmax is computed numerically stably (subtract max). The top-k
- * selection uses a simple O(k * n) scan (n is small, typically <= 256). */
 static void hunyuan_topk_experts(const float *router_logits,
                                   uint32_t n_experts, uint32_t k,
                                   uint32_t *sel_idx, float *sel_w)
@@ -836,10 +700,7 @@ static void hunyuan_expert_forward(OcLlamaSession *s, OcLlamaLayer *L,
     size_t per_row = (size_t)expert_i_size * (size_t)L->ffn_gate_exps.row_bytes;
     (void)per_row;
 
-    /* Build a WeightView for this expert's gate/up/down by slicing the
-     * stacked expert tensors. Expert i occupies rows
-     * [i * expert_i_size, (i+1) * expert_i_size) for gate/up, and
-     * [i * n_embd, (i+1) * n_embd) for down. */
+    /* Build a WeightView for this expert's gate/up/down by slicing the stacked expert tensors. */
     OcWeightView gate, up, down;
     size_t gate_row_bytes = L->ffn_gate_exps.row_bytes;
     gate.data = L->ffn_gate_exps.data
@@ -889,7 +750,6 @@ static void hunyuan_shared_expert_forward(OcLlamaSession *s, OcLlamaLayer *L,
     glm_matvec(&down, s->shexp_gate, shexp_out, s->dequant_temp);
 }
 
-/* ─── Hunyuan dense layer (pre-MoE layers) ─────────────────────────────── */
 
 static void hunyuan_dense_layer(OcLlamaSession *s, uint32_t layer)
 {
@@ -898,7 +758,6 @@ static void hunyuan_dense_layer(OcLlamaSession *s, uint32_t layer)
     glm_layer(s, layer);
 }
 
-/* ─── Hunyuan MoE layer forward ────────────────────────────────────────── */
 
 static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
 {
@@ -911,7 +770,6 @@ static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
     uint32_t exp_i_size = c->expert_intermediate_size;
     if (exp_i_size == 0) exp_i_size = c->n_ff;
 
-    /* 1. Pre-attention RMSNorm + attention (same as GLM-4 dense). */
     oc_rms_norm_f32(s->x, L->attn_norm, s->normed, n_embd, c->rms_norm_eps);
 
     glm_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
@@ -940,10 +798,8 @@ static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
     glm_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
-    /* 2. Pre-FFN RMSNorm. */
     oc_rms_norm_f32(s->x, L->ffn_norm, s->normed, n_embd, c->rms_norm_eps);
 
-    /* 3. MoE routing. */
     /* Zero the accumulator. */
     memset(s->expert_out, 0, n_embd * sizeof(float));
 
@@ -969,7 +825,6 @@ static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
         }
     }
 
-    /* 4. Shared expert (weight 1.0). */
     if (L->ffn_gate_shexp.data != NULL) {
         uint32_t shexp_size = c->expert_intermediate_size;
         if (shexp_size == 0) shexp_size = c->n_ff;
@@ -980,20 +835,9 @@ static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
         }
     }
 
-    /* 5. Residual add. */
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->expert_out[i];
 }
 
-/* ─── Hunyuan MLA attention ──────────────────────────────────────────────
- *
- * When uses_mla is true, the attention path uses DeepSeek-V2/V3 style
- * latent compression. The MLA weights are stored in OcLlamaLayer's
- * mla_* fields. The compressed KV cache is stored in the session's
- * mla_c_kv buffer (length kv_lora + kv_pe per position).
- *
- * For the scalar reference, we decompress per-position during the attention
- * loop (no fused kernel). This is correct but not optimized.
- */
 static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
 {
     const OcLlamaConfig *c = &s->model->cfg;
@@ -1001,16 +845,13 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
     size_t n_embd = c->n_embd;
     size_t hd = c->head_dim;
 
-    /* 1. q_a_proj → c_q; RMSNorm(c_q, q_a_norm). */
     glm_matvec(&L->mla_q_a, s->normed, s->mla_c_q, s->dequant_temp);
     if (L->mla_q_a_norm != NULL) {
         oc_rms_norm_f32(s->mla_c_q, L->mla_q_a_norm, s->mla_c_q,
                         c->mla_q_lora_dim, c->rms_norm_eps);
     }
-    /* q_b_proj → q_full [n_head * (q_nope_dim + q_rope_dim)]. */
     glm_matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
 
-    /* 2. kv_a_proj → c_kv [kv_lora_dim + kv_pe_dim]. */
     glm_matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed,
                s->dequant_temp);
     size_t kv_lora = c->mla_kv_lora_dim;
@@ -1021,11 +862,7 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
                         s->mla_kv_compressed, kv_lora, c->rms_norm_eps);
     }
 
-    /* Store compressed KV in the MLA cache slot (reusing mla_c_kv as a
-     * per-position store). For the scalar reference, we decompress on the
-     * fly during attention. The compressed representation is
-     * [kv_lora + kv_pe] floats per position. We store it at the layer's
-     * KV cache offset (reusing the kv_k buffer as a flat store). */
+    /* Store compressed KV in the MLA cache slot (reusing mla_c_kv as a per-position store). */
     size_t mla_row_floats = kv_lora + kv_pe_dim;
     size_t kv_off = ((size_t)layer * c->n_ctx + (size_t)s->pos)
                   * mla_row_floats;
@@ -1034,14 +871,9 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
     memcpy(s->kv_k + kv_off, s->mla_kv_compressed,
            mla_row_floats * sizeof(float));
 
-    /* 3. k_b_proj → k_nope [n_head * kv_nope_dim];
-     *    v_b_proj → v [n_head * v_head_dim]. */
     glm_matvec(&L->mla_k_b, s->mla_kv_compressed, s->k, s->dequant_temp);
     glm_matvec(&L->mla_v_b, s->mla_kv_compressed, s->v, s->dequant_temp);
 
-    /* 4. Apply RoPE to q's rope portion and to kv_pe.
-     *    q layout: [n_head * (q_nope_dim + q_rope_dim)].
-     *    The rope portion is the last q_rope_dim of each head. */
     size_t q_nope = c->mla_kv_nope_head_dim;  /* q nope per head */
     size_t q_rope = c->mla_q_rope_dim;
     for (uint32_t h = 0; h < c->n_head; h++) {
@@ -1049,13 +881,9 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
         oc_apply_rope_f32(q_h + q_nope, q_h + q_nope, q_rope, q_rope,
                           s->pos, c->rope_theta);
     }
-    /* kv_pe is the tail of the compressed c_kv. */
     float *kv_pe = s->mla_kv_compressed + kv_lora;
     oc_apply_rope_f32(kv_pe, kv_pe, q_rope, q_rope, s->pos, c->rope_theta);
 
-    /* 5. Attention: per head, build full k = [k_nope | kv_pe] and attend.
-     *    For the scalar reference, we decompress per position from the
-     *    compressed cache. */
     float scale = 1.0f / sqrtf((float)(q_nope + q_rope));
     int64_t seq_len = s->pos + 1;
 
@@ -1075,11 +903,6 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
             const float *c_kv_nope_t = c_kv_t;          /* [kv_lora_dim] */
             const float *kv_pe_t = c_kv_t + kv_lora;    /* [kv_pe_dim] */
 
-            /* k_b_proj on c_kv_nope gives [n_head * kv_nope_dim].
-             * We only need the h-th head's slice. For the scalar reference,
-             * we compute the full projection into a temp buffer and extract
-             * the head's portion. This is O(n_head * kv_nope * kv_lora) per
-             * position, which is expensive but correct. */
             float *k_nope_full = s->dequant_temp;  /* [n_head * kv_nope] */
             /* Reuse mla_k_b weight view to project c_kv_nope → k_nope. */
             /* For the current position (t == s->pos), we already computed
@@ -1133,7 +956,6 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
     (void)n_embd;
 }
 
-/* ─── Hunyuan forward pass ─────────────────────────────────────────────── */
 
 OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
                                  float *logits_out)
@@ -1143,10 +965,8 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
     e = glm_validate_layers(sess->model);
     if (e != OC_OK) return e;
 
-    /* 1. Token embedding lookup. */
     glm_embed_token(sess, token);
 
-    /* 2. Per-layer forward. */
     const OcLlamaConfig *c = &sess->model->cfg;
     for (uint32_t l = 0; l < c->n_layer; l++) {
         if (c->uses_mla) {
@@ -1210,7 +1030,6 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
         }
     }
 
-    /* 3. Final RMSNorm + lm_head → logits. */
     e = glm_final_norm_and_logits(sess, logits_out);
     if (e != OC_OK) return e;
 
@@ -1218,7 +1037,6 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
     return OC_OK;
 }
 
-/* ─── Test stubs (compile-time sanity checks) ─────────────────────────── */
 #ifdef OC_GLM_ARCH_TEST_STUBS
 #include <stdio.h>
 

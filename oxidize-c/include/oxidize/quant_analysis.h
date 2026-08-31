@@ -1,13 +1,4 @@
-/*
- * quant_analysis.h — Quantization quality analysis and comparison.
- *
- * Provides tools to measure the quality impact of different quantization
- * types on model weights. Computes MSE, max error, cosine similarity,
- * and perplexity delta between quantized and original weights.
- *
- * Also provides a quantization type recommender that selects the best
- * quant type based on available memory and quality requirements.
- */
+/* quant_analysis.h — Quantization quality analysis and comparison. */
 #ifndef OXIDIZE_QUANT_ANALYSIS_H
 #define OXIDIZE_QUANT_ANALYSIS_H
 
@@ -22,7 +13,6 @@
 extern "C" {
 #endif
 
-/* ─── Quality metrics ──────────────────────────────────────────────────── */
 
 typedef struct OcQuantMetrics {
     double mse;             /* mean squared error (f32 vs dequantized)     */
@@ -38,12 +28,7 @@ typedef struct OcQuantMetrics {
     double compression_ratio; /* original / quantized                        */
 } OcQuantMetrics;
 
-/* Compute quality metrics by comparing f32 weights to dequantized weights.
- * f32_data: [n] original float weights
- * quant_data: packed quantized weights
- * qtype: quantization type
- * n: number of elements
- * Returns metrics. */
+/* Compare f32 weights to dequantized `quant_data`, which must be packed for `qtype` (size from oc_quantized_size(qtype, n)). Returns OC_ERR_INVALID_ARG on NULL args or n==0. */
 OcError oc_quant_analyze(const float *f32_data, const uint8_t *quant_data,
                           OcGgufQuantizationType qtype, size_t n,
                           OcQuantMetrics *out);
@@ -54,7 +39,6 @@ size_t oc_quant_metrics_format(const OcQuantMetrics *m, char *buf, size_t cap);
 /* Format as human-readable table. */
 size_t oc_quant_metrics_table(const OcQuantMetrics *m, char *buf, size_t cap);
 
-/* ─── Per-element analysis ─────────────────────────────────────────────── */
 
 typedef struct OcQuantErrorDist {
     double p50_error;    /* median absolute error                         */
@@ -73,7 +57,6 @@ OcError oc_quant_error_distribution(const float *f32_data,
                                      OcGgufQuantizationType qtype,
                                      size_t n, OcQuantErrorDist *out);
 
-/* ─── Layer-wise analysis ──────────────────────────────────────────────── */
 
 typedef struct OcLayerQuantReport {
     char     layer_name[128];
@@ -95,7 +78,6 @@ typedef struct OcModelQuantReport {
     double overall_compression;
 } OcModelQuantReport;
 
-/* ─── Quantization recommender ─────────────────────────────────────────── */
 
 typedef enum {
     OC_QUANT_GOAL_SPEED     = 0, /* prioritize inference speed              */
@@ -122,7 +104,6 @@ OcError oc_quant_recommend(uint64_t model_params, uint64_t available_ram,
 size_t oc_quant_recommend_format(const OcQuantRecommendation *r,
                                   char *buf, size_t cap);
 
-/* ─── Comparison table ────────────────────────────────────────────────── */
 
 /* Generate a comparison table of all quant types for a given model size. */
 size_t oc_quant_comparison_table(uint64_t model_params, char *buf, size_t cap);

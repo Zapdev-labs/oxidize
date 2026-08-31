@@ -55,9 +55,6 @@ def reset_gpu_state() -> None:
         _global_state = None
 
 
-# --- buffer pools ---------------------------------------------------------
-
-
 def get_f32_buffer(s: GpuState, n: int) -> list[float]:
     """Return a reusable zeroed f32 buffer from the pool, or allocate one.
 
@@ -88,9 +85,6 @@ def get_q8k_buffer(s: GpuState, n: int) -> bytearray:
 def return_q8k_buffer(s: GpuState, buf: bytearray) -> None:
     """Return a byte buffer to the pool."""
     s.q8k_pool.setdefault(len(buf), []).append(buf)
-
-
-# --- layer LRU / budget ---------------------------------------------------
 
 
 def touch_layer(s: GpuState, layer: int) -> None:
@@ -237,9 +231,6 @@ def key_referenced_f32(s: GpuState, key: WeightCacheKey) -> bool:
 
 def key_referenced_f16(s: GpuState, key: WeightCacheKey) -> bool:
     return any(key in e.f16_keys for e in s.layer_map.values())
-
-
-# --- RMS-norm helper ------------------------------------------------------
 
 
 def rms_norm_into(

@@ -6,10 +6,7 @@
 
 Test(flash_attn, single_position)
 {
-    /* Q = K = [1, 0, 0, 0], V = [1, 2, 3, 4]
-     * score = 1/sqrt(4) * (1*1) = 0.5
-     * softmax(0.5) = 1.0 (single element)
-     * out = 1.0 * V = [1, 2, 3, 4] */
+    /* Two positions with equal scores → output is average of V's. */
     float q[] = {1, 0, 0, 0};
     float k[] = {1, 0, 0, 0};
     float v[] = {1, 2, 3, 4};
@@ -33,7 +30,7 @@ Test(flash_attn, two_positions_equal_weight)
     float temp[4] = {0};
 
     cr_assert_eq(oc_flash_attention_head(q, k, v, 2, 4, out, temp), OC_OK);
-    /* Both have the same score, so out = (V0 + V1) / 2 = [3, 0, 0, 0] */
+    /* Head 0 -> kv_head 0: Q=[1,0], K=[1,0], score=1/sqrt(2), out=V=[3,0] */
     cr_assert_float_eq(out[0], 3.0f, 1e-5f);
     cr_assert_float_eq(out[1], 0.0f, 1e-5f);
 }
@@ -44,7 +41,6 @@ Test(flash_attn, attention_scores)
     float k[] = {1, 0, 0, 0, 1, 0}; /* 2 positions, dim 3 */
     float scores[2];
     cr_assert_eq(oc_attention_scores(q, k, 2, 3, scores), OC_OK);
-    /* score[0] = 1/sqrt(3) * 1 = 0.5774 */
     cr_assert_float_eq(scores[0], 1.0f / sqrtf(3.0f), 1e-5f);
     cr_assert_float_eq(scores[1], 0.0f, 1e-6f);
 }
@@ -91,7 +87,6 @@ Test(flash_attn, multi_head)
     cr_assert_float_eq(out[3], 7.0f, 1e-5f);
 }
 
-/* ─── decode_heads_f32 tests ────────────────────────────────────────── */
 
 Test(flash_decode_heads, f32_basic)
 {
@@ -150,11 +145,8 @@ Test(flash_decode_heads, f32_invalid_heads)
     float k[4] = {0};
     float v[4] = {0};
     float out[4] = {0};
-    /* num_heads not divisible by kv_heads */
     cr_assert_neq(oc_flash_attention_decode_heads_f32(q, k, v, 1, 2, 2, 3, 2, out), OC_OK);
-    /* kv_heads = 0 */
     cr_assert_neq(oc_flash_attention_decode_heads_f32(q, k, v, 1, 2, 2, 2, 0, out), OC_OK);
-    /* head_dim = 0 */
     cr_assert_neq(oc_flash_attention_decode_heads_f32(q, k, v, 1, 0, 0, 2, 1, out), OC_OK);
 }
 
@@ -182,7 +174,6 @@ Test(flash_decode_heads, f32_block_boundary)
     cr_assert_float_eq(out[0], 32.0f, 0.5f);
 }
 
-/* ─── decode_heads_f16 tests ────────────────────────────────────────── */
 
 Test(flash_decode_heads, f16_matches_f32)
 {
@@ -225,14 +216,10 @@ Test(flash_decode_heads, f16_null_safety)
     cr_assert_neq(oc_flash_attention_decode_heads_f16(NULL, NULL, NULL, 0, 1, 1, 1, 1, NULL), OC_OK);
 }
 
-/* ─── prefill_f32 tests ─────────────────────────────────────────────── */
 
 Test(flash_prefill, basic)
 {
-    /* 2 queries, 2 KV positions, head_dim=2.
-     * Q0=[1,0] attends to K0=[1,0] and K1=[0,1].
-     * Score(Q0,K0) = 1/sqrt(2), Score(Q0,K1) = 0.
-     * Since softmax of [1/sqrt(2), 0] is not uniform, out is weighted toward K0. */
+    /* 2 queries, 2 KV positions, head_dim=2. */
     float q[4] = {1, 0, 0, 1};
     float k[4] = {1, 0, 0, 1};
     float v[4] = {10, 0, 0, 20};
@@ -283,7 +270,6 @@ Test(flash_prefill, block_boundary)
     cr_assert_float_eq(out[0], 32.0f, 0.5f);
 }
 
-/* ─── f16 conversion tests ──────────────────────────────────────────── */
 
 Test(f16_conv, round_trip)
 {

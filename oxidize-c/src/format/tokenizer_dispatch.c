@@ -1,19 +1,4 @@
-/* tokenizer_dispatch.c — dispatch tokenizer loading by `tokenizer.ggml.model`.
- *
- * Port of oxidize-core/src/format/tokenizer.rs::load_tokenizer_from_gguf_metadata.
- *
- *   "gpt2" | "lfm2" | "lfm2moe"  → BPE (byte-level, tiktoken-style)
- *   "llama" | "gemma" | "gemma4" → SentencePiece (unigram, Viterbi)
- *   "bert"                       → WordPiece (## continuation)
- *   "tiktoken"                   → Tiktoken (raw byte-level)
- *   <other>                      → OC_ERR_TOKENIZER
- *
- * After loading the kind-specific implementation, special-token ids are
- * copied into the `OcTokenizer` wrapper and the optional
- * `tokenizer.ggml.add_bos_token` bool is read (defaults to false when
- * absent; SentencePiece models default to adding BOS per Rust
- * `add_bos_default()`).
- */
+/* tokenizer_dispatch.c — dispatch tokenizer loading by `tokenizer.ggml.model`. */
 
 #include "oxidize/tokenizer.h"
 
@@ -28,10 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Case-sensitive string equals. The GGUF metadata values for
- * `tokenizer.ggml.model` are lowercase ASCII strings emitted by
- * convert.py / llama.cpp, so case-sensitive comparison matches Rust's
- * `match model.as_str()` exactly. */
+/* Case-sensitive string equals. */
 static bool str_eq(const char *a, const char *b)
 {
     return a && b && strcmp(a, b) == 0;
@@ -165,7 +147,6 @@ OcError oc_tokenizer_load_from_gguf(const OcGgufFile *gguf, OcTokenizer *out)
 /* oc_tokenizer_free() is implemented in tokenizer_bpe.c (it needs access to
  * the per-kind free functions). */
 
-/* ─── Streaming detokenizer ────────────────────────────────────────────── */
 
 void oc_streaming_detok_init(OcStreamingDetokenizer *sd,
                              const OcTokenizer *tok)
@@ -332,7 +313,6 @@ void oc_streaming_detok_free(OcStreamingDetokenizer *sd)
     memset(sd, 0, sizeof(*sd));
 }
 
-/* ─── Token healing ────────────────────────────────────────────────────── */
 
 OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
                                  const uint32_t *ids, size_t n_ids,
@@ -345,11 +325,7 @@ OcError oc_tokenizer_heal_tokens(const OcTokenizer *tok,
 
     if (n_ids < 2) return OC_OK;
 
-    /* Re-encode each maximal non-special span (special ids pass through
-     * unchanged), mirroring the Rust implementation. This reaches the
-     * canonical tokenization even for long fragmented suffixes (e.g. five
-     * one-byte fragments of "hello"), which a fixed 2/3-token window
-     * cannot. Spans that fail to decode/encode are kept verbatim. */
+    /* Re-encode each maximal non-special span (special ids pass through unchanged), mirroring the Rust implementation. This reaches the canonical tokenization even for long fragmented suffixes (e.g. five one-byte fragments of "hello"), which a fixed 2/3-token window cannot. Spans that fail to decode/encode are kept verbatim. */
     size_t cap = n_ids + 8;
     uint32_t *result = malloc(cap * sizeof(uint32_t));
     if (!result) return OC_ERR_OOM;

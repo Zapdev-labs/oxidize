@@ -1,9 +1,4 @@
-/*
- * fingerprint.h — Model file fingerprinting.
- *
- * Reads GGUF metadata to create a fingerprint for autotune.
- * Port from oxidize-core/src/autotune/fingerprint.rs.
- */
+/* fingerprint.h — Model file fingerprinting. */
 #ifndef OXIDIZE_FINGERPRINT_H
 #define OXIDIZE_FINGERPRINT_H
 

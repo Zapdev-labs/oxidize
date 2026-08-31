@@ -1,11 +1,4 @@
-/*
- * batch_engine.h — Continuous-batching decode engine.
- *
- * Port of oxidize-core/src/model/inference/batch_engine.rs.
- * Manages per-sequence KV state, admits new requests up to a batch cap,
- * prefills each one, then issues a single batched decode per step.
- * The engine is model-agnostic: it manages bookkeeping only.
- */
+/* batch_engine.h — Continuous-batching decode engine. */
 #ifndef OXIDIZE_BATCH_ENGINE_H
 #define OXIDIZE_BATCH_ENGINE_H
 
@@ -82,10 +75,7 @@ bool oc_batch_cancel(OcBatchEngine *engine, OcSeqId id);
  * calls the callback to produce real tokens instead of simulating. */
 OcError oc_batch_set_forward(OcBatchEngine *engine, OcBatchForward forward);
 
-/* Execute one decode step. Outputs up to max_out results in out.
- * Returns OC_OK on success. *n_out is set to the number of outputs produced.
- * If a forward callback is set, uses it for real token generation;
- * otherwise falls back to simulated incrementing tokens. */
+/* Execute one decode step. Outputs up to max_out results in out. Returns OC_OK on success. *n_out is set to the number of outputs produced. If a forward callback is set, uses it for real token generation; otherwise falls back to simulated incrementing tokens. */
 OcError oc_batch_step(OcBatchEngine *engine,
                       OcBatchStepOutput *out, size_t max_out, size_t *n_out);
 

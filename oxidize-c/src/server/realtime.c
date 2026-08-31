@@ -1,17 +1,4 @@
-/*
- * realtime.c — OpenAI Realtime API over WebSocket implementation.
- *
- * Drives a bidirectional WebSocket session: parses incoming JSON commands
- * (input_text_delta, session.update, audio buffer append/commit,
- * response.cancel), forwards text input through the loaded model, and
- * emits typed events (speech.started, response.text.delta,
- * speech.stopped, error) as JSON over the WebSocket.
- *
- * The text streaming path mirrors the generation loop in openai.c:
- * tokenize → forward prompt → sample + decode token-by-token → emit
- * text_delta events. When no model is loaded, the session responds with
- * an error event (matching the OpenAI Realtime error shape).
- */
+/* realtime.c — OpenAI Realtime API over WebSocket implementation. */
 #define _GNU_SOURCE 1   /* memmem, strdup */
 #include "oxidize/realtime.h"
 
@@ -20,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── JSON field extraction (minimal, tailored to Realtime message shape) ──── */
 
 static const char *find_field_value(const char *json, size_t len,
                                     const char *key)
@@ -90,7 +76,6 @@ static bool extract_json_uint(const char *json, size_t len,
     return true;
 }
 
-/* ─── Message type parsing ─────────────────────────────────────────────────── */
 
 OcRealtimeMessageType oc_realtime_parse_type(const char *json, size_t len)
 {
@@ -117,7 +102,6 @@ OcRealtimeMessageType oc_realtime_parse_type(const char *json, size_t len)
     return OC_RT_MSG_UNKNOWN;
 }
 
-/* ─── Event formatting ─────────────────────────────────────────────────────── */
 
 size_t oc_realtime_format_event(OcRealtimeEvent ev, const char *data,
                                 char *buf, size_t cap)
@@ -139,7 +123,6 @@ size_t oc_realtime_format_event(OcRealtimeEvent ev, const char *data,
     return (size_t)n;
 }
 
-/* ─── Session lifecycle ────────────────────────────────────────────────────── */
 
 OcError oc_realtime_session_init(OcRealtimeSession *sess,
                                  OcWsSession *ws,
@@ -184,7 +167,6 @@ void oc_realtime_session_free(OcRealtimeSession *sess)
     }
 }
 
-/* ─── Event sending ────────────────────────────────────────────────────────── */
 
 OcError oc_realtime_send_event(OcRealtimeSession *sess,
                                OcRealtimeEvent ev, const char *data)
@@ -230,7 +212,6 @@ OcError oc_realtime_send_event(OcRealtimeSession *sess,
     return oc_ws_send_text(sess->ws, buf);
 }
 
-/* ─── Text generation (mirrors openai.c loop) ──────────────────────────────── */
 
 static OcError generate_text_response(OcRealtimeSession *sess,
                                       const char *prompt_text)
@@ -309,7 +290,6 @@ static OcError generate_text_response(OcRealtimeSession *sess,
     return OC_OK;
 }
 
-/* ─── Message dispatch ─────────────────────────────────────────────────────── */
 
 OcError oc_realtime_process_message(OcRealtimeSession *sess,
                                     const char *json, size_t len)
@@ -371,7 +351,6 @@ OcError oc_realtime_process_message(OcRealtimeSession *sess,
     }
 }
 
-/* ─── Main session loop ────────────────────────────────────────────────────── */
 
 OcError oc_realtime_handle_session(OcRealtimeSession *sess)
 {

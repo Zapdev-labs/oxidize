@@ -62,9 +62,7 @@ float max_total_cmp(const std::vector<float>& v) {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // GrammarConstraint
-// ---------------------------------------------------------------------------
 
 GrammarConstraint::GrammarConstraint(std::string start, Productions productions)
     : start_(std::move(start)), productions_(std::move(productions)) {
@@ -181,18 +179,14 @@ bool GrammarConstraint::accepts_prefix(
   return false;
 }
 
-// ---------------------------------------------------------------------------
 // greedy
-// ---------------------------------------------------------------------------
 
 Token greedy(const Logits& logits) {
   if (logits.empty()) throw std::runtime_error("EmptyLogits");
   return static_cast<Token>(argmax_total_cmp(logits));
 }
 
-// ---------------------------------------------------------------------------
 // Helper filters (operate on sorted-descending indexed_probs)
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -431,9 +425,7 @@ std::optional<Token> sample_unfiltered(const std::vector<float>& logits,
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
 // sample family
-// ---------------------------------------------------------------------------
 
 Token sample(const Logits& logits, const SamplerConfig& config, float random) {
   return sample_with_repetition(logits, config, random, {},
@@ -653,9 +645,7 @@ Token sample_with_repetition_and_grammar(
   return greedy(logits);
 }
 
-// ---------------------------------------------------------------------------
 // mirostat
-// ---------------------------------------------------------------------------
 
 std::pair<Token, float> sample_mirostat(const Logits& logits, float temperature,
                                         const MirostatConfig& config,
@@ -688,9 +678,7 @@ std::pair<Token, float> sample_mirostat(const Logits& logits, float temperature,
   return {static_cast<Token>(chosen->first), updated_mu};
 }
 
-// ---------------------------------------------------------------------------
 // speculative_decode
-// ---------------------------------------------------------------------------
 
 SpeculativeDecodeResult speculative_decode(
     const std::vector<uint32_t>& draft_tokens,
@@ -756,9 +744,7 @@ SpeculativeDecodeResult speculative_decode(
   return {emitted, draft_tokens.size(), false};
 }
 
-// ---------------------------------------------------------------------------
 // beam_search
-// ---------------------------------------------------------------------------
 
 BeamSearchResult beam_search(const std::vector<Logits>& logits_per_step,
                              size_t beam_width,
@@ -829,9 +815,7 @@ BeamSearchResult beam_search(const std::vector<Logits>& logits_per_step,
   return {beams[best].tokens, beams[best].score};
 }
 
-// ---------------------------------------------------------------------------
 // Rng: SplitMix64-seeded xoshiro256** -> f32 in [0,1)
-// ---------------------------------------------------------------------------
 
 namespace {
 inline uint64_t rotl(uint64_t x, int k) { return (x << k) | (x >> (64 - k)); }

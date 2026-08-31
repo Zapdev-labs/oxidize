@@ -1,20 +1,4 @@
-/* test_tokenizer_sp.c — Criterion tests for the SentencePiece unigram
- * tokenizer (Viterbi best-path segmentation).
- *
- * Covers:
- *   VAL-TOK-006 — SentencePiece unigram round-trip (Llama fixture)
- *   VAL-TOK-007 — BOS token handling (prepend BOS via OC_TOK_ADD_BOS)
- *   VAL-TOK-010 — Dispatch by tokenizer.ggml.model key (llama/gemma/gemma4)
- *   VAL-TOK-011 — Parity vs Rust LoadedTokenizer (toy SP parity with
- *                 Rust `SentencePieceUnigramTokenizer` unit tests).
- *
- * Parity reference: oxidize-core/src/format/tokenizer.rs `#[cfg(test)]`:
- *   - `sentencepiece_prefers_higher_probability_path`
- *   - `sentencepiece_uses_unknown_for_unmatched_text`
- *   - `sentencepiece_round_trips_known_pieces`
- *   - `loads_sentencepiece_tokenizer_from_gguf_metadata`
- *   - `loads_gemma4_sentencepiece_tokenizer_from_gguf_metadata`
- */
+/* test_tokenizer_sp.c — Criterion tests for the SentencePiece unigram VAL-TOK-006 — SentencePiece unigram round-trip (Llama fixture) VAL-TOK-007 — BOS token handling (prepend BOS via OC_TOK_ADD_BOS) */
 
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 
@@ -31,7 +15,6 @@
 #include <string.h>
 #include <unistd.h>   /* mkstemp, unlink */
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static void assert_ids_eq(const uint32_t *actual, size_t actual_count,
                           const uint32_t *expected, size_t expected_count)
@@ -46,19 +29,10 @@ static void assert_ids_eq(const uint32_t *actual, size_t actual_count,
     }
 }
 
-/* ─── Viterbi best-path segmentation ─────────────────────────────────────
- * Mirrors Rust `sentencepiece_prefers_higher_probability_path`. */
 
 Test(tokenizer_sp, prefers_higher_probability_path)
 {
-    /* Rust:
-     *   SentencePieceUnigramTokenizer::new(&[
-     *       ("a", -3.0), ("b", -3.0), ("ab", -0.5), ("aba", -0.1),
-     *   ])
-     *   encode("aba") -> len 1, decode -> "aba"
-     *
-     * The "aba" piece has the highest score (-0.1), so the best-path
-     * search should pick it as a single token. */
+    /* Rust: */
     OcArena *arena = oc_arena_new(0);
     cr_assert_not_null(arena);
 
@@ -94,13 +68,7 @@ Test(tokenizer_sp, prefers_higher_probability_path)
 
 Test(tokenizer_sp, unknown_for_unmatched_text)
 {
-    /* Rust:
-     *   SentencePieceUnigramTokenizer::new(&[("a", -0.5), ("b", -0.5)])
-     *       .with_unknown_token("<unk>")
-     *   encode("abz") -> decode -> "ab<unk>"
-     *
-     * 'z' is not in the vocab, so the best-path search fails to segment
-     * the suffix "z" and emits the <unk> token. */
+    /* Rust: */
     OcArena *arena = oc_arena_new(0);
     OcSpPiece pieces[] = {
         { "a", -0.5f },
@@ -134,16 +102,7 @@ Test(tokenizer_sp, unknown_for_unmatched_text)
 
 Test(tokenizer_sp, round_trip_known_pieces)
 {
-    /* Rust:
-     *   SentencePieceUnigramTokenizer::new(&[
-     *       ("hello", -0.2), (" ", -0.1), ("world", -0.2),
-     *       ("hell", -1.5), ("o", -1.0),
-     *   ])
-     *   encode("hello world") -> decode -> "hello world"
-     *
-     * The best-path picks "hello" + " " + "world" (scores: -0.2 + -0.1 +
-     * -0.2 = -0.5) over alternatives like "hell" + "o" + " " + "world"
-     * (-1.5 + -1.0 + -0.1 + -0.2 = -2.8). */
+    /* Rust: */
     OcArena *arena = oc_arena_new(0);
     OcSpPiece pieces[] = {
         { "hello", -0.2f },
@@ -235,7 +194,6 @@ Test(tokenizer_sp, round_trip_multilingual)
     oc_arena_free(arena);
 }
 
-/* ─── Decode unknown id returns error ─────────────────────────────────── */
 
 Test(tokenizer_sp, decode_unknown_id_returns_error)
 {
@@ -255,7 +213,6 @@ Test(tokenizer_sp, decode_unknown_id_returns_error)
     oc_arena_free(arena);
 }
 
-/* ─── Empty input ──────────────────────────────────────────────────────── */
 
 Test(tokenizer_sp, empty_input_returns_empty)
 {
@@ -282,15 +239,7 @@ Test(tokenizer_sp, empty_input_returns_empty)
     oc_arena_free(arena);
 }
 
-/* ─── BOS token handling (VAL-TOK-007) ───────────────────────────────────
- * Mirrors the BOS prepend behavior. The C wrapper exposes
- * OC_TOK_ADD_BOS which prepends the configured BOS id. SP models default
- * to add_bos=true (per Rust `add_bos_default()`).
- *
- * The direct-struct BOS prepend test lives in `load_from_gguf_with_bos_metadata`
- * below (it loads a GGUF with bos_token_id metadata and verifies
- * OC_TOK_ADD_BOS prepends the BOS id). Here we verify only the
- * `add_bos_default` policy logic. */
+/* ─── BOS token handling (VAL-TOK-007) ─────────────────────────────────── Mirrors the BOS prepend behavior. */
 
 Test(tokenizer_sp, add_bos_default_true_for_sp)
 {
@@ -318,7 +267,6 @@ Test(tokenizer_sp, add_bos_default_true_for_sp)
               "explicit add_bos_token=true should be honored");
 }
 
-/* ─── GGUF load (mirrors Rust `loads_sentencepiece_tokenizer...`) ────── */
 
 /* Build a synthetic GGUF buffer for a SentencePiece tokenizer. */
 static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
@@ -350,7 +298,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
     EMIT_U64(buf, off, 0);   /* tensor_count */
     EMIT_U64(buf, off, 4);   /* kv_count */
 
-    /* KV 1: tokenizer.ggml.model = model_str */
+    /* KV 4: tokenizer.ggml.unknown_token_id = 3 (UINT32) */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.model");
         EMIT_U32(buf, off, OC_GGUF_MT_STRING);
@@ -358,7 +306,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
         EMIT_U64(buf, off, sl);
         EMIT(buf, off, model_str, sl);
     }
-    /* KV 2: tokenizer.ggml.tokens = ARRAY<STRING>[4] */
+    /* KV 4: tokenizer.ggml.unknown_token_id = 3 (UINT32) */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.tokens");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -370,7 +318,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
             EMIT(buf, off, toks[i], sl);
         }
     }
-    /* KV 3: tokenizer.ggml.scores = ARRAY<FLOAT32>[4] */
+    /* KV 4: tokenizer.ggml.unknown_token_id = 3 (UINT32) */
     {
         EMIT_KV_STR_KEY(buf, off, "tokenizer.ggml.scores");
         EMIT_U32(buf, off, OC_GGUF_MT_ARRAY);
@@ -401,11 +349,7 @@ static uint8_t *build_sp_gguf(const char *model_str, size_t *out_len)
 
 Test(tokenizer_sp, load_from_gguf_llama)
 {
-    /* Mirrors Rust `loads_sentencepiece_tokenizer_from_gguf_metadata`:
-     *   model = "llama", tokens = ["he","llo","hello","<unk>"],
-     *   scores = [-1, -1, -0.1, -99], unknown_token_id = 3
-     *   encode("hello") -> decode -> "hello"
-     *   encode("x") -> decode -> "<unk>" */
+    /* Mirrors Rust `loads_gemma4_sentencepiece_tokenizer_from_gguf_metadata`. */
     size_t len = 0;
     uint8_t *buf = build_sp_gguf("llama", &len);
     OcGgufFile gguf;
@@ -419,7 +363,6 @@ Test(tokenizer_sp, load_from_gguf_llama)
     cr_assert(tok.has_unknown, "should have unknown id");
     cr_assert_eq(tok.unknown_id, 3, "unknown id should be 3");
 
-    /* encode("hello") -> [2] (the "hello" piece, id 2, score -0.1) */
     uint32_t *ids = NULL;
     size_t count = 0;
     e = oc_tokenizer_encode(&tok, "hello", OC_TOK_DEFAULT, &ids, &count);
@@ -434,7 +377,6 @@ Test(tokenizer_sp, load_from_gguf_llama)
     free(ids);
     free(decoded);
 
-    /* encode("x") -> [3] (the <unk> id, since 'x' is not in vocab) */
     e = oc_tokenizer_encode(&tok, "x", OC_TOK_DEFAULT, &ids, &count);
     cr_assert_eq(e, OC_OK);
     assert_ids_eq(ids, count, (uint32_t[]){3}, 1);

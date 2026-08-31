@@ -1,19 +1,4 @@
-/*
- * test_llama.c — Llama forward-pass component tests.
- *
- * The oxidize-core GGUF test fixtures are tiny parser fixtures (no
- * weights), so there is no end-to-end runnable model to test against.
- * Instead this file asserts:
- *   1. The math primitives (RMSNorm, RoPE, SwiGLU, matvec) match hand-
- *      computed expected values (VAL-FWD-001..004).
- *   2. oc_llama_load gracefully rejects the parser fixtures (which lack
- *      tok_embeddings) with OC_ERR_MODEL rather than crashing.
- *   3. Session workspace allocation sizes are consistent with config.
- *
- * Full end-to-end parity against a Rust reference forward requires a real
- * GGUF model; that test runs on the remote NUMA box (ai@192.168.1.121) as
- * part of the cpu-qwen-benchmark-121 feature.
- */
+/* test_llama.c — Llama forward-pass component tests. computed expected values (VAL-FWD-001..004). */
 #include <criterion/criterion.h>
 
 #include "oxidize/activation.h"
@@ -25,10 +10,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ─── RMSNorm ────────────────────────────────────────────────────────────
- * x=[3,4,0], w=[1,1,1], eps=1e-5.
- * ss = 9+16+0 = 25; mean = 25/3; inv_rms = 1/sqrt(25/3 + eps).
- * out[i] = x[i] * inv_rms. */
 Test(llama, rms_norm_basic)
 {
     float x[] = {3.0f, 4.0f, 0.0f};
@@ -55,16 +36,6 @@ Test(llama, rms_norm_weight_scales)
     }
 }
 
-/* ─── RoPE (split-halves, NeoX-style) ────────────────────────────────────
- * head_dim=4, rope_len=4, position=1, theta=10000.
- * half=2; freq_mul = 10000^(-2/4) = 0.01.
- * pair 0: freq=1.0,     angle=1.0
- * pair 1: freq=0.01,    angle=0.01
- * input [1,2,3,4]:
- *   out[0] = 1*cos(1.0) - 3*sin(1.0)
- *   out[2] = 1*sin(1.0) + 3*cos(1.0)
- *   out[1] = 2*cos(0.01) - 4*sin(0.01)
- *   out[3] = 2*sin(0.01) + 4*cos(0.01) */
 Test(llama, rope_split_halves_position1)
 {
     float in[]  = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -89,7 +60,6 @@ Test(llama, rope_position_zero_is_identity)
 
 Test(llama, rope_partial_passthrough_tail)
 {
-    /* rope_len=4 < head_dim=8 → tail [4..8] passes through unchanged. */
     float in[] = {1.0f, 2.0f, 3.0f, 4.0f, 99.0f, 100.0f, 101.0f, 102.0f};
     float out[8];
     oc_apply_rope_f32(in, out, 8, 4, 1, 10000.0f);
@@ -99,10 +69,6 @@ Test(llama, rope_partial_passthrough_tail)
     cr_assert_float_eq(out[7], 102.0f, 1e-6f, "tail passthrough [7]");
 }
 
-/* ─── SwiGLU ─────────────────────────────────────────────────────────────
- * gate=[0,1], up=[1,2].
- * silu(0)=0*sigmoid(0)=0; silu(1)=1*sigmoid(1)=0.731059.
- * out = [0*1, 0.731059*2] = [0, 1.462117]. */
 Test(llama, swiglu_basic)
 {
     float gate[] = {0.0f, 1.0f};
@@ -112,8 +78,6 @@ Test(llama, swiglu_basic)
     cr_assert_float_eq(gate[1], 0.73105858f * 2.0f, 1e-5f, "silu(1)*2");
 }
 
-/* ─── matvec_f32 ─────────────────────────────────────────────────────────
- * data = [[1,2,3],[4,5,6]], input=[1,1,1] → [6, 15]. */
 Test(llama, matvec_f32_basic)
 {
     float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
@@ -156,9 +120,6 @@ Test(llama, matvec_f32_zero_input)
     cr_assert_float_eq(out[1], 0.0f, 1e-6f);
 }
 
-/* ─── Load: parser fixture must be rejected ─────────────────────────────
- * oxidize-core/tests/fixtures/valid-v3.gguf has a valid GGUF header but no
- * tok_embeddings.weight → oc_llama_load must return OC_ERR_MODEL (not crash). */
 Test(llama, load_rejects_parser_fixture)
 {
     const char *path = "../oxidize-core/tests/fixtures/valid-v3.gguf";
@@ -190,13 +151,7 @@ Test(llama, sessions_reject_unsupported_architecture_paths)
     memset(&model, 0, sizeof(model));
     OcLlamaSession session;
     OcBatchSession batch;
-    /* MLA is no longer rejected — forward_mla_attention handles it, and
-     * single-token sessions for DeepSeek/GLM-MoE-DSA/LongCat go through it.
-     * (Batch decode already allocated the MLA workspace; see
-     * batch_allocates_mla_workspace below.) uses_geglu is likewise a
-     * supported activation. LayerNorm architectures (GPT-2/NeoX/Falcon) are
-     * rejected by batch init only — single-token sessions dispatch to
-     * arch_forward.c. */
+    /* MLA is no longer rejected — forward_mla_attention handles it, and single-token sessions for DeepSeek/GLM-MoE-DSA/LongCat go through it. (Batch decode already allocated the MLA workspace; see batch_allocates_mla_workspace below.) uses_geglu is likewise a supported activation. LayerNorm architectures (GPT-2/NeoX/Falcon) are rejected by batch init only — single-token sessions dispatch to arch_forward.c. */
     model.arch = OC_ARCH_GPT2;
     cr_assert_eq(oc_batch_session_init(&model, 2, &batch), OC_ERR_MODEL);
     model.arch = OC_ARCH_GPTJ;
@@ -233,10 +188,6 @@ Test(llama, batch_allocates_mla_workspace)
     cr_assert_not_null(batch.mla_kv_compressed);
     cr_assert_not_null(batch.mla_q_absorbed);
     cr_assert_not_null(batch.mla_ctx_latent);
-    /* MLA caches the compressed [c_kv | k_pe] latent, and the batch path
-     * must agree with the single-sequence path exactly — they index the same
-     * rows through the same forward code. Sizing this the old expanded way
-     * (n_head * head_dim) allocated ~21x more per sequence. */
     cr_assert_eq(batch.kv_row_floats,
                  (size_t)model.cfg.mla_kv_lora_dim + model.cfg.mla_q_rope_dim);
     oc_batch_session_free(&batch);
@@ -268,17 +219,9 @@ Test(llama, batch_validates_context_and_moe_workspace)
     oc_batch_session_free(&batch);
 }
 
-/* ─── MoE config defaults ──────────────────────────────────────────────
- * A dense model (no expert_count metadata) must have num_experts=0,
- * which means forward_layer uses the dense SwiGLU path. The MoE scratch
- * buffers (router_logits, expert_gate, etc.) must be NULL. */
 Test(llama, moe_config_defaults_dense)
 {
     OcLlamaModel m;
-    /* We can't easily construct a full model, but we can verify the config
-     * struct initializes to zero and the defaults are applied in
-     * parse_config. If the fixture loads (or fails with IO), the config
-     * should still report num_experts=0 for non-MoE GGUFs. */
     memset(&m, 0, sizeof(m));
     /* Simulate a default config (as parse_config would set it). */
     m.cfg.num_experts = 0;
@@ -291,10 +234,6 @@ Test(llama, moe_config_defaults_dense)
     cr_assert_float_eq(m.cfg.expert_weights_scale, 1.0f, 1e-6f, "default scale 1.0");
 }
 
-/* ─── MoE top-k clamp logic ─────────────────────────────────────────────
- * When num_experts_per_tok > num_experts, it must be clamped to num_experts.
- * When num_experts_per_tok == 0 but num_experts > 0, it defaults to 1.
- * This mirrors the clamp in parse_config. */
 Test(llama, moe_topk_clamp)
 {
     /* Case 1: k=0 with experts → default to 1. */
@@ -313,10 +252,6 @@ Test(llama, moe_topk_clamp)
     cr_assert_eq(k, 4, "k should be unchanged when within range");
 }
 
-/* ─── GeGLU activation (Gemma FFN) ────────────────────────────────────
- * GeGLU: gate[i] = gelu(gate[i]) * up[i].
- * gelu(0) = 0; gelu(1) = 0.841345 (erf-based).
- * gate=[0,1], up=[1,2] → [0*1, 0.841345*2] = [0, 1.682690]. */
 Test(llama, geglu_basic)
 {
     float gate[] = {0.0f, 1.0f};
@@ -326,9 +261,6 @@ Test(llama, geglu_basic)
     cr_assert_float_eq(gate[1], 0.84134474f * 2.0f, 1e-4f, "gelu(1)*2");
 }
 
-/* ─── GeLU vs SwiGLU differ ───────────────────────────────────────────
- * For the same input, GeGLU and SwiGLU must produce different outputs
- * (gelu(1) ≠ silu(1)). silu(1) = 0.731059, gelu(1) = 0.841345. */
 Test(llama, geglu_differs_from_swiglu)
 {
     float g1[] = {1.0f, 1.0f};
@@ -341,7 +273,6 @@ Test(llama, geglu_differs_from_swiglu)
     cr_assert_float_eq(g2[0], 0.84134474f, 1e-4f, "gelu(1)");
 }
 
-/* ─── Gemma config defaults ──────────────────────────────────────────── */
 Test(llama, gemma_config_defaults)
 {
     OcLlamaConfig cfg;
@@ -355,14 +286,10 @@ Test(llama, gemma_config_defaults)
     cr_assert(cfg.norm_scale > 1.0f, "norm_scale > 1 for Gemma");
 }
 
-/* ─── YaRN RoPE scaling ─────────────────────────────────────────────────
- * YaRN should be identity when yarn_factor <= 1.0 (no scaling).
- * With yarn_factor > 1.0, YaRN should produce different output. */
 Test(llama, yarn_identity_within_ctx)
 {
     float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
     float out_yarn[4], out_normal[4];
-    /* yarn_factor=1.0 → no YaRN, should equal normal RoPE. */
     oc_apply_rope_yarn_f32(in, out_yarn, 4, 4, 10, 10000.0f, 1.0f, 4096);
     oc_apply_rope_f32(in, out_normal, 4, 4, 10, 10000.0f);
     for (int i = 0; i < 4; i++) {
@@ -375,7 +302,6 @@ Test(llama, yarn_scales_beyond_ctx)
 {
     float in[] = {1.0f, 2.0f, 3.0f, 4.0f};
     float out_yarn[4], out_normal[4];
-    /* position=8192, orig_ctx=4096, yarn_factor=4.0 → beyond ctx, YaRN should differ. */
     oc_apply_rope_yarn_f32(in, out_yarn, 4, 4, 8192, 10000.0f, 4.0f, 4096);
     oc_apply_rope_f32(in, out_normal, 4, 4, 8192, 10000.0f);
     bool differs = false;
@@ -411,14 +337,6 @@ Test(llama, yarn_factor_changes_angles)
     cr_assert_arr_neq(factor_one, factor_two, sizeof(factor_one));
 }
 
-/* ─── QKV projection bias (Qwen2-family) ───────────────────────────────
- *
- * Qwen2 carries attn_{q,k,v}.bias on every layer. The port ignored them
- * entirely, which silently produced garbage output on every Qwen2 model
- * while all unit tests stayed green — nothing here ever ran a forward pass.
- * This builds a minimal single-layer F32 model and asserts the bias reaches
- * the result.
- */
 #define TB_EMBD 4u
 #define TB_FF   4u
 #define TB_VOCAB 4u
@@ -463,7 +381,6 @@ static void tiny_bias_model_init(TinyBiasModel *t, bool with_bias)
         for (size_t cc = 0; cc < TB_EMBD; cc++)
             t->ident[r * TB_EMBD + cc] = (r == cc) ? 1.0f : 0.0f;
     for (size_t i = 0; i < TB_EMBD; i++) t->norm_ones[i] = 1.0f;
-    /* ffn_w stays zero: the dense FFN adds nothing, isolating attention. */
 
     t->model.tok_embeddings = tb_view(t->embd, TB_VOCAB, TB_EMBD);
     t->model.output = tb_view(t->ident, TB_VOCAB, TB_EMBD);
@@ -538,11 +455,6 @@ Test(llama, qkv_bias_absent_is_a_noop)
     oc_llama_session_free(&sb);
 }
 
-/* ─── Q8 KV cache ────────────────────────────────────────────────────────
- *
- * oc_llama_kv_cache_bytes() reads only cfg, so it can be exercised against a
- * hand-built model without any weights.
- */
 static OcLlamaModel kv_stub_model(uint32_t n_layer, uint32_t n_ctx,
                                   uint32_t n_head_kv, uint32_t kv_head_dim)
 {

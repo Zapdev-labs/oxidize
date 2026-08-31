@@ -1,9 +1,4 @@
-/* test_safetensors.c — Criterion tests for the SafeTensors reader.
- *
- * Builds small .safetensors files in /tmp (in-memory -> write to disk) and
- * round-trips them through oc_safetensors_open / get_tensor /
- * get_tensor_data / n_tensors / close.
- */
+/* test_safetensors.c — Criterion tests for the SafeTensors reader. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <criterion/criterion.h>
@@ -16,7 +11,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ─── Helper: write a .safetensors file from a JSON header + raw bytes ──── */
 
 typedef struct {
     const char *name;
@@ -90,7 +84,6 @@ static const char *tmp_path(const char *suffix)
     return path;
 }
 
-/* ─── Tests ───────────────────────────────────────────────────────────── */
 
 Test(safetensors, open_single_tensor)
 {

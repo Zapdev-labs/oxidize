@@ -97,7 +97,6 @@ Test(rope, apply_none)
     memset(cos_buf, 0, sizeof(cos_buf));
     memset(sin_buf, 0, sizeof(sin_buf));
     cr_assert_eq(oc_rope_apply(&cfg, 10, 8, 10000.0f, cos_buf, sin_buf), OC_OK);
-    /* cos/sin should have valid values (first half_dim=4 elements written). */
     for (int i = 0; i < 4; i++) {
         cr_assert(cos_buf[i] >= -1.01f && cos_buf[i] <= 1.01f);
         cr_assert(sin_buf[i] >= -1.01f && sin_buf[i] <= 1.01f);
@@ -130,7 +129,6 @@ Test(rope, apply_yarn)
 
 Test(rope, yarn_mscale_value)
 {
-    /* mscale = 1 + 0.1 * ln(scale). For scale=4: 1 + 0.1*ln(4) ≈ 1.1386 */
     float ms = oc_rope_yarn_mscale(4.0f);
     cr_assert_float_eq(ms, 1.0f + 0.1f * logf(4.0f), 0.001f);
 }
@@ -214,7 +212,6 @@ Test(rope, dynamic_ntk_scales_beyond_orig)
     float cos_buf[64], sin_buf[64];
     memset(cos_buf, 0, sizeof(cos_buf));
     memset(sin_buf, 0, sizeof(sin_buf));
-    /* pos beyond original_max_pos should use NTK scaling. */
     cr_assert_eq(oc_rope_apply(&cfg, 8192, 64, 10000.0f, cos_buf, sin_buf), OC_OK);
     /* Values should be valid. */
     for (int i = 0; i < 32; i++) {
@@ -325,20 +322,10 @@ Test(rope, ntk_modifies_base)
     cr_assert(differs, "NTK should produce different angles than no-scaling");
 }
 
-/* ─── deepseek_yarn mscale pair ──────────────────────────────────────────
- *
- * The two derived scales are what the DeepSeek reference calls
- * `rope_attn_factor` (on cos/sin) and `softmax_scale` (on attention logits).
- * Which one carries the correction is decided entirely by the mscale pair,
- * and getting it backwards is a silent whole-model correctness bug — hence
- * pinning the exact constants for both conventions here. */
 
 Test(rope_scaling, deepseek_yarn_scales_longcat)
 {
-    /* LongCat-2.0: factor 120, mscale = mscale_all_dim = 1, head_dim 192.
-     * get_mscale(120, 1) = 0.1*ln(120) + 1 = 1.47874917.
-     * Both terms are equal, so the RoPE factor cancels to exactly 1 and the
-     * whole correction lands on the softmax scale, squared. */
+    /* LongCat-2.0: factor 120, mscale = mscale_all_dim = 1, head_dim 192. */
     float rope_f = -1.0f, softmax = -1.0f;
     oc_rope_deepseek_yarn_scales(120.0f, 1.0f, 1.0f, 192, &rope_f, &softmax);
 
@@ -371,7 +358,6 @@ Test(rope_scaling, deepseek_yarn_scales_deepseek_v3)
 
 Test(rope_scaling, deepseek_yarn_scales_no_scaling)
 {
-    /* factor <= 1 disables YaRN entirely: both terms are 1. */
     float rope_f = -1.0f, softmax = -1.0f;
     oc_rope_deepseek_yarn_scales(1.0f, 1.0f, 1.0f, 192, &rope_f, &softmax);
     cr_assert_float_eq(rope_f, 1.0f, 1e-6f, "no YaRN -> factor 1.0");
@@ -381,10 +367,7 @@ Test(rope_scaling, deepseek_yarn_scales_no_scaling)
 
 Test(rope_scaling, yarn_correction_range_longcat)
 {
-    /* LongCat: rope dim 64, base 1e6, original ctx 8192, beta_fast 32,
-     * beta_slow 1. corr = dim * ln(orig/(beta*2pi)) / (2*ln(base)).
-     *   lo = floor(64 * ln(8192/(32*2pi)) / (2*ln(1e6))) = floor(8.586) = 8
-     *   hi = ceil (64 * ln(8192/( 1*2pi)) / (2*ln(1e6))) = ceil (16.615) = 17 */
+    /* LongCat: rope dim 64, base 1e6, original ctx 8192, beta_fast 32, beta_slow 1. */
     const float two_pi = 6.283185307f;
     float base_log = 2.0f * logf(1.0e6f);
     float lo = floorf(64.0f * logf(8192.0f / (32.0f * two_pi)) / base_log);

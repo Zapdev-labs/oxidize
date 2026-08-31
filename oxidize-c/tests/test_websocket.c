@@ -1,13 +1,4 @@
-/*
- * test_websocket.c — WebSocket protocol tests.
- *
- * VAL-WS-001..005 cover:
- *   1. SHA-1 computation (FIPS test vector "abc").
- *   2. Base64 encoding (known vector "Man" -> "TWFu").
- *   3. WebSocket accept key computation (RFC 6455 §1.3 test vector).
- *   4. Frame construction (text, binary, close).
- *   5. Frame parsing (unmasked text, masked text, extended payload length).
- */
+/* test_websocket.c — WebSocket protocol tests. VAL-WS-001..005 cover: */
 #define _GNU_SOURCE 1
 #include <criterion/criterion.h>
 
@@ -17,11 +8,10 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ─── SHA-1 ──────────────────────────────────────────────────────────────── */
 
 Test(websocket, sha1_known_vector)
 {
-    /* FIPS 180-2: SHA-1("abc") = a9993e36 4706816a ba3e2571 7850c26c 9cd0d89d */
+    /* SHA-1("") = da39a3ee 5e6b4b0d 3255bfef 95601890 afd80709 */
     uint8_t out[20];
     oc_sha1((const uint8_t *)"abc", 3, out);
     static const uint8_t expected[20] = {
@@ -60,7 +50,6 @@ Test(websocket, sha1_longer_input)
     cr_assert(memcmp(out, expected, 20) == 0, "SHA-1(fox) mismatch");
 }
 
-/* ─── Base64 ─────────────────────────────────────────────────────────────── */
 
 Test(websocket, base64_known_vector)
 {
@@ -104,7 +93,6 @@ Test(websocket, base64_overflow_returns_zero)
     cr_assert_eq(n, 0u);
 }
 
-/* ─── WebSocket accept key ─────────────────────────────────────────────────── */
 
 Test(websocket, accept_key_rfc6455_vector)
 {
@@ -125,7 +113,6 @@ Test(websocket, accept_key_short_buffer_rejected)
     cr_assert_eq(e, OC_ERR_INVALID_ARG);
 }
 
-/* ─── Frame construction ──────────────────────────────────────────────────── */
 
 Test(websocket, build_text_frame_short)
 {
@@ -198,7 +185,6 @@ Test(websocket, build_overflow_returns_zero)
     cr_assert_eq(n, 0u);
 }
 
-/* ─── Frame parsing ───────────────────────────────────────────────────────── */
 
 Test(websocket, parse_unmasked_text_frame)
 {
@@ -231,7 +217,6 @@ Test(websocket, parse_masked_text_frame)
     cr_assert_eq(f.mask[0], 0x37u);
     cr_assert_eq(f.mask[3], 0x3du);
     cr_assert_eq(f.payload_len, 5u);
-    /* payload aliases the masked bytes (parser does not unmask; caller does) */
     cr_assert_eq(f.payload[0], 0x7fu);
 }
 
@@ -305,7 +290,6 @@ Test(websocket, roundtrip_text_frame)
     cr_assert(memcmp(f.payload, msg, strlen(msg)) == 0);
 }
 
-/* ─── Session init/free ──────────────────────────────────────────────────── */
 
 Test(websocket, session_init_sets_open_state)
 {
@@ -320,7 +304,6 @@ Test(websocket, session_init_sets_open_state)
     cr_assert_eq(sess.recv_cap, 0u);
 }
 
-/* ─── Socket-level read: fragmentation + coalescing + unmasked rejection ─── */
 
 #include <sys/socket.h>
 #include <unistd.h>

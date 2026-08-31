@@ -8,7 +8,6 @@
 #include <string.h>
 #include <time.h>
 
-/* ─── Timing ────────────────────────────────────────────────────────────── */
 
 uint64_t oc_prof_now_ns(void)
 {
@@ -17,7 +16,6 @@ uint64_t oc_prof_now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-/* ─── Profiler ──────────────────────────────────────────────────────────── */
 
 void oc_profiler_init(OcProfiler *p)
 {
@@ -74,7 +72,6 @@ void oc_profiler_reset(OcProfiler *p)
     p->tokens_profiled = 0;
 }
 
-/* ─── Scoped timing ────────────────────────────────────────────────────── */
 
 void oc_prof_scope_begin(OcProfileScope *s, OcProfiler *p, OcProfEvent e)
 {
@@ -92,7 +89,6 @@ void oc_prof_scope_end(OcProfileScope *s)
     s->prof = NULL; /* prevent double-record */
 }
 
-/* ─── Names ────────────────────────────────────────────────────────────── */
 
 const char *oc_prof_event_name(OcProfEvent e)
 {
@@ -106,7 +102,6 @@ const char *oc_prof_event_name(OcProfEvent e)
     return names[e];
 }
 
-/* ─── Formatting ────────────────────────────────────────────────────────── */
 
 size_t oc_profiler_format(const OcProfiler *p, char *buf, size_t cap)
 {

@@ -3,9 +3,6 @@ package video
 import "fmt"
 
 // VisionConfig is the subset of vision-encoder configuration the video stack
-// needs to lay out patch tensors and pooled per-frame vectors. It mirrors the
-// relevant fields of oxidize-core's VisionConfig without coupling the video
-// package to the (differently-shaped) Go vision package.
 type VisionConfig struct {
 	ImageSize        int
 	PatchSize        int

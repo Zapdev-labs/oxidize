@@ -1,15 +1,4 @@
-/*
- * validation.h — cross-validation and model quality assessment utilities.
- *
- * Inspired by oxidize-core/src/validation/cross_validation.rs: provides
- * k-fold and single-pass validation, confusion matrices, and perplexity
- * estimation over a set of labeled samples (input tokens -> expected token).
- *
- * The implementation is model-agnostic: callers supply the actual predictions
- * by way of `OcValidationSample`. The validation framework handles folding,
- * aggregation, and reporting. A simple deterministic PRNG (LCG, seed from
- * config) drives the fold assignment so results are reproducible.
- */
+/* validation.h — cross-validation and model quality assessment utilities. */
 #ifndef OXIDIZE_VALIDATION_H
 #define OXIDIZE_VALIDATION_H
 
@@ -23,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_VALIDATION_DEFAULT_N_FOLDS    5u
 #define OC_VALIDATION_DEFAULT_MAX_SAMPLES 1000u
@@ -31,7 +19,6 @@ extern "C" {
 #define OC_VALIDATION_MAX_FOLDS         10u
 #define OC_VALIDATION_MAX_INPUT_TOKENS  256u
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 typedef struct OcValidationConfig {
     uint32_t n_folds;        /* default OC_VALIDATION_DEFAULT_N_FOLDS      */
@@ -64,12 +51,10 @@ typedef struct OcValidationState {
     uint32_t               cap_samples;
 } OcValidationState;
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 /* Initialize config with defaults. */
 OcError oc_validation_config_init(OcValidationConfig *cfg);
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 /* Allocate a validation state for the given config (NULL = defaults). */
 OcError oc_validation_init(const OcValidationConfig *config,
@@ -78,7 +63,6 @@ OcError oc_validation_init(const OcValidationConfig *config,
 /* Free all owned storage. Safe on NULL / already-freed. */
 void oc_validation_free(OcValidationState *state);
 
-/* ─── Sample management ────────────────────────────────────────────── */
 
 /* Add a validation sample. `n_input` must be <= OC_VALIDATION_MAX_INPUT_TOKENS.
  * Copies the sample into internal storage. */
@@ -88,13 +72,8 @@ OcError oc_validation_add_sample(OcValidationState *state,
 /* Remove all samples (config preserved). */
 OcError oc_validation_clear(OcValidationState *state);
 
-/* ─── Metrics ───────────────────────────────────────────────────────── */
 
-/* Run k-fold cross-validation over the stored samples. Folds are assigned
- * deterministically from `config.seed`. For each fold, samples in that fold
- * are "held out" — accuracy/loss are computed only over held-out samples
- * (simulating train/test split semantics). Writes per-fold and overall
- * aggregated metrics to `out_result`. */
+/* Run k-fold cross-validation over the stored samples. Folds are assigned deterministically from `config.seed`. For each fold, samples in that fold are "held out" — accuracy/loss are computed only over held-out samples (simulating train/test split semantics). Writes per-fold and overall aggregated metrics to `out_result`. */
 OcError oc_validation_k_fold(const OcValidationState *state,
                               OcValidationResult *out_result);
 

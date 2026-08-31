@@ -1,25 +1,4 @@
-/* test_muse_glimmer.c — Muse Glimmer config parse + forward-path wiring.
- *
- * Muse Glimmer (Meta, GGUF arch "muse-glimmer") is a dense SwiGLU
- * transformer that reuses machinery already present for other families —
- * Gemma's sandwich norms and per-head QK-norm, Gemma 4's metadata-driven
- * sliding-window pattern, Gemma 4's final-logit softcap — plus four things
- * nothing else needed:
- *
- *   1. the token embedding is RMS-normalized (no weight) before layer 0;
- *   2. sigmoid(W_gate · attn_norm(x)) gates the attention output before the
- *      output projection;
- *   3. RoPE runs on the sliding layers only — global layers are NoPE;
- *   4. the lm_head output is scaled, then softcapped.
- *
- * The [local, local, local, global] pattern is the part most likely to
- * regress silently: getting it inverted still produces fluent text, just
- * subtly wrong attention. It is asserted per layer here.
- *
- * Reference: llama.cpp src/models/muse-glimmer.cpp (PR #26841) and a header
- * parse of Muse-Glimmer-30B-UD-Q4_K_XL.gguf. The fixture is geometrically
- * faithful but tiny — the real model is 6656-wide with 52 layers.
- */
+/* test_muse_glimmer.c — Muse Glimmer config parse + forward-path wiring. */
 #include <criterion/criterion.h>
 
 #include "oxidize/gguf_writer.h"
@@ -236,10 +215,6 @@ Test(muse_glimmer, per_layer_tensors_bind)
     remove(p);
 }
 
-/* The forward pass has to run end to end and produce finite, softcapped
- * logits. With every weight positive and identical across layers this is not
- * a numerical reference — it is a wiring check: an unbound gate, a
- * mis-sized scratch buffer or a NaN from the NoPE layers all show up here. */
 Test(muse_glimmer, forward_produces_softcapped_logits)
 {
     const char *p = FIXTURE("fwd");
@@ -277,10 +252,7 @@ Test(muse_glimmer, forward_produces_softcapped_logits)
     remove(p);
 }
 
-/* The batched prefill path must agree with the per-token path. This is the
- * regression that matters most in practice: prefill re-implements the whole
- * layer (gate projection, NoPE split, sandwich norms) in batched form, and
- * a divergence there corrupts long prompts only. */
+/* The batched prefill path must agree with the per-token path. */
 Test(muse_glimmer, prefill_matches_per_token_forward)
 {
     const char *p = FIXTURE("prefill");

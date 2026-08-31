@@ -63,4 +63,3 @@ Test(error, ctx_format)
 
     oc_error_ctx_free(top);
 }
-

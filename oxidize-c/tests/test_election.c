@@ -4,7 +4,6 @@
 #include <string.h>
 #include "oxidize/election.h"
 
-/* ─── Config ──────────────────────────────────────────────────────── */
 
 Test(election, config_init_defaults)
 {
@@ -20,7 +19,6 @@ Test(election, config_init_null)
     cr_assert_eq(oc_election_config_init(NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Lifecycle ───────────────────────────────────────────────────── */
 
 Test(election, init_creates_follower)
 {
@@ -78,7 +76,6 @@ Test(election, free_null_is_safe)
     cr_assert(true);
 }
 
-/* ─── Tick ─────────────────────────────────────────────────────────── */
 
 Test(election, tick_first_stamp_sets_heartbeat)
 {
@@ -122,7 +119,6 @@ Test(election, tick_leader_does_not_timeout)
     oc_election_free(s);
 }
 
-/* ─── Vote RPC ────────────────────────────────────────────────────── */
 
 Test(election, request_vote_granted_for_higher_priority)
 {
@@ -147,7 +143,6 @@ Test(election, request_vote_rejected_for_lower_priority)
     OcElectionState *s = NULL;
     cr_assert_eq(oc_election_init(&cfg, 10, &s), OC_OK);
     bool granted = true;
-    /* candidate_id 5 < self_id 10, same priority 5 → loses tie-break. */
     cr_assert_eq(oc_election_request_vote(s, 5, 1, &granted), OC_OK);
     cr_assert_not(granted);
     cr_assert_eq(s->voted_for, 0u);
@@ -198,7 +193,6 @@ Test(election, request_vote_double_vote_rejected)
     oc_election_free(s);
 }
 
-/* ─── Receive vote ─────────────────────────────────────────────────── */
 
 Test(election, receive_vote_increments_count)
 {
@@ -236,7 +230,6 @@ Test(election, receive_vote_ignored_when_not_candidate)
     oc_election_free(s);
 }
 
-/* ─── Heartbeat ─────────────────────────────────────────────────────── */
 
 Test(election, heartbeat_adopts_leader_and_steps_down)
 {
@@ -272,7 +265,6 @@ Test(election, heartbeat_rejects_zero_leader)
     oc_election_free(s);
 }
 
-/* ─── Role transitions ──────────────────────────────────────────────── */
 
 Test(election, become_leader_sets_state)
 {
@@ -285,7 +277,6 @@ Test(election, become_leader_sets_state)
     oc_election_free(s);
 }
 
-/* ─── Queries ───────────────────────────────────────────────────────── */
 
 Test(election, get_role_returns_current_role)
 {

@@ -7,7 +7,6 @@
 
 /* Unique suite name to avoid collision with test_validation.c's "validation". */
 
-/* ─── compare: identical arrays ──────────────────────────────────────── */
 
 Test(cross_validation, compare_identical_arrays)
 {
@@ -31,7 +30,6 @@ Test(cross_validation, compare_identical_zero_tolerance)
     cr_assert(oc_cross_validation_passed(&r));
 }
 
-/* ─── compare: different arrays ─────────────────────────────────────── */
 
 Test(cross_validation, compare_different_arrays)
 {
@@ -81,7 +79,6 @@ Test(cross_validation, compare_inf_difference)
     cr_assert(!oc_cross_validation_passed(&r));
 }
 
-/* ─── null / edge cases ─────────────────────────────────────────────── */
 
 Test(cross_validation, compare_null_out)
 {
@@ -131,7 +128,6 @@ Test(cross_validation, compare_single_element)
     cr_assert_float_eq(r.tolerance, 0.4f, 1e-9f);
 }
 
-/* ─── passed() ──────────────────────────────────────────────────────── */
 
 Test(cross_validation, passed_null_returns_false)
 {
@@ -150,7 +146,6 @@ Test(cross_validation, passed_just_above_tolerance)
     cr_assert(!oc_cross_validation_passed(&r));
 }
 
-/* ─── suite name strings ────────────────────────────────────────────── */
 
 Test(cross_validation, suite_name_vulkan_dflash_cpu)
 {
@@ -176,7 +171,6 @@ Test(cross_validation, suite_name_invalid)
                      "unknown");
 }
 
-/* ─── suite enumeration ─────────────────────────────────────────────── */
 
 Test(cross_validation, n_suites_is_three)
 {

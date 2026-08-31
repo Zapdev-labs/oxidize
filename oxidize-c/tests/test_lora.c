@@ -76,7 +76,6 @@ Test(lora, apply_scaling)
     float out[] = {10.0f, 20.0f}; /* existing values */
     float temp[2];
     oc_lora_apply(&adapter, x, out, temp);
-    /* out += 2 * x */
     cr_assert_float_eq(out[0], 16.0f, 1e-5f);
     cr_assert_float_eq(out[1], 30.0f, 1e-5f);
 }
@@ -103,7 +102,6 @@ Test(lora, set_invalid_weight_name)
     oc_lora_model_free(&lm);
 }
 
-/* ─── LoRA plan tests ───────────────────────────────────────────────── */
 
 Test(lora_plan, basic_match)
 {
@@ -132,7 +130,6 @@ Test(lora_plan, qlora_kind)
     };
 
     OcLoraPlan plan;
-    /* base_qtype=1 means quantized -> Qlora */
     OcLoraPlanError e = oc_lora_plan_application(base, 1, adapter, 2, 1, &plan);
     cr_assert_eq(e, OC_LORA_PLAN_OK);
     cr_assert_eq(plan.kind, OC_ADAPTER_QLORA);
@@ -163,7 +160,6 @@ Test(lora_plan, missing_pair_for_a)
     const char *base[] = {"blk.0.attn_q.weight"};
     const char *adapter[] = {
         "blk.0.attn_q.weight.lora_a.weight",
-        /* no lora_b */
     };
 
     OcLoraPlan plan;
@@ -176,7 +172,6 @@ Test(lora_plan, missing_pair_for_b)
     const char *base[] = {"blk.0.attn_q.weight"};
     const char *adapter[] = {
         "blk.0.attn_q.weight.lora_b.weight",
-        /* no lora_a */
     };
 
     OcLoraPlan plan;
@@ -243,7 +238,6 @@ Test(lora_plan, null_safety)
 
 Test(lora_plan, no_adapters_on_base)
 {
-    /* adapter has no lora tensors, should produce empty plan. */
     const char *base[] = {"blk.0.attn_q.weight"};
     const char *adapter[] = {"blk.0.attn_q.weight"};
 

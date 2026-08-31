@@ -1,22 +1,4 @@
-/*
- * model_registry.h — on-disk model registry for the C port.
- *
- * Tracks .gguf files discovered in a cache directory (default
- * ~/.cache/oxidize/models). Each entry caches metadata parsed from the GGUF
- * header (architecture, layer count, embedding dim, vocab size) plus file
- * size and discovery time, so CLI commands like `oxidize list` and
- * `oxidize inspect` can render a table without re-parsing every file on
- * every invocation.
- *
- * The registry is intentionally process-local: it does not persist across
- * runs and does not watch for filesystem changes. Callers re-scan with
- * oc_model_registry_scan() when they know the directory may have changed
- * (e.g. after a download completes). The scan reads only the GGUF header
- * (first few KiB), so it is cheap even for multi-GB model files.
- *
- * Concurrency: the registry is NOT thread-safe. Callers that share one
- * registry across threads must serialize access externally.
- */
+/* model_registry.h — on-disk model registry for the C port. */
 #ifndef OXIDIZE_MODEL_REGISTRY_H
 #define OXIDIZE_MODEL_REGISTRY_H
 
@@ -32,10 +14,7 @@
 extern "C" {
 #endif
 
-/* Maximum number of entries the registry will hold before refusing new
- * additions. Sized to cover a typical local cache (a handful of quantized
- * variants per base model). The cap is a soft limit: oc_model_registry_scan
- * stops adding entries when it hits the cap rather than erroring. */
+/* Maximum number of entries the registry will hold before refusing new additions. Sized to cover a typical local cache (a handful of quantized variants per base model). The cap is a soft limit: oc_model_registry_scan stops adding entries when it hits the cap rather than erroring. */
 #define OC_MODEL_REGISTRY_MAX_ENTRIES 256
 
 /* Maximum length (including NUL) of a stored path or model name. Paths
@@ -43,10 +22,6 @@ extern "C" {
  * human-managed cache directories, not arbitrary filesystem traversal). */
 #define OC_MODEL_REGISTRY_MAX_PATH 512
 
-/* A single registered model entry. All strings are NUL-terminated and owned
- * by the registry (strdup'd on add, freed on remove/free). Numeric fields
- * are populated from the GGUF header during scan/add; if the GGUF parse
- * fails they are left at 0 and `arch` is set to OC_ARCH_UNKNOWN. */
 typedef struct OcModelEntry {
     char               path[OC_MODEL_REGISTRY_MAX_PATH];   /* absolute or relative file path */
     char               name[OC_MODEL_REGISTRY_MAX_PATH];   /* basename without .gguf extension */
@@ -93,10 +68,7 @@ typedef struct OcModelRegistry {
     char          cache_dir[OC_MODEL_REGISTRY_MAX_PATH];
 } OcModelRegistry;
 
-/* Initialize a registry with capacity `max_entries` (clamped to
- * OC_MODEL_REGISTRY_MAX_ENTRIES). `cache_dir` is copied (NUL-truncated to
- * fit); it may be NULL for an empty default. Returns OC_OK or
- * OC_ERR_INVALID_ARG (NULL `out`) / OC_ERR_OOM. */
+/* Initialize a registry with capacity `max_entries` (clamped to OC_MODEL_REGISTRY_MAX_ENTRIES). */
 OcError oc_model_registry_init(OcModelRegistry *reg, const char *cache_dir,
                                size_t max_entries);
 
@@ -105,19 +77,10 @@ OcError oc_model_registry_init(OcModelRegistry *reg, const char *cache_dir,
  * registry is zeroed. */
 void oc_model_registry_free(OcModelRegistry *reg);
 
-/* Scan `dir` for `*.gguf` files (non-recursive) and add each one via
- * oc_model_registry_add. Entries already present (matched by path) are
- * skipped. Stops at max_entries. Returns OC_OK, OC_ERR_IO (opendir failed),
- * OC_ERR_OOM, or OC_ERR_INVALID_ARG. Even on error the registry may contain
- * a partial set of entries scanned before the failure. */
+/* Scan `dir` for `*.gguf` files (non-recursive) and add each one via oc_model_registry_add. */
 OcError oc_model_registry_scan(OcModelRegistry *reg, const char *dir);
 
-/* Add a single model file. Parses the GGUF header to populate arch,
- * n_layers, n_embd, vocab_size, n_params; reads file size from stat(). If
- * the path is already present the existing entry is updated in place.
- * Returns OC_OK, OC_ERR_IO, OC_ERR_FORMAT, OC_ERR_OOM, or
- * OC_ERR_INVALID_ARG. GGUF parse failures are NOT fatal: the entry is added
- * with zeroed metadata and arch=OC_ARCH_UNKNOWN. */
+/* Add a single model file. */
 OcError oc_model_registry_add(OcModelRegistry *reg, const char *path);
 
 /* Remove the entry whose path matches `path` exactly. Shifts subsequent
@@ -125,27 +88,16 @@ OcError oc_model_registry_add(OcModelRegistry *reg, const char *path);
  * (or NULL args). */
 OcError oc_model_registry_remove(OcModelRegistry *reg, const char *path);
 
-/* Find the first entry whose `name` fuzzy-matches `query`. Fuzzy match:
- *   1. case-insensitive substring of name; if that matches, return it;
- *   2. otherwise compute Levenshtein distance to name; return the entry
- *      with the smallest distance provided distance <= strlen(query)/2.
- * Returns a pointer into `reg` (valid until the next mutating call), or
- * NULL if no match. */
+/* Find the first entry whose `name` fuzzy-matches `query`. Fuzzy match: 1. case-insensitive substring of name; if that matches, return it; 2. otherwise compute Levenshtein distance to name; return the entry with the smallest distance provided distance <= strlen(query)/2. Returns a pointer into `reg` (valid until the next mutating call), or NULL if no match. */
 const OcModelEntry *oc_model_registry_find(const OcModelRegistry *reg,
                                            const char *query);
 
-/* List all entries sorted by `key`. Writes pointers to registry entries
- * (in sorted order) into `out` (cap slots). Returns the number of entries
- * written (min(count, cap)). `out` may be NULL to just retrieve the count.
- * The pointers alias into `reg` and are valid until the next mutating call. */
+/* List all entries sorted by `key`. Writes pointers to registry entries (in sorted order) into `out` (cap slots). Returns the number of entries written (min(count, cap)). `out` may be NULL to just retrieve the count. The pointers alias into `reg` and are valid until the next mutating call. */
 size_t oc_model_registry_list(const OcModelRegistry *reg,
                               OcModelSortKey key,
                               const OcModelEntry **out, size_t cap);
 
-/* Format the registry as a JSON array into `buf` (cap bytes). Returns
- * bytes written excluding NUL, or 0 on overflow / NULL args. Each entry is
- * an object with path, name, arch, quant_type, size_bytes, n_params,
- * n_layers, n_embd, vocab_size, loaded_at (unix epoch). */
+/* Format the registry as a JSON array into `buf` (cap bytes). Returns bytes written excluding NUL, or 0 on overflow or NULL args. */
 size_t oc_model_registry_format(const OcModelRegistry *reg,
                                 char *buf, size_t cap);
 

@@ -1,9 +1,4 @@
-/*
- * chat_mode.h — Interactive chat mode for the CLI.
- *
- * Provides a REPL-style chat interface with multi-turn conversation
- * support, using the chat template formatting from chat.h.
- */
+/* chat_mode.h — Interactive chat mode for the CLI. */
 #ifndef OXIDIZE_CHAT_MODE_H
 #define OXIDIZE_CHAT_MODE_H
 

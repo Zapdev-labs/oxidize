@@ -193,7 +193,6 @@ Test(inf, encode_decode_roundtrip)
     oc_inf_engine_free(&engine);
 }
 
-/* ─── OcInferenceConfig tests ─────────────────────────────────────────── */
 
 Test(inf_cfg, init_defaults)
 {
@@ -226,7 +225,6 @@ Test(inf_cfg, head_dim)
 {
     OcInferenceConfig cfg;
     oc_inference_config_init(&cfg);
-    /* hidden=4096, heads=32 -> head_dim=128 */
     cr_assert_eq(oc_inference_config_head_dim(&cfg), 128);
 }
 
@@ -248,7 +246,6 @@ Test(inf_cfg, effective_rope_dim_default)
 {
     OcInferenceConfig cfg;
     oc_inference_config_init(&cfg);
-    /* rope_dim=0 -> falls back to head_dim=128 */
     cr_assert_eq(oc_inference_config_effective_rope_dim(&cfg), 128);
 }
 
@@ -264,7 +261,6 @@ Test(inf_cfg, kv_head_dim_default)
 {
     OcInferenceConfig cfg;
     oc_inference_config_init(&cfg);
-    /* key_value_head_dim=0 -> falls back to head_dim=128 */
     cr_assert_eq(oc_inference_config_kv_head_dim(&cfg), 128);
 }
 
@@ -407,7 +403,7 @@ Test(inf_cfg, layer_rope_theta_default)
 {
     OcInferenceConfig cfg;
     oc_inference_config_init(&cfg);
-    /* No SWA theta set -> all layers use rope_theta */
+    /* Layer 0 is local -> uses rope_theta_swa */
     cr_assert_float_eq(oc_inference_config_layer_rope_theta(&cfg, 0), 10000.0f, 0.01f);
     cr_assert_float_eq(oc_inference_config_layer_rope_theta(&cfg, 5), 10000.0f, 0.01f);
 }
@@ -506,7 +502,6 @@ Test(inf_cfg, apply_rope_head_null)
     /* Should not crash. */
 }
 
-/* ─── Model arch trait method tests ───────────────────────────────────── */
 
 Test(arch_traits, sliding_window)
 {

@@ -1,17 +1,4 @@
-/* test_tokenizer_wp.c — Criterion tests for the WordPiece tokenizer
- * (BERT `##` continuation).
- *
- * Covers:
- *   VAL-TOK-008 — WordPiece ## continuation correct
- *   VAL-TOK-010 — Dispatch by tokenizer.ggml.model key (bert)
- *   VAL-TOK-011 — Parity vs Rust LoadedTokenizer (toy WP parity with
- *                 Rust `WordPieceTokenizer` unit tests).
- *
- * Parity reference: oxidize-core/src/format/tokenizer.rs `#[cfg(test)]`:
- *   - `wordpiece_encodes_with_greedy_longest_match`
- *   - `wordpiece_uses_unknown_for_unmatched_word`
- *   - `wordpiece_decode_errors_on_unknown_id`
- */
+/* test_tokenizer_wp.c — Criterion tests for the WordPiece tokenizer VAL-TOK-008 — WordPiece ## continuation correct VAL-TOK-010 — Dispatch by tokenizer.ggml.model key (bert) */
 
 #define _POSIX_C_SOURCE 200809L  /* mkstemp */
 
@@ -28,7 +15,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static void assert_ids_eq(const uint32_t *actual, size_t actual_count,
                           const uint32_t *expected, size_t expected_count)
@@ -43,17 +29,7 @@ static void assert_ids_eq(const uint32_t *actual, size_t actual_count,
     }
 }
 
-/* ─── Greedy longest match (VAL-TOK-008) ─────────────────────────────────
- * Mirrors Rust `wordpiece_encodes_with_greedy_longest_match`:
- *   vocab = ["play", "##ing", "##er", " "]
- *   encode("player playing") -> decode -> "player playing"
- *   encoded.len() == 5
- *
- * "player" splits to ["play", "##er"] (greedy longest: "play" (4 chars)
- * matches first, then "##er" (2 chars) matches the suffix).
- * " " is one whitespace token.
- * "playing" splits to ["play", "##ing"].
- * Total: 2 + 1 + 2 = 5 tokens. */
+/* ─── Greedy longest match (VAL-TOK-008) ───────────────────────────────── Mirrors Rust `wordpiece_encodes_with_greedy_longest_match`: vocab = ["play", "##ing", "##er", " "] encode("player playing") -> decode -> "player playing" encoded.len() == 5 "player" splits to ["play", "##er"] (greedy longest: "play" (4 chars) matches first, then "##er" (2 chars) matches the suffix). */
 
 Test(tokenizer_wp, greedy_longest_match)
 {
@@ -88,8 +64,6 @@ Test(tokenizer_wp, greedy_longest_match)
     oc_arena_free(arena);
 }
 
-/* ─── `##` continuation correct on decode ────────────────────────────────
- * Explicitly verify the ## prefix is stripped on decode. */
 
 Test(tokenizer_wp, continuation_prefix_stripped_on_decode)
 {
@@ -112,13 +86,6 @@ Test(tokenizer_wp, continuation_prefix_stripped_on_decode)
     oc_arena_free(arena);
 }
 
-/* ─── Unknown token fallback ─────────────────────────────────────────────
- * Mirrors Rust `wordpiece_uses_unknown_for_unmatched_word`:
- *   vocab = ["hello", "world", " "] + unk("<unk>")
- *   encode("hello mars") -> decode -> "hello <unk>"
- *
- * "mars" cannot be split (no matching pieces), so the whole word becomes
- * <unk>. The space between "hello" and "mars" is emitted as its own id. */
 
 Test(tokenizer_wp, unknown_for_unmatched_word)
 {
@@ -147,8 +114,6 @@ Test(tokenizer_wp, unknown_for_unmatched_word)
     oc_arena_free(arena);
 }
 
-/* ─── Decode unknown id returns error ────────────────────────────────────
- * Mirrors Rust `wordpiece_decode_errors_on_unknown_id`. */
 
 Test(tokenizer_wp, decode_unknown_id_returns_error)
 {
@@ -168,7 +133,6 @@ Test(tokenizer_wp, decode_unknown_id_returns_error)
     oc_arena_free(arena);
 }
 
-/* ─── Empty input ──────────────────────────────────────────────────────── */
 
 Test(tokenizer_wp, empty_input_returns_empty)
 {
@@ -195,14 +159,10 @@ Test(tokenizer_wp, empty_input_returns_empty)
     oc_arena_free(arena);
 }
 
-/* ─── Continuation at non-zero offset only ──────────────────────────────
- * A `##ing` token only matches when start_idx > 0 within a word. Encoding
- * "ing" (a whole word) should NOT match "##ing". */
 
 Test(tokenizer_wp, continuation_only_at_nonzero_offset)
 {
     OcArena *arena = oc_arena_new(0);
-    /* vocab: "play", "##ing", "ing" — "ing" is a whole-word token. */
     const char *vocab[] = { "play", "##ing", "ing" };
     OcWordPieceTokenizer *wp = NULL;
     OcError e = oc_wp_new(vocab, 3, arena, &wp);
@@ -237,10 +197,6 @@ Test(tokenizer_wp, continuation_only_at_nonzero_offset)
     oc_arena_free(arena);
 }
 
-/* ─── Multibyte whitespace ──────────────────────────────────────────────
- * WordPiece flushes on Unicode whitespace (mirrors Rust
- * `char::is_whitespace`). Verify non-breaking space (U+00A0) and
- * ideographic space (U+3000) flush the current word. */
 
 Test(tokenizer_wp, multibyte_whitespace_flushes_word)
 {
@@ -270,9 +226,6 @@ Test(tokenizer_wp, multibyte_whitespace_flushes_word)
     oc_arena_free(arena);
 }
 
-/* ─── GGUF load (BERT) ───────────────────────────────────────────────────
- * Builds a synthetic GGUF with tokenizer.ggml.model = "bert" and verifies
- * dispatch + encode/decode round-trip. */
 
 Test(tokenizer_wp, load_from_gguf_bert)
 {

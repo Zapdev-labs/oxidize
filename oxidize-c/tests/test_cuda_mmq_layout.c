@@ -1,20 +1,4 @@
-/* test_cuda_mmq_layout.c — host mirror of the device matvec block layouts.
- *
- * The kernels in src/backends/cuda_mmq.cu can only be built by nvcc and only
- * run on a GPU, so their index math is not otherwise reachable from the test
- * suite. That math — which super-block a group lands in, where its scale bits
- * are split, which nibble half maps to which element of x — is exactly the
- * part that silently produces plausible-looking garbage when it is wrong.
- *
- * These tests re-implement the per-group dot products here, byte for byte
- * against the same layout the device code walks, and check them against
- * oc_quant_dequant_row_scalar + a plain dot product. A divergence means the
- * .cu kernel is wrong in the same way, because the two are written from the
- * same layout description.
- *
- * Keep the MIRROR_* functions structurally identical to their mq_*_group_dot
- * counterparts. If one changes, change both.
- */
+/* test_cuda_mmq_layout.c — host mirror of the device matvec block layouts. */
 #include <criterion/criterion.h>
 
 #include <math.h>
@@ -172,10 +156,6 @@ Test(cuda_mmq_layout, iq4_xs_expand_matches_dequant)
     free(packed); free(ref); free(got);
 }
 
-/* The group dot must agree with dequantize-then-dot. This is the check that
- * catches a mis-split scale or a swapped nibble half: those still produce
- * finite, reasonable-magnitude numbers, so only a reference comparison finds
- * them. */
 Test(cuda_mmq_layout, iq4_xs_group_dot_matches_reference)
 {
     const size_t cols = MIRROR_QK_K * 5;
@@ -235,10 +215,7 @@ Test(cuda_mmq_layout, iq4_xs_row_dot_matches_reference)
     free(packed); free(ref); free(x);
 }
 
-/* Every IQ4_XS row length in Gemma 4 31B must be a whole number of
- * super-blocks, or oc_cuda_mmq_supported() rejects the tensor and it silently
- * falls back to the f32 upload path — which for this model does not fit in
- * VRAM. Guard the shapes the loader will actually see. */
+/* Every IQ4_XS row length in Gemma 4 31B must be a whole number of super-blocks, or oc_cuda_mmq_supported() rejects the tensor and it silently falls back to the f32 upload path — which for this model does not fit in VRAM. Guard the shapes the loader will actually see. */
 Test(cuda_mmq_layout, gemma4_row_lengths_are_block_aligned)
 {
     /* Row length = ne0 for each IQ4_XS tensor in gemma-4-31B-it-IQ4_XS.gguf:
@@ -252,12 +229,6 @@ Test(cuda_mmq_layout, gemma4_row_lengths_are_block_aligned)
     }
 }
 
-/* ─── Q5_K mirror ────────────────────────────────────────────────────────
- *
- * oc_quant_pack_row cannot produce Q5_K, but any random byte pattern is a
- * structurally valid block (every field is a plain bitfield), so random
- * packed blocks + oc_quant_dequant_row_scalar make a reference. Keep this
- * structurally identical to cuda_mmq.cu::mq_q5k_group_dot. */
 #define MIRROR_Q5_K_BLOCK 176u
 
 static void mirror_scale_min_k4(uint32_t j, const uint8_t *scales,

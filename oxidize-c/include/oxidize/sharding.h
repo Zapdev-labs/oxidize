@@ -1,14 +1,4 @@
-/*
- * sharding.h — Mesh model sharding for tensor parallelism.
- *
- * Splits tensors across multiple nodes according to a strategy (ROW,
- * COLUMN, or BLOCK). Each tensor is described by (n_rows, n_cols) and the
- * shard manager computes per-shard [start_row, end_row] x [start_col, end_col]
- * ranges so that the union of all shards covers the whole tensor.
- *
- * Transport-agnostic: callers are responsible for shipping shard data to
- * the appropriate node based on shard_id.
- */
+/* sharding.h — Mesh model sharding for tensor parallelism. */
 #ifndef OXIDIZE_SHARDING_H
 #define OXIDIZE_SHARDING_H
 
@@ -22,12 +12,10 @@
 extern "C" {
 #endif
 
-/* ─── Constants ──────────────────────────────────────────────────────── */
 
 #define OC_SHARD_MAX_TENSORS  64u
 #define OC_SHARD_NAME_LEN    128u
 
-/* ─── Types ─────────────────────────────────────────────────────────── */
 
 /* Sharding strategy. Values are stable for serialization. */
 typedef enum {
@@ -58,7 +46,6 @@ typedef struct OcShardManager {
     uint32_t      n_shards;     /* number of shard records currently stored */
 } OcShardManager;
 
-/* ─── Config helpers ────────────────────────────────────────────────── */
 
 /* Initialize config with defaults. */
 OcError oc_shard_config_init(OcShardConfig *cfg);
@@ -66,7 +53,6 @@ OcError oc_shard_config_init(OcShardConfig *cfg);
 /* Human-readable strategy name (e.g. "ROW"). Never NULL. */
 const char *oc_shard_strategy_name(OcShardStrategy strategy);
 
-/* ─── Lifecycle ─────────────────────────────────────────────────────── */
 
 /* Allocate a shard manager. `config` may be NULL (defaults are used).
  * Free with oc_shard_free. */
@@ -75,13 +61,8 @@ OcError oc_shard_init(const OcShardConfig *config, OcShardManager **out);
 /* Free all owned storage and reset state. Safe on NULL / already-freed. */
 void oc_shard_free(OcShardManager *mgr);
 
-/* ─── Assignment ─────────────────────────────────────────────────────── */
 
-/* Compute and store shard assignments for `tensor_name` of shape
- * (n_rows, n_cols). Splits into `config.n_shards` parts according to the
- * configured strategy. Each shard's size_bytes is set to
- * (end_row-start_row)*(end_col-start_col)*sizeof(float). Returns
- * OC_ERR_INVALID_ARG if n_shards is 0 or dims are 0. */
+/* Compute and store shard assignments for `tensor_name` of shape (n_rows, n_cols). Splits into `config.n_shards` parts according to the configured strategy. Each shard's size_bytes is set to (end_row-start_row)*(end_col-start_col)*sizeof(float). Returns OC_ERR_INVALID_ARG if n_shards is 0 or dims are 0. */
 OcError oc_shard_assign(OcShardManager *mgr, const char *tensor_name,
                         uint32_t n_rows, uint32_t n_cols);
 
@@ -91,16 +72,12 @@ OcError oc_shard_get_assignment(const OcShardManager *mgr,
                                 const char *tensor_name, uint32_t shard_id,
                                 OcShardInfo *out_info);
 
-/* Copy up to `max` shard assignments for `tensor_name` into `out_array`.
- * Sets *out_count to the number written. Pass NULL for out_array to just
- * count. If `tensor_name` is NULL, returns all assignments across all
- * tensors. */
+/* Copy up to `max` shard assignments for `tensor_name` into `out_array`. Pass NULL for `out_array` to count only. If `tensor_name` is NULL, returns assignments across all tensors. Sets `*out_count` to the full match count. */
 OcError oc_shard_get_all_assignments(const OcShardManager *mgr,
                                      const char *tensor_name,
                                      OcShardInfo *out_array, uint32_t max,
                                      uint32_t *out_count);
 
-/* ─── Queries ────────────────────────────────────────────────────────── */
 
 /* Number of shard records currently stored. */
 uint32_t oc_shard_n_shards(const OcShardManager *mgr);

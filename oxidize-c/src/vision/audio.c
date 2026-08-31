@@ -1,17 +1,4 @@
-/*
- * audio.c — Audio multimodal module implementation.
- *
- * Provides the audio processing pipeline for the C port:
- *   - WAV file parsing (RIFF/WAVE, 16-bit PCM)
- *   - Hann window application
- *   - Simple DFT (O(n^2), no FFTW dependency)
- *   - Mel filter bank computation (triangular, Slaney mel scale)
- *   - Mel spectrogram: frame -> window -> FFT -> mel filter -> log
- *   - Audio encoder: mel -> linear projection + positional embeddings
- *   - Prompt formatting: <audio> token + audio embedding + text
- *
- * Port of the conceptual oxidize-core audio multimodal path.
- */
+/* audio.c — Audio multimodal module implementation. */
 #include "oxidize/audio.h"
 
 #include <math.h>
@@ -24,12 +11,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* ─── Mel scale (Slaney) ───────────────────────────────────────────────── */
 
 #define OC_MEL_F_SP        (200.0f / 3.0f)  /* ~66.667 */
 #define OC_MEL_MIN_LOG_HZ  1000.0f
 #define OC_MEL_MIN_LOG_MEL (1000.0f / OC_MEL_F_SP) /* 15.0 */
-/* logf() is not a constant expression in C11; keep the literal. */
 #define OC_MEL_LOGSTEP     0.06875177742094912f /* logf(6.4f) / 27.0f */
 
 float oc_audio_hz_to_mel(float hz)
@@ -48,7 +33,6 @@ float oc_audio_mel_to_hz(float mel)
     return OC_MEL_MIN_LOG_HZ * expf(OC_MEL_LOGSTEP * (mel - OC_MEL_MIN_LOG_MEL));
 }
 
-/* ─── Lifecycle ───────────────────────────────────────────────────────── */
 
 OcError oc_audio_init(OcAudioEncoder *enc, const OcAudioConfig *cfg,
                        uint32_t hidden_dim, uint32_t n_layers)
@@ -87,7 +71,6 @@ void oc_audio_wav_free(OcAudioWav *wav)
     memset(wav, 0, sizeof(*wav));
 }
 
-/* ─── WAV file parsing (RIFF/WAVE, 16-bit PCM) ─────────────────────────── */
 
 /* Read a little-endian 16-bit value from a byte buffer. */
 static uint16_t oc_read_u16_le(const uint8_t *p)
@@ -121,7 +104,6 @@ OcError oc_audio_load_wav(const char *path, OcAudioWav *out)
         fclose(fp);
         return OC_ERR_FORMAT;
     }
-    /* bytes 8-11 should be "WAVE" */
     if (memcmp(riff_hdr + 8, "WAVE", 4) != 0) {
         fclose(fp);
         return OC_ERR_FORMAT;
@@ -243,7 +225,6 @@ OcError oc_audio_load_wav(const char *path, OcAudioWav *out)
     return OC_OK;
 }
 
-/* ─── Hann window ──────────────────────────────────────────────────────── */
 
 OcError oc_audio_hann_window(float *out, uint32_t n)
 {
@@ -258,7 +239,6 @@ OcError oc_audio_hann_window(float *out, uint32_t n)
     return OC_OK;
 }
 
-/* ─── Simple DFT (O(n^2)) ──────────────────────────────────────────────── */
 
 OcError oc_audio_dft(const float *input, uint32_t n, float *out_mag)
 {
@@ -281,7 +261,6 @@ OcError oc_audio_dft(const float *input, uint32_t n, float *out_mag)
     return OC_OK;
 }
 
-/* ─── Mel filter bank (triangular, Slaney) ──────────────────────────────── */
 
 OcError oc_audio_mel_filterbank(const OcAudioConfig *cfg,
                                  float *out_filterbank,
@@ -361,7 +340,6 @@ OcError oc_audio_mel_filterbank(const OcAudioConfig *cfg,
     return OC_OK;
 }
 
-/* ─── Frame count utility ──────────────────────────────────────────────── */
 
 uint32_t oc_audio_n_frames(uint32_t n_samples, uint32_t n_fft,
                            uint32_t hop_length)
@@ -370,7 +348,6 @@ uint32_t oc_audio_n_frames(uint32_t n_samples, uint32_t n_fft,
     return 1 + (n_samples - n_fft) / hop_length;
 }
 
-/* ─── Mel spectrogram computation ──────────────────────────────────────── */
 
 OcError oc_audio_compute_mel(const OcAudioConfig *cfg,
                               const float *samples, size_t n_samples,
@@ -497,7 +474,6 @@ OcError oc_audio_compute_mel_from_wav(const OcAudioConfig *cfg,
     return e;
 }
 
-/* ─── Audio encoder ────────────────────────────────────────────────────── */
 
 OcError oc_audio_encode(OcAudioEncoder *enc, const OcAudioFeatures *feats,
                          float *out_hidden, size_t *out_len)
@@ -598,7 +574,6 @@ OcError oc_audio_encode(OcAudioEncoder *enc, const OcAudioFeatures *feats,
     return OC_OK;
 }
 
-/* ─── Multimodal prompt formatting ──────────────────────────────────────── */
 
 OcError oc_audio_format_prompt(const float *audio_embeddings,
                                 size_t n_embeddings,

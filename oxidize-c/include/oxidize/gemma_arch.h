@@ -1,35 +1,4 @@
-/*
- * gemma_arch.h — Gemma architecture forward pass.
- *
- * Gemma (Google) is structurally close to Llama/Mistral but with two
- * distinguishing features:
- *   - GeGLU activation (tanh-approximated GELU gated FFN) instead of
- *     Llama's SwiGLU (SiLU-gated FFN).
- *   - Embedding scaling factor: the token-embedding lookup is multiplied
- *     by sqrt(hidden_dim) before the first layer. This is the most
- *     commonly-forgotten Gemma-specific quirk and is captured here as
- *     `embedding_scale` (default sqrt(hidden_dim)).
- *
- * Gemma also uses RoPE (theta default 10000.0) and Grouped-Query
- * Attention (GQA). Gemma-1 uses a single KV head; Gemma-2/3/4 add
- * interleaved local/global sliding-window attention layers and
- * sandwich normalization (handled by the model loader when present).
- *
- * Port of oxidize-core/src/model/inference.rs::ModelArchitecture::Gemma
- * forward path to the C11 port. The forward function is a stub that
- * allocates a logits buffer sized by the model config, fills it with
- * zeros, and returns OC_OK.
- *
- * Weight tensor canonical names (after HF → oxidize mapping):
- *   tok_embeddings.weight
- *   output.weight (tied with embeddings in some Gemma variants)
- *   norm.weight
- *   blk.N.attn_q.weight, blk.N.attn_k.weight, blk.N.attn_v.weight,
- *   blk.N.attn_output.weight
- *   blk.N.attn_norm.weight, blk.N.ffn_norm.weight,
- *   blk.N.post_attention_norm.weight, blk.N.post_ffw_norm.weight (Gemma 2+)
- *   blk.N.ffn_gate.weight, blk.N.ffn_up.weight, blk.N.ffn_down.weight
- */
+/* gemma_arch.h — Gemma architecture forward pass. */
 #ifndef OXIDIZE_GEMMA_ARCH_H
 #define OXIDIZE_GEMMA_ARCH_H
 
@@ -43,11 +12,7 @@
 extern "C" {
 #endif
 
-/* Gemma model configuration. Defaults populated by oc_gemma_config_init()
- * match the Gemma-2B reference:
- *   n_layers=18, n_heads=8, n_kv_heads=1, head_dim=256, hidden_dim=2048,
- *   intermediate_dim=16384, vocab_size=256000,
- *   embedding_scale=sqrt(hidden_dim), rope_theta=10000.0. */
+/* Gemma model configuration. Defaults populated by oc_gemma_config_init() */
 typedef struct OcGemmaConfig {
     uint32_t n_layers;
     uint32_t n_heads;

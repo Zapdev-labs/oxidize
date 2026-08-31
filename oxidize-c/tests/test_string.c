@@ -77,4 +77,3 @@ Test(string, parse_i64_f64)
     cr_assert(d > 3.13 && d < 3.15, "");
     cr_assert(!oc_parse_f64("not-a-num", &d), "");
 }
-

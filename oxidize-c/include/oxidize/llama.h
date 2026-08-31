@@ -1,18 +1,4 @@
-/*
- * llama.h — Llama-family dense forward pass (CPU, scalar + SIMD dequant).
- *
- * Port of oxidize-core/src/model/inference.rs (the Llama/Mistral path of
- * `InferenceModel::forward_single`). Implements: token embedding lookup,
- * per-layer RMSNorm → GQA attention (RoPE, online softmax) → SwiGLU FFN,
- * final RMSNorm + lm_head. Weight matrices are read zero-copy from the
- * mmap'd GGUF; matvec dequantizes one row at a time via the SIMD-accelerated
- * `oc_quant_dequant_row`.
- *
- * Scope of the `cpu-llama-forward` feature: the standard Llama/Mistral
- * dense path. MoE (Qwen3-MoE), MLA (DeepSeek), Gemma sandwich-norm, and
- * YaRN scaling are added by later features. Tied embeddings (output.weight
- * absent) are supported.
- */
+/* llama.h — Llama-family dense forward pass (CPU, scalar + SIMD dequant). */
 #ifndef OXIDIZE_LLAMA_H
 #define OXIDIZE_LLAMA_H
 
@@ -29,7 +15,6 @@
 extern "C" {
 #endif
 
-/* ─── Config (port of InferenceConfig, Llama-relevant subset) ──────────── */
 typedef struct OcLlamaConfig {
     uint32_t vocab_size;
     uint32_t n_embd;        /* hidden_size                          */
@@ -62,24 +47,6 @@ typedef struct OcLlamaConfig {
      * window size in tokens (0 = no sliding window). */
     uint32_t sliding_window;            /* 0 = disabled                         */
     uint32_t sliding_window_pattern;   /* 1 = all global, 2 = alternating     */
-    /* ── Gemma 4 dual-geometry attention ──────────────────────────────────
-     *
-     * Gemma 4 does not merely alternate *window size* between layers the way
-     * Gemma 2 does — sliding and global layers have genuinely different
-     * attention shapes, so a single head_dim/n_head_kv cannot describe the
-     * model. In gemma-4-31B-it, 50 sliding layers use head_dim 256 with 16 KV
-     * heads and rope theta 1e4, while 10 global layers use head_dim 512 with
-     * 4 KV heads and rope theta 1e6. The GGUF reflects this by storing
-     * attention.head_count_kv as a 60-element ARRAY rather than a scalar.
-     *
-     * The non-suffixed fields above (head_dim, n_head_kv, rope_dim,
-     * rope_theta) carry the GLOBAL-layer geometry; the _swa fields here carry
-     * the sliding-layer geometry. `layer_is_swa` gives the per-layer pattern
-     * directly from metadata rather than inferring it from a modulus, because
-     * the pattern is data, not arithmetic.
-     *
-     * When uses_gemma4 is false every _swa field mirrors its base field, so
-     * geometry lookups are uniform for all other architectures. */
     bool     uses_gemma4;
     uint32_t head_dim_swa;             /* sliding-layer head dim (256)         */
     uint32_t n_head_kv_swa;            /* sliding-layer KV heads (16)          */
@@ -93,17 +60,9 @@ typedef struct OcLlamaConfig {
      * Gemma 4 uses 30.0; skipping it measurably distorts the sampling
      * distribution, so it is correctness, not a tuning knob. */
     float    logit_softcap;
-    /* Global layers ship no attn_v tensor at all — V is the same projection
-     * as K (config.json `attention_k_eq_v`). The loader aliases attn_v onto
-     * attn_k for those layers, and the KV cache stores one buffer instead of
-     * two, halving global-layer cache footprint. */
+    /* Global layers ship no attn_v tensor at all — V is the same projection as K (config.json `attention_k_eq_v`). The loader aliases attn_v onto attn_k for those layers, and the KV cache stores one buffer instead of two, halving global-layer cache footprint. */
     bool     k_eq_v;
-    /* Pre-attention score scale. Gemma 4 sets this to 1.0 — it applies NO
-     * 1/sqrt(head_dim) factor (llama.cpp: hparams.f_attention_scale = 1.0f,
-     * "Gemma4 uses self.scaling = 1.0"). 0 means "use the usual
-     * 1/sqrt(head_dim)", which is every other architecture. Getting this wrong
-     * is not subtle: dividing scores by sqrt(512) flattens the softmax toward
-     * uniform, so attention returns roughly the mean of V. */
+    /* Pre-attention score scale. Gemma 4 sets this to 1.0 — it applies NO 1/sqrt(head_dim) factor (llama.cpp: hparams.f_attention_scale = 1.0f, "Gemma4 uses self.scaling = 1.0"). 0 means "use the usual 1/sqrt(head_dim)", which is every other architecture. Getting this wrong is not subtle: dividing scores by sqrt(512) flattens the softmax toward uniform, so attention returns roughly the mean of V. */
     float    attn_scale;
     /* Gemma 4 RMS-normalizes V after projection with NO weight tensor —
      * a plain normalization, not a learned one. */
@@ -118,21 +77,11 @@ typedef struct OcLlamaConfig {
     uint32_t mla_q_rope_dim;           /* RoPE dim for q_pe                        */
     uint32_t mla_kv_nope_head_dim;     /* per-head nope dim (k_b output / n_heads) */
     uint32_t mla_v_head_dim;           /* per-head v dim (v_b output / n_heads)    */
-    /* LongCat (ScMoE + MLA + n-gram over-embedding).
-     *
-     * LongCat packs TWO attention+FFN sub-blocks into each GGUF `blk.N`, so
-     * `n_layer` is 2 * longcat.block_count and per-sub-block tensors carry a
-     * `_0`/`_1` suffix. Router, expert pool and indexer appear once per
-     * `blk.N` and attach to the even sub-layer 2N. */
+    /* LongCat (ScMoE + MLA + n-gram over-embedding). */
     bool     is_longcat;
     uint32_t zero_expert_count;        /* identity experts appended after routed  */
-    /* deepseek_yarn parameters. Absent from GGUF metadata — LongCat's
-     * config.json sets both mscale terms to 1, which makes
-     * the RoPE attn factor exactly 1.0 and folds a 1.4787^2 term into the
-     * softmax scale instead. See oc_rope_deepseek_yarn_scales(). */
     float    yarn_mscale;
     float    yarn_mscale_all_dim;
-    /* n-gram over-embedding: (neighbor_num - 1) * split_num tables. */
     uint32_t ngram_n_grams;
     uint32_t ngram_split_num;
     /* Qwen3.5 hybrid attention. block_count includes optional trailing MTP
@@ -148,21 +97,9 @@ typedef struct OcLlamaConfig {
     uint32_t ssm_value_heads;
     uint32_t ssm_inner_size;
     uint32_t shared_expert_intermediate_size;
-    /* ── Muse Glimmer ─────────────────────────────────────────────────────
-     *
-     * Meta's Muse-Glimmer-30B (GGUF arch "muse-glimmer") is a dense
-     * transformer that reuses pieces already present here — Gemma's sandwich
-     * norms, Gemma 4's per-layer sliding-window pattern, Gemma's per-head
-     * QK-norm, Gemma's final-logit softcap — plus four things nothing else
-     * needed. They are expressed as behaviour flags rather than an
-     * `is_muse` switch so each one reads as what it does. */
     /* The token embedding is RMS-normalized (no weight) before layer 0.
      * llama.cpp: build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1). */
     bool     embd_rms_norm;
-    /* sigmoid(W_gate · attn_norm(x)) gates the attention output elementwise
-     * before the output projection. The gate is n_head*head_dim wide and is
-     * computed from the PRE-attention normed hidden state, not from the
-     * attention output. */
     bool     attn_out_gate;
     /* RoPE runs only on sliding-window layers; global layers are NoPE.
      * Resolved per layer into OcLlamaLayer.use_rope. */
@@ -173,11 +110,7 @@ typedef struct OcLlamaConfig {
     float    post_norm_eps;
     /* Final logits are multiplied by this before the softcap. 0 = 1.0. */
     float    logit_scale;
-    /* RoPE pairs dimensions (2i, 2i+1) instead of (i, i + rope_dim/2) —
-     * llama.cpp's LLAMA_ROPE_TYPE_NORM. The two conventions assign different
-     * frequencies to the same dimension, so this is correctness, not style:
-     * with the wrong one the model stays locally fluent and drifts within a
-     * couple of dozen tokens. */
+    /* RoPE pairs dimensions (2i, 2i+1) instead of (i, i + rope_dim/2) — llama.cpp's LLAMA_ROPE_TYPE_NORM. The two conventions assign different frequencies to the same dimension, so this is correctness, not style: with the wrong one the model stays locally fluent and drifts within a couple of dozen tokens. */
     bool     rope_norm_pairs;
 } OcLlamaConfig;
 
@@ -226,10 +159,7 @@ typedef struct OcLlamaLayer {
     OcWeightView mla_v_b;               /* v_b_proj: [n_heads*v_head_dim, kv_lora_dim] */
     float *mla_q_a_norm;                /* owned f32, length q_lora_dim */
     float *mla_kv_a_norm;               /* owned f32, length kv_lora_dim */
-    /* LongCat router bias (`blk.N.exp_probs_b.bias`), owned f32 of length
-     * num_experts + zero_expert_count. Added to the router logits for
-     * SELECTION only — the gate weight applied to an expert's output is the
-     * unbiased probability. NULL when absent. */
+    /* LongCat router bias (`blk.N.exp_probs_b.bias`), owned f32 of length num_experts + zero_expert_count. Added to the router logits for SELECTION only — the gate weight applied to an expert's output is the unbiased probability. NULL when absent. */
     float *exp_probs_b;
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
@@ -243,13 +173,6 @@ typedef struct OcLlamaLayer {
     float *attn_q_bias;
     float *attn_k_bias;
     float *attn_v_bias;
-    /* ── Gemma-family extra norms (all owned f32, NULL when absent) ────────
-     *
-     * Gemma applies RMSNorm to Q and K per head *after* projection and before
-     * RoPE (lengths are the layer's own head_dim — 256 on sliding layers, 512
-     * on global ones, so these are not interchangeable between layers), and
-     * wraps each residual branch in a second "sandwich" norm applied to the
-     * branch output before it is added back. */
     float *attn_q_norm;         /* length = this layer's head_dim   */
     float *attn_k_norm;         /* length = this layer's head_dim   */
     float *post_attention_norm; /* length n_embd, applied to attn branch out */
@@ -298,25 +221,12 @@ typedef struct OcLlamaModel {
      * forward. Per-model (views into this model's mmap). */
     OcWeightView     gpt2_pos_embed;
     bool             gpt2_pos_resolved;
-    /* LongCat n-gram over-embedding. `cfg.ngram_n_grams` tables (16 for
-     * LongCat-2.0), each a hashed embedding of width mla_kv_lora_dim (512)
-     * projected back up to n_embd. Row counts differ per table and are read
-     * from each tensor's own shape, never recomputed. Unused views are
-     * zeroed. */
+    /* LongCat n-gram over-embedding. */
     OcWeightView     ngram_embd[OC_LONGCAT_MAX_NGRAM];
     OcWeightView     ngram_proj[OC_LONGCAT_MAX_NGRAM];
 } OcLlamaModel;
 
-/* KV cache element type.
- *
- * The cache is allocated for the full n_ctx up front, so on long-context
- * models it can dwarf the weights — a 128k-context model can want tens of GB
- * of f32 KV. Q8 stores one int8 per element plus one f32 scale per
- * (layer, position, kv head), cutting that ~4x for a quantization error far
- * below the model's own weight quantization.
- *
- * F32 is the default so existing behaviour is bit-for-bit unchanged; select
- * Q8 explicitly with oc_llama_session_init_kv(), or set OX_KV_TYPE=q8. */
+/* KV cache element type. */
 typedef enum {
     OC_KV_F32 = 0,
     OC_KV_Q8  = 1,
@@ -325,12 +235,7 @@ typedef enum {
 /* Per-sequence KV cache + scratch workspace. One session = one sequence. */
 typedef struct OcLlamaSession {
     OcLlamaModel *model;
-    /* KV cache: [n_layer][n_ctx][n_head_kv * kv_head_dim].
-     * kv_type == OC_KV_F32: kv_k/kv_v hold f32 values; the quantized code
-     *   and scale pointers are NULL.
-     * kv_type == OC_KV_Q8:  kv_k_q/kv_v_q hold int8 codes with the same
-     *   indexing, kv_k_scale/kv_v_scale hold one f32 per
-     *   (layer, pos, kv_head), and kv_k/kv_v are NULL. */
+    /* KV cache: [n_layer][n_ctx][n_head_kv * kv_head_dim]. */
     float *kv_k;
     float *kv_v;
     OcKvCacheType kv_type;
@@ -396,12 +301,6 @@ typedef struct OcLlamaSession {
     uint32_t mtp_pos;
 } OcLlamaSession;
 
-/* ─── Batched decode ─────────────────────────────────────────────────────
- *
- * Processes multiple sequences in a single forward pass. Each sequence has
- * its own KV cache view and position, but they share the weight matrices
- * (better cache locality than sequential processing).
- */
 
 #define OC_MAX_BATCH_SEQ 16
 
@@ -487,10 +386,7 @@ OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx,
  * reporting and for deciding whether a context length is affordable. */
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
 
-/* Run one forward step: embed `token`, advance position, write logits_out
- * (length model->cfg.vocab_size). Returns OC_OK or OC_ERR_INVALID_ARG.
- * `logits_out` may be NULL to skip the lm_head projection (useful for
- * prompt prefill where only the KV cache matters). */
+/* Run one forward step for each active sequence in the batch. `seqs` is an array of `max_seqs` entries. Only sequences with `active=true` are processed; their `logits` will be filled. */
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out);
 
 bool oc_llama_mtp_present(const OcLlamaModel *model);
@@ -506,25 +402,7 @@ OcError oc_llama_mtp_draft_tokens(OcLlamaSession *sess, uint32_t k,
                                   uint32_t *out_tokens, float *out_conf,
                                   uint32_t *n_out);
 
-/* Prefill a whole prompt, processing `chunk` tokens per pass so they share
- * one sweep over the weights instead of one sweep each.
- *
- * Equivalent to calling oc_llama_forward() for tokens[0..n_tokens), with
- * `logits_out` receiving the LAST token's logits (NULL to skip the lm_head).
- * KV cache entries are written for positions sess->pos .. sess->pos+n-1 and
- * the position advances by n_tokens.
- *
- * `chunk` of 0 selects the default. Models the batched path does not cover
- * (MLA, LongCat, Gemma 4, and the LayerNorm architectures with their own
- * forward passes) fall back to the per-token loop transparently, as does a
- * scratch allocation failure — the result is the same either way.
- *
- * Numerics: every matmul quantizes each activation exactly as the
- * single-vector path does (tiling changes only how many are in flight), so
- * dense models come out bit-identical. MoE models differ at float-rounding
- * level and only there: grouping tokens by expert means a token's expert
- * contributions are summed in expert-index order rather than in descending
- * gate order, and float addition is not associative. */
+/* Prefill a whole prompt, processing `chunk` tokens per pass so they share one sweep over the weights instead of one sweep each. */
 OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
                          size_t n_tokens, size_t chunk, float *logits_out);
 
@@ -537,14 +415,7 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
  * subsequent forwards). Does NOT zero the cache. */
 void oc_llama_session_reset(OcLlamaSession *sess);
 
-/* Rewind position to `pos` (for speculative decoding cache rollback).
- * KV cache entries at positions >= pos will be overwritten on subsequent
- * forwards. Does NOT zero the cache.
- *
- * Only the KV position is restored. Recurrent state (Qwen3.5 DeltaNet conv
- * and recurrent matrices) has already absorbed every token stepped through,
- * and no snapshot of it is kept, so a rewind cannot undo it. That is why
- * oc_speculative_generate() refuses is_qwen35 models outright. */
+/* Rewind position to `pos` (for speculative decoding cache rollback). */
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);

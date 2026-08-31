@@ -99,7 +99,6 @@ Test(beam, result_free)
     cr_assert_eq(result.n_tokens, 0);
 }
 
-/* ─── Speculative decode probability helpers ───────────────────────────── */
 
 Test(beam, residual_probs_basic)
 {
@@ -107,7 +106,6 @@ Test(beam, residual_probs_basic)
     float draft[]  = {0.2f, 0.5f, 0.2f, 0.1f};
     float out[4];
     oc_residual_probs(target, draft, out, 4);
-    /* residual = max(0, t-d) = [0.3, 0, 0, 0], sum=0.3, normalized = [1, 0, 0, 0]. */
     cr_assert_float_eq(out[0], 1.0f, 0.01f);
     cr_assert_float_eq(out[1], 0.0f, 0.01f);
     cr_assert_float_eq(out[2], 0.0f, 0.01f);
@@ -128,16 +126,13 @@ Test(beam, residual_probs_all_zero)
 Test(beam, sample_probabilities_basic)
 {
     float probs[] = {0.0f, 0.5f, 0.5f, 0.0f};
-    /* random=0.0 -> first non-zero cumulative -> index 0 (cumulative 0 <= 0). */
     /* Actually target = 0 * 1.0 = 0, cumulative at 0 = 0, so 0 <= 0 is true. */
     size_t idx = oc_sample_probabilities(probs, 4, 0.0f);
     cr_assert_eq(idx, 0);
 
-    /* random=0.5 -> target = 0.5, cumulative: 0, 0.5 -> 0.5 <= 0.5 -> index 1. */
     idx = oc_sample_probabilities(probs, 4, 0.5f);
     cr_assert_eq(idx, 1);
 
-    /* random=0.99 -> target = 0.99, cumulative: 0, 0.5, 1.0 -> 0.99 <= 1.0 -> index 2. */
     idx = oc_sample_probabilities(probs, 4, 0.99f);
     cr_assert_eq(idx, 2);
 }
@@ -153,12 +148,10 @@ Test(beam, sample_probabilities_argmax_fallback)
 Test(beam, sample_probabilities_weighted)
 {
     float probs[] = {0.1f, 0.9f, 0.0f, 0.0f};
-    /* random=0.5 -> target = 0.5 * 1.0 = 0.5, cumulative: 0.1, 1.0 -> 0.5 <= 1.0 -> index 1. */
     size_t idx = oc_sample_probabilities(probs, 4, 0.5f);
     cr_assert_eq(idx, 1);
 }
 
-/* ─── Repetition penalties ─────────────────────────────────────────────── */
 
 Test(beam, rep_penalty_basic)
 {
@@ -171,9 +164,7 @@ Test(beam, rep_penalty_basic)
         .newline_penalty = 0.0f,
     };
     oc_apply_repetition_penalties(logits, 4, recent, 3, &cfg);
-    /* token 1: freq=2, penalty = 2*0.1 + 0.5 = 0.7 -> 2.0 - 0.7 = 1.3. */
     cr_assert_float_eq(logits[1], 1.3f, 0.001f);
-    /* token 3: freq=1, penalty = 0.1 + 0.5 = 0.6 -> 4.0 - 0.6 = 3.4. */
     cr_assert_float_eq(logits[3], 3.4f, 0.001f);
     /* token 0 and 2: no change. */
     cr_assert_float_eq(logits[0], 1.0f, 0.001f);

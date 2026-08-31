@@ -4,7 +4,6 @@
 
 #include "oxidize/spec_tree.h"
 
-/* ─── Config / lifecycle ───────────────────────────────────────────── */
 
 Test(spec_tree, config_init_defaults)
 {
@@ -57,7 +56,6 @@ Test(spec_tree, free_null_safe)
     oc_spec_tree_free(NULL);
 }
 
-/* ─── Root / child ──────────────────────────────────────────────────── */
 
 Test(spec_tree, add_root)
 {
@@ -140,7 +138,6 @@ Test(spec_tree, max_depth_cap)
     cr_assert_eq(oc_spec_tree_init(&cfg, &t), OC_OK);
     cr_assert_eq(oc_spec_tree_add_root(&t, 1u, 0.0f, NULL), OC_OK);
     cr_assert_eq(oc_spec_tree_add_child(&t, 0, 2u, 0.0f, NULL), OC_OK);
-    /* depth 2 > max_depth 1 -> fails */
     cr_assert_neq(oc_spec_tree_add_child(&t, 1, 3u, 0.0f, NULL), OC_OK);
     oc_spec_tree_free(&t);
 }
@@ -170,7 +167,6 @@ Test(spec_tree, get_node_out_of_range)
     oc_spec_tree_free(&t);
 }
 
-/* ─── Path / leaves ─────────────────────────────────────────────────── */
 
 Test(spec_tree, get_path)
 {
@@ -205,7 +201,6 @@ Test(spec_tree, get_leaves)
 {
     OcSpecTree t;
     cr_assert_eq(oc_spec_tree_init(NULL, &t), OC_OK);
-    /* root -> [1, 2], 1 -> [3]; leaves: 2, 3 */
     cr_assert_eq(oc_spec_tree_add_root(&t, 0u, 0.0f, NULL), OC_OK);
     cr_assert_eq(oc_spec_tree_add_child(&t, 0, 1u, 0.0f, NULL), OC_OK);
     cr_assert_eq(oc_spec_tree_add_child(&t, 0, 2u, 0.0f, NULL), OC_OK);
@@ -224,7 +219,6 @@ Test(spec_tree, get_leaves)
     oc_spec_tree_free(&t);
 }
 
-/* ─── Accept / prune ───────────────────────────────────────────────── */
 
 Test(spec_tree, mark_accepted)
 {
@@ -254,10 +248,7 @@ Test(spec_tree, prune_keeps_accepted_chain)
 {
     OcSpecTree t;
     cr_assert_eq(oc_spec_tree_init(NULL, &t), OC_OK);
-    /* root=0
-     * 0 -> 1 (accepted via mark)
-     *   1 -> 2 (leaf, accepted)
-     * 0 -> 3 (leaf, rejected)  */
+    /* root=0 */
     cr_assert_eq(oc_spec_tree_add_root(&t, 0u, 0.0f, NULL), OC_OK);
     cr_assert_eq(oc_spec_tree_add_child(&t, 0, 1u, 0.0f, NULL), OC_OK);
     cr_assert_eq(oc_spec_tree_add_child(&t, 1, 2u, 0.0f, NULL), OC_OK);
@@ -303,7 +294,6 @@ Test(spec_tree, prune_keeps_root_when_none_accepted)
     oc_spec_tree_free(&t);
 }
 
-/* ─── Size / depth ─────────────────────────────────────────────────── */
 
 Test(spec_tree, size_and_depth)
 {

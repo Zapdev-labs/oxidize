@@ -1,13 +1,4 @@
-/*
- * sampling.c — token sampling from logits.
- *
- * Port of oxidize-core/src/model/sampling.rs (greedy / temperature / top-k /
- * top-p / repeat-penalty). Uses an in-house xorshift64 RNG (deterministic
- * given seed) so sampling is reproducible across platforms.
- *
- * Numerics: softmax is computed with the standard max-subtraction trick for
- * numerical stability.
- */
+/* sampling.c — token sampling from logits. */
 #include "oxidize/sampling.h"
 
 #include <float.h>
@@ -16,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── RNG ──────────────────────────────────────────────────────────────── */
 
 static uint64_t rng_next(uint64_t *state)
 {
@@ -36,7 +26,6 @@ static double rng_uniform(uint64_t *state)
     return (double)(rng_next(state) >> 11) / (double)(1ULL << 53);
 }
 
-/* ─── Argmax ──────────────────────────────────────────────────────────── */
 
 uint32_t oc_argmax(const float *logits, size_t vocab_size)
 {
@@ -49,7 +38,6 @@ uint32_t oc_argmax(const float *logits, size_t vocab_size)
     return (uint32_t)best;
 }
 
-/* ─── Repeat penalty ──────────────────────────────────────────────────── */
 
 void oc_apply_repeat_penalty(float *logits, size_t vocab_size,
                              const uint32_t *recent, size_t n_recent,
@@ -70,7 +58,6 @@ void oc_apply_repeat_penalty(float *logits, size_t vocab_size,
     }
 }
 
-/* ─── Softmax (max-subtraction, stable) ───────────────────────────────── */
 
 static void softmax_inplace(float *logits, size_t n)
 {
@@ -87,9 +74,6 @@ static void softmax_inplace(float *logits, size_t n)
     for (size_t i = 0; i < n; i++) logits[i] *= inv;
 }
 
-/* ─── Top-K selection (partial selection sort) ──────────────────────────
- * Returns the number of candidates kept (min(k, n)) and writes their indices
- * to `out_idx` in descending-logit order. `logits` is read-only. */
 static size_t top_k_select(const float *logits, size_t n, size_t k,
                            size_t *out_idx)
 {
@@ -123,10 +107,6 @@ static int compare_ranked_logit_desc(const void *left, const void *right)
     return (a->index > b->index) - (a->index < b->index);
 }
 
-/* ─── Top-P (nucleus) selection ─────────────────────────────────────────
- * Sorts all indices descending by logit, softmaxes, then keeps the smallest
- * prefix whose cumulative probability >= p. Returns the kept count + indices.
- * Writes probs (post-softmax) into out_probs for the kept set. */
 static size_t top_p_select(const float *logits, size_t n, float p,
                            size_t *out_idx, float *out_probs)
 {
@@ -161,7 +141,6 @@ static size_t top_p_select(const float *logits, size_t n, float p,
     return keep;
 }
 
-/* ─── Categorical sample from a (normalized) probability mass ─────────── */
 
 static uint32_t sample_categorical(const size_t *idx, const float *probs,
                                    size_t n, uint64_t *rng)
@@ -175,7 +154,6 @@ static uint32_t sample_categorical(const size_t *idx, const float *probs,
     return (uint32_t)idx[n - 1];
 }
 
-/* ─── Top-level entry ─────────────────────────────────────────────────── */
 
 uint32_t oc_mirostat_v2_sample(const float *logits, size_t vocab_size,
                                const OcSamplerConfig *cfg,
@@ -363,15 +341,10 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
             result = oc_argmax(logits, vocab_size);
         }
     } else if (cfg->type == OC_SAMPLER_MIROSTAT_V2) {
-        /* Mirostat v2 is inherently stateful across calls (mu is the running
-         * surprise estimate). oc_sample is single-shot and takes a const
-         * config, so we run one step using cfg->mu as the starting estimate
-         * and discard the update. For stateful multi-step decoding, call
-         * oc_mirostat_v2_sample directly and persist mu between calls. */
+        /* Mirostat v2 is inherently stateful across calls (mu is the running surprise estimate). oc_sample is single-shot and takes a const config, so we run one step using cfg->mu as the starting estimate and discard the update. For stateful multi-step decoding, call oc_mirostat_v2_sample directly and persist mu between calls. */
         if (!(cfg->mu > 0.0f)) cfg->mu = 2.0f * cfg->tau;
         result = oc_mirostat_v2_sample(logits, vocab_size, cfg, &cfg->mu, &rng);
     } else if (cfg->type == OC_SAMPLER_MIN_P) {
-        /* min-p: keep only tokens with p >= min_p * max_p. */
         float *probs = malloc(vocab_size * sizeof(float));
         if (probs != NULL) {
             softmax_inplace(logits, vocab_size);
@@ -404,10 +377,7 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
             result = oc_argmax(logits, vocab_size);
         }
     } else if (cfg->type == OC_SAMPLER_TYPICAL_P) {
-        /* Locally typical sampling: compute the negative entropy of each
-         * token's information content, then filter by the typical_p
-         * cumulative threshold. Tokens with "typical" surprise (close to
-         * the entropy) are preferred. */
+        /* Locally typical sampling: compute the negative entropy of each token's information content, then filter by the typical_p cumulative threshold. Tokens with "typical" surprise (close to the entropy) are preferred. */
         if (cfg->typical_p <= 0.0f) {
             softmax_inplace(logits, vocab_size);
             for (size_t i = 0; i < vocab_size; i++) idx[i] = i;
@@ -539,7 +509,6 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
     return result;
 }
 
-/* ─── Softmax probabilities ────────────────────────────────────────────── */
 
 OcError oc_softmax_probs(const float *logits, size_t vocab_size,
                           float temperature, float *out)
@@ -575,7 +544,6 @@ OcError oc_softmax_probs(const float *logits, size_t vocab_size,
     return OC_OK;
 }
 
-/* ─── Speculative decode probability helpers ───────────────────────────── */
 
 void oc_residual_probs(const float *target_probs, const float *draft_probs,
                         float *out, size_t vocab_size)
@@ -628,7 +596,6 @@ size_t oc_sample_probabilities(const float *probs, size_t vocab_size, float rand
     return vocab_size - 1;
 }
 
-/* ─── Repetition penalties ────────────────────────────────────────────── */
 
 void oc_apply_repetition_penalties(float *logits, size_t vocab_size,
                                     const uint32_t *recent, size_t n_recent,
@@ -665,7 +632,6 @@ void oc_apply_repetition_penalties(float *logits, size_t vocab_size,
     free(freqs);
 }
 
-/* ─── Beam search ──────────────────────────────────────────────────────── */
 
 typedef struct {
     uint32_t *tokens;
@@ -787,10 +753,7 @@ OcError oc_beam_search(float * const *logits_per_step, size_t n_steps,
         }
         n_active_beams = take;
 
-        /* The top `take` candidates were moved into `beams` above and are now
-         * owned there. Everything past `take` lost the cut and still owns a
-         * tokens allocation — free it before the memset below erases the
-         * pointer, or it leaks once per round. */
+        /* The top `take` candidates were moved into `beams` above and are now owned there. Everything past `take` lost the cut and still owns a tokens allocation — free it before the memset below erases the pointer, or it leaks once per round. */
         for (size_t bi = take; bi < n_candidates; bi++)
             beam_free(&candidates[bi]);
 

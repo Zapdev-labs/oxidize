@@ -1,16 +1,4 @@
-/*
- * websocket.h — RFC 6455 WebSocket protocol (server side).
- *
- * Implements the `server-websocket` feature: the wire-level protocol
- * (handshake accept computation, frame parsing + construction, session
- * state machine) needed by the OpenAI Realtime API and any other
- * WebSocket-based endpoint.
- *
- * Scope: enough to upgrade an HTTP connection, read/write text and binary
- * frames, and perform the close handshake. Includes a self-contained
- * SHA-1 + Base64 implementation (used only for the Sec-WebSocket-Accept
- * computation) so the port stays dependency-free.
- */
+/* websocket.h — RFC 6455 WebSocket protocol (server side). */
 #ifndef OXIDIZE_WEBSOCKET_H
 #define OXIDIZE_WEBSOCKET_H
 
@@ -24,7 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── WebSocket opcodes (RFC 6455 §5.2) ─────────────────────────────────── */
 typedef enum {
     OC_WS_OPCODE_CONTINUATION = 0x0,
     OC_WS_OPCODE_TEXT         = 0x1,
@@ -34,7 +21,6 @@ typedef enum {
     OC_WS_OPCODE_PONG         = 0xA,
 } OcWsOpcode;
 
-/* ─── Session state machine ─────────────────────────────────────────────── */
 typedef enum {
     OC_WS_CONNECTING = 0,
     OC_WS_OPEN,
@@ -58,11 +44,9 @@ typedef struct OcWsFrame {
 typedef struct OcWsSession {
     int        fd;
     OcWsState  state;
-    /* receive buffer for partial reads */
     uint8_t   *recv_buf;
     size_t     recv_len;
     size_t     recv_cap;
-    /* fragmentation reassembly */
     uint8_t    frag_opcode;
     bool       frag_in_progress;
     uint8_t   *frag_buf;
@@ -70,7 +54,6 @@ typedef struct OcWsSession {
     size_t     frag_cap;
 } OcWsSession;
 
-/* ─── SHA-1 + Base64 (exposed for tests + the accept computation) ────────── */
 
 /* Compute the 20-byte SHA-1 digest of `data` (len bytes) into `out[20]`. */
 void oc_sha1(const uint8_t *data, size_t len, uint8_t out[20]);
@@ -85,11 +68,6 @@ size_t oc_base64_encode(const uint8_t *data, size_t len, char *out, size_t cap);
  * OC_ERR_INVALID_ARG (NULL/short buffer). */
 OcError oc_ws_compute_accept(const char *key, char *out, size_t cap);
 
-/* ─── Frame parsing + construction (pure: no socket I/O) ───────────────────
- *
- * `oc_ws_parse_frame` consumes at most `len` bytes from `buf`. On success
- * returns the total number of bytes consumed (frame header + payload) and
- * fills `frame`. Returns 0 if a complete frame is not yet available. */
 size_t oc_ws_parse_frame(const uint8_t *buf, size_t len, OcWsFrame *frame);
 
 /* Construct a WebSocket frame into `out` (cap bytes). `mask` is used only
@@ -99,7 +77,6 @@ size_t oc_ws_build_frame(uint8_t opcode, bool fin, bool masked,
                          const uint8_t *mask, const uint8_t *payload,
                          size_t payload_len, uint8_t *out, size_t cap);
 
-/* ─── Session lifecycle ──────────────────────────────────────────────────── */
 
 /* Initialize a session for an already-accepted socket fd. Returns OC_OK
  * or OC_ERR_OOM. Caller owns `sess`. */
@@ -109,12 +86,8 @@ OcError oc_ws_session_init(OcWsSession *sess, int fd);
  * Safe on NULL. */
 void oc_ws_session_free(OcWsSession *sess);
 
-/* ─── Socket-level helpers (use the pure parse/build functions internally) ── */
 
-/* Read a complete frame from the session's socket (blocking). Returns OC_OK
- * and fills `frame`; `frame.payload` aliases the session's recv buffer
- * (valid until the next read). Returns OC_ERR_IO on socket error or
- * OC_ERR_FORMAT on a malformed frame. */
+/* Read a complete frame from the session's socket (blocking). Returns OC_OK and fills `frame`; `frame.payload` aliases the session's recv buffer (valid until the next read). Returns OC_ERR_IO on socket error or OC_ERR_FORMAT on a malformed frame. */
 OcError oc_ws_read_frame(OcWsSession *sess, OcWsFrame *frame);
 
 /* Send a frame over the session's socket. Returns OC_OK or OC_ERR_IO. */

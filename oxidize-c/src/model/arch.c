@@ -1,26 +1,4 @@
-/* arch.c — OcModelArchitecture detection + tensor-name mapping.
- *
- * Port of:
- *   - oxidize-core/src/model/inference.rs::ModelArchitecture::from_gguf()
- *   - oxidize-core/src/format/gguf.rs::map_tensor_name / map_hf_decoder_name
- *     / map_falcon_name / map_gpt2_name / map_gptj_name / map_gpt_neox_name
- *
- * `oc_model_arch_from_str()` recognizes all 17 architecture strings
- * enumerated in inference.rs::ModelArchitecture::from_gguf (16 recognized +
- * OC_ARCH_UNKNOWN = 17 enum values).
- *
- * `oc_gguf_map_tensor_name()` maps HuggingFace tensor names to the oxidize
- * canonical form (e.g. "model.layers.3.self_attn.q_proj.weight" →
- * "blk.3.attn_q.weight"). Per-architecture mapping tables mirror Rust.
- *
- * The mapping is architecture-driven but name-table-driven: Llama, Mistral,
- * Mixtral, Qwen (all variants), DeepSeek (all variants), Gemma, Phi, and
- * GLM-MoE-DSA share the HF decoder mapping; Falcon, GPT2, GPTJ, GPTNeoX have
- * their own (smaller) mapping tables. LFM2/Lfm2Moe/HunyuanMoe/MiniMax/LongCat
- * use the HF decoder mapping (their HF names follow the model.layers.N.*
- * pattern; LongCat's ScMoE sub-block suffixes are resolved later, in
- * llama.c's assign_tensor).
- */
+/* arch.c — OcModelArchitecture detection + tensor-name mapping. */
 #include "oxidize/model.h"
 
 #include <ctype.h>
@@ -31,17 +9,7 @@
 #include "oxidize/arena.h"
 #include "oxidize/log.h"
 
-/* ─── Helpers ──────────────────────────────────────────────────────────── */
 
-/* ─── oc_model_arch_from_str ──────────────────────────────────────────────
- *
- * Mirrors Rust `ModelArchitecture::from_gguf`:
- *   1. Lowercase + replace '-' → '_' (so "glm-dsa" → "glm_dsa").
- *   2. Match against the known architecture strings.
- *   3. Return OC_ARCH_UNKNOWN for unrecognized strings.
- *
- * We avoid dynamic allocation: the input is compared against each known
- * string with a small normalization helper. */
 OcModelArchitecture oc_model_arch_from_str(const char *s)
 {
     if (!s || !*s) return OC_ARCH_UNKNOWN;
@@ -200,23 +168,6 @@ bool oc_model_arch_uses_parallel_attn_ffn(OcModelArchitecture arch)
     return arch == OC_ARCH_GEMMA || arch == OC_ARCH_PHI;
 }
 
-/* ─── Tensor name mapping ────────────────────────────────────────────────
- *
- * Mirrors Rust `map_tensor_name(architecture, name)`:
- *   - Llama/Mistral/Mixtral/Qwen (all variants)/DeepSeek (all variants)/
- *     Gemma/Phi/GLM-MoE-DSA → map_hf_decoder_name()
- *   - Falcon → map_falcon_name()
- *   - GPT2 → map_gpt2_name()
- *   - GPTJ → map_gptj_name()
- *   - GPTNeoX → map_gpt_neox_name()
- *   - Others (LFM2, Lfm2Moe, MiniMax, HunyuanMoe) → also use map_hf_decoder_name
- *     (their HF names follow the model.layers.N.* pattern; this matches the
- *     Rust behavior where unmapped names fall through to identity).
- *   - Unknown → identity copy.
- *
- * Each `map_*` helper returns NULL if the name doesn't match any pattern;
- * the top-level then falls back to an arena-owned copy of the original name
- * (mirrors Rust's `mapped.unwrap_or_else(|| name.to_owned())`). */
 
 /* Forward decl. */
 static const char *map_hf_decoder_name(const char *name, OcArena *arena);
@@ -271,15 +222,6 @@ const char *oc_gguf_map_tensor_name(OcModelArchitecture arch, const char *name,
     return oc_arena_dup(arena, name);
 }
 
-/* ─── map_hf_decoder_name ────────────────────────────────────────────────
- *
- * Mirrors Rust `map_hf_decoder_name`. Handles the HuggingFace transformer
- * naming convention (model.layers.N.*, model.embed_tokens.weight, etc.)
- * used by Llama, Mistral, Mixtral, Qwen (all variants), DeepSeek (all
- * variants), Gemma, Phi, GLM-MoE-DSA, LFM2, MiniMax, HunyuanMoe.
- *
- * Returns NULL (no match) for names that don't follow the HF convention;
- * the caller then falls back to identity. */
 
 /* Helper: parse the leading integer from `s` (digits only). Returns true and
  * writes `*out` on success; false if no digits or overflow. The integer is
@@ -387,10 +329,7 @@ static const char *map_hf_decoder_name(const char *name, OcArena *arena)
                                 (unsigned long long)expert_idx);
     }
 
-    /* Pattern B: mlp.experts.<M>.<gate_proj|up_proj|down_proj>.weight
-     *   → blk.<N>.ffn_<gate|up|down>.<M>.weight
-     * This is the DeepSeek convention (VAL-FOUND-011 Rust test
-     * `mapped[3].name == "blk.1.ffn_gate.42.weight"`). */
+    /* Pattern B: mlp.experts.<M>.<gate_proj|up_proj|down_proj>.weight → blk.<N>.ffn_<gate|up|down>.<M>.weight This is the DeepSeek convention (VAL-FOUND-011 Rust test `mapped[3].name == "blk.1.ffn_gate.42.weight"`). */
     static const char me_prefix[] = "mlp.experts.";
     const size_t me_len = sizeof(me_prefix) - 1;
     if (strncmp(p, me_prefix, me_len) == 0) {
@@ -417,7 +356,6 @@ static const char *map_hf_decoder_name(const char *name, OcArena *arena)
                             (unsigned long long)layer_idx, mapped_suffix);
 }
 
-/* ─── Falcon / GPT2 / GPTJ / GPTNeoX mappings ─────────────────────────── */
 
 static const char *map_falcon_name(const char *name, OcArena *arena)
 {

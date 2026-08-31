@@ -1,13 +1,4 @@
-/*
- * offload.h — CPU/GPU layer offload pipeline.
- *
- * Splits model layers between CPU and GPU. Layers [0, gpu_layers) run on GPU,
- * layers [gpu_layers, n_layer) run on CPU. The embedding lookup and final
- * lm_head always run on CPU (they're cheap). The hidden state is transferred
- * between devices at the boundary.
- *
- * This enables partial-GPU inference for models that exceed VRAM.
- */
+/* offload.h — CPU/GPU layer offload pipeline. */
 #ifndef OXIDIZE_OFFLOAD_H
 #define OXIDIZE_OFFLOAD_H
 
@@ -70,7 +61,6 @@ bool oc_offload_cuda_available(void);
 uint32_t oc_offload_suggest_gpu_layers(uint64_t model_size_bytes,
                                        uint64_t available_vram_bytes);
 
-/* ─── Multi-GPU offload planning (port of offload.rs) ─────────────────── */
 
 /* Parallelism strategy for multi-GPU tensor placement. */
 typedef enum {
@@ -128,10 +118,7 @@ typedef struct {
     size_t      layer_index;   /* SIZE_MAX = not a layer tensor */
 } OcPlanTensorInfo;
 
-/* Plan single-GPU layer offload.
- * tensors: array of tensor infos.
- * n_tensors: count.
- * n_gpu_layers: requested GPU layers (capped to total layers). */
+/* Plan single-GPU layer offload. */
 OcLayerOffloadPlan oc_plan_layer_offload(const OcPlanTensorInfo *tensors,
                                           size_t n_tensors,
                                           size_t n_gpu_layers);

@@ -1,16 +1,4 @@
-/*
- * k8s.c — Kubernetes integration.
- *
- * Pod bookkeeping is in-process; oc_k8s_scale() issues a real HTTP request
- * to the Kubernetes API server (a merge-patch on the Deployment's /scale
- * subresource).
- *
- * The API server speaks HTTPS and this port links only libc, so the
- * endpoint must be plaintext HTTP. In practice that means either
- * `kubectl proxy` (OC_K8S_API_URL=http://127.0.0.1:8001) or an in-cluster
- * sidecar/proxy. Without one, scaling reports OC_ERR_NETWORK rather than
- * silently claiming success.
- */
+/* k8s.c — Kubernetes integration. */
 #define _POSIX_C_SOURCE 200809L
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1

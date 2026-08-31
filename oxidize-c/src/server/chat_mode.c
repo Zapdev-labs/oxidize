@@ -13,7 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Chat history ──────────────────────────────────────────────────────── */
 
 void oc_chat_history_init(OcChatHistory *h, OcChatTemplate tmpl)
 {
@@ -101,7 +100,6 @@ void oc_chat_history_free(OcChatHistory *h)
     memset(h, 0, sizeof(*h));
 }
 
-/* ─── Single input processing ───────────────────────────────────────────── */
 
 OcError oc_chat_process_input(OcLlamaModel *model, OcTokenizer *tok,
                               const OcSamplerConfig *scfg,
@@ -207,7 +205,6 @@ OcError oc_chat_process_input(OcLlamaModel *model, OcTokenizer *tok,
     return OC_OK;
 }
 
-/* ─── Interactive REPL ─────────────────────────────────────────────────── */
 
 OcError oc_chat_run(OcLlamaModel *model, OcTokenizer *tok,
                     const OcSamplerConfig *scfg,

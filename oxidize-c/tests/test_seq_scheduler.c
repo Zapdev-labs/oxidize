@@ -21,7 +21,6 @@ static OcSeqRequest make_request(uint64_t id, const uint32_t *prompt,
 
 static uint32_t one_prompt[] = {1};
 
-/* ─── Basic lifecycle ──────────────────────────────────────────────────── */
 
 Test(seq_scheduler, config_default)
 {
@@ -59,7 +58,6 @@ Test(seq_scheduler, init_invalid_water_level)
     cr_assert_eq(oc_seq_sched_init(&s, c, NULL), OC_ERR_INVALID_ARG);
 }
 
-/* ─── Add requests ─────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, add_request)
 {
@@ -110,7 +108,6 @@ Test(seq_scheduler, add_when_full)
     oc_seq_sched_free(s);
 }
 
-/* ─── Scheduling ───────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, schedule_empty)
 {
@@ -187,7 +184,6 @@ Test(seq_scheduler, schedule_mixed_batch)
     oc_seq_sched_free(s);
 }
 
-/* ─── Append token ────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, append_token_transitions_running)
 {
@@ -230,7 +226,6 @@ Test(seq_scheduler, append_token_unknown_id)
     oc_seq_sched_free(s);
 }
 
-/* ─── Finish / Abort ───────────────────────────────────────────────────── */
 
 Test(seq_scheduler, finish_request)
 {
@@ -311,7 +306,6 @@ Test(seq_scheduler, aborted_excluded_from_schedule)
     oc_seq_sched_free(s);
 }
 
-/* ─── Capacity ─────────────────────────────────────────────────────────── */
 
 Test(seq_scheduler, can_fit_within_capacity)
 {
@@ -321,7 +315,6 @@ Test(seq_scheduler, can_fit_within_capacity)
     c.max_total_tokens = 100;
     c.water_level = 0.8f;
     oc_seq_sched_init(&s, c, NULL);
-    /* water_mark = 100 * 0.8 = 80 */
     cr_assert(oc_seq_sched_can_fit(s, 80));
     cr_assert(oc_seq_sched_can_fit(s, 50));
     oc_seq_sched_free(s);
@@ -335,7 +328,6 @@ Test(seq_scheduler, can_fit_exceeds_capacity)
     c.max_total_tokens = 100;
     c.water_level = 0.8f;
     oc_seq_sched_init(&s, c, NULL);
-    /* water_mark = 80; 81 tokens should not fit. */
     cr_assert(!oc_seq_sched_can_fit(s, 81));
     oc_seq_sched_free(s);
 }
@@ -347,7 +339,6 @@ Test(seq_scheduler, schedule_blocks_when_full)
     c.max_batch_size = 4;
     c.max_total_tokens = 10;
     c.water_level = 0.8f;
-    /* water_mark = 10 * 0.8 = 8; a prompt of 9 tokens won't fit. */
     oc_seq_sched_init(&s, c, NULL);
     uint32_t prompt9[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
     OcSeqRequest r = make_request(1, prompt9, 9, 5, 0.0f);

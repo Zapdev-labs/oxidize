@@ -16,7 +16,6 @@ Test(gemma, config_init_defaults)
     cr_assert_eq(cfg.hidden_dim, 2048);
     cr_assert_eq(cfg.intermediate_dim, 16384);
     cr_assert_eq(cfg.vocab_size, 256000);
-    /* embedding_scale must default to sqrt(hidden_dim). */
     cr_assert_float_eq(cfg.embedding_scale, sqrtf((float)cfg.hidden_dim),
                        0.001f);
     cr_assert_float_eq(cfg.rope_theta, 10000.0f, 0.001f);

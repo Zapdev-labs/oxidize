@@ -1,19 +1,4 @@
-/*
- * test_oxk_gguf_layout.c — do the OXK kernels agree with the GGUF layout?
- *
- * The existing OXK tests compare each SIMD variant against the OXK scalar
- * reference. That checks the variants against each other but never against
- * the layout real GGUF weights actually use, so a wrong unpacking order in
- * the scalar reference propagates to every variant and passes.
- *
- * These tests close that hole. Each one dequantizes the SAME Q8 activation
- * the kernel consumes, dots it against oc_quant_dequant_row's output, and
- * compares. Dequantizing the activation is what removes int8 quantization
- * error from the comparison: both sides then see identical numbers, so any
- * meaningful difference is a disagreement about where the weight bits live.
- *
- * This caught three real defects in Q4_0, Q4_1 and Q4_K, all now fixed.
- */
+/* test_oxk_gguf_layout.c — do the OXK kernels agree with the GGUF layout? The existing OXK tests compare each SIMD variant against the OXK scalar reference. */
 #include <criterion/criterion.h>
 
 #include "oxidize/flash_attention.h"
@@ -33,7 +18,6 @@ static float frand(uint32_t *s)
     return (float)((int32_t)(*s >> 8) % 2000 - 1000) / 1000.0f;
 }
 
-/* ─── activation codecs (mirroring matvec.c) ─────────────────────────── */
 
 static void act_q8_k(const float *x, size_t n, uint8_t *out)
 {
@@ -140,7 +124,6 @@ static double kernel_vs_gguf(OcGgufQuantizationType qt, int kblock,
     return fabs(ref - got) / (fabs(ref) + 1e-6);
 }
 
-/* ─── kernels that agree with GGUF ───────────────────────────────────── */
 
 Test(oxk_gguf, q8_0_matches_dequant_reference)
 {
@@ -156,7 +139,6 @@ Test(oxk_gguf, q6_k_matches_dequant_reference)
     cr_assert_lt(rel, 1e-4, "Q6_K kernel disagrees with GGUF layout (rel=%g)", rel);
 }
 
-/* ─── kernels fixed in this change ───────────────────────────────────── */
 
 /* Q4_0 and Q4_1 had the wrong nibble-to-element mapping; Q4_K additionally
  * scaled its offset term by dw*dmin instead of dmin, and decoded the upper

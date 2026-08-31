@@ -65,7 +65,12 @@ pub struct SpeculativeGenerationConfig {
 
 impl SpeculativeGenerationConfig {
     fn capped_draft_tokens_per_step(&self) -> usize {
-        self.draft_tokens_per_step.min(MAX_DRAFT_TOKENS_PER_STEP)
+        let n = self.draft_tokens_per_step;
+        if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        }
     }
 }
 
@@ -123,7 +128,12 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let n = config.draft_tokens_per_step;
+        let draft_tokens_per_step = if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        };
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -246,7 +256,6 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             GenerationError::Model(ModelError::InferenceFailed("no last token".to_string()))
         })?;
 
-        // 1. Draft model generates K tokens autoregressively.
         let k = self.config.capped_draft_tokens_per_step();
         let mut draft_tokens = std::mem::take(&mut self.draft_token_buffer);
         draft_tokens.clear();
@@ -270,7 +279,6 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             current_token = token;
         }
 
-        // 2. Target model verifies draft tokens from a fixed KV checkpoint.
         let verify_start = session.consumed_tokens();
         let mut target_logits = Vec::with_capacity(draft_tokens.len() + 1);
         if self.last_token_pending_kv {
@@ -301,7 +309,6 @@ impl<'a, T: Model + ?Sized> SpeculativeGenerationStream<'a, T> {
             Vec::new()
         };
 
-        // 3. Speculative decode: accept/reject draft tokens.
         let randoms: Vec<f32> = (0..=2 * draft_tokens.len())
             .map(|_| (self.random.as_mut())())
             .collect();
@@ -453,7 +460,12 @@ impl<'a> MtpGenerationStream<'a> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let n = config.draft_tokens_per_step;
+        let draft_tokens_per_step = if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        };
         Self {
             target_model: Some(target_model),
             session: Some(session),
@@ -750,7 +762,12 @@ impl<'a> Eagle3GenerationStream<'a> {
             .map(Vec::len)
             .max()
             .unwrap_or(0);
-        let draft_tokens_per_step = config.capped_draft_tokens_per_step();
+        let n = config.draft_tokens_per_step;
+        let draft_tokens_per_step = if n > MAX_DRAFT_TOKENS_PER_STEP {
+            MAX_DRAFT_TOKENS_PER_STEP
+        } else {
+            n
+        };
         Self {
             target_model: Some(target_model),
             draft_model: Some(draft_model),
@@ -1447,6 +1464,8 @@ mod tests {
             cfg.capped_draft_tokens_per_step(),
             MAX_DRAFT_TOKENS_PER_STEP
         );
-        assert!(MAX_DRAFT_TOKENS_PER_STEP < 1024);
+        const {
+            assert!(MAX_DRAFT_TOKENS_PER_STEP < 1024);
+        }
     }
 }

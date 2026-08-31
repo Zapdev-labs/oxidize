@@ -1,14 +1,4 @@
-/*
- * cross_validation.h — Output cross-validation suites and result reporting.
- *
- * Port of oxidize-core/src/validation/cross_validation.rs. Provides
- * validation suites (VulkanDflashCpu, FullPipeline, SmokeCheck) that
- * compare expected vs actual model output tensors element-wise and report
- * the maximum absolute difference against a caller-supplied tolerance.
- *
- * The module is intentionally side-effect free: callers pass buffers and
- * receive an OcValidationResult. No global state is mutated.
- */
+/* cross_validation.h — Output cross-validation suites and result reporting. */
 #ifndef OXIDIZE_CROSS_VALIDATION_H
 #define OXIDIZE_CROSS_VALIDATION_H
 
@@ -21,17 +11,14 @@
 extern "C" {
 #endif
 
-/* ─── Validation suites ───────────────────────────────────────────────── */
 
 typedef enum {
     OC_VAL_SUITE_VULKAN_DFLASH_CPU = 0,
     OC_VAL_SUITE_FULL_PIPELINE,
     OC_VAL_SUITE_SMOKE_CHECK,
-    /* sentinel for bounds checking; not a valid suite */
     OC_VAL_SUITE__COUNT,
 } OcValidationSuite;
 
-/* ─── Result ──────────────────────────────────────────────────────────── */
 
 typedef struct {
     OcValidationSuite suite;
@@ -39,20 +26,8 @@ typedef struct {
     float             tolerance;
 } OcValidationResult;
 
-/* ─── API ─────────────────────────────────────────────────────────────── */
 
-/*
- * Compare `expected` and `actual` buffers element-wise for `len` elements.
- * Computes the maximum absolute difference across all pairs and stores the
- * result, suite, and tolerance in `*out`.
- *
- * Returns:
- *   OC_OK             — comparison performed (regardless of pass/fail)
- *   OC_ERR_INVALID_ARG — `actual`/`expected`/`out` NULL, OR `len>0` with NULL
- *                       buffer, OR `suite` out of range
- *
- * For `len==0` with non-NULL buffers, returns OC_OK with max_abs_diff=0.0f.
- */
+/* Compare `expected` and `actual` element-wise. Returns OC_OK after writing `out` even when `max_abs_diff` fails the suite threshold; OC_ERR_INVALID_ARG on NULL args or an out-of-range suite. */
 OcError oc_cross_validation_compare(OcValidationSuite suite,
                                     const float *expected,
                                     const float *actual,

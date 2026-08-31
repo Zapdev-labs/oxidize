@@ -170,7 +170,6 @@ void oc_lw_state_free(OcLayerWiseState *state)
     memset(state, 0, sizeof(*state));
 }
 
-/* ─── Layer-wise forward (port of layer_wise/forward.rs) ─────────────── */
 
 OcError oc_lw_forward_single(OcLayerWiseState *state,
                               void *model_ptr,

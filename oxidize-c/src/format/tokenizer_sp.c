@@ -1,34 +1,5 @@
-/* tokenizer_sp.c — SentencePiece unigram tokenizer with Viterbi best-path
- * segmentation, for Llama / Gemma / Gemma4 model families.
- *
- * Faithful port of oxidize-core/src/format/tokenizer.rs::
- *   - `load_sentencepiece`        (load from GGUF metadata)
- *   - `SentencePieceUnigramTokenizer::new`          (test constructor)
- *   - `SentencePieceUnigramTokenizer::with_unknown_token`
- *   - `SentencePieceUnigramTokenizer::encode`      (Viterbi decode)
- *   - `SentencePieceUnigramTokenizer::decode`      (piece concatenation)
- *
- * Algorithm (mirrors Rust `encode` + `best_segmentation`):
- *   1. Compute UTF-8 char boundaries of the input.
- *   2. Starting at `boundary_idx = 0`, find the best-scoring segmentation of
- *      the suffix `text[boundaries[boundary_idx]..]` via a forward Viterbi
- *      pass: `best_scores[j] = max over i<j of (best_scores[i] +
- *      piece_score(text[i..j]))` for every piece present in the vocab.
- *      Backtracking from the largest reachable `end` reconstructs the token
- *      id sequence. If no segmentation reaches beyond `boundary_idx`, emit
- *      the `<unk>` id and advance one char.
- *   3. Repeat until the whole input is consumed.
- *
- * BOS handling: SentencePiece models add BOS by default (mirrors Rust
- * `add_bos_default()` returning `true` for SentencePiece). The BOS id is
- * prepended by `oc_tokenizer_encode(..., OC_TOK_ADD_BOS)` at the wrapper
- * layer, not here.
- *
- * `<unk>` fallback (VAL-TOK-006): when no piece starting at the current
- * position can be segmented, the configured unknown id is emitted for the
- * current codepoint and the search resumes on the next codepoint. This
- * matches Rust exactly (the `if let Some(unk) = ...` branch).
- */
+/* tokenizer_sp.c — SentencePiece unigram tokenizer with Viterbi best-path segmentation, for Llama / Gemma / Gemma4 model families. */
+/* `<unk>` fallback (VAL-TOK-006): when no piece starting at the current */
 
 #define _POSIX_C_SOURCE 200809L  /* strdup */
 
@@ -50,15 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── SentencePiece tokenizer state ─────────────────────────────────── */
 
 struct OcSentencePieceTokenizer {
-    /* vocab: token string → id. Keys are arena-owned NUL-terminated strings. */
     OcHashtable *vocab;
-    /* id → token string (dense array indexed by id). Arena-owned. */
     char  **id_to_token;
     size_t  vocab_size;
-    /* id → piece score (log-probability). Dense array indexed by id. */
     float  *piece_scores;
     /* Special-token ids (also mirrored in the OcTokenizer wrapper). */
     uint32_t  unknown_id;  bool has_unknown;
@@ -70,14 +37,10 @@ struct OcSentencePieceTokenizer {
     uint32_t  mask_id;     bool has_mask;
 };
 
-/* ─── UTF-8 helpers ──────────────────────────────────────────────────── */
 
 /* UTF-8 codepoint decoding is shared (utf8_utils.h::oc_utf8_decode_cp). */
 
-/* Compute UTF-8 char boundaries (byte offsets of each codepoint start,
- * followed by `text_len`). Mirrors Rust `char_boundaries`. `out` must be
- * large enough to hold `strlen(text) + 1` entries (worst case: every byte
- * is a single-char boundary). Returns the count of boundaries written. */
+/* Compute UTF-8 char boundaries (byte offsets of each codepoint start, followed by `text_len`). */
 static size_t sp_char_boundaries(const char *text, size_t text_len, size_t *out)
 {
     size_t n = 0;
@@ -93,7 +56,6 @@ static size_t sp_char_boundaries(const char *text, size_t text_len, size_t *out)
     return n;
 }
 
-/* ─── Constructor (mirrors Rust `SentencePieceUnigramTokenizer::new`) ─── */
 
 OcError oc_sp_new(const OcSpPiece *pieces, size_t n_pieces,
                   OcArena *arena, OcSentencePieceTokenizer **out)
@@ -142,10 +104,7 @@ OcError oc_sp_with_unknown_token(OcSentencePieceTokenizer *sp, OcArena *arena,
     if (oc_hashtable_get(sp->vocab, token, &vp)) {
         id = (uint32_t)(uintptr_t)vp;
     } else {
-        /* Rust allocates a new id = (max existing id) + 1 and grows both
-         * the vocab and id_to_token. We can't realloc arena memory, so we
-         * allocate a new id_to_token + piece_scores array of size
-         * (vocab_size + 1) and copy. */
+        /* Rust allocates a new id = (max existing id) + 1 and grows both the vocab and id_to_token. We can't realloc arena memory, so we allocate a new id_to_token + piece_scores array of size (vocab_size + 1) and copy. */
         id = (uint32_t)sp->vocab_size;
         char *dup = oc_arena_dup(arena, token);
         if (!dup) return OC_ERR_OOM;
@@ -173,22 +132,8 @@ OcError oc_sp_with_unknown_token(OcSentencePieceTokenizer *sp, OcArena *arena,
     return OC_OK;
 }
 
-/* ─── Encode (Viterbi best-path segmentation) ────────────────────────── */
 
-/* Find the best-scoring segmentation of `text` (a UTF-8 string) and write
- * the resulting id sequence to `*out_ids` (malloc'd) and the number of
- * codepoints consumed to `*out_consumed`. Sets `*out_found = false` when no
- * piece starting at index 0 can be segmented (caller should emit <unk>).
- * Returns OC_ERR_OOM on allocation failure — distinct from
- * "no segmentation" so the caller never fabricates <unk> ids under OOM.
- *
- * Mirrors Rust `SentencePieceUnigramTokenizer::best_segmentation`.
- *
- * Algorithm: forward Viterbi. `best_scores[j]` = the best total score of
- * any segmentation reaching boundary `j`. `backtrack[j]` = the (prev, id)
- * pair that achieved `best_scores[j]`. After the forward pass, find the
- * largest `end` with a finite score; backtrack from there to emit ids.
- */
+/* Find the best-scoring segmentation of `text` (a UTF-8 string) and write the resulting id sequence to `*out_ids` (malloc'd) and the number of codepoints consumed to `*out_consumed`. */
 static OcError sp_best_segmentation(const OcSentencePieceTokenizer *sp,
                                     const char *text, size_t text_len,
                                     uint32_t **out_ids, size_t *out_count,
@@ -203,7 +148,6 @@ static OcError sp_best_segmentation(const OcSentencePieceTokenizer *sp,
     size_t *boundaries = (size_t *)malloc((text_len + 1) * sizeof(size_t));
     if (!boundaries) return OC_ERR_OOM;
     size_t n_bounds = sp_char_boundaries(text, text_len, boundaries);
-    /* token_count = number of codepoints = n_bounds - 1. */
     size_t token_count = (n_bounds == 0) ? 0 : (n_bounds - 1);
     if (token_count == 0) {
         free(boundaries);
@@ -212,7 +156,6 @@ static OcError sp_best_segmentation(const OcSentencePieceTokenizer *sp,
         return OC_OK;
     }
 
-    /* best_scores[0..=token_count], init to -INFINITY except [0]=0. */
     float *best_scores = (float *)malloc((token_count + 1) * sizeof(float));
     /* backtrack[j] = (prev_idx, id). id is irrelevant when prev_idx is
      * SIZE_MAX (unreachable). */
@@ -418,7 +361,6 @@ OcError oc_sp_encode(const OcSentencePieceTokenizer *sp, const char *text,
     return OC_OK;
 }
 
-/* ─── Decode ─────────────────────────────────────────────────────────── */
 
 OcError oc_sp_decode(const OcSentencePieceTokenizer *sp, const uint32_t *ids,
                      size_t count, char **out_text)
@@ -457,7 +399,6 @@ OcError oc_sp_decode(const OcSentencePieceTokenizer *sp, const uint32_t *ids,
     return OC_OK;
 }
 
-/* ─── Load from GGUF metadata ───────────────────────────────────────── */
 
 /* Helper: get a metadata string array as a vector of arena-owned strings. */
 static OcError sp_get_string_array(const OcGgufFile *gguf, const char *key,

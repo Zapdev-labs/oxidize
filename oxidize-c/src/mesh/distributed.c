@@ -1,34 +1,4 @@
-/*
- * distributed.c — distributed inference scheduler implementation.
- *
- * Coordinates model inference across multiple nodes using pipeline and
- * tensor parallelism over TCP sockets. Single-node mode (n_nodes == 1)
- * is a zero-overhead fast path: no sockets are opened and all
- * communication functions are no-ops.
- *
- * Communication model:
- *
- *   Pipeline parallelism:
- *     - Layers are split into `pipeline_stages` contiguous groups.
- *     - Each stage runs its layers, then sends the final hidden state to
- *       the next stage via oc_distributed_send_activations().
- *     - The next stage receives via oc_distributed_recv_activations().
- *     - The pipeline master (stage 0) drives the run and is the only node
- *       that interacts with the tokenizer / sampler.
- *
- *   Tensor parallelism:
- *     - Within a pipeline stage, `tensor_parallel_size` nodes each compute
- *       a shard of the weight matrix. After the matmul, they call
- *       oc_distributed_all_reduce() to sum partial results.
- *     - All-reduce uses a coordinator gather followed by broadcast over the
- *       connections established during initialization.
- *
- * Reconnection:
- *   If a peer's socket is disconnected (send/recv returns 0 or error), the
- *   peer is marked offline and oc_distributed_reconnect() can be called to
- *   re-establish the TCP connection. The disconnects stat is incremented on
- *   detection; reconnects stat is incremented on successful reconnection.
- */
+/* distributed.c — distributed inference scheduler implementation. */
 #define _POSIX_C_SOURCE 200809L
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1  /* BSD socket opts (IP_MULTICAST_TTL, etc.) on macOS */
@@ -54,15 +24,11 @@
 #define MSG_NOSIGNAL 0
 #endif
 
-/* ------------------------------------------------------------------ */
-/* Constants                                                          */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Constants ------------------------------------------------------------------ */
 
 #define OC_DIST_PORT_DEFAULT 51930
 
-/* ------------------------------------------------------------------ */
-/* Helpers: timing                                                    */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Helpers: timing ------------------------------------------------------------------ */
 
 static double now_ms(void)
 {
@@ -81,9 +47,7 @@ static void update_latency(OcDistributedStats *st, double lat)
         (lat - st->avg_latency_ms) / (double)st->latency_samples;
 }
 
-/* ------------------------------------------------------------------ */
-/* Helpers: TCP socket I/O                                            */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Helpers: TCP socket I/O ------------------------------------------------------------------ */
 
 /* Send exactly `len` bytes, retrying on partial writes.
  * Returns OC_OK on success, OC_ERR_NETWORK on failure. */
@@ -176,9 +140,7 @@ static int tcp_connect(const char *addr)
     return fd;
 }
 
-/* ------------------------------------------------------------------ */
-/* Config validation                                                  */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Config validation ------------------------------------------------------------------ */
 
 OcError oc_distributed_validate_config(const OcDistributedConfig *cfg)
 {
@@ -226,9 +188,7 @@ OcError oc_distributed_validate_config(const OcDistributedConfig *cfg)
     return OC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Role resolution                                                    */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Role resolution ------------------------------------------------------------------ */
 
 OcNodeRole oc_distributed_resolve_role(const OcDistributedConfig *cfg)
 {
@@ -251,9 +211,7 @@ OcNodeRole oc_distributed_resolve_role(const OcDistributedConfig *cfg)
     return OC_NODE_ROLE_PIPELINE_WORKER;
 }
 
-/* ------------------------------------------------------------------ */
-/* Buffer management                                                  */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Buffer management ------------------------------------------------------------------ */
 
 static OcError ensure_buffers(OcDistributedScheduler *sched)
 {
@@ -277,17 +235,9 @@ static OcError ensure_buffers(OcDistributedScheduler *sched)
     return OC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Peer management                                                    */
-/* ------------------------------------------------------------------ */
+/* Peer management */
 
-/* Find the peer that is the "next pipeline stage" for this node.
- * In a simple linear pipeline, that's the node with pipeline_rank+1.
- * For this implementation we assume peers are ranked by global node rank
- * and pipeline stages map 1:1 to ranks in pipeline order.
- *
- * Returns a pointer to the next-stage peer, or NULL if this is the last
- * stage or single-node. */
+/* Find the peer that is the "next pipeline stage" for this node. */
 static OcDistPeer *find_next_pipeline_peer(OcDistributedScheduler *sched)
 {
     if (sched->config.n_nodes <= 1) return NULL;
@@ -326,9 +276,7 @@ static OcDistPeer *find_next_tp_peer(OcDistributedScheduler *sched)
     return &sched->peers[tp_next];
 }
 
-/* ------------------------------------------------------------------ */
-/* Init / Free                                                        */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Init / Free ------------------------------------------------------------------ */
 
 OcError oc_distributed_init(OcDistributedScheduler *sched,
                             const OcDistributedConfig *cfg)
@@ -408,10 +356,7 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
             tv.tv_usec = (suseconds_t)((timeout_ms % 1000u) * 1000u);
             setsockopt(lfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-            /* Accept connections from workers (nodes 1..n_nodes-1).
-             * Each worker connects and sends its rank as a 4-byte uint32.
-             * A worker may reconnect after a failed handshake, so keep
-             * accepting until every rank is online or the deadline passes. */
+            /* Accept connections from workers (nodes 1..n_nodes-1). */
             uint32_t connected = 0;
             while (connected + 1 < cfg->n_nodes && now_ms() < deadline) {
                 struct sockaddr_in caddr;
@@ -527,9 +472,7 @@ void oc_distributed_free(OcDistributedScheduler *sched)
     sched->listen_fd = -1;
 }
 
-/* ------------------------------------------------------------------ */
-/* Reconnection                                                       */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Reconnection ------------------------------------------------------------------ */
 
 OcError oc_distributed_reconnect(OcDistributedScheduler *sched,
                                  uint32_t peer_rank)
@@ -565,9 +508,7 @@ static void mark_peer_disconnected(OcDistributedScheduler *sched,
     sched->stats.disconnects++;
 }
 
-/* ------------------------------------------------------------------ */
 /* Chunked send/recv (handles buffers larger than OC_DIST_BUF_SIZE)   */
-/* ------------------------------------------------------------------ */
 
 static OcError send_chunked(OcDistributedScheduler *sched, OcDistPeer *p,
                             const void *data, size_t len)
@@ -639,9 +580,7 @@ static OcError recv_chunked(OcDistributedScheduler *sched, OcDistPeer *p,
     return OC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Pipeline parallelism: send/recv activations                        */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Pipeline parallelism: send/recv activations ------------------------------------------------------------------ */
 
 OcError oc_distributed_send_activations(OcDistributedScheduler *sched,
                                         const void *data, size_t count)
@@ -704,9 +643,7 @@ OcError oc_distributed_recv_activations(OcDistributedScheduler *sched,
     return recv_chunked(sched, prev, out, total_bytes);
 }
 
-/* ------------------------------------------------------------------ */
-/* Tensor parallelism: all-reduce                                     */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Tensor parallelism: all-reduce ------------------------------------------------------------------ */
 
 OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
                                   float *data, size_t count)
@@ -768,9 +705,7 @@ OcError oc_distributed_all_reduce(OcDistributedScheduler *sched,
     return OC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Barrier                                                            */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Barrier ------------------------------------------------------------------ */
 
 OcError oc_distributed_barrier(OcDistributedScheduler *sched)
 {
@@ -781,10 +716,7 @@ OcError oc_distributed_barrier(OcDistributedScheduler *sched)
     /* Single-node: no-op. */
     if (sched->config.n_nodes <= 1) return OC_OK;
 
-    /* NOTE: this ping/pong is NOT a global barrier (the first stage exits
-     * after its outbound ping without waiting for later stages). It is
-     * unreachable today because init rejects multi-node configs; a proper
-     * arrival + release protocol is required before enabling multi-node. */
+    /* NOTE: this ping/pong is NOT a global barrier (the first stage exits after its outbound ping without waiting for later stages). */
     uint8_t ping = 0x42;
 
     /* Send to next pipeline peer (or TP peer). */
@@ -822,9 +754,7 @@ OcError oc_distributed_barrier(OcDistributedScheduler *sched)
     return OC_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Latency measurement                                                 */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Latency measurement ------------------------------------------------------------------ */
 
 double oc_distributed_get_latency(OcDistributedScheduler *sched)
 {
@@ -892,9 +822,7 @@ double oc_distributed_get_latency(OcDistributedScheduler *sched)
     return lat;
 }
 
-/* ------------------------------------------------------------------ */
-/* Stats                                                              */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Stats ------------------------------------------------------------------ */
 
 const OcDistributedStats *oc_distributed_get_stats(
     const OcDistributedScheduler *sched)

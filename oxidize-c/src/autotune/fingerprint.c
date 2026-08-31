@@ -1,9 +1,4 @@
-/*
- * fingerprint.c — Model file fingerprinting implementation.
- *
- * Reads GGUF metadata to populate the fingerprint with real architecture
- * information (layers, heads, hidden dim, vocab, quant type, etc.).
- */
+/* fingerprint.c — Model file fingerprinting implementation. */
 #include "oxidize/fingerprint.h"
 #include "oxidize/gguf.h"
 

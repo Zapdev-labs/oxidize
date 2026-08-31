@@ -1,14 +1,9 @@
-/* test_mlx_inference.c — OcMlxEngine stub tests.
- *
- * Unique suite name "mlx_inference". On non-macOS every operation is a
- * stub returning OC_ERR_BACKEND; these tests assert that contract.
- */
+/* test_mlx_inference.c — OcMlxEngine stub tests. */
 #include <criterion/criterion.h>
 #include <string.h>
 
 #include "oxidize/mlx_inference.h"
 
-/* ─── config init ──────────────────────────────────────────────────── */
 
 Test(mlx_inference, config_init_defaults)
 {
@@ -27,7 +22,6 @@ Test(mlx_inference, config_init_null_is_noop)
     cr_assert(true, "");
 }
 
-/* ─── engine init ──────────────────────────────────────────────────── */
 
 Test(mlx_inference, engine_init_good)
 {
@@ -67,7 +61,6 @@ Test(mlx_inference, engine_free_resets_flags)
     cr_assert_not(eng.available, "");
 }
 
-/* ─── load ─────────────────────────────────────────────────────────── */
 
 Test(mlx_inference, load_returns_backend_error)
 {
@@ -96,7 +89,6 @@ Test(mlx_inference, load_null_engine)
     cr_assert_eq(oc_mlx_engine_load(NULL, "/tmp/x"), OC_ERR_INVALID_ARG, "");
 }
 
-/* ─── generate ─────────────────────────────────────────────────────── */
 
 Test(mlx_inference, generate_returns_error)
 {
@@ -149,7 +141,6 @@ Test(mlx_inference, generate_zero_tokens_or_max)
     oc_mlx_engine_free(&eng);
 }
 
-/* ─── platform info ───────────────────────────────────────────────── */
 
 Test(mlx_inference, is_available_is_false_on_non_macos)
 {
@@ -163,7 +154,6 @@ Test(mlx_inference, backend_name_is_mlx)
     cr_assert_str_eq(oc_mlx_backend_name(), "mlx", "");
 }
 
-/* ─── available flag ──────────────────────────────────────────────── */
 
 Test(mlx_inference, available_flag_matches_host)
 {
@@ -175,7 +165,6 @@ Test(mlx_inference, available_flag_matches_host)
     oc_mlx_engine_free(&eng);
 }
 
-/* ─── loaded flag ─────────────────────────────────────────────────── */
 
 Test(mlx_inference, loaded_flag_false_after_init)
 {

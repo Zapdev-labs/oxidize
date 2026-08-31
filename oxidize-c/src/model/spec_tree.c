@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ─── Helpers ───────────────────────────────────────────────────────── */
 
 static void oc_spec_node_init(OcSpecNode *node, uint32_t token_id,
                               float logprob, int32_t parent_idx,
@@ -24,7 +23,6 @@ static void oc_spec_node_init(OcSpecNode *node, uint32_t token_id,
     node->n_children = 0;
 }
 
-/* ─── API ────────────────────────────────────────────────────────────── */
 
 OcError oc_spec_tree_config_init(OcSpecTreeConfig *cfg)
 {
@@ -187,10 +185,7 @@ OcError oc_spec_tree_prune(OcSpecTree *tree)
     if (!tree) return OC_ERR_INVALID_ARG;
     if (tree->n_nodes == 0) return OC_OK;
 
-    /* A node survives if it (and all its ancestors) is accepted. In
-     * tree-based speculative decoding, only fully-accepted paths are kept;
-     * a rejected branch is dropped along with its descendants.
-     * The root is preserved as a sentinel so the tree is never empty. */
+    /* A node survives if it (and all its ancestors) is accepted. */
     bool *keep = malloc(tree->n_nodes * sizeof(bool));
     if (!keep) return OC_ERR_OOM;
 

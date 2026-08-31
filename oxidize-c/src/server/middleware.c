@@ -1,20 +1,4 @@
-/*
- * middleware.c — server middleware stack implementation.
- *
- * Auth: Bearer token check against the configured API key.
- * Rate limit: token-bucket per IP (or global), refilled at a steady rate.
- * Metrics: atomic counters + a simple latency histogram.
- * Audit: fixed-size ring buffer of the most recent N entries (newest-first
- *        retrieval, mutex-protected).
- * CORS: configurable Access-Control-* headers appended to responses.
- *
- * Threading: metrics use atomics; the rate-limit table and audit ring
- * buffer are protected by mutexes. Safe to call from multiple worker
- * threads concurrently.
- *
- * Wired into `--serve-api` via oc_openai_handler and
- * oc_openai_stream_authorize (Authorization plus peer IP on OcRequestContext).
- */
+/* middleware.c — server middleware stack implementation. */
 #define _POSIX_C_SOURCE 200809L   /* strdup, snprintf */
 #include "oxidize/middleware.h"
 
@@ -28,7 +12,6 @@
 #include <strings.h>
 #include <time.h>
 
-/* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
 static uint64_t now_ms(void)
 {
@@ -52,7 +35,6 @@ static size_t latency_bucket(uint64_t ms)
     return 7;
 }
 
-/* ─── Auth ────────────────────────────────────────────────────────────────── */
 
 /* Returns 0 if authorized, 401 otherwise. */
 static int auth_check(const OcAuthConfig *auth, const char *auth_header)
@@ -69,7 +51,6 @@ static int auth_check(const OcAuthConfig *auth, const char *auth_header)
     return 0;
 }
 
-/* ─── Rate limiter ─────────────────────────────────────────────────────────── */
 
 static void bucket_refill(OcRateBucket *b, const OcRateLimitConfig *cfg,
                           uint64_t now)
@@ -80,7 +61,6 @@ static void bucket_refill(OcRateBucket *b, const OcRateLimitConfig *cfg,
         return;
     }
     if (now <= b->last_refill) return;
-    /* tokens per ms = requests_per_minute / 60000 */
     double add = (double)(now - b->last_refill) *
                  (double)cfg->requests_per_minute / 60000.0;
     b->tokens += add;
@@ -154,7 +134,6 @@ bool oc_rate_limiter_allow(OcRateLimiter *rl, const char *client_ip)
     return allow;
 }
 
-/* ─── Metrics ─────────────────────────────────────────────────────────────── */
 
 void oc_metrics_record(OcMetrics *m, int status, uint64_t duration_ms,
                        size_t tokens_generated)
@@ -274,7 +253,6 @@ size_t oc_metrics_format_prometheus(const OcMetrics *m, char *buf, size_t cap)
     return off;
 }
 
-/* ─── Audit ───────────────────────────────────────────────────────────────── */
 
 void oc_audit_record(OcAuditLog *log, const OcRequestContext *req,
                      const OcResponseContext *resp)
@@ -383,7 +361,6 @@ size_t oc_audit_format(const OcAuditLog *log, char *buf, size_t cap)
     return off;
 }
 
-/* ─── Middleware init/free ────────────────────────────────────────────────── */
 
 OcError oc_middleware_init(OcMiddleware *mw, uint32_t enabled,
                           const char *api_key,
@@ -446,7 +423,6 @@ void oc_middleware_free(OcMiddleware *mw)
     pthread_mutex_destroy(&mw->audit.lock);
 }
 
-/* ─── Process request/response ────────────────────────────────────────────── */
 
 int oc_middleware_process_request(OcMiddleware *mw, const OcRequestContext *req)
 {

@@ -1,8 +1,4 @@
-/*
- * conversion.c — Model format conversion implementation.
- *
- * Wires oc_conv_run to the real oc_safetensors_to_gguf conversion.
- */
+/* conversion.c — Model format conversion implementation. */
 #include "oxidize/conversion.h"
 #include "oxidize/safetensors_to_gguf.h"
 

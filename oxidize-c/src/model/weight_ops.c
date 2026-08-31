@@ -7,7 +7,6 @@
 #include <string.h>
 #include <math.h>
 
-/* ─── f32 GEMV ────────────────────────────────────────────────────────── */
 
 OcError oc_gemv_f32(const float *weights, size_t rows, size_t cols,
                      const float *input, float *output)
@@ -25,7 +24,6 @@ OcError oc_gemv_f32(const float *weights, size_t rows, size_t cols,
     return OC_OK;
 }
 
-/* ─── GEMV weight ─────────────────────────────────────────────────────── */
 
 OcError oc_gemv_weight(const OcWeightStorage *ws,
                        size_t rows, size_t cols,
@@ -73,7 +71,6 @@ OcError oc_gemv_weight(const OcWeightStorage *ws,
     return OC_ERR_INVALID_ARG;
 }
 
-/* ─── GEMV expert weight ──────────────────────────────────────────────── */
 
 OcError oc_gemv_expert_weight(const OcWeightStorage *ws,
                                size_t expert_idx, size_t n_experts,
@@ -126,7 +123,6 @@ OcError oc_gemv_expert_weight(const OcWeightStorage *ws,
     return OC_ERR_INVALID_ARG;
 }
 
-/* ─── Fused GEMV ──────────────────────────────────────────────────────── */
 
 OcError oc_gemv_weight_fused(OcGemvPart *parts, size_t n_parts,
                               size_t cols, const float *input)
@@ -143,7 +139,6 @@ OcError oc_gemv_weight_fused(OcGemvPart *parts, size_t n_parts,
     return OC_OK;
 }
 
-/* ─── Batched GEMM ────────────────────────────────────────────────────── */
 
 OcError oc_gemm_weight(const OcWeightStorage *ws,
                         size_t rows, size_t cols,
@@ -209,7 +204,6 @@ OcError oc_gemm_weight(const OcWeightStorage *ws,
     return OC_ERR_INVALID_ARG;
 }
 
-/* ─── Add repeating bias ─────────────────────────────────────────────── */
 
 void oc_add_repeating_bias(float *buf, size_t buf_len,
                             const float *bias, size_t bias_len)
@@ -219,7 +213,6 @@ void oc_add_repeating_bias(float *buf, size_t buf_len,
         buf[i] += bias[i % bias_len];
 }
 
-/* ─── MoE FFN forward ─────────────────────────────────────────────────── */
 
 static int compare_expert_scores(const void *a, const void *b)
 {
@@ -249,10 +242,7 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
     size_t h = cfg->hidden_size;
     size_t i_size = cfg->expert_intermediate_size > 0 ? cfg->expert_intermediate_size : cfg->intermediate_size;
     size_t n_experts = cfg->num_experts;
-    /* LongCat appends `zero_expert_count` identity experts after the routed
-     * ones. They hold no weights, so the expert pool is still n_experts
-     * wide, but the ROUTER spans every slot and top-k picks across all of
-     * them -- a token can route part of its mass to "do nothing". */
+    /* LongCat appends `zero_expert_count` identity experts after the routed them -- a token can route part of its mass to "do nothing". */
     size_t n_zero  = cfg->zero_expert_count;
     size_t n_slots = n_experts + n_zero;
     size_t n_per_tok = cfg->num_experts_per_tok;
@@ -263,12 +253,10 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
     /* Zero output. */
     memset(ffn_out, 0, h * sizeof(float));
 
-    /* 1. Router logits: [n_slots] */
     memset(router_logits, 0, n_slots * sizeof(float));
     OcError e = oc_gemv_weight(gate_inp, n_slots, h, normed, router_logits);
     if (e != OC_OK) return e;
 
-    /* 2. Gating: softmax (Mixtral) or sigmoid + bias (LFM2MoE). */
     if (sigmoid_gating) {
         for (size_t i = 0; i < n_slots; i++)
             router_logits[i] = 1.0f / (1.0f + expf(-router_logits[i]));
@@ -305,7 +293,6 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
         }
     }
 
-    /* 2b. DeepSeek group-limited routing (skip if n_group <= 1). */
     if (cfg->expert_group_count > 1 &&
         cfg->expert_group_used_count > 0 &&
         cfg->expert_group_used_count < cfg->expert_group_count &&
@@ -349,15 +336,8 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
         free(group_selected);
     }
 
-    /* 3. Sort experts by score (descending). */
     qsort(expert_scores, n_slots, sizeof(OcExpertScore), compare_expert_scores);
 
-    /* 4. Renormalize weights over top-k.
-     *
-     * LongCat does NOT renormalize: the softmax already spans all 896 slots
-     * and the routed mass is meant to be less than 1 when zero experts win,
-     * which is exactly how a token skips work. Rescaling to sum 1 would undo
-     * that and force every token through a full-strength FFN. */
     bool renormalize = (n_zero == 0);
     float weight_sum = 0.0f;
     if (renormalize) {
@@ -367,7 +347,6 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
     /* Apply expert_weights_scale. */
     float scale = cfg->expert_weights_scale;
 
-    /* 5. Run top-k experts and accumulate. */
     for (size_t k = 0; k < n_per_tok; k++) {
         size_t expert_idx = expert_scores[k].idx;
         float weight = expert_scores[k].weight;
@@ -387,12 +366,10 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
             continue;
         }
 
-        /* gate = gate_exps[expert_idx] @ normed  -> [i_size] */
         e = oc_gemv_expert_weight(gate_exps, expert_idx, n_experts,
                                    i_size, h, normed, gate_scratch);
         if (e != OC_OK) return e;
 
-        /* up = up_exps[expert_idx] @ normed -> [i_size] */
         e = oc_gemv_expert_weight(up_exps, expert_idx, n_experts,
                                    i_size, h, normed, up_scratch);
         if (e != OC_OK) return e;
@@ -400,7 +377,6 @@ OcError oc_moe_ffn_forward(const OcWeightStorage *gate_inp,
         /* SwiGLU: gate[i] = silu(gate[i]) * up[i] */
         oc_swiglu_inplace_f32(gate_scratch, up_scratch, i_size);
 
-        /* down = down_exps[expert_idx] @ gate -> [h] */
         e = oc_gemv_expert_weight(down_exps, expert_idx, n_experts,
                                    h, i_size, gate_scratch, expert_out);
         if (e != OC_OK) return e;

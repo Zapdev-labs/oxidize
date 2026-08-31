@@ -1,22 +1,4 @@
-/*
- * context_cache.c — Persistent KV cache storage for fast session resume.
- *
- * Implements the OcContextCache defined in oxidize/context_cache.h: a
- * thread-safe, disk-backed hash table of KV cache snapshots keyed by session
- * id, with LRU eviction, TTL expiration, binary serialization, and stats.
- *
- * Design notes:
- *   - In-memory index: fixed-capacity open-addressing hash table using FNV-1a
- *     of the session_id string + linear probing. Capacity is `max_entries`
- *     rounded up to a power of two, capped to a sane minimum.
- *   - Each entry owns its `data` buffer (malloc) and its session_id string.
- *   - On-disk layout: see context_cache.h header comment. One file per
- *     session: `<cache_dir>/<session_id>.bin`.
- *   - LRU: entries carry `last_accessed` (epoch seconds); eviction picks the
- *     minimum. TTL expiration is checked lazily on load and on a sweep at the
- *     top of store.
- *   - Thread safety: a single pthread mutex guards every public mutation/lookup.
- */
+/* context_cache.c — Persistent KV cache storage for fast session resume. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -33,18 +15,14 @@
 #include <sys/types.h>
 #include <time.h>
 
-/* ------------------------------------------------------------------ */
-/* Constants                                                           */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Constants ------------------------------------------------------------------ */
 
 #define OC_CC_MIN_CAP    16u     /* minimum hash table capacity          */
 #define OC_CC_MAX_CAP    (1u << 20)   /* hard cap to avoid pathological allocs */
 #define OC_CC_FNV_OFFSET  0xcbf29ce484222325ULL
 #define OC_CC_FNV_PRIME   0x100000001b3ULL
 
-/* ------------------------------------------------------------------ */
-/* Internal types                                                      */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Internal types ------------------------------------------------------------------ */
 
 /* A slot in the open-addressing table. `used' distinguishes occupied from
  * empty; tombstones are tracked by `deleted' (set when an entry is removed
@@ -66,9 +44,7 @@ struct OcContextCache {
     pthread_mutex_t       mu;
 };
 
-/* ------------------------------------------------------------------ */
-/* Small helpers                                                       */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Small helpers ------------------------------------------------------------------ */
 
 static uint64_t oc_cc_now(void) {
     return (uint64_t)time(NULL);
@@ -177,9 +153,7 @@ static int oc_cc_path_for(const char *cache_dir, const char *session_id,
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Serialization                                                       */
-/* ------------------------------------------------------------------ */
+/* Serialization */
 
 /* All multi-byte fields are written in host byte order (the format is
  * intended for single-host use; cross-host portability would require
@@ -312,9 +286,7 @@ static void oc_cc_unlink_entry(const OcContextCacheConfig *cfg,
     (void)remove(path);
 }
 
-/* ------------------------------------------------------------------ */
-/* Hash table internals                                                */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Hash table internals ------------------------------------------------------------------ */
 
 /* Find the slot index for `session_id`. If `find_tombstone` is true and the
  * key is absent, returns the index of the first tombstone encountered (for
@@ -335,9 +307,7 @@ static ssize_t oc_cc_find_slot(OcContextCache *cc, const char *session_id,
                 if (first_tomb < 0) {
                     first_tomb = (ssize_t)idx;
                 }
-                /* keep probing in case the key lives further on */
             } else {
-                /* genuinely empty — key absent */
                 if (find_tombstone && first_tomb >= 0) {
                     return first_tomb;
                 }
@@ -416,9 +386,7 @@ static void oc_cc_enforce_limits(OcContextCache *cc) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Public API                                                          */
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ Public API ------------------------------------------------------------------ */
 
 OcContextCacheConfig oc_context_cache_config_default(void) {
     OcContextCacheConfig c;
@@ -446,7 +414,6 @@ OcContextCache *oc_context_cache_init(const OcContextCacheConfig *cfg) {
     if (cc->cfg.max_size_bytes == 0) {
         cc->cfg.max_size_bytes = OC_CONTEXT_CACHE_DEFAULT_MAX_SIZE;
     }
-    /* ttl_seconds == 0 means "no TTL" (preserved). */
 
     /* Copy cache_dir if provided. */
     if (cc->cfg.cache_dir != NULL) {

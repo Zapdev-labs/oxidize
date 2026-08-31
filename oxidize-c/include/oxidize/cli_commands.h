@@ -1,27 +1,4 @@
-/*
- * cli_commands.h — CLI subcommand dispatch for oxidize-c.
- *
- * Extends the basic --prompt / --serve-api flag-based CLI with a structured
- * subcommand system modeled after the Rust `oxidize-cli` subcommands.
- * Each subcommand (bench, inspect, quantize, convert, merge, prune, etc.)
- * has a dedicated handler that wires into the existing module APIs
- * (benchmark.h, inspect.h, quantize_tool.h, safetensors_to_gguf.h,
- * merge.h, prune.h, finetune.h, perplexity.h, realtime.h, openai.h, etc.).
- *
- * The dispatch model:
- *   1. Parse the first positional argument as a subcommand name
- *      (via oc_cli_command_parse).
- *   2. Build an OcCliContext from the remaining flags
- *      (model path, host/port, output format, verbose, etc.).
- *   3. Call oc_cli_command_run(ctx) which dispatches to the handler.
- *
- * Output formats: every handler supports `--output text` (default,
- * human-readable) and `--output json` (machine-readable JSON on stdout).
- * Progress / diagnostic messages always go to stderr so stdout stays clean
- * for piping.
- *
- * Port of oxidize-cli subcommands to the C11 port.
- */
+/* cli_commands.h — CLI subcommand dispatch for oxidize-c. */
 #ifndef OXIDIZE_CLI_COMMANDS_H
 #define OXIDIZE_CLI_COMMANDS_H
 
@@ -35,10 +12,6 @@
 extern "C" {
 #endif
 
-/* ─── Subcommand enum ────────────────────────────────────────────────────
- *
- * Numeric values are stable (callers may store them). Append-only.
- * OC_CLI_CMD_NONE is the "no subcommand" sentinel. */
 typedef enum {
     OC_CLI_CMD_NONE            = 0,
     OC_CLI_CMD_PROMPT          = 1,  /* generation (default)               */
@@ -59,16 +32,11 @@ typedef enum {
     OC_CLI_CMD_SERVE_REALTIME  = 16, /* start WebSocket realtime server    */
 } OcCliCommand;
 
-/* ─── Output format ────────────────────────────────────────────────────── */
 typedef enum {
     OC_CLI_OUTPUT_TEXT = 0,   /* human-readable (default)               */
     OC_CLI_OUTPUT_JSON = 1,   /* machine-readable JSON                 */
 } OcCliOutputFormat;
 
-/* ─── CLI context ────────────────────────────────────────────────────────
- *
- * Aggregates all flags needed by any subcommand handler. Fields not
- * relevant to a given command are simply ignored (NULL / 0 / false). */
 typedef struct OcCliContext {
     /* Subcommand + output. */
     OcCliCommand       command;
@@ -153,16 +121,7 @@ typedef struct OcCliContext {
     bool               tokens_no_special; /* --no-special (disallow special) */
 } OcCliContext;
 
-/* Default cap on the KV context when --ctx is not given.
- *
- * The KV cache is allocated eagerly for the whole context, so using the
- * model's advertised context_length as the default is not viable on modern
- * long-context models: Llama-3.1-8B advertises 131072, which at its 1024-float
- * KV row is 34 GB of f32 cache for an 8B model. That allocation dominates
- * startup and thrashes memory before a single token is produced. llama.cpp
- * makes the same choice for the same reason.
- *
- * Capping is announced at INFO. `--ctx 0` restores the model's own value. */
+/* Default cap on the KV context when --ctx is not given. */
 #define OC_CLI_DEFAULT_MAX_CTX 4096u
 
 /* Resolve the effective context for `model` under `ctx` and write it into the
@@ -171,7 +130,6 @@ typedef struct OcCliContext {
 struct OcLlamaModel;
 void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model);
 
-/* ─── Enum ↔ string ───────────────────────────────────────────────────── */
 
 /* Convert a command enum to its canonical name string.
  * Returns "none" for OC_CLI_CMD_NONE. Never returns NULL. */
@@ -181,12 +139,10 @@ const char *oc_cli_command_name(OcCliCommand cmd);
  * Returns OC_CLI_CMD_NONE if the name is unrecognized. */
 OcCliCommand oc_cli_command_parse(const char *name);
 
-/* ─── Context helpers ──────────────────────────────────────────────────── */
 
 /* Zero-initialize an OcCliContext with sensible defaults. */
 void oc_cli_context_defaults(OcCliContext *ctx);
 
-/* ─── Dispatch ─────────────────────────────────────────────────────────── */
 
 /* Dispatch to the appropriate command handler based on ctx->command.
  * Returns OC_OK on success, or an error code on failure.
@@ -200,12 +156,6 @@ void oc_cli_command_help(void);
  * If cmd is OC_CLI_CMD_NONE, prints the top-level help. */
 void oc_cli_command_help_for(OcCliCommand cmd);
 
-/* ─── Individual command handlers ────────────────────────────────────────
- *
- * Each handler takes an OcCliContext* and returns OC_OK or an error.
- * Handlers print results to stdout (text or JSON depending on
- * ctx->output_format) and progress/diagnostics to stderr.
- * On error, a user-friendly message is printed to stderr. */
 
 /* Run a benchmark: load model, run N iterations, print tok/s. */
 OcError oc_cli_run_bench(OcCliContext *ctx);

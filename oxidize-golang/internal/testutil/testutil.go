@@ -93,9 +93,6 @@ func AssertGenerationText(t *testing.T, raw string) {
 }
 
 // CopyFixture copies the canonical valid-v3.gguf fixture from the
-// oxidize-core test fixtures into the supplied target path. It fails the test
-// immediately if either the source cannot be read or the target cannot be
-// written.
 func CopyFixture(t *testing.T, target string) {
 	t.Helper()
 	source := filepath.Join("..", "..", "..", "oxidize-core", "tests", "fixtures", "valid-v3.gguf")

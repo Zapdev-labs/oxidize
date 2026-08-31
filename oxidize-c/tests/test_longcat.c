@@ -1,18 +1,4 @@
-/* test_longcat.c — LongCat-2.0 config parse + ScMoE tensor dispatch.
- *
- * LongCat packs TWO attention+FFN sub-blocks into each GGUF `blk.N`, so a
- * 38-block file is a 76-layer model. Sub-block tensors carry a `_0`/`_1`
- * marker on the stem (`blk.3.attn_norm_1.weight`); the router, router bias
- * and expert pool appear once per block and belong to the even sub-layer.
- *
- * These fixtures are geometrically faithful but tiny: real LongCat-2.0 is
- * 8192-wide with 768+128 experts, which would be a 1.6T-param file. The
- * shapes here are scaled down; only the NAMING and LAYER-REMAP behaviour is
- * under test.
- *
- * Reference for the contract: LongCat-2.0 config.json + a header parse of
- * LongCat-2.0-BF16.gguf.
- */
+/* test_longcat.c — LongCat-2.0 config parse + ScMoE tensor dispatch. */
 #include <criterion/criterion.h>
 #include "oxidize/gguf_writer.h"
 #include "oxidize/llama.h"
@@ -201,7 +187,6 @@ Test(longcat, config_mla_and_moe_geometry)
     cr_assert_eq(m.cfg.mla_kv_nope_head_dim, LC_KEY_LEN - LC_ROPE_DIM,
         "nope head dim should be key_length - rope, got %u",
         m.cfg.mla_kv_nope_head_dim);
-    /* value_length is read explicitly and is NOT assumed equal to nope. */
     cr_assert_eq(m.cfg.mla_v_head_dim, LC_VALUE_LEN,
         "v_head_dim should come from attention.value_length, got %u",
         m.cfg.mla_v_head_dim);
@@ -326,21 +311,6 @@ Test(longcat, ngram_tables_bind_with_per_table_row_counts)
     remove(p);
 }
 
-/* ─── MLA V projection ───────────────────────────────────────────────────
- *
- * v_b is stored exactly like k_b: HF's kv_b_proj [n_heads*(nope+v), kv_lora]
- * is split so head h contributes rows [h*(nope+v)+nope, h*(nope+v)+nope+v),
- * leaving head h's V block as `v_head_dim` contiguous rows of `kv_lora`
- * columns. That is head-major, which is what oc_gemv_weight_head expects.
- *
- * Two things used to be wrong here, and both silently produced garbage
- * rather than an error:
- *   - the GEMV was hand-rolled with a [kv_lora, v_dim, n_heads] index, which
- *     is neither the file's layout nor self-consistent; and
- *   - it read through oc_weight_storage_f32_data(), which returns NULL for
- *     mmap-backed quantized storage. BF16 counts as quantized, so V was
- *     identically zero for every real model.
- */
 
 #define VB_HEADS   3u
 #define VB_VDIM    4u
@@ -387,10 +357,7 @@ Test(longcat, mla_v_projection_is_head_major)
 
 Test(longcat, mla_v_projection_nonzero_for_quantized_storage)
 {
-    /* The regression that made V vanish: quantized storage returned NULL
-     * from the f32 accessor and the projection was skipped, leaving the
-     * output buffer at its memset zero. Any real model hits this path,
-     * because BF16 is a quantized type here. */
+    /* The regression that made V vanish: quantized storage returned NULL because BF16 is a quantized type here. */
     size_t total = (size_t)VB_HEADS * VB_VDIM * VB_LORA;
     float *ref = malloc(total * sizeof(float));
     cr_assert_not_null(ref, "alloc");
@@ -438,17 +405,7 @@ Test(longcat, mla_v_projection_nonzero_for_quantized_storage)
     oc_weight_storage_free(&ws);
 }
 
-/* ─── Zero-expert (identity) MoE routing ─────────────────────────────────
- *
- * LongCat appends `zero_expert_count` identity experts after the routed
- * ones. They hold no weights and return their input unchanged. Three
- * properties distinguish this from ordinary top-k MoE, and all three are
- * silent if wrong:
- *   - the router spans routed + zero slots, so top-k can pick "do nothing";
- *   - exp_probs_b steers SELECTION only, never the applied gate;
- *   - there is NO renormalization over top-k, because routed mass summing
- *     to less than 1 is the mechanism by which a token skips work.
- */
+/* - the router spans routed + zero slots, so top-k can pick "do nothing"; */
 
 #define ZE_H       2u
 #define ZE_IFF     2u
@@ -464,7 +421,6 @@ typedef struct {
 static void ze_build(ZeExperts *z, float l0, float l1)
 {
     float *router = malloc(ZE_SLOTS * ZE_H * sizeof(float));
-    /* input is {1,1}, so each row must sum to the wanted logit. */
     router[0] = l0 * 0.5f; router[1] = l0 * 0.5f;
     router[2] = l1 * 0.5f; router[3] = l1 * 0.5f;
     oc_weight_storage_init(&z->gate_inp);
@@ -546,11 +502,6 @@ Test(longcat, zero_expert_contributes_identity)
 
 Test(longcat, zero_expert_output_is_not_renormalized)
 {
-    /* If top-k were renormalized to sum 1, the single selected expert would
-     * always get weight 1.0 and the output would be exactly `scale`,
-     * regardless of how confident the router was. That would erase the
-     * "skip work" mechanism entirely. Two different logit gaps must give
-     * two different magnitudes. */
     float lo[ZE_H] = {0}, hi[ZE_H] = {0};
     ze_run(0.0f, 1.0f, NULL, 1.0f, lo);
     ze_run(0.0f, 6.0f, NULL, 1.0f, hi);
@@ -564,10 +515,7 @@ Test(longcat, zero_expert_output_is_not_renormalized)
 
 Test(longcat, exp_probs_b_biases_selection_not_weight)
 {
-    /* Routed expert (slot 0) has the higher probability, but a large bias on
-     * slot 1 flips WHICH expert wins. The applied gate must still be slot
-     * 1's UNBIASED probability -- folding the bias into the weight would
-     * inflate the contribution far past 1.0. */
+    /* Routed expert (slot 0) has the higher probability, but a large bias on slot 1 flips WHICH expert wins. */
     float bias[ZE_SLOTS] = { 0.0f, 10.0f };
     float out[ZE_H] = {0};
     ze_run(4.0f, 0.0f, bias, 1.0f, out);
@@ -583,11 +531,6 @@ Test(longcat, exp_probs_b_biases_selection_not_weight)
 
 Test(longcat, routed_expert_still_runs_when_it_wins)
 {
-    /* Sanity: with the routed expert winning, the zero-expert path must not
-     * swallow it. For x = {1,1}: gate is the identity so gate[i] = 1 and
-     * silu(1) = 0.7310586; up is an all-ones [2,2] matrix, so it sums both
-     * input lanes to 2.0; down is the identity. Per lane that is
-     * silu(1) * 2, gated by the router probability. */
     float out[ZE_H] = {0};
     ze_run(4.0f, 0.0f, NULL, 1.0f, out);
 
@@ -599,13 +542,6 @@ Test(longcat, routed_expert_still_runs_when_it_wins)
             "routed expert output: got %.6f want %.6f", out[i], want);
 }
 
-/* ─── MLA session init ───────────────────────────────────────────────────
- *
- * oc_llama_session_init used to hard-reject every MLA model with
- * OC_ERR_MODEL ("MLA still lacks a complete session path"), which meant the
- * whole DeepSeek/GLM-MoE-DSA/LongCat family could load but never decode --
- * every CLI and server entry point routes through this call.
- */
 
 Test(longcat, mla_session_initializes)
 {
@@ -629,11 +565,6 @@ Test(longcat, mla_session_initializes)
 
 Test(longcat, mla_kv_row_is_the_compressed_latent)
 {
-    /* MLA caches [c_kv | k_pe] -- the compressed latent every head's K and V
-     * decompress from -- rather than the expanded per-head K/V. On real
-     * LongCat-2.0 that is 576 floats per row against 64*192 = 12288, which
-     * is the difference between 8k context costing 61 GB and 64k costing
-     * about 11 GB. */
     const char *p = FIXTURE("kvrow");
     build_longcat_gguf(p);
 

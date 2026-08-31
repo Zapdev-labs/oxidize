@@ -1,10 +1,4 @@
-/*
- * cpu_kernels.h — CPU kernel dispatch.
- *
- * Provides function pointers that dispatch to the best available SIMD
- * implementation (scalar, AVX2, AVX-512) for each kernel.
- * Port from oxidize-core/src/compute/ and oxidize-kernels/.
- */
+/* cpu_kernels.h — CPU kernel dispatch. */
 #ifndef OXIDIZE_CPU_KERNELS_H
 #define OXIDIZE_CPU_KERNELS_H
 
@@ -68,10 +62,7 @@ float oc_cpu_dot_f32_scalar(const float *a, const float *b, size_t n);
 void oc_cpu_matvec_f32_scalar(const float *w, const float *x, float *out,
                                size_t n_rows, size_t n_cols);
 
-/* SIMD implementations. Only defined on x86-64 with a compiler that
- * supports the corresponding __attribute__((target(...))); use
- * oc_cpu_kernels_init()/init_best() rather than calling these directly,
- * since they fault on CPUs lacking the instruction set. */
+/* SIMD implementations. Calling the avx2/avx512 kernels without those ISAs is SIGILL; use oc_cpu_kernels_init()/init_best() rather than calling these directly. */
 #if defined(__x86_64__) || defined(__i386__)
 #define OC_CPU_KERNELS_HAVE_AVX2 1
 float oc_cpu_dot_f32_avx2(const float *a, const float *b, size_t n);
