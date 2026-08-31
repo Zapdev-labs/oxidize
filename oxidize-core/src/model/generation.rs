@@ -1437,12 +1437,13 @@ mod tests {
     #[test]
     fn stop_tracker_matches_sequences_within_ring() {
         let stop = vec![3_u32, 4, 5];
-        let mut tracker = StopTracker::new(&[stop.clone()]);
-        assert!(!tracker.push(1, None, &[stop.clone()]));
-        assert!(!tracker.push(2, None, &[stop.clone()]));
-        assert!(!tracker.push(3, None, &[stop.clone()])); // partial only
-        assert!(!tracker.push(4, None, &[stop.clone()])); // partial only
-        assert!(tracker.push(5, None, &[stop])); // completes [3, 4, 5]
+        let mut tracker = StopTracker::new(std::slice::from_ref(&stop));
+        let seqs = [stop.clone()];
+        assert!(!tracker.push(1, None, &seqs));
+        assert!(!tracker.push(2, None, &seqs));
+        assert!(!tracker.push(3, None, &seqs)); // partial only
+        assert!(!tracker.push(4, None, &seqs)); // partial only
+        assert!(tracker.push(5, None, &seqs)); // completes [3, 4, 5]
     }
 
     #[test]
