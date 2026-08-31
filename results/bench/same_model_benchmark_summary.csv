@@ -1,4 +1,0 @@
-engine,model,test,tps,source
-Oxidize,Qwen3.6-27B-DFlash-llamacpp.gguf,draft_forward,17.09,oxidize_qwen36_dflash_llamacpp_after_flash.log
-llama.cpp,Qwen3.6-27B-DFlash-llamacpp.gguf,pp32,118.77,llama_cpp_qwen36_dflash_llamacpp_same_model_alt.log
-llama.cpp,Qwen3.6-27B-DFlash-llamacpp.gguf,tg32,118.77,llama_cpp_qwen36_dflash_llamacpp_same_model_alt.log

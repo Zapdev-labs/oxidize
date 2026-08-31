@@ -1,4 +1,0 @@
-generation progress: 1/2 tokens
-generation progress: 2/2 tokens
-oxidize-cli: hello
-generation stats: tokens=2 speed=4.00 tok/s

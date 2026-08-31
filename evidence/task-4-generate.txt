@@ -1,8 +1,0 @@
-=== RUN   TestServerPlaceholderPriority
---- PASS: TestServerPlaceholderPriority (0.00s)
-=== RUN   TestCLITranscript
---- PASS: TestCLITranscript (0.00s)
-=== RUN   TestNoRealInferenceHooks
---- PASS: TestNoRealInferenceHooks (0.00s)
-PASS
-ok  	github.com/Zapdev-labs/oxidize/golang/internal/generate	0.010s
