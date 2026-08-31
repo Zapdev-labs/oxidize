@@ -57,6 +57,7 @@ typedef enum {
     OC_CLI_CMD_DETOKENIZE      = 14, /* token IDs → text                   */
     OC_CLI_CMD_PERPLEXITY      = 15, /* compute perplexity                 */
     OC_CLI_CMD_SERVE_REALTIME  = 16, /* start WebSocket realtime server    */
+    OC_CLI_CMD_DFLASH2         = 17, /* DFlash2 draft propose benchmark    */
 } OcCliCommand;
 
 /* ─── Output format ────────────────────────────────────────────────────── */
@@ -248,6 +249,13 @@ OcError oc_cli_run_serve(OcCliContext *ctx);
 
 /* Start the WebSocket realtime server. */
 OcError oc_cli_run_serve_realtime(OcCliContext *ctx);
+
+/* DFlash2 draft-model propose benchmark: loads a DFlash2 safetensors
+ * checkpoint, runs `--bench-iters` propose steps with synthetic target
+ * inputs (random-but-deterministic noise embeddings, context features,
+ * and lm_head), and reports step latency + throughput. Synthetic harness
+ * because the GLM-5.3-Flash target (321B) does not fit on the host. */
+OcError oc_cli_run_dflash2(OcCliContext *ctx);
 
 #ifdef __cplusplus
 }
