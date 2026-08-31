@@ -8,8 +8,50 @@
 
 #include "oxidize/cli_commands.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+int oc_cli_kv_compress_enabled(const char *name)
+{
+    return name && name[0] != '\0' && strcmp(name, "none") != 0;
+}
+
+int oc_cli_kv_compress_valid(const char *name)
+{
+    if (!name || name[0] == '\0' || strcmp(name, "none") == 0) return 1;
+    return strcmp(name, "rotor") == 0 || strcmp(name, "helix") == 0;
+}
+
+int oc_cli_cuda_conflicts_kv_compress(const char *backend,
+                                      const char *kv_compress)
+{
+    return backend && strcmp(backend, "cuda") == 0 &&
+           oc_cli_kv_compress_enabled(kv_compress);
+}
+
+int oc_cli_kv_compress_reject(const char *backend, const char *kv_compress,
+                              const char *server_label)
+{
+    if (oc_cli_cuda_conflicts_kv_compress(backend, kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress is not supported with --backend cuda\n");
+        return 1;
+    }
+    if (!oc_cli_kv_compress_valid(kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress must be none, rotor, or helix\n");
+        return 1;
+    }
+    if (server_label && server_label[0] != '\0' &&
+        oc_cli_kv_compress_enabled(kv_compress)) {
+        fprintf(stderr,
+                "error: --kv-compress is not supported with %s\n",
+                server_label);
+        return 1;
+    }
+    return 0;
+}
 
 void oc_cli_args_defaults(OcCliArgs *a)
 {
@@ -46,6 +88,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--n-predict"))  { a->n_predict = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--ctx"))        { a->n_ctx = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--kv"))         { a->kv_type = val; *consumed_val = true; }
+    else if (match(arg, "--kv-compress")){ a->kv_compress = val; *consumed_val = true; }
     else if (match(arg, "--threads"))    { a->threads = atoi(val); *consumed_val = true; }
     else if (match(arg, "--batch-size")) { a->batch_size = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--numa"))       { a->numa = val; *consumed_val = true; }
@@ -148,6 +191,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--kv"))             { ctx->kv_type = val; i++; }
+        else if (match(arg, "--kv-compress"))    { ctx->kv_compress = val; i++; }
         else if (match(arg, "--threads"))        { ctx->threads = atoi(val); i++; }
         else if (match(arg, "--numa"))           { ctx->numa = val; i++; }
         else if (match(arg, "--backend"))        { ctx->backend = val; i++; }

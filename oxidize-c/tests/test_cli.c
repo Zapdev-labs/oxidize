@@ -151,3 +151,68 @@ Test(cli, parses_kv_type)
     oc_cli_parse_args(5, argv, &a);
     cr_assert_str_eq(a.kv_type, "q8");
 }
+
+Test(cli, parses_kv_compress)
+{
+    char *argv[] = {"oxidize-c", "--model", "m.gguf", "--kv-compress", "rotor"};
+    OcCliArgs a;
+    oc_cli_parse_args(5, argv, &a);
+    cr_assert_str_eq(a.kv_compress, "rotor");
+}
+
+Test(cli, kv_compress_defaults_to_none)
+{
+    OcCliArgs a;
+    oc_cli_args_defaults(&a);
+    cr_assert(a.kv_compress == NULL, "default compressed KV is off");
+}
+
+Test(cli, subcommand_parses_kv_compress)
+{
+    char *argv[] = {"oxidize-c", "bench", "--model", "m.gguf",
+                    "--kv-compress", "helix"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(6, argv, &ctx));
+    cr_assert_str_eq(ctx.kv_compress, "helix");
+}
+
+Test(cli, kv_compress_conflicts_with_cuda)
+{
+    cr_assert(oc_cli_cuda_conflicts_kv_compress("cuda", "rotor"));
+    cr_assert(oc_cli_cuda_conflicts_kv_compress("cuda", "helix"));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress("cuda", "none"));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress("cuda", NULL));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress("cpu", "rotor"));
+    cr_assert(!oc_cli_cuda_conflicts_kv_compress(NULL, "helix"));
+    cr_assert(oc_cli_kv_compress_enabled("rotor"));
+    cr_assert(!oc_cli_kv_compress_enabled("none"));
+    cr_assert(!oc_cli_kv_compress_enabled(NULL));
+}
+
+Test(cli, kv_compress_valid_names)
+{
+    cr_assert(oc_cli_kv_compress_valid(NULL));
+    cr_assert(oc_cli_kv_compress_valid(""));
+    cr_assert(oc_cli_kv_compress_valid("none"));
+    cr_assert(oc_cli_kv_compress_valid("rotor"));
+    cr_assert(oc_cli_kv_compress_valid("helix"));
+    cr_assert(!oc_cli_kv_compress_valid("turbo"));
+    cr_assert(!oc_cli_kv_compress_valid("ROTORS"));
+}
+
+Test(cli, kv_compress_reject_helper_matches_paths)
+{
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "rotor", NULL), 0);
+    cr_assert_eq(oc_cli_kv_compress_reject("cuda", "rotor", NULL), 1);
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "rotr", NULL), 1);
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "helix", "serve-realtime"),
+                 1);
+    cr_assert_eq(oc_cli_kv_compress_reject("cpu", "none", "serve"), 0);
+}
+
+Test(cli, command_name_identifies_serve_realtime)
+{
+    cr_assert_str_eq(oc_cli_command_name(OC_CLI_CMD_SERVE), "serve");
+    cr_assert_str_eq(oc_cli_command_name(OC_CLI_CMD_SERVE_REALTIME),
+                     "serve-realtime");
+}

@@ -118,6 +118,7 @@ static void print_help(void)
 "  --n-predict N          Max tokens to generate (default 128)\n"
 "  --ctx N                Cap KV context below the model's advertised length\n"
 "  --kv f32|q8            KV cache dtype (default: q8 when ctx>=8192)\n"
+"  --kv-compress MODE     none | rotor | helix (default none)\n"
 "  --threads N            CPU thread hint (0 = auto)\n"
 "  --numa MODE            single | interleave | none (default none)\n"
 "  --auto                 Enable autotune (detect + plan)\n"
@@ -319,7 +320,7 @@ static OcError run_generation(const OcCliArgs *args)
 
     OcLlamaSession sess;
     OcKvCacheType kv = oc_llama_select_kv_type(model.cfg.n_ctx, args->kv_type);
-    e = oc_llama_session_init_kv(&model, &sess, kv);
+    e = oc_llama_session_init_with_compress(&model, &sess, kv, args->kv_compress);
     if (e != OC_OK) {
         fprintf(stderr, "error: session init failed (%s)\n", oc_error_msg(e));
         oc_tokenizer_free(&tok);
@@ -560,6 +561,12 @@ int main(int argc, char **argv)
      * every existing script keep working. */
     OcCliContext ctx;
     if (oc_cli_context_parse(argc, argv, &ctx)) {
+        const char *server = NULL;
+        if (ctx.command == OC_CLI_CMD_SERVE ||
+            ctx.command == OC_CLI_CMD_SERVE_REALTIME)
+            server = oc_cli_command_name(ctx.command);
+        if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
+            return 1;
         init_compute_threads(ctx.threads);
         OcError ce = oc_cli_command_run(&ctx);
         oc_parallel_shutdown();
@@ -573,6 +580,9 @@ int main(int argc, char **argv)
      * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
+    if (oc_cli_kv_compress_reject(args.backend, args.kv_compress,
+                                  args.serve_api ? "--serve-api" : NULL))
+        return 1;
     if (args.cuda_selftest) {
         OcError se = oc_cuda_selftest();
         if (se != OC_OK) {
@@ -897,9 +907,18 @@ int main(int argc, char **argv)
                n_ids, args.bench_iterations, args.n_predict);
         double best_tps = 0.0, sum_tps = 0.0;
         int completed_iterations = 0;
+        int setup_failed = 0;
         for (int iter = 0; iter < args.bench_iterations; iter++) {
             OcLlamaSession sess;
-            if (oc_llama_session_init_kv(&model, &sess, bench_kv) != OC_OK) break;
+            OcError se = oc_llama_session_init_with_compress(&model, &sess,
+                                                             bench_kv,
+                                                             args.kv_compress);
+            if (se != OC_OK) {
+                fprintf(stderr, "error: benchmark session init failed (%s)\n",
+                        oc_error_msg(se));
+                setup_failed = 1;
+                break;
+            }
             float *logits = sess.logits;
             for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++)
                 e = oc_llama_forward(&sess, ids[i], NULL);
@@ -907,6 +926,7 @@ int main(int argc, char **argv)
             if (e != OC_OK) {
                 fprintf(stderr, "error: benchmark prefill failed (%s)\n", oc_error_msg(e));
                 oc_llama_session_free(&sess);
+                setup_failed = 1;
                 break;
             }
             double start = wall_now();
@@ -923,7 +943,8 @@ int main(int argc, char **argv)
             double pf_start = wall_now();
             OcLlamaSession pf_sess;
             memset(&pf_sess, 0, sizeof(pf_sess));
-            if (oc_llama_session_init_kv(&model, &pf_sess, bench_kv) == OC_OK) {
+            if (oc_llama_session_init_with_compress(&model, &pf_sess, bench_kv,
+                                                    args.kv_compress) == OC_OK) {
                 for (size_t i = 0; i < n_ids; i++)
                     oc_llama_forward(&pf_sess, ids[i], NULL);
             }
@@ -941,7 +962,9 @@ int main(int argc, char **argv)
         free(bench_file_prompt);
         oc_tokenizer_free(&tok);
         oc_llama_free(&model);
-        if (completed_iterations == 0) return 1;
+        if (setup_failed || completed_iterations == 0 ||
+            completed_iterations != args.bench_iterations)
+            return 1;
         printf("benchmark: best=%.2f tok/s, avg=%.2f tok/s\n",
                best_tps, sum_tps / completed_iterations);
         return 0;

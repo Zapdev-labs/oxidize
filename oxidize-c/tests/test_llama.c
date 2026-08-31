@@ -23,6 +23,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ─── RMSNorm ────────────────────────────────────────────────────────────
@@ -609,4 +610,219 @@ Test(llama, select_kv_type_explicit)
     cr_assert_eq(oc_llama_select_kv_type(32768, "f32"), OC_KV_F32);
     cr_assert_eq(oc_llama_select_kv_type(64, "q8"), OC_KV_Q8);
     cr_assert_eq(oc_llama_select_kv_type(4096, "Q8"), OC_KV_Q8);
+}
+
+static float llama_lcg(uint64_t *state)
+{
+    *state = *state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (float)(*state >> 40) / (float)(1u << 24) * 2.0f - 1.0f;
+}
+
+static void llama_rope_interleaved(const float *row, size_t pos, size_t hd,
+                                   float theta, float *out)
+{
+    size_t p;
+    for (p = 0; p < hd / 2; p++) {
+        const float freq = powf(theta, -2.0f * (float)p / (float)hd);
+        const float a = freq * (float)pos;
+        const float c = cosf(a);
+        const float s = sinf(a);
+        out[2 * p]     = row[2 * p] * c - row[2 * p + 1] * s;
+        out[2 * p + 1] = row[2 * p] * s + row[2 * p + 1] * c;
+    }
+}
+
+static float cosine_sim(const float *a, const float *b, size_t n)
+{
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    size_t i;
+    for (i = 0; i < n; i++) {
+        dot += (double)a[i] * (double)b[i];
+        na += (double)a[i] * (double)a[i];
+        nb += (double)b[i] * (double)b[i];
+    }
+    if (na <= 0.0 || nb <= 0.0) return 0.0f;
+    return (float)(dot / (sqrt(na) * sqrt(nb)));
+}
+
+static void rotor_facade_vs_f32(size_t hd)
+{
+    const size_t tokens = 8;
+    const float theta = 10000.0f;
+    uint64_t rng = 11 + hd;
+    float *keys, *values, *query, *ref, *rq, *rk, *out, *scores;
+    size_t *positions;
+    size_t t, i;
+    float max_s, z, scale, sim;
+    OcCompressedKvCache cache;
+    keys = malloc(tokens * hd * sizeof(float));
+    values = malloc(tokens * hd * sizeof(float));
+    query = malloc(hd * sizeof(float));
+    ref = calloc(hd, sizeof(float));
+    rq = malloc(hd * sizeof(float));
+    rk = malloc(hd * sizeof(float));
+    out = malloc(hd * sizeof(float));
+    scores = malloc(tokens * sizeof(float));
+    positions = malloc(tokens * sizeof(size_t));
+    cr_assert(keys && values && query && ref && rq && rk && out && scores &&
+              positions);
+    for (i = 0; i < tokens * hd; i++) keys[i] = llama_lcg(&rng);
+    for (i = 0; i < tokens * hd; i++) values[i] = llama_lcg(&rng);
+    for (i = 0; i < hd; i++) query[i] = llama_lcg(&rng);
+    for (t = 0; t < tokens; t++) positions[t] = t;
+    llama_rope_interleaved(query, tokens - 1, hd, theta, rq);
+    scale = 1.0f / sqrtf((float)hd);
+    max_s = -1.0e30f;
+    for (t = 0; t < tokens; t++) {
+        float dot = 0.0f;
+        llama_rope_interleaved(keys + t * hd, t, hd, theta, rk);
+        for (i = 0; i < hd; i++) dot += rq[i] * rk[i];
+        scores[t] = dot * scale;
+        if (scores[t] > max_s) max_s = scores[t];
+    }
+    z = 0.0f;
+    for (t = 0; t < tokens; t++) {
+        scores[t] = expf(scores[t] - max_s);
+        z += scores[t];
+    }
+    for (t = 0; t < tokens; t++) {
+        for (i = 0; i < hd; i++)
+            ref[i] += scores[t] / z * values[t * hd + i];
+    }
+    cr_assert_eq(oc_compressed_kv_init(&cache, hd, OC_KV_SCHEME_ROTOR, tokens,
+                                       theta),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_store_page(&cache, 0, 0, keys, values,
+                                             positions, tokens),
+                 OC_OK);
+    cr_assert_eq(oc_compressed_kv_attention(&cache, 0, 0, query, hd, tokens - 1,
+                                            out),
+                 OC_OK);
+    sim = cosine_sim(out, ref, hd);
+    /* int4 + 3D rotors: cosine against f32 RoPE-attention stays high. */
+    cr_assert(sim >= 0.95f,
+              "head_dim=%zu cosine similarity %f (need >= 0.95)", hd, sim);
+    oc_compressed_kv_free(&cache);
+    free(keys); free(values); free(query); free(ref); free(rq); free(rk);
+    free(out); free(scores); free(positions);
+}
+
+Test(llama, compressed_kv_rotor_cosine_hd8)
+{
+    rotor_facade_vs_f32(8);
+}
+
+Test(llama, compressed_kv_rotor_cosine_hd16)
+{
+    rotor_facade_vs_f32(16);
+}
+
+Test(llama, enable_kv_compress_releases_dense_cache)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    cr_assert_eq(oc_llama_session_init(&t.model, &s), OC_OK);
+    cr_assert_not_null(s.kv_k, "dense cache is allocated first");
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_OK);
+    cr_assert_null(s.kv_k, "enabling compression must drop the f32 cache");
+    cr_assert_null(s.kv_v);
+    cr_assert_not_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}
+
+Test(llama, init_compressed_skips_dense_cache)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    cr_assert_eq(oc_llama_session_init_compressed(&t.model, &s,
+                                                 OC_KV_SCHEME_ROTOR),
+                 OC_OK);
+    cr_assert_null(s.kv_k, "init_compressed must not allocate the f32 cache");
+    cr_assert_null(s.kv_v);
+    cr_assert_not_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}
+
+Test(llama, mixed_swa_pattern_keeps_dense_kv)
+{
+    TinyBiasModel t;
+    OcLlamaLayer layers[2];
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    layers[0] = t.layer;
+    layers[1] = t.layer;
+    t.model.layers = layers;
+    t.model.cfg.n_layer = 2;
+    t.model.cfg.sliding_window = 1024;
+    t.model.cfg.sliding_window_pattern = 2;
+    cr_assert_eq(oc_llama_session_init_with_compress(&t.model, &s, OC_KV_F32,
+                                                     "rotor"),
+                 OC_OK);
+    cr_assert_not_null(s.kv_k, "legacy SWA layers must keep the dense cache");
+    cr_assert_not_null(s.kv_v);
+    cr_assert_not_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}
+
+Test(llama, enable_kv_compress_after_tokens_is_rejected)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    cr_assert_eq(oc_llama_session_init(&t.model, &s), OC_OK);
+    s.pos = 1;
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}
+
+Test(llama, enable_kv_compress_after_reset_is_ok)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    cr_assert_eq(oc_llama_session_init(&t.model, &s), OC_OK);
+    s.pos = 1;
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_ERR_INVALID_ARG);
+    oc_llama_session_reset(&s);
+    cr_assert_eq(s.pos, (int64_t)0);
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_OK);
+    cr_assert_not_null(s.kv_compress);
+    oc_llama_session_free(&s);
+}
+
+Test(llama, enable_kv_compress_rejects_gpt_family)
+{
+    TinyBiasModel t;
+    OcLlamaSession s;
+    tiny_bias_model_init(&t, false);
+    t.layer.use_rope = true;
+    t.layer.rope_dim = TB_EMBD;
+    t.model.cfg.rope_dim = TB_EMBD;
+    t.model.arch = OC_ARCH_GPT2;
+    cr_assert_eq(oc_llama_session_init(&t.model, &s), OC_OK);
+    cr_assert_eq(oc_llama_session_enable_kv_compress(&s, OC_KV_SCHEME_ROTOR),
+                 OC_ERR_INVALID_ARG);
+    oc_llama_session_free(&s);
 }
