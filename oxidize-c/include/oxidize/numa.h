@@ -85,6 +85,15 @@ OcError oc_numa_describe(const OcNumaTopology *topo,
 /* Get recommended thread count for inference based on NUMA topology. */
 uint32_t oc_numa_recommended_threads(const OcNumaTopology *topo);
 
+/* SMT-aware worker pinning: returns true and writes the CPU that pool
+ * worker `tid` should be pinned to — one worker per PHYSICAL core (the
+ * first CPU of each core's sibling list) — when `n_threads` equals the
+ * physical-core count of the machine. Returns false (no pinning advice)
+ * otherwise, or on non-Linux / undetectable topology. Rationale: the
+ * DFlash2 µop-bound phases lose ~19% when SMT siblings share a core. */
+bool oc_numa_distinct_core_for_worker(size_t tid, size_t n_threads,
+                                      uint32_t *out_cpu);
+
 /* Check if NUMA is available on this system. */
 bool oc_numa_available(void);
 

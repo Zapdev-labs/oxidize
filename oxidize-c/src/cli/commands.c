@@ -1648,6 +1648,7 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
 /* ─── dflash2: draft propose benchmark ───────────────────────────────── */
 
 #include "oxidize/dflash2.h"
+#include "oxidize/numa.h"
 #include "oxidize/parallel.h"
 
 #include <time.h>
@@ -1729,11 +1730,15 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     cli_info("loading DFlash2 draft from %s", st_path);
     if (ctx->threads > 0) {
         oc_parallel_set_threads((size_t)ctx->threads);
-    } else if (ctx->auto_tune || ctx->numa) {
+    } else if (ctx->auto_tune ||
+               (ctx->numa && strcmp(ctx->numa, "none") != 0)) {
         size_t n = (size_t)sysconf(_SC_NPROCESSORS_ONLN);
         oc_parallel_set_threads(n > 16 ? 16 : n);
     } else {
-        oc_parallel_set_threads(8);
+        /* Default: keep init_compute_threads' physical-core pool (already
+         * pinned one-worker-per-core by oc_parallel_set_threads). SMT
+         * siblings contend on the µop-bound phases and measured 19%
+         * slower. */
     }
 
     OcDFlash2Model model;

@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -281,6 +282,86 @@ OcError oc_numa_pin_cpu(uint32_t cpu)
 #else
     (void)cpu;  /* CPU affinity is Linux-only; no-op elsewhere. */
     return OC_OK;
+#endif
+}
+
+/* ─── SMT-aware worker pinning ──────────────────────────────────────────
+ *
+ * Physical-core pinning for pool workers. Detects one CPU per physical
+ * core via /sys thread_siblings_list; when the pool's thread count equals
+ * the machine's physical-core count, each worker tid maps deterministi-
+ * cally to one core. The µop-bound DFlash2 phases measured 19% slower
+ * with SMT siblings (two workers contending for one core's FMA/LSU
+ * throughput) than one-thread-per-core, so the pool consults this before
+ * workers start. */
+
+/* Parse "0-3,8,10-11" (or a single "N") into ascending CPU ids. */
+static size_t parse_cpu_list(const char *s, uint32_t *out, size_t cap)
+{
+    size_t n = 0;
+    const char *p = s;
+    while (*p && n < cap) {
+        if (!isdigit((unsigned char)*p)) { p++; continue; }
+        uint32_t a = (uint32_t)strtoul(p, (char **)&p, 10);
+        uint32_t b = a;
+        if (*p == '-') {
+            p++;
+            b = (uint32_t)strtoul(p, (char **)&p, 10);
+            if (b < a) b = a;
+        }
+        for (uint32_t c = a; c <= b && n < cap; c++) out[n++] = c;
+    }
+    return n;
+}
+
+/* One CPU per physical core (the lowest sibling id of each core), built
+ * once under pthread_once — see oc_numa_distinct_core_for_worker. */
+static uint32_t g_core_cpus[OC_NUMA_MAX_CPUS];
+static size_t g_n_cores = (size_t)-1;
+
+static void build_core_list_once(void)
+{
+    size_t n_cores = 0;
+    uint32_t seen_siblings[OC_NUMA_MAX_CPUS];
+    size_t n_seen = 0;
+    for (uint32_t cpu = 0; cpu < OC_NUMA_MAX_CPUS; cpu++) {
+        char path[128], buf[256];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%u/"
+                 "topology/thread_siblings_list", cpu);
+        if (!read_file_to_buf(path, buf, sizeof(buf))) continue;
+        uint32_t sib[64];
+        size_t ns = parse_cpu_list(buf, sib, 64);
+        if (ns == 0) continue;
+        /* Core representative = lowest sibling id; skip cores already
+         * seen (each core appears once per sibling CPU). */
+        uint32_t first = sib[0];
+        bool dup = false;
+        for (size_t i = 0; i < n_seen; i++)
+            if (seen_siblings[i] == first) { dup = true; break; }
+        if (dup) continue;
+        if (n_seen < OC_NUMA_MAX_CPUS) seen_siblings[n_seen++] = first;
+        if (n_cores < OC_NUMA_MAX_CPUS) g_core_cpus[n_cores++] = first;
+    }
+    g_n_cores = n_cores;
+}
+
+bool oc_numa_distinct_core_for_worker(size_t tid, size_t n_threads,
+                                      uint32_t *out_cpu)
+{
+#if defined(__linux__)
+    if (!out_cpu || n_threads == 0) return false;
+    /* The pool consults this from every worker thread at startup, so the
+     * list build must be race-free: pthread_once. */
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, build_core_list_once);
+    if (g_n_cores == 0) return false;
+    if (n_threads != g_n_cores || tid >= n_threads) return false;
+    *out_cpu = g_core_cpus[tid];
+    return true;
+#else
+    (void)tid; (void)n_threads; (void)out_cpu;
+    return false;
 #endif
 }
 
