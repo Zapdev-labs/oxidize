@@ -423,6 +423,67 @@ static void gemm(const OcDFlash2Weight *w, const float *x, size_t n,
     oc_parallel_for(w->rows, dflash2_gemm_par_fn, &c);
 }
 
+/* Multi-GEMM: several weight matrices — each with its own x rows — run in
+ * ONE pool dispatch over a unified row space (each slice maps its rows back
+ * to the owning matrix). Saves per-dispatch wake overhead when a phase
+ * strings together several small GEMMs (attention projections, mlp
+ * gate+up). All matrices must share the same n (x-row count) and cols. */
+typedef struct OcDFlash2MultiGemmCtx {
+    const OcDFlash2Weight *ws[8]; /* [n_w] */
+    const float *xs[8];           /* [n_w] x row blocks, each [n, cols] */
+    float *outs[8];               /* [n_w] out matrices */
+    size_t n_w;
+    size_t row0[9];               /* unified-row offset per matrix (+end) */
+    size_t total_rows;
+    size_t n;                     /* shared x-row count per matrix */
+} OcDFlash2MultiGemmCtx;
+
+static void dflash2_multigemm_par_fn(size_t begin, size_t end, size_t tid,
+                                     void *ud)
+{
+    (void)tid;
+    OcDFlash2MultiGemmCtx *c = (OcDFlash2MultiGemmCtx *)ud;
+    for (size_t ur = begin; ur < end; ur++) {
+        size_t wsel = 0;
+        while (wsel + 1 < c->n_w && ur >= c->row0[wsel + 1]) wsel++;
+        const OcDFlash2Weight *w = c->ws[wsel];
+        const float *x = c->xs[wsel];
+        const size_t r = ur - c->row0[wsel];
+        const size_t H = w->cols;
+        float out[OC_DF2_GEMM_FUSED_MAX_N];
+#if OC_DF2_SIMD_X86
+        if (w->bf16 && c->n <= OC_DF2_GEMM_FUSED_MAX_N &&
+            (oc_simd_caps()->level == OC_SIMD_AVX2 ||
+             oc_simd_caps()->level == OC_SIMD_AVX512)) {
+            df2_dot_bf16_batch_avx2(w->bf16 + r * H, x, H, c->n, out);
+            for (size_t i = 0; i < c->n; i++)
+                c->outs[wsel][i * w->rows + r] = out[i];
+            continue;
+        }
+#endif
+        for (size_t i = 0; i < c->n; i++)
+            c->outs[wsel][i * w->rows + r] = df2_dot_wrow(w, r, x + i * H);
+    }
+}
+
+/* Run up to 8 small GEMMs (same n, same cols) in one dispatch. */
+static void gemm_multi(OcDFlash2MultiGemmCtx *c)
+{
+    c->total_rows = 0;
+    for (size_t k = 0; k < c->n_w; k++) {
+        c->row0[k] = c->total_rows;
+        c->total_rows += c->ws[k]->rows;
+    }
+    c->row0[c->n_w] = c->total_rows;
+    if (c->total_rows == 0 || c->n == 0) return;
+    if (c->n == 1) {
+        for (size_t k = 0; k < c->n_w; k++)
+            gemv_w(c->ws[k], c->xs[k], c->outs[k]);
+        return;
+    }
+    oc_parallel_for(c->total_rows, dflash2_multigemm_par_fn, c);
+}
+
 /* ─── Grouped dynamic causal conv ───────────────────────────────────── */
 
 #if OC_DF2_SIMD_X86
@@ -1368,12 +1429,26 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                                     block, H, ksz, gs, conv_out);
         }
 
-        /* Q from conv'd hidden; K/V from BOTH context and conv'd hidden. */
-        gemm(&L->attn.q_proj, conv_out, block, q);
-        gemm(&L->attn.k_proj, m->target_ctx, n_ctx, k_all);
-        gemm(&L->attn.v_proj, m->target_ctx, n_ctx, v_all);
-        gemm(&L->attn.k_proj, conv_out, block, k_noise);
-        gemm(&L->attn.v_proj, conv_out, block, v_noise);
+        /* Q from conv'd hidden; K/V from BOTH context and conv'd hidden.
+         * One dispatch per x-row group: {q, k_noise, v_noise} over conv'd
+         * rows, {k_ctx, v_ctx} over the fused target context. */
+        {
+            OcDFlash2MultiGemmCtx mg = { 0 };
+            mg.ws[0] = &L->attn.q_proj;   mg.xs[0] = conv_out;  mg.outs[0] = q;
+            mg.ws[1] = &L->attn.k_proj;   mg.xs[1] = conv_out;  mg.outs[1] = k_noise;
+            mg.ws[2] = &L->attn.v_proj;   mg.xs[2] = conv_out;  mg.outs[2] = v_noise;
+            mg.n_w = 3;
+            mg.n = block;
+            gemm_multi(&mg);
+            if (n_ctx >= 1) {
+                OcDFlash2MultiGemmCtx mc = { 0 };
+                mc.ws[0] = &L->attn.k_proj; mc.xs[0] = m->target_ctx; mc.outs[0] = k_all;
+                mc.ws[1] = &L->attn.v_proj; mc.xs[1] = m->target_ctx; mc.outs[1] = v_all;
+                mc.n_w = 2;
+                mc.n = n_ctx;
+                gemm_multi(&mc);
+            }
+        }
         DF2_PT_MARK(PT_QKV);
 
         memcpy(k_all + n_ctx * n_kv * hd, k_noise, block * n_kv * hd * sizeof(float));
@@ -1469,8 +1544,14 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                                 L->mlp_conv.base_kernel.data,
                                 block, H, ksz, gs, conv_out);
 
-        gemm(&(L->mlp_gate), conv_out, block, mlp_gu);
-        gemm(&(L->mlp_up), conv_out, block, mlp_up_out);
+        {
+            OcDFlash2MultiGemmCtx mg = { 0 };
+            mg.ws[0] = &L->mlp_gate; mg.xs[0] = conv_out; mg.outs[0] = mlp_gu;
+            mg.ws[1] = &L->mlp_up;   mg.xs[1] = conv_out; mg.outs[1] = mlp_up_out;
+            mg.n_w = 2;
+            mg.n = block;
+            gemm_multi(&mg);
+        }
         for (size_t i = 0; i < block * inter; i++)
             mlp_gu[i] = silu(mlp_gu[i]) * mlp_up_out[i];
         gemm(&L->mlp_down, mlp_gu, block, mlp_out);
