@@ -17,6 +17,9 @@
  *     temperature-sampled) path via
  *     edge(p->c) = <A[p] o proj(h), B[c]> + unary[c].
  */
+/* clock_gettime (phase timing + benchmark clocks). */
+#define _POSIX_C_SOURCE 200809L
+
 #include "oxidize/dflash2.h"
 #include "oxidize/parallel.h"
 #include "oxidize/safetensors.h"
@@ -26,6 +29,62 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+/* ─── Hugepage-aware allocation ─────────────────────────────────────── */
+/*
+ * The step's two big working sets (BF16 weights ~2.35 GB, target lm_head
+ * ~1.18 GB) are fully streamed every propose step. With transparent
+ * hugepages in madvise mode those plain mallocs land on 4 KB pages: a
+ * 1.18 GB sequential scan walks ~300k pages and misses the dTLB on most
+ * of them. Backing the big buffers with MADV_HUGEPAGE 2 MB pages keeps the
+ * scan inside the L2 TLB. Rounds size up to 2 MB so madvise can coalesce. */
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <unistd.h>
+
+static size_t df2_hp_pagesize(void)
+{
+    static long ps = -1;
+    if (ps < 0) {
+        ps = sysconf(_SC_PAGESIZE);
+        if (ps <= 0) ps = 4096;
+    }
+    return (size_t)ps;
+}
+
+void *oc_dflash2_alloc_huge(size_t n)
+{
+    if (n < 1u << 20) return malloc(n);       /* small: plain malloc */
+    size_t pg = df2_hp_pagesize();
+    size_t n2 = (n + pg - 1) & ~(pg - 1);
+    void *p = mmap(NULL, n2, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return malloc(n);    /* fall back */
+#ifdef MADV_HUGEPAGE
+    if (madvise(p, n2, MADV_HUGEPAGE) != 0) { /* best effort; keep 4 KB */
+    }
+#endif
+    return p;
+}
+
+void oc_dflash2_free_huge(void *p, size_t n)
+{
+    if (!p) return;
+    if (n < 1u << 20) { free(p); return; }
+    size_t pg = df2_hp_pagesize();
+    size_t n2 = (n + pg - 1) & ~(pg - 1);
+    munmap(p, n2);
+}
+
+static void *df2_alloc_huge(size_t n) { return oc_dflash2_alloc_huge(n); }
+static void df2_free_huge(void *p, size_t n) { oc_dflash2_free_huge(p, n); }
+#else
+void *oc_dflash2_alloc_huge(size_t n) { return malloc(n); }
+void oc_dflash2_free_huge(void *p, size_t n) { (void)n; free(p); }
+#define df2_alloc_huge(n) malloc(n)
+#define df2_free_huge(p, n) free(p)
+#endif
 
 
 /* ─── Small helpers ─────────────────────────────────────────────────── */
@@ -251,7 +310,7 @@ void oc_dflash2_gemv(const float *w, size_t rows, size_t cols,
                      const float *x, float *out)
 {
     /* Legacy F32-pointer entry (kept for the public API). */
-    OcDFlash2Weight tmp = { (float *)(uintptr_t)w, NULL, rows, cols,
+    OcDFlash2Weight tmp = { (float *)(uintptr_t)w, NULL, rows, cols, 0,
                             NULL, NULL };
     OcDFlash2GemvCtx c = { &tmp, x, out };
     if (rows * cols < (size_t)32768) {
@@ -287,23 +346,65 @@ typedef struct OcDFlash2GemmCtx {
 
 /* out[i, :] = W @ x[i, :] for n input rows; weights streamed per worker. */
 
-static void dflash2_gemm_par_fn(size_t begin, size_t end, size_t tid, void *ud)
+/* Defined below (topk section); shared with the block-GEMM worker. */
+#if OC_DF2_SIMD_X86
+static void df2_dot_bf16_batch_avx2(const uint16_t *w, const float *x,
+                                    size_t H, size_t n_draft, float *out);
+#endif
+
+/* Batch size cap for the fused BF16 block-GEMM kernel: one W row is
+ * loaded/widened once and FMAd against up to 8 x rows (8 accumulator
+ * sets fit comfortably in registers; beyond that fall back per-row). */
+#define OC_DF2_GEMM_FUSED_MAX_N 8u
+
+static void dflash2_gemm_par_fn(size_t begin, size_t end, size_t tid,
+                                void *ud)
 {
     (void)tid;
     OcDFlash2GemmCtx *c = (OcDFlash2GemmCtx *)ud;
     /* W-row outer loop: weight streamed once per region, x rows stay in
      * cache (x is at most block*4096*4 = 128 KB for the block sizes here). */
 #if OC_DF2_SIMD_X86
-    /* n >= 2 block GEMMs: the plain weight-stationary loop below already
-     * keeps each W row in L1 across its n dots; a register-blocked 8-acc
-     * variant measured slightly slower (inner-loop overhead), so it is
-     * intentionally not used. */
+    /* BF16 weights with a small x-row count: the fused kernel loads and
+     * widens each W chunk once for ALL x rows (the per-row loop would
+     * re-load + re-widen the row once per x row, which measured ~1.6x
+     * slower streaming on cold DRAM). Falls back per-row for F32 weights
+     * (small/synthetic) and n > 8. */
+    if (c->w->bf16 && c->n <= OC_DF2_GEMM_FUSED_MAX_N &&
+        (oc_simd_caps()->level == OC_SIMD_AVX2 ||
+         oc_simd_caps()->level == OC_SIMD_AVX512)) {
+        const size_t H = c->w->cols;
+        float out[OC_DF2_GEMM_FUSED_MAX_N];
+        for (size_t r = begin; r < end; r++) {
+            df2_dot_bf16_batch_avx2(c->w->bf16 + r * H, c->x,
+                                    H, c->n, out);
+            for (size_t i = 0; i < c->n; i++)
+                c->out[i * c->out_row_stride + r] = out[i];
+        }
+        return;
+    }
 #endif
     for (size_t r = begin; r < end; r++) {
         for (size_t i = 0; i < c->n; i++)
             c->out[i * c->out_row_stride + r] =
                 df2_dot_wrow(c->w, r, c->x + i * c->x_stride);
     }
+}
+
+/* n-row x blocking for ctx GEMMs: split x rows across workers instead of
+ * W rows when n is large (x per worker then fits in cache while its W-row
+ * slice streams once). Each (worker, x-block) pair streams W's full row
+ * set once per block, so total W traffic = W * ceil(n / X_BLOCK). */
+#define OC_DF2_GEMM_X_BLOCK 256u
+static void dflash2_gemm_xblock_par_fn(size_t begin, size_t end, size_t tid,
+                                       void *ud)
+{
+    (void)tid;
+    OcDFlash2GemmCtx *c = (OcDFlash2GemmCtx *)ud;
+    for (size_t i = begin; i < end; i++)
+        for (size_t r = 0; r < c->w->rows; r++)
+            c->out[i * c->out_row_stride + r] =
+                df2_dot_wrow(c->w, r, c->x + i * c->x_stride);
 }
 
 static void gemm(const OcDFlash2Weight *w, const float *x, size_t n,
@@ -315,6 +416,10 @@ static void gemm(const OcDFlash2Weight *w, const float *x, size_t n,
         return;
     }
     OcDFlash2GemmCtx c = { w, w->cols, x, out, w->rows, n };
+    if (n >= OC_DF2_GEMM_X_BLOCK) {
+        oc_parallel_for(n, dflash2_gemm_xblock_par_fn, &c);
+        return;
+    }
     oc_parallel_for(w->rows, dflash2_gemm_par_fn, &c);
 }
 
@@ -570,11 +675,13 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
 
     const uint8_t *raw = (const uint8_t *)f->raw_data + t->data_offset;
     if (strcmp(t->dtype, "BF16") == 0 && elems >= OC_DF2_BF16_KEEP_MIN_ELEMS) {
-        w->bf16 = malloc(elems * sizeof(uint16_t));
+        size_t bytes = elems * sizeof(uint16_t);
+        w->bf16 = df2_alloc_huge(bytes);
         w->data = NULL;
         w->rows = rows;
         w->cols = cols;
         if (!w->bf16) return OC_ERR_OOM;
+        w->alloc_bytes = bytes;
         memcpy(w->bf16, raw, elems * 2);
         return OC_OK;
     }
@@ -783,7 +890,7 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
     }
     if (e == OC_OK) {
         m->kv_capacity = m->cfg.sliding_window + m->cfg.block_size;
-        m->target_ctx = malloc(m->kv_capacity * H * sizeof(float));
+        m->target_ctx = df2_alloc_huge(m->kv_capacity * H * sizeof(float));
         if (!m->target_ctx) e = OC_ERR_OOM;
     }
 
@@ -796,47 +903,48 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
     return OC_OK;
 }
 
+/* Free a weight's backing store: hugepage-backed when alloc_bytes is set
+ * (see df2_alloc_huge), plain malloc otherwise. */
+static void df2_free_w(OcDFlash2Weight *w)
+{
+    if (w->alloc_bytes) {
+        df2_free_huge(w->data ? (void *)w->data : (void *)w->bf16,
+                      w->alloc_bytes);
+    } else {
+        free(w->data);
+        free(w->bf16);
+    }
+    w->data = NULL;
+    w->bf16 = NULL;
+    w->alloc_bytes = 0;
+}
+
 void oc_dflash2_model_free(OcDFlash2Model *m)
 {
     if (!m) return;
-    free(m->fc.data);
-    free(m->fc.bf16);
+    df2_free_w(&m->fc);
     free(m->hidden_norm);
     free(m->norm);
-    free(m->selector.predecessor_codebook.data);
-    free(m->selector.predecessor_codebook.bf16);
-    free(m->selector.successor_codebook.data);
-    free(m->selector.successor_codebook.bf16);
-    free(m->selector.hidden_projection.data);
-    free(m->selector.hidden_projection.bf16);
+    df2_free_w(&m->selector.predecessor_codebook);
+    df2_free_w(&m->selector.successor_codebook);
+    df2_free_w(&m->selector.hidden_projection);
     for (size_t li = 0; li < m->n_layers; li++) {
         OcDFlash2Layer *L = &m->layers[li];
         free(L->input_layernorm);
         free(L->post_attention_layernorm);
-        free(L->attn.q_proj.data);
-        free(L->attn.q_proj.bf16);
-        free(L->attn.k_proj.data);
-        free(L->attn.k_proj.bf16);
-        free(L->attn.v_proj.data);
-        free(L->attn.v_proj.bf16);
-        free(L->attn.o_proj.data);
-        free(L->attn.o_proj.bf16);
+        df2_free_w(&L->attn.q_proj);
+        df2_free_w(&L->attn.k_proj);
+        df2_free_w(&L->attn.v_proj);
+        df2_free_w(&L->attn.o_proj);
         free(L->attn.q_norm);
         free(L->attn.k_norm);
-        free(L->attn_conv.base_kernel.data);
-        free(L->attn_conv.base_kernel.bf16);
-        free(L->attn_conv.kernel_proj.data);
-        free(L->attn_conv.kernel_proj.bf16);
-        free(L->mlp_gate.data);
-        free(L->mlp_gate.bf16);
-        free(L->mlp_up.data);
-        free(L->mlp_up.bf16);
-        free(L->mlp_down.data);
-        free(L->mlp_down.bf16);
-        free(L->mlp_conv.base_kernel.data);
-        free(L->mlp_conv.base_kernel.bf16);
-        free(L->mlp_conv.kernel_proj.data);
-        free(L->mlp_conv.kernel_proj.bf16);
+        df2_free_w(&L->attn_conv.base_kernel);
+        df2_free_w(&L->attn_conv.kernel_proj);
+        df2_free_w(&L->mlp_gate);
+        df2_free_w(&L->mlp_up);
+        df2_free_w(&L->mlp_down);
+        df2_free_w(&L->mlp_conv.base_kernel);
+        df2_free_w(&L->mlp_conv.kernel_proj);
     }
     free(m->layers);
     if (m->kv) {
@@ -844,7 +952,8 @@ void oc_dflash2_model_free(OcDFlash2Model *m)
             oc_dflash2_kvring_free(&m->kv[li]);
         free(m->kv);
     }
-    free(m->target_ctx);
+    df2_free_huge(m->target_ctx,
+                  m->kv_capacity * m->cfg.hidden_size * sizeof(float));
     memset(m, 0, sizeof(*m));
 }
 
@@ -904,6 +1013,74 @@ typedef struct OcDFlash2TopKCtx {
     size_t H;
 } OcDFlash2TopKCtx;
 
+#if OC_DF2_SIMD_X86
+/* Fused batched BF16 dot: one stream of W, FMAs against n_draft x rows.
+ * Each 16-lane W chunk is loaded/widened once and accumulated into all
+ * draft rows' accumulator sets, keeping W in registers across the batch
+ * (the W row is the bandwidth-limited stream; x rows stay hot in L2/L1). */
+__attribute__((target("avx2,fma")))
+static void df2_dot_bf16_batch_avx2(const uint16_t *w, const float *x,
+                                    size_t H, size_t n_draft, float *out)
+{
+    __m256 acc[OC_DFLASH2_MAX_BLOCK];
+    for (size_t p = 0; p < n_draft; p++)
+        acc[p] = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 32 <= H; i += 32) {
+        /* W chunk [i, i+32): two 256-bit loads = 4 x 8-lane widenings. */
+        __m256i h0 = _mm256_loadu_si256((const __m256i *)(w + i));
+        __m256i h1 = _mm256_loadu_si256((const __m256i *)(w + i + 16));
+        __m128i c0 = _mm256_castsi256_si128(h0);
+        __m128i c1 = _mm256_extracti128_si256(h0, 1);
+        __m128i c2 = _mm256_castsi256_si128(h1);
+        __m128i c3 = _mm256_extracti128_si256(h1, 1);
+        __m256 wv0, wv1, wv2, wv3;
+        {
+            __m256i e0 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c0), 16);
+            __m256i e1 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c1), 16);
+            __m256i e2 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c2), 16);
+            __m256i e3 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c3), 16);
+            memcpy(&wv0, &e0, 32); memcpy(&wv1, &e1, 32);
+            memcpy(&wv2, &e2, 32); memcpy(&wv3, &e3, 32);
+        }
+        for (size_t p = 0; p < n_draft; p++) {
+            const float *xp = x + p * H + i;
+            acc[p] = _mm256_fmadd_ps(wv0, _mm256_loadu_ps(xp), acc[p]);
+            acc[p] = _mm256_fmadd_ps(wv1, _mm256_loadu_ps(xp + 8), acc[p]);
+            acc[p] = _mm256_fmadd_ps(wv2, _mm256_loadu_ps(xp + 16), acc[p]);
+            acc[p] = _mm256_fmadd_ps(wv3, _mm256_loadu_ps(xp + 24), acc[p]);
+        }
+    }
+    for (size_t p = 0; p < n_draft; p++) {
+        float s0 = acc[p][0] + acc[p][1] + acc[p][2] + acc[p][3];
+        float s1 = acc[p][4] + acc[p][5] + acc[p][6] + acc[p][7];
+        out[p] = s0 + s1;
+    }
+    if (i < H) {
+        /* Tail: finish scalar per draft row (H is a multiple of 16 for all
+         * real configs, so this is a guard only). */
+        for (size_t p = 0; p < n_draft; p++)
+            out[p] += df2_dot_bf16(w + i, x + p * H + i, H - i);
+    }
+}
+#endif
+
+/* K-best insert (descending). Returns early when below current worst. */
+static inline void df2_topk_insert(float *pval, uint32_t *pidx,
+                                   size_t top_k, float v_, uint32_t id_)
+{
+    if (v_ > pval[top_k - 1]) {
+        size_t k = top_k - 1;
+        pval[k] = v_;
+        pidx[k] = id_;
+        while (k > 0 && pval[k] > pval[k - 1]) {
+            float tv = pval[k]; pval[k] = pval[k - 1]; pval[k - 1] = tv;
+            uint32_t ti = pidx[k]; pidx[k] = pidx[k - 1]; pidx[k - 1] = ti;
+            k--;
+        }
+    }
+}
+
 static void dflash2_topk_par_fn(size_t begin, size_t end, size_t tid,
                                 void *ud)
 {
@@ -919,24 +1096,34 @@ static void dflash2_topk_par_fn(size_t begin, size_t end, size_t tid,
 
     for (size_t v = begin; v < end; v++) {
         const float *wr;
-        if (c->lm->data || c->lm->bf16) {
-            /* Real weights: dot straight out of F32 or BF16 storage. */
+        if (c->lm->bf16) {
+            /* Fused batched BF16 dot: W streamed once, all draft rows
+             * accumulated in the same pass. */
+            float scores[OC_DFLASH2_MAX_BLOCK];
+#if OC_DF2_SIMD_X86
+            if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
+                oc_simd_caps()->level == OC_SIMD_AVX512) {
+                df2_dot_bf16_batch_avx2(c->lm->bf16 + v * H, c->x,
+                                        H, n_draft, scores);
+                for (size_t p = 0; p < n_draft; p++)
+                    df2_topk_insert(val + p * top_k, idx + p * top_k,
+                                     top_k, scores[p], (uint32_t)v);
+                continue;
+            }
+#endif
             for (size_t p = 0; p < n_draft; p++) {
-                float v_ = c->lm->bf16
-                    ? df2_dot_bf16(c->lm->bf16 + v * H, c->x + p * H, H)
-                    : df2_dot(c->lm->data + v * H, c->x + p * H, H);
-                uint32_t *pidx = idx + p * top_k;
-                float *pval = val + p * top_k;
-                if (v_ > pval[top_k - 1]) {
-                    size_t k = top_k - 1;
-                    pval[k] = v_;
-                    pidx[k] = (uint32_t)v;
-                    while (k > 0 && pval[k] > pval[k - 1]) {
-                        float tv = pval[k]; pval[k] = pval[k - 1]; pval[k - 1] = tv;
-                        uint32_t ti = pidx[k]; pidx[k] = pidx[k - 1]; pidx[k - 1] = ti;
-                        k--;
-                    }
-                }
+                float v_ = df2_dot_bf16(c->lm->bf16 + v * H,
+                                        c->x + p * H, H);
+                df2_topk_insert(val + p * top_k, idx + p * top_k,
+                                top_k, v_, (uint32_t)v);
+            }
+            continue;
+        }
+        if (c->lm->data) {
+            for (size_t p = 0; p < n_draft; p++) {
+                float v_ = df2_dot(c->lm->data + v * H, c->x + p * H, H);
+                df2_topk_insert(val + p * top_k, idx + p * top_k,
+                                top_k, v_, (uint32_t)v);
             }
             continue;
         }
@@ -944,18 +1131,8 @@ static void dflash2_topk_par_fn(size_t begin, size_t end, size_t tid,
         wr = gen_buf;
         for (size_t p = 0; p < n_draft; p++) {
             float v_ = df2_dot(wr, c->x + p * H, H);
-            uint32_t *pidx = idx + p * top_k;
-            float *pval = val + p * top_k;
-            if (v_ > pval[top_k - 1]) {
-                size_t k = top_k - 1;
-                pval[k] = v_;
-                pidx[k] = (uint32_t)v;
-                while (k > 0 && pval[k] > pval[k - 1]) {
-                    float tv = pval[k]; pval[k] = pval[k - 1]; pval[k - 1] = tv;
-                    uint32_t ti = pidx[k]; pidx[k] = pidx[k - 1]; pidx[k - 1] = ti;
-                    k--;
-                }
-            }
+            df2_topk_insert(val + p * top_k, idx + p * top_k,
+                            top_k, v_, (uint32_t)v);
         }
     }
 }
@@ -991,49 +1168,80 @@ typedef struct OcDFlash2ProposeCtx {
  * accumulator, rescaling on new maxima. The reference computes the same
  * softmax with a two-pass max+sum; mathematically identical (the validators
  * pin this within BF16 tolerance).
+ *
+ * Jobs (q_len * n_heads of them) are fully independent — each owns one
+ * output row-head — so the loop nest is split across the thread pool
+ * without changing any per-job key order (bit-identical to the serial
+ * evaluation; single-thread `oc_parallel_for` falls back inline).
  */
+typedef struct OcDFlash2AttnRingCtx {
+    const OcDFlash2KvRing *ring;
+    const float *q;
+    int64_t pos_q0;
+    size_t q_len;
+    size_t n_q_heads;
+    size_t head_dim;
+    float scale;
+    size_t window;
+    float *out;
+} OcDFlash2AttnRingCtx;
+
+static void attn_ring_job(size_t job, OcDFlash2AttnRingCtx *c)
+{
+    const size_t n_q_heads = c->n_q_heads;
+    const size_t head_dim = c->head_dim;
+    const size_t qi = job / n_q_heads;
+    const size_t h = job % n_q_heads;
+    const OcDFlash2KvRing *ring = c->ring;
+    const size_t n_kv = ring->n_kv_heads;
+    const size_t gq = n_q_heads / n_kv;
+    const size_t vec = n_kv * head_dim;
+    const float *qh = c->q + (qi * n_q_heads + h) * head_dim;
+    float *oh = c->out + (qi * n_q_heads + h) * head_dim;
+    const int64_t qpos = c->pos_q0 + (int64_t)qi;
+    const size_t hg = h / gq;             /* kv group */
+
+    float m = -INFINITY;   /* running max of scaled scores */
+    float denom = 0.0f;     /* running softmax denominator */
+    for (size_t s = 0; s < ring->len; s++) {
+        int64_t dq = qpos - ring->pos[s];
+        if (dq >= (int64_t)c->window || -dq >= (int64_t)c->window) continue;
+        const float *kh = ring->k + s * vec + hg * head_dim;
+        const float *vh = ring->v + s * vec + hg * head_dim;
+        float sc = df2_dot(qh, kh, head_dim) * c->scale;
+        if (sc > m) {
+            /* New max: rescale the accumulator + denominator. */
+            float r = (m == -INFINITY) ? 0.0f : expf(m - sc);
+            for (size_t d = 0; d < head_dim; d++) oh[d] *= r;
+            denom *= r;
+            m = sc;
+        }
+        float w = expf(sc - m);
+        denom += w;
+        for (size_t d = 0; d < head_dim; d++) oh[d] += w * vh[d];
+    }
+    if (denom > 0.0f) {
+        float inv = 1.0f / denom;
+        for (size_t d = 0; d < head_dim; d++) oh[d] *= inv;
+    }
+}
+
+static void attn_ring_par_fn(size_t begin, size_t end, size_t tid, void *ud)
+{
+    (void)tid;
+    OcDFlash2AttnRingCtx *c = (OcDFlash2AttnRingCtx *)ud;
+    for (size_t job = begin; job < end; job++) attn_ring_job(job, c);
+}
+
 static void attn_ring(const OcDFlash2KvRing *ring, const float *q,
                       int64_t pos_q0, size_t q_len, size_t n_q_heads,
                       size_t head_dim, float scale, size_t window,
                       float *out)
 {
-    const size_t n_kv = ring->n_kv_heads;
-    const size_t gq = n_q_heads / n_kv;
-    const size_t vec = n_kv * head_dim;
     memset(out, 0, q_len * n_q_heads * head_dim * sizeof(float));
-
-    for (size_t qi = 0; qi < q_len; qi++) {
-        int64_t qpos = pos_q0 + (int64_t)qi;
-        for (size_t h = 0; h < n_q_heads; h++) {
-            const size_t hg = h / gq;             /* kv group */
-            const float *qh =
-                q + (qi * n_q_heads + h) * head_dim;
-            float *oh = out + (qi * n_q_heads + h) * head_dim;
-            float m = -INFINITY;   /* running max of scaled scores */
-            float denom = 0.0f;     /* running softmax denominator */
-            for (size_t s = 0; s < ring->len; s++) {
-                int64_t dq = qpos - ring->pos[s];
-                if (dq >= (int64_t)window || -dq >= (int64_t)window) continue;
-                const float *kh = ring->k + s * vec + hg * head_dim;
-                const float *vh = ring->v + s * vec + hg * head_dim;
-                float sc = df2_dot(qh, kh, head_dim) * scale;
-                if (sc > m) {
-                    /* New max: rescale the accumulator + denominator. */
-                    float r = (m == -INFINITY) ? 0.0f : expf(m - sc);
-                    for (size_t d = 0; d < head_dim; d++) oh[d] *= r;
-                    denom *= r;
-                    m = sc;
-                }
-                float w = expf(sc - m);
-                denom += w;
-                for (size_t d = 0; d < head_dim; d++) oh[d] += w * vh[d];
-            }
-            if (denom > 0.0f) {
-                float inv = 1.0f / denom;
-                for (size_t d = 0; d < head_dim; d++) oh[d] *= inv;
-            }
-        }
-    }
+    OcDFlash2AttnRingCtx c = { ring, q, pos_q0, q_len, n_q_heads,
+                               head_dim, scale, window, out };
+    oc_parallel_for(q_len * n_q_heads, attn_ring_par_fn, &c);
 }
 
 OcError oc_dflash2_propose(OcDFlash2Model *m,
@@ -1104,6 +1312,32 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
 
     memcpy(hidden, noise_emb, block * H * sizeof(float));
 
+    /* Optional phase timing (DF2_PHASE_TIMING=1): wall time per segment of
+     * the layer loop, printed to stderr at propose end. Off by default. */
+    enum { PT_ACONV, PT_QKV, PT_NORM, PT_ATTN, PT_OCONV, PT_MLP, PT_N };
+    static const char *pt_names[PT_N] = {
+        "attn_convproj", "qkv_gemm", "qk_norm_rope", "attn",
+        "o_proj_conv", "mlp"
+    };
+    int df2_pt = getenv("DF2_PHASE_TIMING") != NULL;
+    double pt[PT_N] = { 0 };
+    double pt_t0 = 0;
+#define DF2_PT_MARK(idx)                                          \
+    do {                                                           \
+        if (df2_pt) {                                              \
+            struct timespec df2_ts_;                              \
+            clock_gettime(CLOCK_MONOTONIC, &df2_ts_);             \
+            double df2_now_ = df2_ts_.tv_sec + df2_ts_.tv_nsec * 1e-9; \
+            pt[idx] += df2_now_ - pt_t0;                          \
+            pt_t0 = df2_now_;                                     \
+        }                                                          \
+    } while (0)
+    if (df2_pt) {
+        struct timespec df2_ts_;
+        clock_gettime(CLOCK_MONOTONIC, &df2_ts_);
+        pt_t0 = df2_ts_.tv_sec + df2_ts_.tv_nsec * 1e-9;
+    }
+
     for (size_t li = 0; li < m->n_layers; li++) {
         OcDFlash2Layer *L = &m->layers[li];
         OcDFlash2KvRing *ring = &m->kv[li];
@@ -1115,6 +1349,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
 
         /* Conv prepare: dynamic kernels + pre-conv. */
         gemm(&L->attn_conv.kernel_proj, normed, block, conv_dyn);
+        DF2_PT_MARK(PT_ACONV);
         /* dyn view: [block, 2][ksz][groups]; tap-0 kernels at
          * conv_dyn[i, 0*ksz*groups + t*groups + g], tap-1 at +ksz*groups. */
         {
@@ -1139,6 +1374,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         gemm(&L->attn.v_proj, m->target_ctx, n_ctx, v_all);
         gemm(&L->attn.k_proj, conv_out, block, k_noise);
         gemm(&L->attn.v_proj, conv_out, block, v_noise);
+        DF2_PT_MARK(PT_QKV);
 
         memcpy(k_all + n_ctx * n_kv * hd, k_noise, block * n_kv * hd * sizeof(float));
         memcpy(v_all + n_ctx * n_kv * hd, v_noise, block * n_kv * hd * sizeof(float));
@@ -1197,11 +1433,14 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
             }
         }
 
+        DF2_PT_MARK(PT_NORM);
+
         /* Append K/V (already RoPE'd) to the ring, then attend. */
         oc_dflash2_kvring_append(ring, k_all, v_all, ctx_pos0, n_k);
 
         attn_ring(ring, q, start, block, n_heads, hd,
                   1.0f / sqrtf((float)hd), m->cfg.sliding_window, attn_out);
+        DF2_PT_MARK(PT_ATTN);
 
         /* o_proj + conv finish + residual. */
         gemm(&L->attn.o_proj, attn_out, block, attn_proj);
@@ -1209,6 +1448,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                                 L->attn_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
         for (size_t i = 0; i < block * H; i++) hidden[i] += conv_out[i];
+        DF2_PT_MARK(PT_OCONV);
 
         /* ── MLP block ────────────────────────────────────────── */
         memcpy(x, hidden, block * H * sizeof(float));
@@ -1234,10 +1474,17 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         for (size_t i = 0; i < block * inter; i++)
             mlp_gu[i] = silu(mlp_gu[i]) * mlp_up_out[i];
         gemm(&L->mlp_down, mlp_gu, block, mlp_out);
+        DF2_PT_MARK(PT_MLP);
         oc_dflash2_grouped_conv(mlp_out, conv_dyn_post,
                                 L->mlp_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
         for (size_t i = 0; i < block * H; i++) hidden[i] += conv_out[i];
+    }
+    if (df2_pt) {
+        fprintf(stderr, "df2 phases ms/step:");
+        for (int k = 0; k < PT_N; k++)
+            fprintf(stderr, " %s=%.2f", pt_names[k], pt[k] * 1e3);
+        fprintf(stderr, "\n");
     }
 
     /* Final norm on all block rows. */

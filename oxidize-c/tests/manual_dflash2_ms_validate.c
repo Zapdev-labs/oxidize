@@ -125,7 +125,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "lm load failed\n");
         return 1;
     }
-    OcDFlash2Weight lmw = { lm, NULL, m.cfg.vocab_size, H, NULL, NULL };
+    OcDFlash2Weight lmw = { lm, NULL, m.cfg.vocab_size, H, 0, NULL, NULL };
 
     int all_ok = 1;
     int64_t start = 4;                      /* matches dflash2_ms_ref.py */

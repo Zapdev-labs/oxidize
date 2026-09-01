@@ -192,7 +192,7 @@ int main(int argc, char **argv)
     }
 
     /* Selector debug on the reference's draft hidden (rows 1..7 of gold). */
-    OcDFlash2Weight lmw = { lm, NULL, m.cfg.vocab_size, H, NULL, NULL };
+    OcDFlash2Weight lmw = { lm, NULL, m.cfg.vocab_size, H, 0, NULL, NULL };
     uint32_t anchor = 7;
     uint32_t *out_tok = malloc(n_draft * sizeof(uint32_t));
     uint32_t *out_cand = malloc(n_draft * top_k * sizeof(uint32_t));

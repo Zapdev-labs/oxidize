@@ -1800,7 +1800,8 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     lm.bf16 = NULL;
     if (ctx->bench_lm_materialize) {
         size_t n_w = vocab * H;
-        lm.bf16 = malloc(n_w * sizeof(uint16_t));
+        size_t lm_bytes = n_w * sizeof(uint16_t);
+        lm.bf16 = oc_dflash2_alloc_huge(lm_bytes);
         if (!lm.bf16) {
             free(noise); free(block_ids); free(anchors);
             free(out_tok); free(out_cand); free(out_probs);
@@ -1809,7 +1810,7 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
         }
         float *row = malloc(H * sizeof(float));
         if (!row) {
-            free(lm.bf16); lm.bf16 = NULL;
+            oc_dflash2_free_huge(lm.bf16, lm_bytes); lm.bf16 = NULL;
             free(noise); free(block_ids); free(anchors);
             free(out_tok); free(out_cand); free(out_probs);
             oc_dflash2_model_free(&model);
@@ -1952,7 +1953,8 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
 
     free(noise); free(block_ids); free(anchors);
     free(out_tok); free(out_cand); free(out_probs); free(bb_hidden);
-    free(lm.bf16);
+    if (lm.bf16)
+        oc_dflash2_free_huge(lm.bf16, (size_t)vocab * H * sizeof(uint16_t));
     oc_dflash2_model_free(&model);
     return OC_OK;
 }

@@ -76,6 +76,12 @@ typedef struct OcDFlash2Config {
 /* GLM-5.3-Flash-DFlash2 defaults. */
 void oc_dflash2_config_init(OcDFlash2Config *cfg);
 
+/* Hugepage-aware allocation for the big per-step working sets (weights,
+ * lm_head): anonymous mmap + MADV_HUGEPAGE on Linux, malloc elsewhere.
+ * Frees must pair with oc_dflash2_free_huge(p, n). */
+void *oc_dflash2_alloc_huge(size_t n);
+void oc_dflash2_free_huge(void *p, size_t n);
+
 /* ─── Weights ───────────────────────────────────────────────────────── */
 
 typedef struct OcDFlash2Weight {
@@ -86,6 +92,8 @@ typedef struct OcDFlash2Weight {
                       * Mutually exclusive with data. */
     size_t rows;
     size_t cols;
+    size_t alloc_bytes; /* backing-store size for hugepage-aware free of
+                         * data/bf16 (0 = plain malloc/free). */
     /* Optional: synthetic weight generator for benchmarks. When data is
      * NULL and generate != NULL, row `r` is materialized into
      * gen_buf[r * cols, (r+1) * cols) on demand. Used to exercise the full
