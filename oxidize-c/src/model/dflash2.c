@@ -109,6 +109,77 @@ static float df2_dot_pre(const float *ap, const float *b, size_t n)
     return df2_dot(ap, b, n);
 }
 
+/* BF16 x F32 dot: the weight row is raw BF16 (the high 16 bits of an
+ * F32), the activation is F32. Widening via cvtepu16 + 32-bit shift
+ * (NOT cvtph_ps, which is IEEE half precision). */
+#if OC_DF2_SIMD_X86
+__attribute__((target("avx2,fma")))
+static float df2_dot_bf16_avx2(const uint16_t *w, const float *x, size_t n)
+{
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m128i h = _mm_loadu_si128((const __m128i *)(w + i));
+        __m256i w32 = _mm256_slli_epi32(
+            _mm256_cvtepu16_epi32(h), 16);
+        __m256 wv;
+        memcpy(&wv, &w32, sizeof(wv));
+        acc = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), acc);
+    }
+    float s0 = acc[0] + acc[1] + acc[2] + acc[3];
+    float s1 = acc[4] + acc[5] + acc[6] + acc[7];
+    float sum = s0 + s1;
+    for (; i < n; i++) {
+        uint32_t bits = (uint32_t)w[i] << 16;
+        float wv;
+        memcpy(&wv, &bits, 4);
+        sum += wv * x[i];
+    }
+    return sum;
+}
+#endif
+
+static float df2_dot_bf16(const uint16_t *w, const float *x, size_t n)
+{
+#if OC_DF2_SIMD_X86
+    if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
+        oc_simd_caps()->level == OC_SIMD_AVX512)
+        return df2_dot_bf16_avx2(w, x, n);
+#endif
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t bits = (uint32_t)w[i] << 16;
+        float wv;
+        memcpy(&wv, &bits, 4);
+        sum += wv * x[i];
+    }
+    return sum;
+}
+
+/* Dot one weight row (F32 or BF16) against x. */
+static float df2_dot_wrow(const OcDFlash2Weight *w, size_t row,
+                          const float *x)
+{
+    if (w->bf16)
+        return df2_dot_bf16(w->bf16 + row * w->cols, x, w->cols);
+    return df2_dot(w->data + row * w->cols, x, w->cols);
+}
+
+/* Widen one weight row to F32 into dst (dst must hold w->cols floats).
+ * Used by paths that need contiguous F32 rows (elementwise ops, gather). */
+static void df2_widen_row(const OcDFlash2Weight *w, size_t row, float *dst)
+{
+    if (w->bf16) {
+        const uint16_t *src = w->bf16 + row * w->cols;
+        for (size_t i = 0; i < w->cols; i++) {
+            uint32_t bits = (uint32_t)src[i] << 16;
+            memcpy(&dst[i], &bits, 4);
+        }
+    } else {
+        memcpy(dst, w->data + row * w->cols, w->cols * sizeof(float));
+    }
+}
+
 #else
 static float df2_dot(const float *a, const float *b, size_t n)
 {
@@ -133,8 +204,7 @@ static void gemv_rows_dispatch(const float *w, size_t rows, size_t cols,
 /* ─── GEMV (parallel over rows for large matrices) ──────────────────── */
 
 typedef struct OcDFlash2GemvCtx {
-    const float *w;
-    size_t cols;
+    const OcDFlash2Weight *w;
     const float *x;
     float *out;
 } OcDFlash2GemvCtx;
@@ -144,26 +214,32 @@ static void dflash2_gemv_par_fn(size_t begin, size_t end, size_t tid, void *ud)
     (void)tid;
     OcDFlash2GemvCtx *c = (OcDFlash2GemvCtx *)ud;
     for (size_t r = begin; r < end; r++)
-        c->out[r] = df2_dot(c->w + r * c->cols, c->x, c->cols);
+        c->out[r] = df2_dot_wrow(c->w, r, c->x);
 }
 
 void oc_dflash2_gemv(const float *w, size_t rows, size_t cols,
                      const float *x, float *out)
 {
-    /* Serial for small matrices; parallel once the work is worth a region. */
+    /* Legacy F32-pointer entry (kept for the public API). */
+    OcDFlash2Weight tmp = { (float *)(uintptr_t)w, NULL, rows, cols,
+                            NULL, NULL };
+    OcDFlash2GemvCtx c = { &tmp, x, out };
     if (rows * cols < (size_t)32768) {
         gemv_rows_dispatch(w, rows, cols, x, out);
         return;
     }
-    OcDFlash2GemvCtx c = { w, cols, x, out };
     oc_parallel_for(rows, dflash2_gemv_par_fn, &c);
 }
 
-/* Convenience wrapper used internally. */
-static void gemv(const float *w, size_t rows, size_t cols,
-                 const float *x, float *out)
+/* Weight-struct GEMV (handles BF16-resident weights). */
+static void gemv_w(const OcDFlash2Weight *w, const float *x, float *out)
 {
-    oc_dflash2_gemv(w, rows, cols, x, out);
+    if (!w->bf16 && w->rows * w->cols < (size_t)32768) {
+        gemv_rows_dispatch(w->data, w->rows, w->cols, x, out);
+        return;
+    }
+    OcDFlash2GemvCtx c = { w, x, out };
+    oc_parallel_for(w->rows, dflash2_gemv_par_fn, &c);
 }
 
 /* GEMM: out[i, :] = W @ x[i, :] for each of `n` input rows.
@@ -171,11 +247,11 @@ static void gemv(const float *w, size_t rows, size_t cols,
  * worker owns a slice of W rows and streams each weight element exactly
  * once per region; the n input rows all reuse the streamed weight row. */
 typedef struct OcDFlash2GemmCtx {
-    const float *w;
-    size_t rows;
-    size_t cols;
+    const OcDFlash2Weight *w;
+    size_t x_stride;   /* == w->cols */
     const float *x;
     float *out;
+    size_t out_row_stride; /* == w->rows */
     size_t n;
 } OcDFlash2GemmCtx;
 
@@ -194,23 +270,22 @@ static void dflash2_gemm_par_fn(size_t begin, size_t end, size_t tid, void *ud)
      * intentionally not used. */
 #endif
     for (size_t r = begin; r < end; r++) {
-        const float *wr = c->w + r * c->cols;
         for (size_t i = 0; i < c->n; i++)
-            c->out[i * c->rows + r] =
-                df2_dot(wr, c->x + i * c->cols, c->cols);
+            c->out[i * c->out_row_stride + r] =
+                df2_dot_wrow(c->w, r, c->x + i * c->x_stride);
     }
 }
 
-static void gemm(const float *w, size_t rows, size_t cols,
-                 const float *x, size_t n, float *out)
+static void gemm(const OcDFlash2Weight *w, const float *x, size_t n,
+                 float *out)
 {
     if (n == 0) return;
     if (n == 1) {
-        gemv(w, rows, cols, x, out);
+        gemv_w(w, x, out);
         return;
     }
-    OcDFlash2GemmCtx c = { w, rows, cols, x, out, n };
-    oc_parallel_for(rows, dflash2_gemm_par_fn, &c);
+    OcDFlash2GemmCtx c = { w, w->cols, x, out, w->rows, n };
+    oc_parallel_for(w->rows, dflash2_gemm_par_fn, &c);
 }
 
 /* ─── Grouped dynamic causal conv ───────────────────────────────────── */
@@ -422,17 +497,64 @@ static float *load_tensor_f32(const OcSafetensorsFile *f,
     return dst;
 }
 
-/* Load a [rows, cols] weight; returns OC_ERR_FORMAT when missing/mismatched. */
+/* Load a [rows, cols] weight; returns OC_ERR_FORMAT when missing/mismatched.
+ * Tensors at least BF16_KEEP_MIN_ELEMS elements are kept in raw BF16
+ * (halving resident + streamed bytes; BF16->F32 widening is exact so
+ * numerics are unchanged); smaller ones are widened to F32 for the plain
+ * scalar paths (norms, conv bases, selector projections). */
+#define OC_DF2_BF16_KEEP_MIN_ELEMS ((size_t)1 << 18)
+
 static OcError load_w(const OcSafetensorsFile *f, const char *name,
                       OcDFlash2Weight *w, size_t rows, size_t cols)
 {
     w->generate = NULL;
     w->gen_user = NULL;
-    w->data = load_tensor_f32(f, name, rows * cols);
+    w->bf16 = NULL;
+    const size_t elems = rows * cols;
+
+    /* Locate the tensor once; reuse the header walk for both paths. */
+    const OcSafetensorsTensor *t = NULL;
+    for (size_t i = 0; i < f->n_tensors; i++) {
+        if (strcmp(f->tensors[i].name, name) == 0) {
+            t = &f->tensors[i];
+            break;
+        }
+    }
+    if (!t) {
+        fprintf(stderr, "dflash2: missing tensor %s\n", name);
+        w->rows = rows;
+        w->cols = cols;
+        w->data = NULL;
+        return OC_ERR_FORMAT;
+    }
+    size_t got = 1;
+    for (uint32_t d = 0; d < t->n_dims; d++) got *= (size_t)t->shape[d];
+    if (got != elems) {
+        fprintf(stderr, "dflash2: bad tensor %s\n", name);
+        w->rows = rows;
+        w->cols = cols;
+        w->data = NULL;
+        return OC_ERR_FORMAT;
+    }
+
+    const uint8_t *raw = (const uint8_t *)f->raw_data + t->data_offset;
+    if (strcmp(t->dtype, "BF16") == 0 && elems >= OC_DF2_BF16_KEEP_MIN_ELEMS) {
+        w->bf16 = malloc(elems * sizeof(uint16_t));
+        w->data = NULL;
+        w->rows = rows;
+        w->cols = cols;
+        if (!w->bf16) return OC_ERR_OOM;
+        memcpy(w->bf16, raw, elems * 2);
+        return OC_OK;
+    }
+    w->data = load_tensor_f32(f, name, elems);
     w->rows = rows;
     w->cols = cols;
-    if (!w->data) fprintf(stderr, "dflash2: missing/bad tensor %s\n", name);
-    return w->data ? OC_OK : OC_ERR_FORMAT;
+    if (!w->data) {
+        fprintf(stderr, "dflash2: missing/bad tensor %s\n", name);
+        return OC_ERR_FORMAT;
+    }
+    return OC_OK;
 }
 
 static OcError load_vec(const OcSafetensorsFile *f, const char *name,
@@ -647,28 +769,43 @@ void oc_dflash2_model_free(OcDFlash2Model *m)
 {
     if (!m) return;
     free(m->fc.data);
+    free(m->fc.bf16);
     free(m->hidden_norm);
     free(m->norm);
     free(m->selector.predecessor_codebook.data);
+    free(m->selector.predecessor_codebook.bf16);
     free(m->selector.successor_codebook.data);
+    free(m->selector.successor_codebook.bf16);
     free(m->selector.hidden_projection.data);
+    free(m->selector.hidden_projection.bf16);
     for (size_t li = 0; li < m->n_layers; li++) {
         OcDFlash2Layer *L = &m->layers[li];
         free(L->input_layernorm);
         free(L->post_attention_layernorm);
         free(L->attn.q_proj.data);
+        free(L->attn.q_proj.bf16);
         free(L->attn.k_proj.data);
+        free(L->attn.k_proj.bf16);
         free(L->attn.v_proj.data);
+        free(L->attn.v_proj.bf16);
         free(L->attn.o_proj.data);
+        free(L->attn.o_proj.bf16);
         free(L->attn.q_norm);
         free(L->attn.k_norm);
         free(L->attn_conv.base_kernel.data);
+        free(L->attn_conv.base_kernel.bf16);
         free(L->attn_conv.kernel_proj.data);
+        free(L->attn_conv.kernel_proj.bf16);
         free(L->mlp_gate.data);
+        free(L->mlp_gate.bf16);
         free(L->mlp_up.data);
+        free(L->mlp_up.bf16);
         free(L->mlp_down.data);
+        free(L->mlp_down.bf16);
         free(L->mlp_conv.base_kernel.data);
+        free(L->mlp_conv.base_kernel.bf16);
         free(L->mlp_conv.kernel_proj.data);
+        free(L->mlp_conv.kernel_proj.bf16);
     }
     free(m->layers);
     if (m->kv) {
@@ -707,10 +844,9 @@ OcError oc_dflash2_set_context(OcDFlash2Model *m,
      * the usable length. */
     if (n_ctx_rows > m->kv_capacity) return OC_ERR_INVALID_ARG;
     const size_t H = m->cfg.hidden_size;
-    const size_t W = m->cfg.n_target_layer_ids * H;
 
     /* ctx = hidden_norm(fc @ concat(target hiddens)), per row. */
-    gemm(m->fc.data, H, W, target_context, n_ctx_rows, m->target_ctx);
+    gemm(&(m->fc), target_context, n_ctx_rows, m->target_ctx);
     for (size_t r = 0; r < n_ctx_rows; r++)
         rms_norm_row(m->target_ctx + r * H, m->hidden_norm,
                      m->target_ctx + r * H, H, m->cfg.rms_norm_eps);
@@ -747,16 +883,34 @@ static void dflash2_topk_par_fn(size_t begin, size_t end, size_t tid,
     uint32_t *idx = c->tidx + tid * n_draft * top_k;
     float *val = c->tval + tid * n_draft * top_k;
     float *gen_buf = oc_parallel_scratch(tid, H * sizeof(float));
-    if (!gen_buf && !c->lm->data) return;
+    const bool generated = !c->lm->data && !c->lm->bf16;
+    if (generated && !gen_buf) return;
 
     for (size_t v = begin; v < end; v++) {
         const float *wr;
-        if (c->lm->data) {
-            wr = c->lm->data + v * H;
-        } else {
-            c->lm->generate(v, H, gen_buf, c->lm->gen_user);
-            wr = gen_buf;
+        if (c->lm->data || c->lm->bf16) {
+            /* Real weights: dot straight out of F32 or BF16 storage. */
+            for (size_t p = 0; p < n_draft; p++) {
+                float v_ = c->lm->bf16
+                    ? df2_dot_bf16(c->lm->bf16 + v * H, c->x + p * H, H)
+                    : df2_dot(c->lm->data + v * H, c->x + p * H, H);
+                uint32_t *pidx = idx + p * top_k;
+                float *pval = val + p * top_k;
+                if (v_ > pval[top_k - 1]) {
+                    size_t k = top_k - 1;
+                    pval[k] = v_;
+                    pidx[k] = (uint32_t)v;
+                    while (k > 0 && pval[k] > pval[k - 1]) {
+                        float tv = pval[k]; pval[k] = pval[k - 1]; pval[k - 1] = tv;
+                        uint32_t ti = pidx[k]; pidx[k] = pidx[k - 1]; pidx[k - 1] = ti;
+                        k--;
+                    }
+                }
+            }
+            continue;
         }
+        c->lm->generate(v, H, gen_buf, c->lm->gen_user);
+        wr = gen_buf;
         for (size_t p = 0; p < n_draft; p++) {
             float v_ = df2_dot(wr, c->x + p * H, H);
             uint32_t *pidx = idx + p * top_k;
@@ -865,7 +1019,8 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     if (!anchor_ids || n_anchor == 0) return OC_ERR_INVALID_ARG;
     if (!noise_emb || block == 0 || block > OC_DFLASH2_MAX_BLOCK)
         return OC_ERR_INVALID_ARG;
-    if (!lm_head || (!lm_head->data && !lm_head->generate))
+    if (!lm_head || (!lm_head->data && !lm_head->bf16 &&
+                      !lm_head->generate))
         return OC_ERR_INVALID_ARG;
     if (!out_tokens) return OC_ERR_INVALID_ARG;
 
@@ -928,8 +1083,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
             rms_norm_row(x + i * H, L->input_layernorm, normed + i * H, H, eps);
 
         /* Conv prepare: dynamic kernels + pre-conv. */
-        gemm(L->attn_conv.kernel_proj.data, 2 * ksz * groups, H,
-             normed, block, conv_dyn);
+        gemm(&L->attn_conv.kernel_proj, normed, block, conv_dyn);
         /* dyn view: [block, 2][ksz][groups]; tap-0 kernels at
          * conv_dyn[i, 0*ksz*groups + t*groups + g], tap-1 at +ksz*groups. */
         {
@@ -949,11 +1103,11 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         }
 
         /* Q from conv'd hidden; K/V from BOTH context and conv'd hidden. */
-        gemm(L->attn.q_proj.data, n_heads * hd, H, conv_out, block, q);
-        gemm(L->attn.k_proj.data, n_kv * hd, H, m->target_ctx, n_ctx, k_all);
-        gemm(L->attn.v_proj.data, n_kv * hd, H, m->target_ctx, n_ctx, v_all);
-        gemm(L->attn.k_proj.data, n_kv * hd, H, conv_out, block, k_noise);
-        gemm(L->attn.v_proj.data, n_kv * hd, H, conv_out, block, v_noise);
+        gemm(&L->attn.q_proj, conv_out, block, q);
+        gemm(&L->attn.k_proj, m->target_ctx, n_ctx, k_all);
+        gemm(&L->attn.v_proj, m->target_ctx, n_ctx, v_all);
+        gemm(&L->attn.k_proj, conv_out, block, k_noise);
+        gemm(&L->attn.v_proj, conv_out, block, v_noise);
 
         memcpy(k_all + n_ctx * n_kv * hd, k_noise, block * n_kv * hd * sizeof(float));
         memcpy(v_all + n_ctx * n_kv * hd, v_noise, block * n_kv * hd * sizeof(float));
@@ -1019,7 +1173,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                   1.0f / sqrtf((float)hd), m->cfg.sliding_window, attn_out);
 
         /* o_proj + conv finish + residual. */
-        gemm(L->attn.o_proj.data, H, n_heads * hd, attn_out, block, attn_proj);
+        gemm(&L->attn.o_proj, attn_out, block, attn_proj);
         oc_dflash2_grouped_conv(attn_proj, conv_dyn_post,
                                 L->attn_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
@@ -1031,8 +1185,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
             rms_norm_row(x + i * H, L->post_attention_layernorm,
                          normed + i * H, H, eps);
 
-        gemm(L->mlp_conv.kernel_proj.data, 2 * ksz * groups, H,
-             normed, block, conv_dyn);
+        gemm(&L->mlp_conv.kernel_proj, normed, block, conv_dyn);
         for (size_t i = 0; i < block; i++) {
             memcpy(conv_scratch + i * ksz * groups,
                    conv_dyn + i * 2 * ksz * groups,
@@ -1045,11 +1198,11 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                                 L->mlp_conv.base_kernel.data,
                                 block, H, ksz, gs, conv_out);
 
-        gemm(L->mlp_gate.data, inter, H, conv_out, block, mlp_gu);
-        gemm(L->mlp_up.data, inter, H, conv_out, block, mlp_up_out);
+        gemm(&(L->mlp_gate), conv_out, block, mlp_gu);
+        gemm(&(L->mlp_up), conv_out, block, mlp_up_out);
         for (size_t i = 0; i < block * inter; i++)
             mlp_gu[i] = silu(mlp_gu[i]) * mlp_up_out[i];
-        gemm(L->mlp_down.data, H, inter, mlp_gu, block, mlp_out);
+        gemm(&L->mlp_down, mlp_gu, block, mlp_out);
         oc_dflash2_grouped_conv(mlp_out, conv_dyn_post,
                                 L->mlp_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
@@ -1086,12 +1239,12 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
      * a real lm_head is streamed once from memory). */
     const size_t vocab_eff = vocab < m->cfg.vocab_size ? vocab : m->cfg.vocab_size;
     int logit_err = 0;
-    if (lm_head->data && vocab_eff <= (size_t)1 << 16) {
+    if ((lm_head->data || lm_head->bf16) && vocab_eff <= (size_t)1 << 16) {
         /* Small real lm_head: full logits per draft row, serial top-k. */
         float *lrow = malloc(vocab_eff * sizeof(float));
         if (!lrow) logit_err = 1;
         for (size_t p = 0; p < n_draft && !logit_err; p++) {
-            gemv(lm_head->data, vocab_eff, H, draft_hidden + p * H, lrow);
+            gemv_w(lm_head, draft_hidden + p * H, lrow);
             for (size_t k = 0; k < top_k; k++) {
                 size_t best = 0;
                 for (size_t v = 1; v < vocab_eff; v++)
@@ -1177,19 +1330,27 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     }
 
     /* hidden_projection for each draft row. */
-    gemm(m->selector.hidden_projection.data, rank, H,
-         draft_hidden, n_draft, proj_h);
+    gemm(&(m->selector.hidden_projection), draft_hidden, n_draft, proj_h);
 
     /* Greedy (or temperature) path trace. */
     uint32_t predecessor = anchor_ids[n_anchor - 1];
+    float *A_buf = malloc(rank * sizeof(float));
+    if (!A_buf) {
+        free(unary); free(cand); free(proj_h); free(scores);
+        free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
+        free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
+        free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
+        free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+        return OC_ERR_OOM;
+    }
     for (size_t p = 0; p < n_draft; p++) {
-        const float *A_p = m->selector.predecessor_codebook.data +
-                           (size_t)predecessor * rank;
-        const float *B_k = m->selector.successor_codebook.data;
+        df2_widen_row(&m->selector.predecessor_codebook, predecessor, A_buf);
+        const float *A_p = A_buf;
         float *un = unary + p * top_k;
         /* B rows for the candidates of this position. */
         float *Brows = malloc(top_k * rank * sizeof(float));
         if (!Brows) {
+            free(A_buf);
             free(unary); free(cand); free(proj_h); free(scores);
             free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
             free(conv_scratch); free(conv_out); free(q); free(k_all);
@@ -1198,9 +1359,8 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
             return OC_ERR_OOM;
         }
         for (size_t k = 0; k < top_k; k++)
-            memcpy(Brows + k * rank,
-                   B_k + (size_t)cand[p * top_k + k] * rank,
-                   rank * sizeof(float));
+            df2_widen_row(&m->selector.successor_codebook,
+                          cand[p * top_k + k], Brows + k * rank);
         oc_dflash2_selector_scores(proj_h + p * rank, A_p, Brows, un,
                                    top_k, scores);
 
@@ -1256,7 +1416,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     for (size_t li = 0; li < m->n_layers; li++)
         oc_dflash2_kvring_trim(&m->kv[li], start);
 
-    free(unary); free(cand); free(proj_h); free(scores);
+    free(unary); free(cand); free(proj_h); free(scores); free(A_buf);
     free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
     free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
     free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
@@ -1338,8 +1498,7 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
         for (size_t i = 0; i < block; i++)
             rms_norm_row(x + i * H, L->input_layernorm, normed + i * H, H, eps);
 
-        gemm(L->attn_conv.kernel_proj.data, 2 * ksz * groups, H,
-             normed, block, conv_dyn);
+        gemm(&L->attn_conv.kernel_proj, normed, block, conv_dyn);
         for (size_t i = 0; i < block; i++) {
             memcpy(conv_scratch + i * ksz * groups,
                    conv_dyn + i * 2 * ksz * groups,
@@ -1353,11 +1512,11 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
                                 block, H, ksz, gs, conv_out);
 
 
-        gemm(L->attn.q_proj.data, n_heads * hd, H, conv_out, block, q);
-        gemm(L->attn.k_proj.data, n_kv * hd, H, m->target_ctx, n_ctx, k_all);
-        gemm(L->attn.v_proj.data, n_kv * hd, H, m->target_ctx, n_ctx, v_all);
-        gemm(L->attn.k_proj.data, n_kv * hd, H, conv_out, block, k_noise);
-        gemm(L->attn.v_proj.data, n_kv * hd, H, conv_out, block, v_noise);
+        gemm(&L->attn.q_proj, conv_out, block, q);
+        gemm(&L->attn.k_proj, m->target_ctx, n_ctx, k_all);
+        gemm(&L->attn.v_proj, m->target_ctx, n_ctx, v_all);
+        gemm(&L->attn.k_proj, conv_out, block, k_noise);
+        gemm(&L->attn.v_proj, conv_out, block, v_noise);
 
         memcpy(k_all + n_ctx * n_kv * hd, k_noise,
                block * n_kv * hd * sizeof(float));
@@ -1421,7 +1580,7 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
         attn_ring(ring, q, start, block, n_heads, hd,
                   1.0f / sqrtf((float)hd), m->cfg.sliding_window, attn_out);
 
-        gemm(L->attn.o_proj.data, H, n_heads * hd, attn_out, block, attn_proj);
+        gemm(&L->attn.o_proj, attn_out, block, attn_proj);
         oc_dflash2_grouped_conv(attn_proj, conv_dyn_post,
                                 L->attn_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
@@ -1433,8 +1592,7 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
             rms_norm_row(x + i * H, L->post_attention_layernorm,
                          normed + i * H, H, eps);
 
-        gemm(L->mlp_conv.kernel_proj.data, 2 * ksz * groups, H,
-             normed, block, conv_dyn);
+        gemm(&L->mlp_conv.kernel_proj, normed, block, conv_dyn);
         for (size_t i = 0; i < block; i++) {
             memcpy(conv_scratch + i * ksz * groups,
                    conv_dyn + i * 2 * ksz * groups,
@@ -1447,11 +1605,11 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
                                 L->mlp_conv.base_kernel.data,
                                 block, H, ksz, gs, conv_out);
 
-        gemm(L->mlp_gate.data, inter, H, conv_out, block, mlp_gu);
-        gemm(L->mlp_up.data, inter, H, conv_out, block, mlp_up_out);
+        gemm(&(L->mlp_gate), conv_out, block, mlp_gu);
+        gemm(&(L->mlp_up), conv_out, block, mlp_up_out);
         for (size_t i = 0; i < block * inter; i++)
             mlp_gu[i] = silu(mlp_gu[i]) * mlp_up_out[i];
-        gemm(L->mlp_down.data, H, inter, mlp_gu, block, mlp_out);
+        gemm(&L->mlp_down, mlp_gu, block, mlp_out);
         oc_dflash2_grouped_conv(mlp_out, conv_dyn_post,
                                 L->mlp_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
@@ -1488,7 +1646,8 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
                                   uint32_t *out_cand)
 {
     if (!m || !m->loaded || !draft_hidden || !anchor_ids || n_anchor == 0 ||
-        !lm_head || (!lm_head->data && !lm_head->generate) || !out_tokens)
+        !lm_head || (!lm_head->data && !lm_head->bf16 &&
+                     !lm_head->generate) || !out_tokens)
         return OC_ERR_INVALID_ARG;
 
     const size_t H = m->cfg.hidden_size;
@@ -1512,7 +1671,7 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
             free(unary); free(cand); free(proj_h); free(scores);
             return OC_ERR_OOM;
         }
-        gemv(lm_head->data, vocab, H, draft_hidden + p * H, lrow);
+        gemv_w(lm_head, draft_hidden + p * H, lrow);
         for (size_t k = 0; k < top_k; k++) {
             size_t best = 0;
             for (size_t v = 1; v < vocab; v++)
@@ -1524,21 +1683,26 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
         free(lrow);
     }
 
-    gemm(m->selector.hidden_projection.data, rank, H,
-         draft_hidden, n_rows, proj_h);
+    gemm(&(m->selector.hidden_projection), draft_hidden, n_rows, proj_h);
 
     uint32_t predecessor = anchor_ids[n_anchor - 1];
+    float *A_buf = malloc(rank * sizeof(float));
+    float *B_buf = malloc(rank * sizeof(float));
+    if (!A_buf || !B_buf) {
+        free(A_buf); free(B_buf);
+        free(unary); free(cand); free(proj_h); free(scores);
+        return OC_ERR_OOM;
+    }
     for (size_t p = 0; p < n_rows; p++) {
-        const float *A_p = m->selector.predecessor_codebook.data +
-                           (size_t)predecessor * rank;
-        const float *B_base = m->selector.successor_codebook.data;
+        df2_widen_row(&m->selector.predecessor_codebook, predecessor, A_buf);
+        const float *A_p = A_buf;
         float *un = unary + p * top_k;
         for (size_t k = 0; k < top_k; k++) {
-            const float *B_row =
-                B_base + (size_t)cand[p * top_k + k] * rank;
+            df2_widen_row(&m->selector.successor_codebook,
+                          cand[p * top_k + k], B_buf);
             float acc = 0.0f;
             for (size_t r = 0; r < rank; r++)
-                acc += (A_p[r] * proj_h[p * rank + r]) * B_row[r];
+                acc += (A_p[r] * proj_h[p * rank + r]) * B_buf[r];
             scores[k] = acc + un[k];
         }
         uint32_t choice = 0;
@@ -1551,6 +1715,7 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
                    top_k * sizeof(uint32_t));
     }
 
+    free(A_buf); free(B_buf);
     free(unary); free(cand); free(proj_h); free(scores);
     return OC_OK;
 }

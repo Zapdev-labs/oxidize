@@ -79,7 +79,11 @@ void oc_dflash2_config_init(OcDFlash2Config *cfg);
 /* ─── Weights ───────────────────────────────────────────────────────── */
 
 typedef struct OcDFlash2Weight {
-    float *data;     /* row-major [rows, cols]; NULL until loaded */
+    float *data;     /* row-major [rows, cols]; NULL until loaded (or when
+                      * the weight is kept in BF16 — see bf16). */
+    uint16_t *bf16;  /* optional BF16 rows [rows, cols] (raw file bytes,
+                      * little-endian); halves resident + streamed bytes.
+                      * Mutually exclusive with data. */
     size_t rows;
     size_t cols;
     /* Optional: synthetic weight generator for benchmarks. When data is
