@@ -1,0 +1,30 @@
+oxidize-c/tests/manual_dflash2_validate.c
+  s_00efa08b7891dc::t_c0ef08fcfea1f0 195
+  s_00efa08b7891dc::t_0167bbedb5be55 181-183,189
+oxidize-c/src/model/dflash2.c
+  s_00efa08b7891dc::t_9dfc0b3f62c7dc 632-633
+  s_00efa08b7891dc::t_1de46a6fb8946c 705-708
+oxidize-c/include/oxidize/dflash2.h
+  s_00efa08b7891dc::t_ad3698cfc13e21 181-183,186-187
+oxidize-c/tests/manual_dflash2_ms_validate.c
+  s_00efa08b7891dc::t_110124f96691d6 163-166,170-171
+  s_00efa08b7891dc::t_1e22c0777057dc 128
+  s_00efa08b7891dc::t_fac5d86adb1358 1-127,129-130,134-135,137-162,167-169,172-206
+  s_00efa08b7891dc::t_264e662323fa35 131-133,136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "0b38a27e2ea2dbbad09700cc3295172f73fcc70e",
+  "prompts": {},
+  "sessions": {
+    "s_00efa08b7891dc": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "0ce28c7d-2cbf-42ab-a37f-cbcafdf3f272",
+        "model": "custom:GLM-5.3-Free-(TokenRouter)-4"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
