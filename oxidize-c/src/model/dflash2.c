@@ -986,8 +986,11 @@ typedef struct OcDFlash2ProposeCtx {
  * Bidirectional sliding-window attention for the block queries against the
  * KV ring. q: [q_len, n_heads*hd] (normed + RoPE'd); out:
  * [q_len, n_heads*hd]. Mask: |qpos - kpos| < window. Softmax is computed
- * per (query row, query head): each of the n_q_heads heads owns its own
- * max/denominator over the visible ring entries of its kv group.
+ * per (query row, query head) with the online (single-pass) algorithm:
+ * each streamed key updates running max, denominator, and the weighted V
+ * accumulator, rescaling on new maxima. The reference computes the same
+ * softmax with a two-pass max+sum; mathematically identical (the validators
+ * pin this within BF16 tolerance).
  */
 static void attn_ring(const OcDFlash2KvRing *ring, const float *q,
                       int64_t pos_q0, size_t q_len, size_t n_q_heads,
@@ -1006,27 +1009,24 @@ static void attn_ring(const OcDFlash2KvRing *ring, const float *q,
             const float *qh =
                 q + (qi * n_q_heads + h) * head_dim;
             float *oh = out + (qi * n_q_heads + h) * head_dim;
-            /* pass 1: max score for this query head. */
-            float m = -INFINITY;
-            for (size_t s = 0; s < ring->len; s++) {
-                int64_t dq = qpos - ring->pos[s];
-                if (dq >= (int64_t)window || -dq >= (int64_t)window) continue;
-                const float *kh = ring->k + s * vec + hg * head_dim;
-                float sc = df2_dot(qh, kh, head_dim) * scale;
-                if (sc > m) m = sc;
-            }
-            if (m == -INFINITY) continue;
-            /* pass 2: softmax-weighted sum. */
-            float denom = 0.0f;
+            float m = -INFINITY;   /* running max of scaled scores */
+            float denom = 0.0f;     /* running softmax denominator */
             for (size_t s = 0; s < ring->len; s++) {
                 int64_t dq = qpos - ring->pos[s];
                 if (dq >= (int64_t)window || -dq >= (int64_t)window) continue;
                 const float *kh = ring->k + s * vec + hg * head_dim;
                 const float *vh = ring->v + s * vec + hg * head_dim;
-                float w = expf(df2_dot(qh, kh, head_dim) * scale - m);
+                float sc = df2_dot(qh, kh, head_dim) * scale;
+                if (sc > m) {
+                    /* New max: rescale the accumulator + denominator. */
+                    float r = (m == -INFINITY) ? 0.0f : expf(m - sc);
+                    for (size_t d = 0; d < head_dim; d++) oh[d] *= r;
+                    denom *= r;
+                    m = sc;
+                }
+                float w = expf(sc - m);
                 denom += w;
-                for (size_t d = 0; d < head_dim; d++)
-                    oh[d] += w * vh[d];
+                for (size_t d = 0; d < head_dim; d++) oh[d] += w * vh[d];
             }
             if (denom > 0.0f) {
                 float inv = 1.0f / denom;
