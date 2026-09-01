@@ -443,6 +443,8 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --bench-iters N       Propose steps to time (default 20)\n"
                "  --bench-warmup N      Untimed warmup steps (default 3)\n"
                "  --bench-prompt-tokens N  Synthetic context rows per step (default 1)\n"
+               "  --lm-materialize       Pre-materialize the lm_head in BF16 so the vocab\n"
+               "                          scan measures real streaming bandwidth (~1.27 GB)\n"
                "  --threads N          Worker threads (default 8)\n"
                "  --seed N              Deterministic input seed (default 42)\n"
                "  --output json         Machine-readable results\n");
@@ -1782,14 +1784,50 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
         return OC_ERR_OOM;
     }
 
-    /* Synthetic lm_head via generated rows (still a full GEMV per row).
-     * Deterministic splitmix-style hash keeps rows stable across runs. */
+    /* Synthetic lm_head. Two modes:
+     *  - default: rows generated on the fly (flat memory, but the vocab
+     *    scan is compute-bound on the generator instead of bandwidth).
+     *  - --lm-materialize: pre-materialize the rows in BF16 (vocab*H*2
+     *    bytes, ~1.27 GB for GLM-5.3-Flash) so the scan measures the real
+     *    target-owned lm_head streaming cost from RAM. Same deterministic
+     *    generator, so both modes produce identical rows. */
     static OcDFlash2Weight lm;
-    lm.data = NULL;
     lm.rows = vocab;
     lm.cols = H;
     lm.gen_user = NULL;
     lm.generate = dflash2_gen_lm_row;
+    lm.data = NULL;
+    lm.bf16 = NULL;
+    if (ctx->bench_lm_materialize) {
+        size_t n_w = vocab * H;
+        lm.bf16 = malloc(n_w * sizeof(uint16_t));
+        if (!lm.bf16) {
+            free(noise); free(block_ids); free(anchors);
+            free(out_tok); free(out_cand); free(out_probs);
+            oc_dflash2_model_free(&model);
+            return OC_ERR_OOM;
+        }
+        float *row = malloc(H * sizeof(float));
+        if (!row) {
+            free(lm.bf16); lm.bf16 = NULL;
+            free(noise); free(block_ids); free(anchors);
+            free(out_tok); free(out_cand); free(out_probs);
+            oc_dflash2_model_free(&model);
+            return OC_ERR_OOM;
+        }
+        for (size_t v = 0; v < vocab; v++) {
+            dflash2_gen_lm_row(v, H, row, NULL);
+            for (size_t c = 0; c < H; c++) {
+                uint32_t bits;
+                memcpy(&bits, row + c, 4);
+                lm.bf16[v * H + c] = (uint16_t)(bits >> 16);
+            }
+        }
+        free(row);
+        cli_info("materialized %zu x %zu BF16 lm_head (%.2f GB), "
+                 "vocab scan now bandwidth-bound",
+                 vocab, H, (double)(n_w * 2) / (1024.0 * 1024.0 * 1024.0));
+    }
 
     uint32_t seed = ctx->seed ? ctx->seed : 42u;
     const uint32_t iters = (uint32_t)(ctx->bench_iterations > 0
@@ -1914,6 +1952,7 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
 
     free(noise); free(block_ids); free(anchors);
     free(out_tok); free(out_cand); free(out_probs); free(bb_hidden);
+    free(lm.bf16);
     oc_dflash2_model_free(&model);
     return OC_OK;
 }

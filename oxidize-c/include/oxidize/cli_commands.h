@@ -118,6 +118,7 @@ typedef struct OcCliContext {
     uint32_t           bench_prompt_tokens;
     uint32_t           bench_decode_tokens;
     bool               bench_no_eos;
+    bool               bench_lm_materialize; /* --lm-materialize (dflash2)  */
 
     /* Quantize / convert / merge / prune. */
     const char        *input_path;      /* --input PATH (for convert/merge)  */

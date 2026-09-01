@@ -132,6 +132,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         if (match(arg, "--json"))       { ctx->output_format = OC_CLI_OUTPUT_JSON; continue; }
         if (match(arg, "--no-special")) { ctx->tokens_no_special = true; continue; }
         if (match(arg, "--bench-no-eos")) { ctx->bench_no_eos = true; continue; }
+        if (match(arg, "--lm-materialize")) { ctx->bench_lm_materialize = true; continue; }
         if (match(arg, "--verbose") || match(arg, "-v")) { ctx->verbose = true; continue; }
 
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
