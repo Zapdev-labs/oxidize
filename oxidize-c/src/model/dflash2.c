@@ -629,7 +629,8 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         e = oc_dflash2_kvring_init(&m->kv[li], cap, kvh, hd);
     }
     if (e == OC_OK) {
-        m->target_ctx = malloc(m->cfg.block_size * H * sizeof(float));
+        m->kv_capacity = m->cfg.sliding_window + m->cfg.block_size;
+        m->target_ctx = malloc(m->kv_capacity * H * sizeof(float));
         if (!m->target_ctx) e = OC_ERR_OOM;
     }
 
@@ -701,7 +702,10 @@ OcError oc_dflash2_set_context(OcDFlash2Model *m,
 {
     if (!m || !m->loaded || !target_context || n_ctx_rows == 0)
         return OC_ERR_INVALID_ARG;
-    if (n_ctx_rows > m->cfg.block_size) return OC_ERR_INVALID_ARG;
+    /* The reference passes whatever context the target produced (prefill
+     * rows at step 0, then the per-verify rows); only the KV window bounds
+     * the usable length. */
+    if (n_ctx_rows > m->kv_capacity) return OC_ERR_INVALID_ARG;
     const size_t H = m->cfg.hidden_size;
     const size_t W = m->cfg.n_target_layer_ids * H;
 

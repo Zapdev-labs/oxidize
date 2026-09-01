@@ -178,9 +178,13 @@ typedef struct OcDFlash2Model {
 
     /* Scratch: fused context feature per attended position.
      * target_ctx holds hidden_norm(fc @ concat(target hiddens)) for the
-     * last produced position (and block). */
-    float *target_ctx;           /* [block, hidden] */
+     * rows set via oc_dflash2_set_context (prefill rows at step 0, then
+     * the per-verify rows), up to kv_capacity rows. */
+    float *target_ctx;           /* [kv_capacity, hidden] */
     size_t target_ctx_len;       /* number of valid rows */
+
+    /* Per-layer KV ring capacity (sliding_window + block_size). */
+    size_t kv_capacity;
 
     /* Absolute position of the next noise token to be drafted. */
     int64_t next_noise_pos;

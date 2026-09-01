@@ -94,7 +94,6 @@ int main(int argc, char **argv)
         "/home/dih/.cache/huggingface/hub/models--incoai--GLM-5.3-Flash-DFlash2/snapshots/bf582e4eacc1810f76656d1811693ff6c6737d2a";
     const char *val_dir = argc > 1 ? argv[1] : "/tmp";
     char path[512], dtype[8];
-    size_t n;
 
     oc_parallel_set_threads(1); /* determinism */
 
@@ -179,19 +178,21 @@ int main(int argc, char **argv)
         size_t n_cap;
         float *gold_l = npy_load(cap, dtype, &n_cap, &fo);
         if (!gold_l) { printf("layer%zu: no capture\n", li); break; }
-        double m = 0.0, s = 0.0;
+        double m = 0.0;
+        double s = 0.0;
+        (void)m;
         for (size_t i = 0; i < n_cap && i < block * H; i++) {
             double d = fabs((double)out_hidden[i] - (double)gold_l[i]);
             /* wrong-stage comparison; skipped numerically, just shape info */
             s += d;
         }
-        (void)m;
+        (void)s;
         printf("layer%zu capture: %zu elems (visual check only)\n", li, n_cap);
         free(gold_l);
     }
 
     /* Selector debug on the reference's draft hidden (rows 1..7 of gold). */
-    OcDFlash2Weight lmw = { lm, m.cfg.vocab_size, H };
+    OcDFlash2Weight lmw = { lm, m.cfg.vocab_size, H, NULL, NULL };
     uint32_t anchor = 7;
     uint32_t *out_tok = malloc(n_draft * sizeof(uint32_t));
     uint32_t *out_cand = malloc(n_draft * top_k * sizeof(uint32_t));
