@@ -1,0 +1,52 @@
+oxidize-c/tests/manual_dflash2_validate.c
+  s_00efa08b7891dc::t_8e8fcdce907aca 195
+oxidize-c/include/oxidize/dflash2.h
+  s_00efa08b7891dc::t_87547ab27fa70d 79-84
+  s_00efa08b7891dc::t_557b464538a9d5 95-96
+oxidize-c/src/model/dflash2.c
+  s_00efa08b7891dc::t_5a24301d109190 20-22
+  s_00efa08b7891dc::t_0384ba70433813 1315-1321,1323-1329,1331-1333
+  s_00efa08b7891dc::t_00f65ae42e9166 34-55,57-70,72-78,82,85-87
+  s_00efa08b7891dc::t_de61033e70c836 355-361,368-385
+  s_00efa08b7891dc::t_7cc87f9e9d67aa 1436-1437,1443
+  s_00efa08b7891dc::t_0abc42c8f64511 32
+  s_00efa08b7891dc::t_de46be50e817fe 1099-1113,1115-1126,1134-1135
+  s_00efa08b7891dc::t_3b2052eb387acd 906-921,925,928-930,935-938,941-947
+  s_00efa08b7891dc::t_12e17fad44f0d5 1322,1330,1334-1340
+  s_00efa08b7891dc::t_ca315e7a60f10d 893
+  s_00efa08b7891dc::t_c7be7147b98c09 313
+  s_00efa08b7891dc::t_9d9138f065bae4 349-354
+  s_00efa08b7891dc::t_5a97cb7d25cca9 1352
+  s_00efa08b7891dc::t_e557da2dc8bf29 1377
+  s_00efa08b7891dc::t_b133c8f6fc9fb9 1451
+  s_00efa08b7891dc::t_11f150535f9ee2 1477
+  s_00efa08b7891dc::t_8bf34335d68e44 678-679,684
+  s_00efa08b7891dc::t_e9de3c3aa8f04b 1483-1488
+  s_00efa08b7891dc::t_fccb3eff493dbd 1029-1030,1032
+  s_00efa08b7891dc::t_53d8a898c9d6ef 1171-1175,1177-1189,1191-1195,1199-1217,1219-1225,1229-1244
+  s_00efa08b7891dc::t_801788383567d1 56,71,79-81,83-84
+  s_00efa08b7891dc::t_68fa4f813281b0 1016-1028,1031,1033-1083
+  s_00efa08b7891dc::t_8a076005c9dbb4 955-956
+  s_00efa08b7891dc::t_bdac76f128a956 394-409,419-422
+oxidize-c/src/cli/commands.c
+  s_00efa08b7891dc::t_b4a255ae212eaf 1803-1804,1813
+  s_00efa08b7891dc::t_01964e2219fa46 1956-1957
+oxidize-c/tests/manual_dflash2_ms_validate.c
+  s_00efa08b7891dc::t_d28b7a1a270a0f 128
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "6c947a98afdfea2dcbdc24deb8f330cde68964c2",
+  "prompts": {},
+  "sessions": {
+    "s_00efa08b7891dc": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "0ce28c7d-2cbf-42ab-a37f-cbcafdf3f272",
+        "model": "custom:GLM-5.3-Free-(TokenRouter)-4"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
