@@ -442,6 +442,7 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "OPTIONS:\n"
                "  --bench-iters N       Propose steps to time (default 20)\n"
                "  --bench-warmup N      Untimed warmup steps (default 3)\n"
+               "  --bench-prompt-tokens N  Synthetic context rows per step (default 1)\n"
                "  --threads N          Worker threads (default 8)\n"
                "  --seed N              Deterministic input seed (default 42)\n"
                "  --output json         Machine-readable results\n");
@@ -1752,21 +1753,30 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     const size_t top_k = model.cfg.selector_top_k;
     const size_t vocab = model.cfg.vocab_size;
 
+    /* Context rows per step: --bench-prompt-tokens drives how much target
+     * context each propose consumes, exercising the full KV window (the
+     * reference model would feed the target's hidden states for the last
+     * `ctx_rows` positions). Capped by the KV ring capacity. */
+    size_t ctx_rows = ctx->bench_prompt_tokens > 0
+                    ? (size_t)ctx->bench_prompt_tokens : 1;
+    if (ctx_rows > model.kv_capacity) ctx_rows = model.kv_capacity;
+    if (ctx_rows < 1) ctx_rows = 1;
+    const size_t ctx_cap = model.kv_capacity;
+
     /* Stand-in target lm_head: rows = vocab, cols = H. Too big to
      * materialize densely in f32 (154880*4096*4 = 2.4 GB) — use a
      * structured pseudo-random projection: hash rows so each "weight row"
      * is generated on the fly. That keeps memory flat while exercising
      * the same FLOPs. */
     float *noise = malloc(block * H * sizeof(float));
-    float *tgt_ctx_raw = malloc(block * n_target_w * sizeof(float));
     uint32_t *block_ids = malloc(block * sizeof(uint32_t));
     uint32_t *anchors = malloc(sizeof(uint32_t));
     uint32_t *out_tok = malloc((block - 1) * sizeof(uint32_t));
     uint32_t *out_cand = malloc((block - 1) * top_k * sizeof(uint32_t));
     float *out_probs = malloc((block - 1) * top_k * sizeof(float));
-    if (!noise || !tgt_ctx_raw || !block_ids || !anchors || !out_tok ||
+    if (!noise || !block_ids || !anchors || !out_tok ||
         !out_cand || !out_probs) {
-        free(noise); free(tgt_ctx_raw); free(block_ids); free(anchors);
+        free(noise); free(block_ids); free(anchors);
         free(out_tok); free(out_cand); free(out_probs);
         oc_dflash2_model_free(&model);
         return OC_ERR_OOM;
@@ -1803,19 +1813,47 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     }
     double bb_avg = iters ? bb_total / (double)iters : 0.0;
 
-    cli_info("running %u propose steps (block %zu, %zu drafts/step, %zu threads)",
-             iters + warmup, block, block - 1, oc_parallel_n_threads());
+    /* Pre-generate the full synthetic context once (the "prefill": the
+     * target's hidden states for positions [0, ctx_rows)). Each step then
+     * only produces the NEW rows (the accepted tokens of the previous
+     * verify), matching dflash_generate: after the first call the draft
+     * consumes just output.hidden_states[:, :produced, :]. */
+    float *ctx_prefill = malloc(ctx_rows * n_target_w * sizeof(float));
+    float *ctx_new = malloc((block - 1) * n_target_w * sizeof(float));
+    if (!ctx_prefill || !ctx_new) {
+        free(ctx_prefill); free(ctx_new);
+        free(noise); free(block_ids); free(anchors);
+        free(out_tok); free(out_cand); free(out_probs);
+        oc_dflash2_model_free(&model);
+        return OC_ERR_OOM;
+    }
+    for (size_t i = 0; i < ctx_rows * n_target_w; i++)
+        ctx_prefill[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
+    e = oc_dflash2_set_context(&model, ctx_prefill, ctx_rows);
+    model.next_noise_pos = (int64_t)ctx_rows;
+    if (e != OC_OK) {
+        free(ctx_prefill); free(ctx_new);
+        free(noise); free(block_ids); free(anchors);
+        free(out_tok); free(out_cand); free(out_probs);
+        oc_dflash2_model_free(&model);
+        return e;
+    }
+
+    cli_info("running %u propose steps (block %zu, %zu drafts/step, %zu threads, %zu ctx rows)",
+             iters + warmup, block, block - 1, oc_parallel_n_threads(), ctx_rows);
 
     for (uint32_t it = 0; it < iters + warmup; it++) {
         /* Fresh synthetic inputs each step. */
         for (size_t i = 0; i < block * H; i++)
             noise[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
-        for (size_t i = 0; i < block * n_target_w; i++)
-            tgt_ctx_raw[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
+        for (size_t i = 0; i < (size_t)(block - 1) * n_target_w; i++)
+            ctx_new[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
         for (size_t i = 0; i < block; i++)
             block_ids[i] = dflash2_lcg(&seed) % (uint32_t)vocab;
 
-        e = oc_dflash2_set_context(&model, tgt_ctx_raw, 1);
+        /* Per-step: only the newly produced rows enter the context, like
+         * the reference's output.hidden_states[:, :produced, :]. */
+        e = oc_dflash2_set_context(&model, ctx_new, block - 1);
         if (e != OC_OK) break;
         anchors[0] = block_ids[0];
 
@@ -1829,12 +1867,16 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
             drafted_total += block - 1;
             if (dt < best) best = dt;
         }
-        /* The synthetic harness cannot know the true acceptance; just
-         * keep the position counter advancing as a server would. */
+        /* Advance like a server: the accepted tokens are committed and the
+         * ring window slides. */
+        model.next_noise_pos += (int64_t)(block - 1);
     }
+    double prefill_fuse_ms = 0.0; /* reported as 0; fusion is amortized */
+    (void)prefill_fuse_ms;
+    free(ctx_prefill); free(ctx_new);
     if (e != OC_OK) {
         cli_error("propose failed (%s)", oc_error_msg(e));
-        free(noise); free(tgt_ctx_raw); free(block_ids); free(anchors);
+        free(noise); free(block_ids); free(anchors);
         free(out_tok); free(out_cand); free(out_probs);
         oc_dflash2_model_free(&model);
         return e;
@@ -1846,12 +1888,13 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"dflash2\",\"model\":\"%s\","
                "\"block_size\":%zu,\"drafts_per_step\":%zu,"
-               "\"threads\":%zu,\"steps\":%u,\"drafted_total\":%llu,"
+               "\"threads\":%zu,\"ctx_rows\":%zu,\"steps\":%u,"
+               "\"drafted_total\":%llu,"
                "\"avg_step_ms\":%.3f,\"best_step_ms\":%.3f,"
                "\"backbone_ms\":%.3f,"
                "\"draft_tok_per_s\":%.1f}\n",
                ctx->model_path, block, block - 1,
-               oc_parallel_n_threads(), iters,
+               oc_parallel_n_threads(), ctx_rows, iters,
                (unsigned long long)drafted_total,
                avg * 1e3, best * 1e3, bb_avg * 1e3, 1.0 / per_draft_tok);
     } else {
@@ -1859,6 +1902,7 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
         printf("  block size:        %zu (%zu drafts/step)\n",
                block, block - 1);
         printf("  threads:           %zu\n", oc_parallel_n_threads());
+        printf("  context rows:      %zu (KV window %zu)\n", ctx_rows, ctx_cap);
         printf("  steps:             %u (+%u warmup)\n", iters, warmup);
         printf("  avg step:          %.3f ms\n", avg * 1e3);
         printf("  best step:         %.3f ms\n", best * 1e3);
@@ -1868,7 +1912,7 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
                "321B and not co-resident)\n");
     }
 
-    free(noise); free(tgt_ctx_raw); free(block_ids); free(anchors);
+    free(noise); free(block_ids); free(anchors);
     free(out_tok); free(out_cand); free(out_probs); free(bb_hidden);
     oc_dflash2_model_free(&model);
     return OC_OK;
