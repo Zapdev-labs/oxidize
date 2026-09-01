@@ -198,6 +198,12 @@ typedef struct OcDFlash2Model {
     /* Per-layer KV ring capacity (sliding_window + block_size). */
     size_t kv_capacity;
 
+    /* RoPE frequency table (head_dim/2 entries), computed once at load
+     * with the same powf the reference evaluates per call; cached so
+     * propose does not recompute transcendentals every step. */
+    float *rope_freq;            /* [head_dim / 2] */
+    size_t rope_freq_n;
+
     /* Absolute position of the next noise token to be drafted. */
     int64_t next_noise_pos;
 

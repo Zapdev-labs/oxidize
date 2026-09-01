@@ -965,6 +965,17 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         oc_dflash2_model_free(m);
         return e;
     }
+    /* RoPE frequency table: same powf the reference evaluates per call,
+     * computed once. Bit-identical values, no per-step transcendentals. */
+    m->rope_freq_n = m->cfg.head_dim / 2;
+    m->rope_freq = malloc(m->rope_freq_n * sizeof(float));
+    if (!m->rope_freq) {
+        oc_dflash2_model_free(m);
+        return OC_ERR_OOM;
+    }
+    for (size_t d = 0; d < m->rope_freq_n; d++)
+        m->rope_freq[d] = powf(m->cfg.rope_theta,
+                               -((float)d / (float)m->rope_freq_n));
     m->loaded = true;
     return OC_OK;
 }
@@ -1020,6 +1031,7 @@ void oc_dflash2_model_free(OcDFlash2Model *m)
     }
     df2_free_huge(m->target_ctx,
                   m->kv_capacity * m->cfg.hidden_size * sizeof(float));
+    free(m->rope_freq);
     memset(m, 0, sizeof(*m));
 }
 
@@ -1482,9 +1494,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
          * [start, start + block). theta 10k, head_dim 128. */
         {
             const size_t half = hd / 2;
-            float freq[half];
-            for (size_t d = 0; d < half; d++)
-                freq[d] = powf(m->cfg.rope_theta, -((float)d / (float)half));
+            const float *freq = m->rope_freq;
             for (size_t i = 0; i < n_k; i++) {
                 int64_t pos = ctx_pos0 + (int64_t)i;
                 for (size_t h = 0; h < n_kv; h++) {
@@ -1909,9 +1919,7 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
 
         {
             const size_t half = hd / 2;
-            float freq[half];
-            for (size_t d = 0; d < half; d++)
-                freq[d] = powf(m->cfg.rope_theta, -((float)d / (float)half));
+            const float *freq = m->rope_freq;
             for (size_t i = 0; i < n_k; i++) {
                 int64_t pos = ctx_pos0 + (int64_t)i;
                 for (size_t h = 0; h < n_kv; h++) {
