@@ -1663,26 +1663,43 @@ static uint32_t dflash2_lcg(uint32_t *s)
     return *s;
 }
 
-/* Deterministic pseudo-random lm_head row generator: vectorizable LCG
- * over 4 independent uint32 lanes (one mul + xor per element, ~1 FLOP
- * cost) so the benchmark's lm_head scan cost stays dominated by the dot
- * products like a real GEMM, not the hash. */
+/* Deterministic pseudo-random lm_head row generator. 8 independent LCG
+ * lanes seeded from the row index; each lane advances once per 8 floats,
+ * so the element loop is dependency-free arithmetic (no serial chain)
+ * and the scan stays dominated by the dot products like a real GEMM. */
 static void dflash2_gen_lm_row(size_t row, size_t cols, float *buf, void *user)
 {
     (void)user;
-    uint32_t s0 = (uint32_t)(row * 2 + 1u);
-    uint32_t s1 = (uint32_t)(row * 2 + 0x9E3779B9u);
-    for (size_t c = 0; c < cols; c += 4) {
+    uint32_t s0 = (uint32_t)row * 1664525u + 1013904223u;
+    uint32_t s1 = s0 * 1664525u + 1013904223u;
+    uint32_t s2 = s1 * 1664525u + 1013904223u;
+    uint32_t s3 = s2 * 1664525u + 1013904223u;
+    uint32_t s4 = s3 * 1664525u + 1013904223u;
+    uint32_t s5 = s4 * 1664525u + 1013904223u;
+    uint32_t s6 = s5 * 1664525u + 1013904223u;
+    uint32_t s7 = s6 * 1664525u + 1013904223u;
+    size_t c = 0;
+    for (; c + 8 <= cols; c += 8) {
         s0 = s0 * 1664525u + 1013904223u;
         s1 = s1 * 1664525u + 1013904223u;
-        uint32_t a = s0 ^ (s1 >> 16);
-        uint32_t b = s1 ^ (s0 >> 16);
-        uint32_t cc = s0 + s1;
-        uint32_t d = s0 ^ s1;
-        buf[c + 0] = ((float)a / 4294967296.0f - 0.5f) * 0.04f;
-        if (c + 1 < cols) buf[c + 1] = ((float)b / 4294967296.0f - 0.5f) * 0.04f;
-        if (c + 2 < cols) buf[c + 2] = ((float)cc / 4294967296.0f - 0.5f) * 0.04f;
-        if (c + 3 < cols) buf[c + 3] = ((float)d / 4294967296.0f - 0.5f) * 0.04f;
+        s2 = s2 * 1664525u + 1013904223u;
+        s3 = s3 * 1664525u + 1013904223u;
+        s4 = s4 * 1664525u + 1013904223u;
+        s5 = s5 * 1664525u + 1013904223u;
+        s6 = s6 * 1664525u + 1013904223u;
+        s7 = s7 * 1664525u + 1013904223u;
+        buf[c + 0] = ((float)(s0 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 1] = ((float)(s1 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 2] = ((float)(s2 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 3] = ((float)(s3 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 4] = ((float)(s4 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 5] = ((float)(s5 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 6] = ((float)(s6 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 7] = ((float)(s7 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+    }
+    for (; c < cols; c++) {
+        s0 = s0 * 1664525u + 1013904223u;
+        buf[c] = ((float)(s0 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
     }
 }
 
