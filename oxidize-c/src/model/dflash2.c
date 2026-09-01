@@ -515,6 +515,11 @@ static void conv_mac(float *ob, const float *kb, const float *xb,
     for (size_t c = 0; c < n; c++) ob[c] += (kb[c] + dv) * xb[c];
 }
 
+/* Grouped-conv parallelization was measured and rejected: the block convs
+ * are 8 rows x 256 groups of 16-lane MACs — ~64 B of writes per job — and
+ * a pool dispatch over 2048 such jobs cost more than the serial MAC work
+ * (127-129 ms/step vs 120.6 serial). Kept serial. */
+
 /*
  * out[i, c] = sum_t (base[t, c] + dyn[i, t, g(c)]) * x[i - t, c]
  * dyn is [len, kernel * groups] with dyn[i, t*groups + g] the dynamic
