@@ -59,21 +59,28 @@ static float silu(float x) { return x / (1.0f + expf(-x)); }
 __attribute__((target("avx2,fma")))
 static float df2_dot_avx2(const float *a, const float *b, size_t n)
 {
-    __m256 acc = _mm256_setzero_ps();
+    /* Four independent FMA chains break the serial dependency; Zen 3
+     * retires 2 FMAs/cycle, so the chain is the throughput limiter. */
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
     size_t i = 0;
     for (; i + 32 <= n; i += 32) {
-        acc = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
-                              _mm256_loadu_ps(b + i), acc);
-        acc = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),
-                              _mm256_loadu_ps(b + i + 8), acc);
-        acc = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16),
-                              _mm256_loadu_ps(b + i + 16), acc);
-        acc = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24),
-                              _mm256_loadu_ps(b + i + 24), acc);
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
+                             _mm256_loadu_ps(b + i), a0);
+        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),
+                             _mm256_loadu_ps(b + i + 8), a1);
+        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16),
+                             _mm256_loadu_ps(b + i + 16), a2);
+        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24),
+                             _mm256_loadu_ps(b + i + 24), a3);
     }
     for (; i + 8 <= n; i += 8)
-        acc = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
-                              _mm256_loadu_ps(b + i), acc);
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
+                             _mm256_loadu_ps(b + i), a0);
+    __m256 acc = _mm256_add_ps(_mm256_add_ps(a0, a1),
+                               _mm256_add_ps(a2, a3));
     float s0 = acc[0] + acc[1] + acc[2] + acc[3];
     float s1 = acc[4] + acc[5] + acc[6] + acc[7];
     float sum = s0 + s1;
@@ -116,16 +123,39 @@ static float df2_dot_pre(const float *ap, const float *b, size_t n)
 __attribute__((target("avx2,fma")))
 static float df2_dot_bf16_avx2(const uint16_t *w, const float *x, size_t n)
 {
-    __m256 acc = _mm256_setzero_ps();
+    /* Four independent FMA chains (see df2_dot_avx2). */
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
     size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        for (size_t j = 0; j < 4; j++) {
+            __m128i h = _mm_loadu_si128((const __m128i *)(w + i + j * 8));
+            __m256i w32 = _mm256_slli_epi32(
+                _mm256_cvtepu16_epi32(h), 16);
+            __m256 wv;
+            memcpy(&wv, &w32, sizeof(wv));
+            if (j == 0)
+                a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), a0);
+            else if (j == 1)
+                a1 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 8), a1);
+            else if (j == 2)
+                a2 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 16), a2);
+            else
+                a3 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 24), a3);
+        }
+    }
     for (; i + 8 <= n; i += 8) {
         __m128i h = _mm_loadu_si128((const __m128i *)(w + i));
         __m256i w32 = _mm256_slli_epi32(
             _mm256_cvtepu16_epi32(h), 16);
         __m256 wv;
         memcpy(&wv, &w32, sizeof(wv));
-        acc = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), acc);
+        a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), a0);
     }
+    __m256 acc = _mm256_add_ps(_mm256_add_ps(a0, a1),
+                               _mm256_add_ps(a2, a3));
     float s0 = acc[0] + acc[1] + acc[2] + acc[3];
     float s1 = acc[4] + acc[5] + acc[6] + acc[7];
     float sum = s0 + s1;
@@ -312,7 +342,8 @@ static void conv_mac(float *ob, const float *kb, const float *xb,
                      float dv, size_t n)
 {
 #if OC_DF2_SIMD_X86
-    if (oc_simd_caps()->level >= OC_SIMD_AVX2)
+    if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
+        oc_simd_caps()->level == OC_SIMD_AVX512)
         return conv_mac_avx2(ob, kb, xb, dv, n);
 #endif
     for (size_t c = 0; c < n; c++) ob[c] += (kb[c] + dv) * xb[c];
