@@ -206,16 +206,29 @@ int main(int argc, char **argv)
         int path_ok = 1;
         for (size_t i = 0; i < n_draft; i++)
             if ((int64_t)out_tok[i] != gold_path[i]) { path_ok = 0; break; }
+        /* Candidate sets must match as multi-sets: each gold entry is
+         * consumed by at most one output so duplicates cannot pass by
+         * reusing a single gold row (e.g. out [a,a,b] vs gold [a,b,c]). */
+        char *matched = calloc(top_k, 1);
+        if (!matched) { fprintf(stderr, "oom\n"); return 1; }
         int cand_ok = 1;
         for (size_t p = 0; p < n_draft && cand_ok; p++) {
+            memset(matched, 0, top_k);
             for (size_t k = 0; k < top_k; k++) {
                 int found = 0;
-                for (size_t j = 0; j < top_k; j++)
+                for (size_t j = 0; j < top_k; j++) {
+                    if (matched[j]) continue;
                     if ((uint32_t)gold_cand[p * top_k + j] ==
-                        out_cand[p * top_k + k]) { found = 1; break; }
+                        out_cand[p * top_k + k]) {
+                        matched[j] = 1;
+                        found = 1;
+                        break;
+                    }
+                }
                 if (!found) { cand_ok = 0; break; }
             }
         }
+        free(matched);
         printf("step%d: path %s (ours:", s, path_ok ? "ok" : "MISMATCH");
         for (size_t i = 0; i < n_draft; i++) printf(" %u", out_tok[i]);
         printf(" | gold:");
