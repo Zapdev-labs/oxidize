@@ -447,7 +447,7 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "                          scan measures real streaming bandwidth (~1.27 GB)\n"
                "  --threads N          Worker threads (default 8)\n"
                "  --seed N              Deterministic input seed (default 42)\n"
-               "  --output json         Machine-readable results\n");
+               "  --json                Machine-readable results\n");
         break;
     case OC_CLI_CMD_QUANTIZE:
         printf("re-quantize a GGUF model\n\n"
