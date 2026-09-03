@@ -78,7 +78,9 @@ void oc_dflash2_config_init(OcDFlash2Config *cfg);
 
 /* Hugepage-aware allocation for the big per-step working sets (weights,
  * lm_head): anonymous mmap + MADV_HUGEPAGE on Linux, malloc elsewhere.
- * Frees must pair with oc_dflash2_free_huge(p, n). */
+ * Allocations of at least 1 MiB are mmap-backed and return NULL on
+ * failure (no malloc fallback, so frees always pair with the matching
+ * deallocator via oc_dflash2_free_huge(p, n)). */
 void *oc_dflash2_alloc_huge(size_t n);
 void oc_dflash2_free_huge(void *p, size_t n);
 

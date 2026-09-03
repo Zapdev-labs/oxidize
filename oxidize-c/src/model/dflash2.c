@@ -60,7 +60,10 @@ void *oc_dflash2_alloc_huge(size_t n)
     size_t n2 = (n + pg - 1) & ~(pg - 1);
     void *p = mmap(NULL, n2, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) return malloc(n);    /* fall back */
+    if (p == MAP_FAILED) return NULL;
+    /* No malloc fallback: free_huge releases >=1 MiB allocations with
+     * munmap, so a fallback pointer would be freed with the wrong
+     * deallocator. Callers treat NULL as OOM already. */
 #ifdef MADV_HUGEPAGE
     if (madvise(p, n2, MADV_HUGEPAGE) != 0) { /* best effort; keep 4 KB */
     }
