@@ -445,7 +445,7 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --bench-prompt-tokens N  Synthetic context rows per step (default 1)\n"
                "  --lm-materialize       Pre-materialize the lm_head in BF16 so the vocab\n"
                "                          scan measures real streaming bandwidth (~1.27 GB)\n"
-               "  --threads N          Worker threads (default 8)\n"
+               "  --threads N          Worker threads; 0 = online CPUs (default 8)\n"
                "  --seed N              Deterministic input seed (default 42)\n"
                "  --json                Machine-readable results\n");
         break;
@@ -1741,7 +1741,8 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
      * 5 warmup), but the documented dflash2 workload is 20 / 3. */
     if (!ctx->bench_iters_set)  ctx->bench_iterations = 20;
     if (!ctx->bench_warmup_set) ctx->bench_warmup = 3;
-    if (ctx->threads > 0) {
+    if (ctx->threads_set) {
+        /* Explicit --threads, including 0 = auto (online CPUs). */
         oc_parallel_set_threads((size_t)ctx->threads);
     } else if (ctx->auto_tune ||
                (ctx->numa && strcmp(ctx->numa, "none") != 0)) {
