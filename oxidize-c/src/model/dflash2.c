@@ -882,6 +882,34 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         return OC_ERR_FORMAT;
     }
 
+    /* Validate every dimension the derive step turns into a tensor shape,
+     * VLA size, or ring capacity, before anything is derived from it. A
+     * malformed config (zero or oversized field) must fail the load here
+     * rather than under-allocate downstream. */
+    if (m->cfg.hidden_size == 0 ||
+        m->cfg.num_hidden_layers == 0 ||
+        m->cfg.num_hidden_layers > OC_DFLASH2_MAX_LAYERS ||
+        m->cfg.num_attention_heads == 0 ||
+        m->cfg.num_key_value_heads == 0 ||
+        m->cfg.head_dim == 0 ||
+        m->cfg.head_dim % 2 != 0 ||   /* RoPE splits head_dim in half */
+        m->cfg.n_target_layer_ids == 0 ||
+        m->cfg.n_target_layer_ids > OC_DFLASH2_MAX_TARGET_LAYERS ||
+        m->cfg.num_attention_heads % m->cfg.num_key_value_heads != 0 ||
+        m->cfg.hidden_size % m->cfg.conv_group_size != 0 ||
+        m->cfg.conv_group_size == 0 ||
+        m->cfg.conv_kernel_size == 0 ||
+        m->cfg.block_size == 0 ||
+        m->cfg.block_size > OC_DFLASH2_MAX_BLOCK ||
+        m->cfg.selector_top_k == 0 ||
+        m->cfg.selector_top_k > OC_DFLASH2_MAX_TOP_K ||
+        m->cfg.sliding_window == 0 ||
+        m->cfg.vocab_size == 0) {
+        fprintf(stderr, "dflash2: invalid config dimensions\n");
+        oc_safetensors_close(&f);
+        return OC_ERR_FORMAT;
+    }
+
     const size_t H = m->cfg.hidden_size;
     const size_t n_layers = m->cfg.num_hidden_layers;
     const size_t n_target_w = m->cfg.n_target_layer_ids * H;
