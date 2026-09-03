@@ -72,12 +72,22 @@ static void *npy_load(const char *path, char *dtype, size_t *n_elems,
         shape[nd++] = (size_t)strtol(p, &p, 10);
     }
     size_t total = 1;
-    for (size_t i = 0; i < nd; i++) total *= shape[i];
+    for (size_t i = 0; i < nd; i++) {
+        /* Guard the shape product: a crafted header could otherwise wrap
+         * the element count and under-allocate below. */
+        if (shape[i] != 0 && total > SIZE_MAX / shape[i]) {
+            free(hdr); fclose(f); return NULL;
+        }
+        total *= shape[i];
+    }
     *n_elems = total;
 
     size_t elem_sz = strstr(dtype, "f4") ? 4
                         : (strstr(dtype, "i8") ? 8 : 0);
     if (elem_sz == 0) { free(hdr); fclose(f); return NULL; }
+    if (total > SIZE_MAX / elem_sz) {
+        free(hdr); fclose(f); return NULL;
+    }
 
     void *data = malloc(total * elem_sz);
     if (!data) { free(hdr); fclose(f); return NULL; }
