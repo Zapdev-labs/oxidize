@@ -171,6 +171,18 @@ static float df2_dot(const float *a, const float *b, size_t n)
     return acc;
 }
 
+#else
+/* Non-x86: plain scalar dot; the helpers below build on it portably. */
+static float df2_dot(const float *a, const float *b, size_t n)
+{
+    float acc = 0.0f;
+    for (size_t i = 0; i < n; i++) acc += a[i] * b[i];
+    return acc;
+}
+#endif
+
+/* ── Portable scalar helpers (both x86 and non-x86) ─────────────────── */
+
 /* sum_i ap[i] * b[i] where ap = a * p is precomputed by the caller (it is
  * shared across all k candidates for one position). */
 static float df2_dot_pre(const float *ap, const float *b, size_t n)
@@ -271,15 +283,6 @@ static void df2_widen_row(const OcDFlash2Weight *w, size_t row, float *dst)
         memcpy(dst, w->data + row * w->cols, w->cols * sizeof(float));
     }
 }
-
-#else
-static float df2_dot(const float *a, const float *b, size_t n)
-{
-    float acc = 0.0f;
-    for (size_t i = 0; i < n; i++) acc += a[i] * b[i];
-    return acc;
-}
-#endif
 
 static void gemv_rows_dispatch(const float *w, size_t rows, size_t cols,
                                const float *x, float *out)
@@ -453,8 +456,8 @@ static void dflash2_multigemm_par_fn(size_t begin, size_t end, size_t tid,
         const float *x = c->xs[wsel];
         const size_t r = ur - c->row0[wsel];
         const size_t H = w->cols;
-        float out[OC_DF2_GEMM_FUSED_MAX_N];
 #if OC_DF2_SIMD_X86
+        float out[OC_DF2_GEMM_FUSED_MAX_N];
         if (w->bf16 && c->n <= OC_DF2_GEMM_FUSED_MAX_N &&
             (oc_simd_caps()->level == OC_SIMD_AVX2 ||
              oc_simd_caps()->level == OC_SIMD_AVX512)) {
@@ -1247,8 +1250,8 @@ static void dflash2_topk_par_fn(size_t begin, size_t end, size_t tid,
         if (c->lm->bf16) {
             /* Fused batched BF16 dot: W streamed once, all draft rows
              * accumulated in the same pass. */
-            float scores[OC_DFLASH2_MAX_BLOCK];
 #if OC_DF2_SIMD_X86
+            float scores[OC_DFLASH2_MAX_BLOCK];
             if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
                 oc_simd_caps()->level == OC_SIMD_AVX512) {
                 df2_dot_bf16_batch_avx2(c->lm->bf16 + v * H, c->x,
