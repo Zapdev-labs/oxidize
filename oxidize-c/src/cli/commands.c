@@ -1855,21 +1855,6 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     double best = INFINITY, total = 0.0;
     uint64_t drafted_total = 0;
 
-    /* Backbone-only timing (forward_debug runs the exact same layer math
-     * as propose without the selector/lm_head scan). Reported separately
-     * so the draft-model cost and the target-owned lm_head scan are
-     * distinguishable. */
-    float *bb_hidden = malloc(block * H * sizeof(float));
-    double bb_total = 0.0;
-    if (bb_hidden) {
-        for (uint32_t it = 0; it < iters; it++) {
-            double s0 = dflash2_now_sec();
-            oc_dflash2_forward_debug(&model, noise, block, bb_hidden);
-            bb_total += dflash2_now_sec() - s0;
-        }
-    }
-    double bb_avg = iters ? bb_total / (double)iters : 0.0;
-
     /* Pre-generate the full synthetic context once (the "prefill": the
      * target's hidden states for positions [0, ctx_rows)). Each step then
      * only produces the NEW rows (the accepted tokens of the previous
@@ -1895,6 +1880,31 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
         oc_dflash2_model_free(&model);
         return e;
     }
+
+    /* Deterministic noise BEFORE any timing: the backbone loop below ran
+     * on uninitialized malloc memory before this point, so backbone_ms
+     * measured indeterminate inputs and was not reproducible. */
+    for (size_t i = 0; i < block * H; i++)
+        noise[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
+
+    /* Backbone-only timing (forward_debug runs the exact same layer math
+     * as propose without the selector/lm_head scan). Reported separately
+     * so the draft-model cost and the target-owned lm_head scan are
+     * distinguishable. */
+    float *bb_hidden = malloc(block * H * sizeof(float));
+    double bb_total = 0.0;
+    if (bb_hidden) {
+        for (uint32_t it = 0; it < iters; it++) {
+            double s0 = dflash2_now_sec();
+            if (oc_dflash2_forward_debug(&model, noise, block, bb_hidden)
+                    != OC_OK) {
+                s0 = 0.0; /* exclude failed calls from the average */
+                break;
+            }
+            bb_total += dflash2_now_sec() - s0;
+        }
+    }
+    double bb_avg = iters ? bb_total / (double)iters : 0.0;
 
     cli_info("running %u propose steps (block %zu, %zu drafts/step, %zu threads, %zu ctx rows)",
              iters + warmup, block, block - 1, oc_parallel_n_threads(), ctx_rows);
