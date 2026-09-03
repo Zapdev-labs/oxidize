@@ -1384,27 +1384,92 @@ static void attn_ring(const OcDFlash2KvRing *ring, const float *q,
     oc_parallel_for(q_len * n_q_heads, attn_ring_par_fn, &c);
 }
 
-OcError oc_dflash2_propose(OcDFlash2Model *m,
-                           const uint32_t *anchor_ids, size_t n_anchor,
-                           const float *noise_emb, size_t block,
-                           const uint32_t *block_ids,
-                           const OcDFlash2Weight *lm_head,
-                           float temperature,
-                           uint32_t *out_tokens,
-                           uint32_t *out_top_k,
-                           float *out_top_k_probs)
-{
-    if (!m || !m->loaded) return OC_ERR_INVALID_ARG;
-    if (!anchor_ids || n_anchor == 0) return OC_ERR_INVALID_ARG;
-    if (anchor_ids[n_anchor - 1] >= m->cfg.vocab_size)
-        return OC_ERR_INVALID_ARG; /* codebook row would be OOB */
-    if (!noise_emb || block == 0 || block > OC_DFLASH2_MAX_BLOCK)
-        return OC_ERR_INVALID_ARG;
-    if (!lm_head || (!lm_head->data && !lm_head->bf16 &&
-                      !lm_head->generate))
-        return OC_ERR_INVALID_ARG;
-    if (!out_tokens) return OC_ERR_INVALID_ARG;
+/* Scratch bundle shared by the block forward (propose + debug paths). */
+typedef struct DFlash2BlockScratch {
+    float *hidden, *normed, *conv_dyn, *conv_dyn_post, *conv_scratch;
+    float *conv_out, *q, *k_all, *v_all, *k_noise, *v_noise;
+    float *attn_out, *attn_proj, *mlp_gu, *mlp_up_out, *mlp_out, *x;
+} DFlash2BlockScratch;
 
+static void dflash2_block_scratch_free(DFlash2BlockScratch *s)
+{
+    free(s->hidden); free(s->normed); free(s->conv_dyn);
+    free(s->conv_dyn_post); free(s->conv_scratch); free(s->conv_out);
+    free(s->q); free(s->k_all); free(s->v_all); free(s->k_noise);
+    free(s->v_noise); free(s->attn_out); free(s->attn_proj);
+    free(s->mlp_gu); free(s->mlp_up_out); free(s->mlp_out); free(s->x);
+    memset(s, 0, sizeof(*s));
+}
+
+static int dflash2_block_scratch_alloc(DFlash2BlockScratch *s,
+                                       size_t block, size_t H,
+                                       size_t n_heads, size_t n_kv,
+                                       size_t hd, size_t ksz, size_t groups,
+                                       size_t inter, size_t n_ctx)
+{
+    memset(s, 0, sizeof(*s));
+    s->hidden = malloc(block * H * sizeof(float));
+    s->normed = malloc(block * H * sizeof(float));
+    s->conv_dyn = malloc(block * 2 * ksz * groups * sizeof(float));
+    s->conv_dyn_post = malloc(block * ksz * groups * sizeof(float));
+    s->conv_scratch = malloc(block * H * sizeof(float));
+    s->conv_out = malloc(block * H * sizeof(float));
+    s->q = malloc(block * n_heads * hd * sizeof(float));
+    s->k_all = malloc((n_ctx + block) * n_kv * hd * sizeof(float));
+    s->v_all = malloc((n_ctx + block) * n_kv * hd * sizeof(float));
+    s->k_noise = malloc(block * n_kv * hd * sizeof(float));
+    s->v_noise = malloc(block * n_kv * hd * sizeof(float));
+    s->attn_out = malloc(block * n_heads * hd * sizeof(float));
+    s->attn_proj = malloc(block * H * sizeof(float));
+    s->mlp_gu = malloc(block * inter * sizeof(float));
+    s->mlp_up_out = malloc(block * inter * sizeof(float));
+    s->mlp_out = malloc(block * H * sizeof(float));
+    s->x = malloc(block * H * sizeof(float));
+    if (!s->hidden || !s->normed || !s->conv_dyn || !s->conv_dyn_post ||
+        !s->conv_scratch || !s->conv_out || !s->q || !s->k_all || !s->v_all ||
+        !s->k_noise || !s->v_noise || !s->attn_out || !s->attn_proj ||
+        !s->mlp_gu || !s->mlp_up_out || !s->mlp_out || !s->x) {
+        dflash2_block_scratch_free(s);
+        return 0;
+    }
+    return 1;
+}
+
+/* Shared block forward: the layered attention + conv + MLP pass from
+ * noise embeddings to final-normed hidden rows, including the per-layer
+ * KV ring append. Used by BOTH oc_dflash2_propose and
+ * oc_dflash2_forward_debug so the two entry points cannot drift (the
+ * review flagged eps handling and OOM behavior diverging between the
+ * previously duplicated loops).
+ *
+ * eps arrives as float — every RMSNorm here (layer, per-head q/k, final)
+ * must see the configured fractional epsilon, never a truncated one.
+ *
+ * out_normed receives the final-normed [block, H] rows (may alias
+ * s->normed). */
+enum { PT_ACONV, PT_QKV, PT_NORM, PT_ATTN, PT_OCONV, PT_MLP, PT_N };
+static const char *df2_pt_names[PT_N] = {
+    "attn_convproj", "qkv_gemm", "qk_norm_rope", "attn",
+    "o_proj_conv", "mlp"
+};
+static double df2_pt[PT_N];
+static int df2_pt_on;
+static double df2_pt_t0;
+
+static void df2_pt_mark(int idx)
+{
+    if (!df2_pt_on) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    df2_pt[idx] += now - df2_pt_t0;
+    df2_pt_t0 = now;
+}
+
+static OcError dflash2_forward_block(OcDFlash2Model *m,
+                                     const float *noise_emb, size_t block,
+                                     DFlash2BlockScratch *s, float *out_normed)
+{
     const size_t H = m->cfg.hidden_size;
     const size_t hd = m->cfg.head_dim;
     const size_t n_heads = m->cfg.num_attention_heads;
@@ -1415,70 +1480,18 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     const size_t inter = m->cfg.intermediate_size;
     const float eps = m->cfg.rms_norm_eps;
     const size_t n_ctx = m->target_ctx_len;
-    const size_t top_k = m->cfg.selector_top_k;
-    const size_t rank = m->cfg.selector_rank;
-    const size_t vocab = lm_head->rows;
-
-    /* Absolute positions: context rows [start - n_ctx, start), noise rows
-     * [start, start + block) where start = next_noise_pos. */
     const int64_t start = m->next_noise_pos;
     const int64_t ctx_pos0 = start - (int64_t)n_ctx;
 
-    /* Scratch allocations. */
-    float *hidden = malloc(block * H * sizeof(float));
-    float *normed = malloc(block * H * sizeof(float));
-    float *conv_dyn = malloc(block * 2 * ksz * groups * sizeof(float));
-    float *conv_dyn_post = malloc(block * ksz * groups * sizeof(float));
-    float *conv_scratch = malloc(block * H * sizeof(float));
-    float *conv_out = malloc(block * H * sizeof(float));
-    float *q = malloc(block * n_heads * hd * sizeof(float));
-    float *k_all = malloc((n_ctx + block) * n_kv * hd * sizeof(float));
-    float *v_all = malloc((n_ctx + block) * n_kv * hd * sizeof(float));
-    float *k_noise = malloc(block * n_kv * hd * sizeof(float));
-    float *v_noise = malloc(block * n_kv * hd * sizeof(float));
-    float *attn_out = malloc(block * n_heads * hd * sizeof(float));
-    float *attn_proj = malloc(block * H * sizeof(float));
-    float *mlp_gu = malloc(block * inter * sizeof(float));
-    float *mlp_up_out = malloc(block * inter * sizeof(float));
-    float *mlp_out = malloc(block * H * sizeof(float));
-    float *x = malloc(block * H * sizeof(float));
-    if (!hidden || !normed || !conv_dyn || !conv_dyn_post || !conv_scratch ||
-        !conv_out || !q || !k_all || !v_all || !k_noise || !v_noise ||
-        !attn_out || !attn_proj || !mlp_gu || !mlp_up_out || !mlp_out || !x) {
-        free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-        free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-        free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-        free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
-        return OC_ERR_OOM;
-    }
+    float *hidden = s->hidden, *normed = s->normed, *conv_dyn = s->conv_dyn;
+    float *conv_dyn_post = s->conv_dyn_post, *conv_scratch = s->conv_scratch;
+    float *conv_out = s->conv_out, *q = s->q, *k_all = s->k_all;
+    float *v_all = s->v_all, *k_noise = s->k_noise, *v_noise = s->v_noise;
+    float *attn_out = s->attn_out, *attn_proj = s->attn_proj;
+    float *mlp_gu = s->mlp_gu, *mlp_up_out = s->mlp_up_out;
+    float *mlp_out = s->mlp_out, *x = s->x;
 
     memcpy(hidden, noise_emb, block * H * sizeof(float));
-
-    /* Optional phase timing (DF2_PHASE_TIMING=1): wall time per segment of
-     * the layer loop, printed to stderr at propose end. Off by default. */
-    enum { PT_ACONV, PT_QKV, PT_NORM, PT_ATTN, PT_OCONV, PT_MLP, PT_N };
-    static const char *pt_names[PT_N] = {
-        "attn_convproj", "qkv_gemm", "qk_norm_rope", "attn",
-        "o_proj_conv", "mlp"
-    };
-    int df2_pt = getenv("DF2_PHASE_TIMING") != NULL;
-    double pt[PT_N] = { 0 };
-    double pt_t0 = 0;
-#define DF2_PT_MARK(idx)                                          \
-    do {                                                           \
-        if (df2_pt) {                                              \
-            struct timespec df2_ts_;                              \
-            clock_gettime(CLOCK_MONOTONIC, &df2_ts_);             \
-            double df2_now_ = df2_ts_.tv_sec + df2_ts_.tv_nsec * 1e-9; \
-            pt[idx] += df2_now_ - pt_t0;                          \
-            pt_t0 = df2_now_;                                     \
-        }                                                          \
-    } while (0)
-    if (df2_pt) {
-        struct timespec df2_ts_;
-        clock_gettime(CLOCK_MONOTONIC, &df2_ts_);
-        pt_t0 = df2_ts_.tv_sec + df2_ts_.tv_nsec * 1e-9;
-    }
 
     for (size_t li = 0; li < m->n_layers; li++) {
         OcDFlash2Layer *L = &m->layers[li];
@@ -1489,26 +1502,21 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         for (size_t i = 0; i < block; i++)
             rms_norm_row(x + i * H, L->input_layernorm, normed + i * H, H, eps);
 
-        /* Conv prepare: dynamic kernels + pre-conv. */
         gemm(&L->attn_conv.kernel_proj, normed, block, conv_dyn);
-        DF2_PT_MARK(PT_ACONV);
+        df2_pt_mark(PT_ACONV);
         /* dyn view: [block, 2][ksz][groups]; tap-0 kernels at
          * conv_dyn[i, 0*ksz*groups + t*groups + g], tap-1 at +ksz*groups. */
-        {
-            /* Build tap-0 dyn array in conv_scratch layout
-             * [block, ksz*groups]. */
-            for (size_t i = 0; i < block; i++) {
-                memcpy(conv_scratch + i * ksz * groups,
-                       conv_dyn + i * 2 * ksz * groups,
-                       ksz * groups * sizeof(float));
-                memcpy(conv_dyn_post + i * ksz * groups,
-                       conv_dyn + i * 2 * ksz * groups + ksz * groups,
-                       ksz * groups * sizeof(float));
-            }
-            oc_dflash2_grouped_conv(normed, conv_scratch,
-                                    L->attn_conv.base_kernel.data,
-                                    block, H, ksz, gs, conv_out);
+        for (size_t i = 0; i < block; i++) {
+            memcpy(conv_scratch + i * ksz * groups,
+                   conv_dyn + i * 2 * ksz * groups,
+                   ksz * groups * sizeof(float));
+            memcpy(conv_dyn_post + i * ksz * groups,
+                   conv_dyn + i * 2 * ksz * groups + ksz * groups,
+                   ksz * groups * sizeof(float));
         }
+        oc_dflash2_grouped_conv(normed, conv_scratch,
+                                L->attn_conv.base_kernel.data,
+                                block, H, ksz, gs, conv_out);
 
         /* Q from conv'd hidden; K/V from BOTH context and conv'd hidden.
          * One dispatch per x-row group: {q, k_noise, v_noise} over conv'd
@@ -1530,7 +1538,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                 gemm_multi(&mc);
             }
         }
-        DF2_PT_MARK(PT_QKV);
+        df2_pt_mark(PT_QKV);
 
         memcpy(k_all + n_ctx * n_kv * hd, k_noise, block * n_kv * hd * sizeof(float));
         memcpy(v_all + n_ctx * n_kv * hd, v_noise, block * n_kv * hd * sizeof(float));
@@ -1587,14 +1595,14 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
             }
         }
 
-        DF2_PT_MARK(PT_NORM);
+        df2_pt_mark(PT_NORM);
 
         /* Append K/V (already RoPE'd) to the ring, then attend. */
         oc_dflash2_kvring_append(ring, k_all, v_all, ctx_pos0, n_k);
 
         attn_ring(ring, q, start, block, n_heads, hd,
                   1.0f / sqrtf((float)hd), m->cfg.sliding_window, attn_out);
-        DF2_PT_MARK(PT_ATTN);
+        df2_pt_mark(PT_ATTN);
 
         /* o_proj + conv finish + residual. */
         gemm(&L->attn.o_proj, attn_out, block, attn_proj);
@@ -1602,7 +1610,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                                 L->attn_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
         for (size_t i = 0; i < block * H; i++) hidden[i] += conv_out[i];
-        DF2_PT_MARK(PT_OCONV);
+        df2_pt_mark(PT_OCONV);
 
         /* ── MLP block ────────────────────────────────────────── */
         memcpy(x, hidden, block * H * sizeof(float));
@@ -1634,22 +1642,82 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         for (size_t i = 0; i < block * inter; i++)
             mlp_gu[i] = silu(mlp_gu[i]) * mlp_up_out[i];
         gemm(&L->mlp_down, mlp_gu, block, mlp_out);
-        DF2_PT_MARK(PT_MLP);
+        df2_pt_mark(PT_MLP);
         oc_dflash2_grouped_conv(mlp_out, conv_dyn_post,
                                 L->mlp_conv.base_kernel.data + ksz * H,
                                 block, H, ksz, gs, conv_out);
         for (size_t i = 0; i < block * H; i++) hidden[i] += conv_out[i];
     }
-    if (df2_pt) {
-        fprintf(stderr, "df2 phases ms/step:");
-        for (int k = 0; k < PT_N; k++)
-            fprintf(stderr, " %s=%.2f", pt_names[k], pt[k] * 1e3);
-        fprintf(stderr, "\n");
-    }
 
     /* Final norm on all block rows. */
     for (size_t i = 0; i < block; i++)
-        rms_norm_row(hidden + i * H, m->norm, normed + i * H, H, eps);
+        rms_norm_row(hidden + i * H, m->norm, out_normed + i * H, H, eps);
+    return OC_OK;
+}
+
+OcError oc_dflash2_propose(OcDFlash2Model *m,
+                           const uint32_t *anchor_ids, size_t n_anchor,
+                           const float *noise_emb, size_t block,
+                           const uint32_t *block_ids,
+                           const OcDFlash2Weight *lm_head,
+                           float temperature,
+                           uint32_t *out_tokens,
+                           uint32_t *out_top_k,
+                           float *out_top_k_probs)
+{
+    if (!m || !m->loaded) return OC_ERR_INVALID_ARG;
+    if (!anchor_ids || n_anchor == 0) return OC_ERR_INVALID_ARG;
+    if (anchor_ids[n_anchor - 1] >= m->cfg.vocab_size)
+        return OC_ERR_INVALID_ARG; /* codebook row would be OOB */
+    if (!noise_emb || block == 0 || block > OC_DFLASH2_MAX_BLOCK)
+        return OC_ERR_INVALID_ARG;
+    if (!lm_head || (!lm_head->data && !lm_head->bf16 &&
+                      !lm_head->generate))
+        return OC_ERR_INVALID_ARG;
+    if (!out_tokens) return OC_ERR_INVALID_ARG;
+
+    const size_t H = m->cfg.hidden_size;
+    const size_t top_k = m->cfg.selector_top_k;
+    const size_t rank = m->cfg.selector_rank;
+    const size_t vocab = lm_head->rows;
+
+    /* Absolute positions: context rows [start - n_ctx, start), noise rows
+     * [start, start + block) where start = next_noise_pos. */
+    const int64_t start = m->next_noise_pos;
+
+    /* Optional phase timing (DF2_PHASE_TIMING=1): wall time per segment of
+     * the layer loop, printed to stderr at propose end. Off by default. */
+    df2_pt_on = getenv("DF2_PHASE_TIMING") != NULL;
+    for (int k = 0; k < PT_N; k++) df2_pt[k] = 0.0;
+    if (df2_pt_on) {
+        struct timespec df2_ts_;
+        clock_gettime(CLOCK_MONOTONIC, &df2_ts_);
+        df2_pt_t0 = df2_ts_.tv_sec + df2_ts_.tv_nsec * 1e-9;
+    }
+
+    /* Shared block forward (same helper the debug path runs, so the two
+     * entry points cannot drift on eps handling or OOM behavior). */
+    DFlash2BlockScratch s;
+    if (!dflash2_block_scratch_alloc(&s, block, H,
+                                     m->cfg.num_attention_heads,
+                                     m->cfg.num_key_value_heads,
+                                     m->cfg.head_dim, m->cfg.conv_kernel_size,
+                                     H / m->cfg.conv_group_size,
+                                     m->cfg.intermediate_size,
+                                     m->target_ctx_len)) {
+        return OC_ERR_OOM;
+    }
+    OcError e = dflash2_forward_block(m, noise_emb, block, &s, s.normed);
+    if (df2_pt_on) {
+        fprintf(stderr, "df2 phases ms/step:");
+        for (int k = 0; k < PT_N; k++)
+            fprintf(stderr, " %s=%.2f", df2_pt_names[k], df2_pt[k] * 1e3);
+        fprintf(stderr, "\n");
+    }
+    if (e != OC_OK) {
+        dflash2_block_scratch_free(&s);
+        return e;
+    }
 
     /* Retain the normed rows for oc_dflash2_last_hidden callers. */
     if (!m->last_hidden || m->last_hidden_len != block) {
@@ -1657,15 +1725,14 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         m->last_hidden = malloc(block * H * sizeof(float));
         if (!m->last_hidden) {
             m->last_hidden_len = 0;
-            free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-            free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-            free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-            free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+            dflash2_block_scratch_free(&s);
             return OC_ERR_OOM;
         }
         m->last_hidden_len = block;
     }
-    memcpy(m->last_hidden, normed, block * H * sizeof(float));
+    memcpy(m->last_hidden, s.normed, block * H * sizeof(float));
+
+    float *normed = s.normed;
 
     /* Draft hidden = rows 1..block-1 (skip the anchor row). */
     const size_t n_draft = block - 1;
@@ -1681,10 +1748,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     float *path_probs = out_top_k_probs;
     if (!unary || !cand || !proj_h || !scores) {
         free(unary); free(cand); free(proj_h); free(scores);
-        free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-        free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-        free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-        free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+        dflash2_block_scratch_free(&s);
         return OC_ERR_OOM;
     }
 
@@ -1776,10 +1840,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     }
     if (logit_err) {
         free(unary); free(cand); free(proj_h); free(scores);
-        free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-        free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-        free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-        free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+        dflash2_block_scratch_free(&s);
         return OC_ERR_OOM;
     }
 
@@ -1791,10 +1852,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     float *A_buf = malloc(rank * sizeof(float));
     if (!A_buf) {
         free(unary); free(cand); free(proj_h); free(scores);
-        free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-        free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-        free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-        free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+        dflash2_block_scratch_free(&s);
         return OC_ERR_OOM;
     }
     for (size_t p = 0; p < n_draft; p++) {
@@ -1806,10 +1864,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         if (!Brows) {
             free(A_buf);
             free(unary); free(cand); free(proj_h); free(scores);
-            free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-            free(conv_scratch); free(conv_out); free(q); free(k_all);
-            free(v_all); free(k_noise); free(v_noise); free(attn_out);
-            free(attn_proj); free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+            dflash2_block_scratch_free(&s);
             return OC_ERR_OOM;
         }
         for (size_t k = 0; k < top_k; k++)
@@ -1872,10 +1927,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         oc_dflash2_kvring_trim(&m->kv[li], start);
 
     free(unary); free(cand); free(proj_h); free(scores); free(A_buf);
-    free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-    free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-    free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-    free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+    dflash2_block_scratch_free(&s);
     (void)block_ids;
     return OC_OK;
 }
@@ -1925,176 +1977,28 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     }
 
     const size_t H = m->cfg.hidden_size;
-    const size_t hd = m->cfg.head_dim;
-    const size_t n_heads = m->cfg.num_attention_heads;
-    const size_t n_kv = m->cfg.num_key_value_heads;
-    const size_t ksz = m->cfg.conv_kernel_size;
-    const size_t gs = m->cfg.conv_group_size;
-    const size_t groups = H / gs;
-    const size_t inter = m->cfg.intermediate_size;
-    const float eps = m->cfg.rms_norm_eps;
-    const size_t n_ctx = m->target_ctx_len;
-    const int64_t start = m->next_noise_pos;
-    const int64_t ctx_pos0 = start - (int64_t)n_ctx;
 
-    float *hidden = malloc(block * H * sizeof(float));
-    float *normed = malloc(block * H * sizeof(float));
-    float *conv_dyn = malloc(block * 2 * ksz * groups * sizeof(float));
-    float *conv_dyn_post = malloc(block * ksz * groups * sizeof(float));
-    float *conv_scratch = malloc(block * H * sizeof(float));
-    float *conv_out = malloc(block * H * sizeof(float));
-    float *q = malloc(block * n_heads * hd * sizeof(float));
-    float *k_all = malloc((n_ctx + block) * n_kv * hd * sizeof(float));
-    float *v_all = malloc((n_ctx + block) * n_kv * hd * sizeof(float));
-    float *k_noise = malloc(block * n_kv * hd * sizeof(float));
-    float *v_noise = malloc(block * n_kv * hd * sizeof(float));
-    float *attn_out = malloc(block * n_heads * hd * sizeof(float));
-    float *attn_proj = malloc(block * H * sizeof(float));
-    float *mlp_gu = malloc(block * inter * sizeof(float));
-    float *mlp_up_out = malloc(block * inter * sizeof(float));
-    float *mlp_out = malloc(block * H * sizeof(float));
-    float *x = malloc(block * H * sizeof(float));
-    if (!hidden || !normed || !conv_dyn || !conv_dyn_post || !conv_scratch ||
-        !conv_out || !q || !k_all || !v_all || !k_noise || !v_noise ||
-        !attn_out || !attn_proj || !mlp_gu || !mlp_up_out || !mlp_out || !x) {
+    DFlash2BlockScratch s;
+    if (!dflash2_block_scratch_alloc(&s, block, H,
+                                     m->cfg.num_attention_heads,
+                                     m->cfg.num_key_value_heads,
+                                     m->cfg.head_dim, m->cfg.conv_kernel_size,
+                                     H / m->cfg.conv_group_size,
+                                     m->cfg.intermediate_size,
+                                     m->target_ctx_len)) {
         free(saved_slots);
-        free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-        free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-        free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-        free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
         return OC_ERR_OOM;
     }
-
-    memcpy(hidden, noise_emb, block * H * sizeof(float));
-
-    for (size_t li = 0; li < m->n_layers; li++) {
-        
-        OcDFlash2Layer *L = &m->layers[li];
-        OcDFlash2KvRing *ring = &m->kv[li];
-
-        memcpy(x, hidden, block * H * sizeof(float));
-        for (size_t i = 0; i < block; i++)
-            rms_norm_row(x + i * H, L->input_layernorm, normed + i * H, H, eps);
-
-        gemm(&L->attn_conv.kernel_proj, normed, block, conv_dyn);
-        for (size_t i = 0; i < block; i++) {
-            memcpy(conv_scratch + i * ksz * groups,
-                   conv_dyn + i * 2 * ksz * groups,
-                   ksz * groups * sizeof(float));
-            memcpy(conv_dyn_post + i * ksz * groups,
-                   conv_dyn + i * 2 * ksz * groups + ksz * groups,
-                   ksz * groups * sizeof(float));
-        }
-        oc_dflash2_grouped_conv(normed, conv_scratch,
-                                L->attn_conv.base_kernel.data,
-                                block, H, ksz, gs, conv_out);
-
-
-        gemm(&L->attn.q_proj, conv_out, block, q);
-        gemm(&L->attn.k_proj, m->target_ctx, n_ctx, k_all);
-        gemm(&L->attn.v_proj, m->target_ctx, n_ctx, v_all);
-        gemm(&L->attn.k_proj, conv_out, block, k_noise);
-        gemm(&L->attn.v_proj, conv_out, block, v_noise);
-
-        memcpy(k_all + n_ctx * n_kv * hd, k_noise,
-               block * n_kv * hd * sizeof(float));
-        memcpy(v_all + n_ctx * n_kv * hd, v_noise,
-               block * n_kv * hd * sizeof(float));
-        const size_t n_k = n_ctx + block;
-
-        for (size_t i = 0; i < block; i++)
-            for (size_t h = 0; h < n_heads; h++) {
-                float *qh = q + (i * n_heads + h) * hd;
-                float ss = 0.0f;
-                for (size_t d = 0; d < hd; d++) ss += qh[d] * qh[d];
-                float r = 1.0f / sqrtf(ss / (float)hd + eps);
-                for (size_t d = 0; d < hd; d++)
-                    qh[d] = qh[d] * r * L->attn.q_norm[d];
-            }
-        for (size_t i = 0; i < n_k; i++)
-            for (size_t h = 0; h < n_kv; h++) {
-                float *kh = k_all + (i * n_kv + h) * hd;
-                float ss = 0.0f;
-                for (size_t d = 0; d < hd; d++) ss += kh[d] * kh[d];
-                float r = 1.0f / sqrtf(ss / (float)hd + eps);
-                for (size_t d = 0; d < hd; d++)
-                    kh[d] = kh[d] * r * L->attn.k_norm[d];
-            }
-
-        {
-            const size_t half = hd / 2;
-            const float *freq = m->rope_freq;
-            for (size_t i = 0; i < n_k; i++) {
-                int64_t pos = ctx_pos0 + (int64_t)i;
-                for (size_t h = 0; h < n_kv; h++) {
-                    float *kh = k_all + (i * n_kv + h) * hd;
-                    for (size_t d = 0; d < half; d++) {
-                        float ang = (float)pos * freq[d];
-                        float c = cosf(ang), s = sinf(ang);
-                        float k0 = kh[d], k1 = kh[d + half];
-                        kh[d] = k0 * c - k1 * s;
-                        kh[d + half] = k0 * s + k1 * c;
-                    }
-                }
-            }
-            for (size_t i = 0; i < block; i++) {
-                int64_t pos = start + (int64_t)i;
-                for (size_t h = 0; h < n_heads; h++) {
-                    float *qh = q + (i * n_heads + h) * hd;
-                    for (size_t d = 0; d < half; d++) {
-                        float ang = (float)pos * freq[d];
-                        float c = cosf(ang), s = sinf(ang);
-                        float q0 = qh[d], q1 = qh[d + half];
-                        qh[d] = q0 * c - q1 * s;
-                        qh[d + half] = q0 * s + q1 * c;
-                    }
-                }
-            }
-        }
-
-        oc_dflash2_kvring_append(ring, k_all, v_all, ctx_pos0, n_k);
-        attn_ring(ring, q, start, block, n_heads, hd,
-                  1.0f / sqrtf((float)hd), m->cfg.sliding_window, attn_out);
-
-        gemm(&L->attn.o_proj, attn_out, block, attn_proj);
-        oc_dflash2_grouped_conv(attn_proj, conv_dyn_post,
-                                L->attn_conv.base_kernel.data + ksz * H,
-                                block, H, ksz, gs, conv_out);
-        for (size_t i = 0; i < block * H; i++) hidden[i] += conv_out[i];
-
-        /* ── MLP block ────────────────────────────────────────── */
-        memcpy(x, hidden, block * H * sizeof(float));
-        for (size_t i = 0; i < block; i++)
-            rms_norm_row(x + i * H, L->post_attention_layernorm,
-                         normed + i * H, H, eps);
-
-        gemm(&L->mlp_conv.kernel_proj, normed, block, conv_dyn);
-        for (size_t i = 0; i < block; i++) {
-            memcpy(conv_scratch + i * ksz * groups,
-                   conv_dyn + i * 2 * ksz * groups,
-                   ksz * groups * sizeof(float));
-            memcpy(conv_dyn_post + i * ksz * groups,
-                   conv_dyn + i * 2 * ksz * groups + ksz * groups,
-                   ksz * groups * sizeof(float));
-        }
-        oc_dflash2_grouped_conv(normed, conv_scratch,
-                                L->mlp_conv.base_kernel.data,
-                                block, H, ksz, gs, conv_out);
-
-        gemm(&(L->mlp_gate), conv_out, block, mlp_gu);
-        gemm(&(L->mlp_up), conv_out, block, mlp_up_out);
-        for (size_t i = 0; i < block * inter; i++)
-            mlp_gu[i] = silu(mlp_gu[i]) * mlp_up_out[i];
-        gemm(&L->mlp_down, mlp_gu, block, mlp_out);
-        oc_dflash2_grouped_conv(mlp_out, conv_dyn_post,
-                                L->mlp_conv.base_kernel.data + ksz * H,
-                                block, H, ksz, gs, conv_out);
-        for (size_t i = 0; i < block * H; i++) hidden[i] += conv_out[i];
-
+    /* Same shared layer loop as propose: identical eps handling and OOM
+     * behavior by construction (the review flagged the duplicated loops
+     * already diverging on eps). */
+    df2_pt_on = 0; /* no phase timing on the debug path */
+    OcError e = dflash2_forward_block(m, noise_emb, block, &s, out_hidden);
+    if (e != OC_OK) {
+        dflash2_block_scratch_free(&s);
+        free(saved_slots);
+        return e;
     }
-
-    for (size_t i = 0; i < block; i++)
-        rms_norm_row(hidden + i * H, m->norm, out_hidden + i * H, H, eps);
 
     /* Restore ring state: counters and the slots the debug append
      * overwrote (only live while wrapped; harmless otherwise). */
@@ -2116,10 +2020,7 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     }
     free(saved_slots);
 
-    free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
-    free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
-    free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
-    free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+    dflash2_block_scratch_free(&s);
     return OC_OK;
 }
 
