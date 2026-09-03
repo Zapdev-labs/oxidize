@@ -96,8 +96,9 @@ typedef struct OcDFlash2Weight {
                          * data/bf16 (0 = plain malloc/free). */
     /* Optional: synthetic weight generator for benchmarks. When data is
      * NULL and generate != NULL, row `r` is materialized into
-     * gen_buf[r * cols, (r+1) * cols) on demand. Used to exercise the full
-     * vocab-GEMV cost without a 2.4 GB target lm_head in memory. */
+     * gen_buf[0..cols) on demand (one row per call; r indexes the vocab
+     * row, not gen_buf). Used to exercise the full vocab-GEMV cost
+     * without a 2.4 GB target lm_head in memory. */
     void (*generate)(size_t row, size_t cols, float *gen_buf, void *user);
     void *gen_user;
 } OcDFlash2Weight;
@@ -237,9 +238,11 @@ void oc_dflash2_model_free(OcDFlash2Model *m);
  * The target model must provide, per produced token:
  *   - `noise_embeddings`: [block, hidden] rows = target's input embedding
  *     for the block tokens (scaled by input_embedding_scale if any).
- *   - `target_context`:   [n_ctx, n_target_layers*hidden] concat of the
- *     target's hidden states at target_layer_ids, i.e. exactly what fc
- *     consumes. For GLM-5.3-Flash-DFlash2: 5 layers x 4096 = 20480.
+ *   - `target_context`:   [n_ctx, n_target_layer_ids*hidden] concat of
+ *     the target's hidden states at target_layer_ids (the *selected*
+ *     layers, not num_target_layers), i.e. exactly what fc consumes. For
+ *     GLM-5.3-Flash-DFlash2: 5 layers x 4096 = 20480. The fc weight is
+ *     [hidden, n_target_layer_ids*hidden] to match.
  *
  * `oc_dflash2_set_context` fuses via fc + hidden_norm into an internal
  * per-position context row used as the attention context stream.
@@ -261,7 +264,10 @@ OcError oc_dflash2_set_context(OcDFlash2Model *m,
  *   noise_emb      [block, hidden] noise embeddings for the block tokens
  *                               (block tokens = [mask-padded block ids]).
  *   block_ids      [block]      the block token ids (first is the anchor
- *                               position's committed token).
+ *                               position's committed token). Currently
+ *                               ignored: the C port consumes only the
+ *                               noise embeddings (which already carry the
+ *                               target's token identity), not raw ids.
  *   lm_head        target lm_head [vocab, hidden] row-major, used to turn
  *                               draft hidden states into logits.
  *   temperature    0 => greedy selector path; > 0 => stochastic selector.
@@ -274,7 +280,7 @@ OcError oc_dflash2_set_context(OcDFlash2Model *m,
  *   out_top_k_probs [block-1][top_k] candidate probs per position
  *                               (temperature-adjusted), row-major.
  *
- * Returns the number of drafted tokens (block_size - 1), or an error.
+ * Returns OC_OK on success; `block - 1` tokens are written to out_tokens.
  */
 OcError oc_dflash2_propose(OcDFlash2Model *m,
                            const uint32_t *anchor_ids, size_t n_anchor,
@@ -313,7 +319,13 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
 
 /* Trim KV entries whose absolute position >= pos_keep_exclusive. The next
  * append must be at position pos_keep_exclusive. Used to roll the ring
- * back to the last committed position after a propose step. */
+ * back to the last committed position after a propose step.
+ *
+ * Caveat: entries are dropped by rewinding the write counters, so once
+ * the ring has wrapped, a later append at an older position rewrites the
+ * slots and the trimmed history is lost. Callers that need true rollback
+ * semantics across a wrap must snapshot the slots (as the debug forward
+ * does) or keep speculative writes on scratch rings. */
 void oc_dflash2_kvring_trim(OcDFlash2KvRing *ring, int64_t pos_keep_exclusive);
 
 /* Last-step hidden states of the latest propose call, normed: useful for
