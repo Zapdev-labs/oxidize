@@ -207,6 +207,12 @@ typedef struct OcDFlash2Model {
     /* Absolute position of the next noise token to be drafted. */
     int64_t next_noise_pos;
 
+    /* Final-normed hidden rows [block, hidden] from the latest successful
+     * propose call, retained for callers that want logits without
+     * re-running the backbone (oc_dflash2_last_hidden). */
+    float *last_hidden;
+    size_t last_hidden_len;
+
     /* Loaded weights flag. */
     bool loaded;
 } OcDFlash2Model;

@@ -1084,6 +1084,7 @@ void oc_dflash2_model_free(OcDFlash2Model *m)
             oc_dflash2_kvring_free(&m->kv[li]);
         free(m->kv);
     }
+    free(m->last_hidden);
     df2_free_huge(m->target_ctx,
                   m->kv_capacity * m->cfg.hidden_size * sizeof(float));
     free(m->rope_freq);
@@ -1100,8 +1101,12 @@ void oc_dflash2_reset(OcDFlash2Model *m)
 }
 const float *oc_dflash2_last_hidden(const OcDFlash2Model *m, size_t *rows)
 {
-    if (rows) *rows = m->target_ctx_len;
-    return m->target_ctx;
+    if (!m) {
+        if (rows) *rows = 0;
+        return NULL;
+    }
+    if (rows) *rows = m->last_hidden_len;
+    return m->last_hidden;
 }
 
 /* ─── Context fusion ────────────────────────────────────────────────── */
@@ -1643,6 +1648,22 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     /* Final norm on all block rows. */
     for (size_t i = 0; i < block; i++)
         rms_norm_row(hidden + i * H, m->norm, normed + i * H, H, eps);
+
+    /* Retain the normed rows for oc_dflash2_last_hidden callers. */
+    if (!m->last_hidden || m->last_hidden_len != block) {
+        free(m->last_hidden);
+        m->last_hidden = malloc(block * H * sizeof(float));
+        if (!m->last_hidden) {
+            m->last_hidden_len = 0;
+            free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
+            free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
+            free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
+            free(mlp_gu); free(mlp_up_out); free(mlp_out); free(x);
+            return OC_ERR_OOM;
+        }
+        m->last_hidden_len = block;
+    }
+    memcpy(m->last_hidden, normed, block * H * sizeof(float));
 
     /* Draft hidden = rows 1..block-1 (skip the anchor row). */
     const size_t n_draft = block - 1;
