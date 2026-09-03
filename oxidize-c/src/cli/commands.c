@@ -1953,6 +1953,9 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     double per_draft_tok = avg / (double)(block - 1);
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+        char model_esc[512];
+        if (json_escape(ctx->model_path, model_esc, sizeof(model_esc)) == 0)
+            snprintf(model_esc, sizeof(model_esc), "?");
         printf("{\"command\":\"dflash2\",\"model\":\"%s\","
                "\"block_size\":%zu,\"drafts_per_step\":%zu,"
                "\"threads\":%zu,\"ctx_rows\":%zu,\"steps\":%u,"
@@ -1960,7 +1963,7 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
                "\"avg_step_ms\":%.3f,\"best_step_ms\":%.3f,"
                "\"backbone_ms\":%.3f,"
                "\"draft_tok_per_s\":%.1f}\n",
-               ctx->model_path, block, block - 1,
+               model_esc, block, block - 1,
                oc_parallel_n_threads(), ctx_rows, iters,
                (unsigned long long)drafted_total,
                avg * 1e3, best * 1e3, bb_avg * 1e3, 1.0 / per_draft_tok);
