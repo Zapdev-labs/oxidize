@@ -872,6 +872,16 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
     OcError e = oc_safetensors_open(st_path, &f);
     if (e != OC_OK) return e;
 
+    /* oc_dflash2_selector_scores is specialized to OC_DFLASH2_RANK (the
+     * codebook stride everywhere); reject checkpoints that configure a
+     * different rank before any tensor is loaded. */
+    if (m->cfg.selector_rank != OC_DFLASH2_RANK) {
+        fprintf(stderr, "dflash2: unsupported selector_rank %zu (need %d)\n",
+                m->cfg.selector_rank, OC_DFLASH2_RANK);
+        oc_safetensors_close(&f);
+        return OC_ERR_FORMAT;
+    }
+
     const size_t H = m->cfg.hidden_size;
     const size_t n_layers = m->cfg.num_hidden_layers;
     const size_t n_target_w = m->cfg.n_target_layer_ids * H;
