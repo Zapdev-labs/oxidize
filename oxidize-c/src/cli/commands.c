@@ -1736,6 +1736,11 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     }
 
     cli_info("loading DFlash2 draft from %s", st_path);
+    /* Command-specific benchmark defaults when the option was omitted:
+     * the shared context ships the generic bench defaults (3 iters /
+     * 5 warmup), but the documented dflash2 workload is 20 / 3. */
+    if (!ctx->bench_iters_set)  ctx->bench_iterations = 20;
+    if (!ctx->bench_warmup_set) ctx->bench_warmup = 3;
     if (ctx->threads > 0) {
         oc_parallel_set_threads((size_t)ctx->threads);
     } else if (ctx->auto_tune ||
@@ -1846,7 +1851,7 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     uint32_t seed = ctx->seed ? ctx->seed : 42u;
     const uint32_t iters = (uint32_t)(ctx->bench_iterations > 0
                                       ? ctx->bench_iterations : 20);
-    const uint32_t warmup = ctx->bench_warmup ? ctx->bench_warmup : 3;
+    const uint32_t warmup = ctx->bench_warmup;
     double best = INFINITY, total = 0.0;
     uint64_t drafted_total = 0;
 

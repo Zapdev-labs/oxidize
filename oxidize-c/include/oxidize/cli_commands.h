@@ -119,6 +119,12 @@ typedef struct OcCliContext {
     uint32_t           bench_decode_tokens;
     bool               bench_no_eos;
     bool               bench_lm_materialize; /* --lm-materialize (dflash2)  */
+    /* Explicit-supplied tracking so per-command defaults (e.g. dflash2's
+     * 20 iters / 3 warmup) don't clobber values the user passed or
+     * inherit unrelated global defaults (bench: 3 iters / 5 warmup). */
+    bool               bench_iters_set;
+    bool               bench_warmup_set;
+    bool               threads_set;
 
     /* Quantize / convert / merge / prune. */
     const char        *input_path;      /* --input PATH (for convert/merge)  */
