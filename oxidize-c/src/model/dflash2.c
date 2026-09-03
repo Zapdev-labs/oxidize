@@ -1351,6 +1351,8 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
 {
     if (!m || !m->loaded) return OC_ERR_INVALID_ARG;
     if (!anchor_ids || n_anchor == 0) return OC_ERR_INVALID_ARG;
+    if (anchor_ids[n_anchor - 1] >= m->cfg.vocab_size)
+        return OC_ERR_INVALID_ARG; /* codebook row would be OOB */
     if (!noise_emb || block == 0 || block > OC_DFLASH2_MAX_BLOCK)
         return OC_ERR_INVALID_ARG;
     if (!lm_head || (!lm_head->data && !lm_head->bf16 &&
@@ -2038,6 +2040,8 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
         !lm_head || (!lm_head->data && !lm_head->bf16 &&
                      !lm_head->generate) || !out_tokens)
         return OC_ERR_INVALID_ARG;
+    if (anchor_ids[n_anchor - 1] >= m->cfg.vocab_size)
+        return OC_ERR_INVALID_ARG; /* codebook row would be OOB */
 
     const size_t H = m->cfg.hidden_size;
     const size_t top_k = m->cfg.selector_top_k;

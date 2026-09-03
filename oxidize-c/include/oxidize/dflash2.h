@@ -244,7 +244,9 @@ OcError oc_dflash2_set_context(OcDFlash2Model *m,
  *   anchor_ids     [n_anchor]   token ids already committed (the last
  *                               committed token is the path start), where
  *                               n_anchor >= 1; the path starts from
- *                               anchor_ids[n_anchor-1].
+ *                               anchor_ids[n_anchor-1]. All ids must be
+ *                               < cfg.vocab_size (they index the selector
+ *                               codebooks).
  *   noise_emb      [block, hidden] noise embeddings for the block tokens
  *                               (block tokens = [mask-padded block ids]).
  *   block_ids      [block]      the block token ids (first is the anchor
