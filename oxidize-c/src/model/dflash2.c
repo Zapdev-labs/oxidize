@@ -686,6 +686,10 @@ static float *load_tensor_f32(const OcSafetensorsFile *f,
     const size_t dtype_sz = strcmp(t->dtype, "F32") == 0 ? 4
                           : (strcmp(t->dtype, "BF16") == 0 ? 2 : 0);
     if (dtype_sz == 0) return NULL;
+    /* Shape arithmetic above can wrap on adversarial dimensions; the
+     * byte-count math below must not. */
+    if (expect_elems > SIZE_MAX / sizeof(float) ||
+        expect_elems > SIZE_MAX / dtype_sz) return NULL;
     if (t->data_offset > f->file_size - f->data_start ||
         t->data_offset + expect_elems * dtype_sz > f->file_size - f->data_start)
         return NULL;
@@ -747,7 +751,8 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
     /* Same range validation as load_tensor_f32: the BF16-keep path below
      * copies directly from the raw section, so it must not run on a
      * malformed (out-of-range) descriptor either. */
-    if (t->data_offset > f->file_size - f->data_start ||
+    if (got > SIZE_MAX / 2 ||
+        t->data_offset > f->file_size - f->data_start ||
         t->data_offset + got * 2 > f->file_size - f->data_start) {
         fprintf(stderr, "dflash2: bad tensor range %s\n", name);
         w->rows = rows;
