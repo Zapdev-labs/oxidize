@@ -1893,11 +1893,33 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     if (block == 0 || block > OC_DFLASH2_MAX_BLOCK) return OC_ERR_INVALID_ARG;
 
 
-    /* Save ring state so validation is side-effect free. */
+    /* Save ring state so validation is side-effect free. The debug append
+     * writes slots (total + i) % capacity; once the ring has wrapped those
+     * slots hold the oldest live entries, so their K/V/pos must be captured
+     * too, not just the counters. All rings share one row geometry, so one
+     * stride covers every layer. */
     const size_t n_layers = m->n_layers;
     size_t saved_total[n_layers];
-    for (size_t li = 0; li < n_layers; li++)
-        saved_total[li] = m->kv[li].total;
+    const size_t n_ctx_dbg = m->target_ctx_len;
+    const size_t n_overwrite = n_ctx_dbg + block;
+    const size_t vec_save = n_layers ? m->kv[0].n_kv_heads * m->kv[0].head_dim
+                                     : 0;
+    const size_t slot_bytes = 2 * vec_save * sizeof(float) + sizeof(int64_t);
+    uint8_t *saved_slots = malloc(n_layers * n_overwrite * slot_bytes);
+    if (!saved_slots) return OC_ERR_OOM;
+    for (size_t li = 0; li < n_layers; li++) {
+        OcDFlash2KvRing *r = &m->kv[li];
+        saved_total[li] = r->total;
+        for (size_t i = 0; i < n_overwrite; i++) {
+            size_t slot = (saved_total[li] + i) % r->capacity;
+            uint8_t *dst = saved_slots + (li * n_overwrite + i) * slot_bytes;
+            memcpy(dst, r->k + slot * vec_save, vec_save * sizeof(float));
+            memcpy(dst + vec_save * sizeof(float),
+                   r->v + slot * vec_save, vec_save * sizeof(float));
+            memcpy(dst + 2 * vec_save * sizeof(float),
+                   &r->pos[slot], sizeof(int64_t));
+        }
+    }
 
     const size_t H = m->cfg.hidden_size;
     const size_t hd = m->cfg.head_dim;
@@ -1932,6 +1954,7 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     if (!hidden || !normed || !conv_dyn || !conv_dyn_post || !conv_scratch ||
         !conv_out || !q || !k_all || !v_all || !k_noise || !v_noise ||
         !attn_out || !attn_proj || !mlp_gu || !mlp_up_out || !mlp_out || !x) {
+        free(saved_slots);
         free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
         free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
         free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
@@ -2070,12 +2093,25 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     for (size_t i = 0; i < block; i++)
         rms_norm_row(hidden + i * H, m->norm, out_hidden + i * H, H, eps);
 
-    /* Restore ring state. */
+    /* Restore ring state: counters and the slots the debug append
+     * overwrote (only live while wrapped; harmless otherwise). */
     for (size_t li = 0; li < n_layers; li++) {
-        m->kv[li].total = saved_total[li];
-        m->kv[li].len = saved_total[li] < m->kv[li].capacity
-                            ? saved_total[li] : m->kv[li].capacity;
+        OcDFlash2KvRing *r = &m->kv[li];
+        for (size_t i = 0; i < n_overwrite; i++) {
+            size_t slot = (saved_total[li] + i) % r->capacity;
+            const uint8_t *src = saved_slots +
+                (li * n_overwrite + i) * slot_bytes;
+            memcpy(r->k + slot * vec_save, src, vec_save * sizeof(float));
+            memcpy(r->v + slot * vec_save,
+                   src + vec_save * sizeof(float),
+                   vec_save * sizeof(float));
+            memcpy(&r->pos[slot],
+                   src + 2 * vec_save * sizeof(float), sizeof(int64_t));
+        }
+        r->total = saved_total[li];
+        r->len = saved_total[li] < r->capacity ? saved_total[li] : r->capacity;
     }
+    free(saved_slots);
 
     free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
     free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
