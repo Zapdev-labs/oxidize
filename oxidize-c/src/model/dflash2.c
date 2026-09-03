@@ -838,7 +838,8 @@ static void parse_config_json(OcDFlash2Config *cfg, const char *json)
             size_t n = 0;
             const char *p = ob + 1;
             while (n < OC_DFLASH2_MAX_TARGET_LAYERS) {
-                while (*p == ' ' || *p == '\n' || *p == ',') p++;
+                while (*p == ' ' || *p == '\n' || *p == '\t' ||
+                       *p == '\r' || *p == ',') p++;
                 if (*p == ']' || *p == '\0') break;
                 long id = strtol(p, (char **)&p, 10);
                 if (*p == '\0') break;
