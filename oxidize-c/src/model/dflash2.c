@@ -1349,7 +1349,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     const size_t gs = m->cfg.conv_group_size;
     const size_t groups = H / gs;
     const size_t inter = m->cfg.intermediate_size;
-    const size_t eps = m->cfg.rms_norm_eps;
+    const float eps = m->cfg.rms_norm_eps;
     const size_t n_ctx = m->target_ctx_len;
     const size_t top_k = m->cfg.selector_top_k;
     const size_t rank = m->cfg.selector_rank;
