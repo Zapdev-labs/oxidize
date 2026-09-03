@@ -59,6 +59,7 @@ static void *npy_load(const char *path, char *dtype, size_t *n_elems,
     if (!val) { free(hdr); fclose(f); return NULL; }
     val++;
     const char *vend = strchr(val, '\'');
+    if (!vend) { free(hdr); fclose(f); return NULL; }
     size_t dlen = (size_t)(vend - val);
     if (dlen > 7) dlen = 7;
     memcpy(dtype, val, dlen);
@@ -94,9 +95,18 @@ static void *npy_load(const char *path, char *dtype, size_t *n_elems,
 
 int main(int argc, char **argv)
 {
-    const char *ckpt_dir =
-        "/home/dih/.cache/huggingface/hub/models--incoai--GLM-5.3-Flash-DFlash2/snapshots/bf582e4eacc1810f76656d1811693ff6c6737d2a";
+    /* Validation dir keeps argv[1] (the Makefile manual-tests contract);
+     * the checkpoint moves off the hard-coded dev-box path: argv[2] or
+     * $OXIDIZE_DFLASH2_CKPT, falling back to the local HF cache. */
     const char *val_dir = argc > 1 ? argv[1] : "/tmp";
+    const char *ckpt_dir = argc > 2 ? argv[2] : getenv("OXIDIZE_DFLASH2_CKPT");
+    if (!ckpt_dir) {
+        ckpt_dir = "/home/dih/.cache/huggingface/hub/models--incoai--"
+                   "GLM-5.3-Flash-DFlash2/snapshots/"
+                   "bf582e4eacc1810f76656d1811693ff6c6737d2a";
+        fprintf(stderr, "no checkpoint given (argv[2] or "
+                        "OXIDIZE_DFLASH2_CKPT); defaulting to %s\n", ckpt_dir);
+    }
     char path[512], dtype[8];
     size_t n;
     (void)n;
@@ -142,14 +152,23 @@ int main(int argc, char **argv)
         float *ctx = npy_load(p2, dtype, &n_ctx_elems, &fo);
         snprintf(p2, sizeof(p2), "%s/dflash2_ms_path%d.npy", val_dir, s);
         size_t n_path;
-        int64_t *gold_path = npy_load(p2, dtype, &n_path, &fo);
+        char dtype_path[8];
+        int64_t *gold_path = npy_load(p2, dtype_path, &n_path, &fo);
         snprintf(p2, sizeof(p2), "%s/dflash2_ms_cand%d.npy", val_dir, s);
         size_t n_cand;
-        int64_t *gold_cand = npy_load(p2, dtype, &n_cand, &fo);
+        char dtype_cand[8];
+        int64_t *gold_cand = npy_load(p2, dtype_cand, &n_cand, &fo);
         if (!noise || !ctx || !gold_path || !gold_cand ||
             n_noise != block * H || n_ctx_elems != n_ctx * n_tl * H ||
             n_path != n_draft || n_cand != n_draft * top_k) {
             fprintf(stderr, "step %d artifact load failed\n", s);
+            return 1;
+        }
+        /* Token-id artifacts must be int64; anything else reads as
+         * garbage 8-byte values in the comparisons below. */
+        if (strcmp(dtype_path, "<i8") != 0 || strcmp(dtype_cand, "<i8") != 0) {
+            fprintf(stderr, "step %d path/cand must be int64 (got %s / %s)\n",
+                    s, dtype_path, dtype_cand);
             return 1;
         }
 

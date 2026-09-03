@@ -55,6 +55,7 @@ static void *npy_load(const char *path, char *dtype, size_t *n_elems,
     if (!val) { free(hdr); fclose(f); return NULL; }
     val++;
     const char *vend = strchr(val, '\'');
+    if (!vend) { free(hdr); fclose(f); return NULL; }
     size_t dlen = (size_t)(vend - val);
     if (dlen > 7) dlen = 7;
     memcpy(dtype, val, dlen);
@@ -90,9 +91,19 @@ static void *npy_load(const char *path, char *dtype, size_t *n_elems,
 
 int main(int argc, char **argv)
 {
-    const char *ckpt_dir =
-        "/home/dih/.cache/huggingface/hub/models--incoai--GLM-5.3-Flash-DFlash2/snapshots/bf582e4eacc1810f76656d1811693ff6c6737d2a";
+    /* Validation dir keeps its argv[1] slot (the Makefile manual-tests
+     * target passes it). The checkpoint moves off the hard-coded dev-box
+     * path: argv[2] or $OXIDIZE_DFLASH2_CKPT, falling back to the local
+     * HF cache so the original workflow still works here. */
     const char *val_dir = argc > 1 ? argv[1] : "/tmp";
+    const char *ckpt_dir = argc > 2 ? argv[2] : getenv("OXIDIZE_DFLASH2_CKPT");
+    if (!ckpt_dir) {
+        ckpt_dir = "/home/dih/.cache/huggingface/hub/models--incoai--"
+                   "GLM-5.3-Flash-DFlash2/snapshots/"
+                   "bf582e4eacc1810f76656d1811693ff6c6737d2a";
+        fprintf(stderr, "no checkpoint given (argv[2] or "
+                        "OXIDIZE_DFLASH2_CKPT); defaulting to %s\n", ckpt_dir);
+    }
     char path[512], dtype[8];
 
     oc_parallel_set_threads(1); /* determinism */
@@ -111,7 +122,8 @@ int main(int argc, char **argv)
     snprintf(path, sizeof(path), "%s/dflash2_val_noise.npy", val_dir);
     int fo;
     size_t n_noise;
-    float *noise = npy_load(path, dtype, &n_noise, &fo);    snprintf(path, sizeof(path), "%s/dflash2_val_ctx.npy", val_dir);
+    float *noise = npy_load(path, dtype, &n_noise, &fo);
+    snprintf(path, sizeof(path), "%s/dflash2_val_ctx.npy", val_dir);
     size_t n_ctx;
     float *ctx = npy_load(path, dtype, &n_ctx, &fo);
     snprintf(path, sizeof(path), "%s/dflash2_val_hidden.npy", val_dir);
@@ -122,12 +134,22 @@ int main(int argc, char **argv)
     float *lm = npy_load(path, dtype, &n_lm, &fo);
     snprintf(path, sizeof(path), "%s/dflash2_val_path.npy", val_dir);
     size_t n_path;
-    int64_t *gold_path = npy_load(path, dtype, &n_path, &fo);
+    char dtype_path[8];
+    int64_t *gold_path = npy_load(path, dtype_path, &n_path, &fo);
     snprintf(path, sizeof(path), "%s/dflash2_val_cand.npy", val_dir);
     size_t n_cand;
-    int64_t *gold_cand = npy_load(path, dtype, &n_cand, &fo);
+    char dtype_cand[8];
+    int64_t *gold_cand = npy_load(path, dtype_cand, &n_cand, &fo);
     if (!noise || !ctx || !gold_hidden || !lm || !gold_path || !gold_cand) {
         fprintf(stderr, "npy load failed\n");
+        return 1;
+    }
+    /* Path + candidates are token-id artifacts: they must be int64
+     * (little-endian '<i8'); a float artifact would be read as garbage
+     * 8-byte values below. */
+    if (strcmp(dtype_path, "<i8") != 0 || strcmp(dtype_cand, "<i8") != 0) {
+        fprintf(stderr, "path/cand artifacts must be int64 (got %s / %s)\n",
+                dtype_path, dtype_cand);
         return 1;
     }
 
@@ -136,9 +158,10 @@ int main(int argc, char **argv)
     const size_t top_k = m.cfg.selector_top_k;
     const size_t n_draft = block - 1;
     if (n_noise != block * H || n_ctx != 5 * H || n_hidden != block * H ||
-        n_lm != m.cfg.vocab_size * H || n_path != n_draft) {
-        fprintf(stderr, "shape mismatch: noise=%zu ctx=%zu hidden=%zu lm=%zu path=%zu\n",
-                n_noise, n_ctx, n_hidden, n_lm, n_path);
+        n_lm != m.cfg.vocab_size * H || n_path != n_draft ||
+        n_cand != n_draft * top_k) {
+        fprintf(stderr, "shape mismatch: noise=%zu ctx=%zu hidden=%zu lm=%zu path=%zu cand=%zu\n",
+                n_noise, n_ctx, n_hidden, n_lm, n_path, n_cand);
         return 1;
     }
 
@@ -176,18 +199,17 @@ int main(int argc, char **argv)
         char cap[64];
         snprintf(cap, sizeof(cap), "%s/dflash2_val_cap_layer%zu.npy", val_dir, li);
         size_t n_cap;
-        float *gold_l = npy_load(cap, dtype, &n_cap, &fo);
+        char dtype_cap[8];
+        float *gold_l = npy_load(cap, dtype_cap, &n_cap, &fo);
         if (!gold_l) { printf("layer%zu: no capture\n", li); break; }
         double m = 0.0;
-        double s = 0.0;
-        (void)m;
-        for (size_t i = 0; i < n_cap && i < block * H; i++) {
+        size_t n_cmp = n_cap < block * H ? n_cap : block * H;
+        for (size_t i = 0; i < n_cmp; i++) {
             double d = fabs((double)out_hidden[i] - (double)gold_l[i]);
-            /* wrong-stage comparison; skipped numerically, just shape info */
-            s += d;
+            if (d > m) m = d;
         }
-        (void)s;
-        printf("layer%zu capture: %zu elems (visual check only)\n", li, n_cap);
+        printf("layer%zu capture: %zu elems, max_abs=%.5e (stage mismatch "
+               "expected: wrong capture point)\n", li, n_cap, m);
         free(gold_l);
     }
 
