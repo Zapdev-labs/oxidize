@@ -1033,6 +1033,7 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         m->rope_freq[d] = powf(m->cfg.rope_theta,
                                -((float)d / (float)m->rope_freq_n));
     m->loaded = true;
+    m->rng_state = 0x9E3779B9u; /* nonzero default seed */
     return OC_OK;
 }
 
@@ -1827,7 +1828,8 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                 scores[k] = expf((scores[k] - mx) / temperature);
                 denom += scores[k];
             }
-            float z = (float)rand() / (float)RAND_MAX * denom;
+            m->rng_state = m->rng_state * 1664525u + 1013904223u;
+            float z = ((float)(m->rng_state >> 8) / 16777216.0f) * denom;
             float run = 0.0f;
             for (size_t k = 0; k < top_k; k++) {
                 run += scores[k];

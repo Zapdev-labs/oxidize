@@ -213,6 +213,11 @@ typedef struct OcDFlash2Model {
     float *last_hidden;
     size_t last_hidden_len;
 
+    /* Deterministic PRNG state for the stochastic selector path
+     * (temperature > 0). Explicit state instead of rand(): reproducible
+     * across runs, thread-safe, and not limited by RAND_MAX resolution. */
+    uint32_t rng_state;
+
     /* Loaded weights flag. */
     bool loaded;
 } OcDFlash2Model;
