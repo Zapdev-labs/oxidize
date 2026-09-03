@@ -1724,8 +1724,16 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     }
     snprintf(cfg_path, sizeof(cfg_path), "%s", st_path);
     char *slash = strrchr(cfg_path, '/');
-    if (slash) snprintf(slash + 1, sizeof(cfg_path) - (size_t)(slash + 1 - cfg_path),
-                        "config.json");
+    if (slash) {
+        snprintf(slash + 1, sizeof(cfg_path) - (size_t)(slash + 1 - cfg_path),
+                 "config.json");
+    } else {
+        /* Bare filename (no directory): the sidecar config lives in the
+         * current working directory. Without this, cfg_path stayed
+         * pointing at the checkpoint and the loader parsed SafeTensors
+         * bytes as config.json. */
+        snprintf(cfg_path, sizeof(cfg_path), "config.json");
+    }
 
     cli_info("loading DFlash2 draft from %s", st_path);
     if (ctx->threads > 0) {
