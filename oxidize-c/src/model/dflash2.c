@@ -1762,9 +1762,12 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
      * a real lm_head is streamed once from memory). */
     const size_t vocab_eff = vocab < m->cfg.vocab_size ? vocab : m->cfg.vocab_size;
     int logit_err = 0;
-    if ((lm_head->data || lm_head->bf16) && vocab_eff <= (size_t)1 << 16) {
-        /* Small real lm_head: full logits per draft row, serial top-k. */
-        float *lrow = malloc(vocab_eff * sizeof(float));
+    if ((lm_head->data || lm_head->bf16) && vocab <= (size_t)1 << 16) {
+        /* Small real lm_head: full logits per draft row, serial top-k.
+         * lrow holds every lm_head row (gemv_w writes rows floats); the
+         * candidate scan below is bounded by vocab_eff so ids stay valid
+         * codebook rows even when the head is larger than cfg.vocab_size. */
+        float *lrow = malloc(vocab * sizeof(float));
         if (!lrow) logit_err = 1;
         for (size_t p = 0; p < n_draft && !logit_err; p++) {
             gemv_w(lm_head, draft_hidden + p * H, lrow);
@@ -2076,8 +2079,10 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
     }
 
     for (size_t p = 0; p < n_rows; p++) {
-        /* full logits row then top-k selection */
-        float *lrow = malloc(vocab * sizeof(float));
+        /* full logits row then top-k selection. lrow holds every lm_head
+         * row (gemv_w writes rows floats); vocab only bounds the scan so
+         * candidate ids index valid codebook rows. */
+        float *lrow = malloc(lm_head->rows * sizeof(float));
         if (!lrow) {
             free(gen_row);
             free(unary); free(cand); free(proj_h); free(scores);
