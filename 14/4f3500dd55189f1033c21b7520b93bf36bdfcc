@@ -1,0 +1,19 @@
+oxidize-c/src/cli/commands.c
+  s_00efa08b7891dc::t_67a5253b7db373 1854
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "144f3500dd55189f1033c21b7520b93bf36bdfcc",
+  "prompts": {},
+  "sessions": {
+    "s_00efa08b7891dc": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "0ce28c7d-2cbf-42ab-a37f-cbcafdf3f272",
+        "model": "custom:GLM-5.3-Free-(TokenRouter)-4"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
