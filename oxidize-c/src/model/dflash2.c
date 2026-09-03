@@ -1437,7 +1437,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     float *x = malloc(block * H * sizeof(float));
     if (!hidden || !normed || !conv_dyn || !conv_dyn_post || !conv_scratch ||
         !conv_out || !q || !k_all || !v_all || !k_noise || !v_noise ||
-        !attn_out || !attn_proj || !mlp_gu || !mlp_out || !x) {
+        !attn_out || !attn_proj || !mlp_gu || !mlp_up_out || !mlp_out || !x) {
         free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
         free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
         free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
@@ -1910,7 +1910,7 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     float *x = malloc(block * H * sizeof(float));
     if (!hidden || !normed || !conv_dyn || !conv_dyn_post || !conv_scratch ||
         !conv_out || !q || !k_all || !v_all || !k_noise || !v_noise ||
-        !attn_out || !attn_proj || !mlp_gu || !mlp_out || !x) {
+        !attn_out || !attn_proj || !mlp_gu || !mlp_up_out || !mlp_out || !x) {
         free(hidden); free(normed); free(conv_dyn); free(conv_dyn_post);
         free(conv_scratch); free(conv_out); free(q); free(k_all); free(v_all);
         free(k_noise); free(v_noise); free(attn_out); free(attn_proj);
