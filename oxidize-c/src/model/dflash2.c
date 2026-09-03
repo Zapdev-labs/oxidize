@@ -2084,7 +2084,10 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
     const size_t H = m->cfg.hidden_size;
     const size_t top_k = m->cfg.selector_top_k;
     const size_t rank = m->cfg.selector_rank;
-    const size_t vocab = lm_head->rows;
+    /* Candidate ids index the selector codebooks [cfg.vocab_size, rank];
+     * an lm_head with more rows must not produce ids past that. */
+    const size_t vocab = lm_head->rows < m->cfg.vocab_size
+                             ? lm_head->rows : m->cfg.vocab_size;
 
     float *unary = malloc(n_rows * top_k * sizeof(float));
     uint32_t *cand = malloc(n_rows * top_k * sizeof(uint32_t));
@@ -2095,14 +2098,33 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
         return OC_ERR_OOM;
     }
 
+    /* Generated lm_heads need one materialized row per step (the propose
+     * path streams them via the same generate contract). */
+    float *gen_row = NULL;
+    if (!lm_head->data && !lm_head->bf16 && lm_head->generate) {
+        gen_row = malloc(H * sizeof(float));
+        if (!gen_row) {
+            free(unary); free(cand); free(proj_h); free(scores);
+            return OC_ERR_OOM;
+        }
+    }
+
     for (size_t p = 0; p < n_rows; p++) {
         /* full logits row then top-k selection */
         float *lrow = malloc(vocab * sizeof(float));
         if (!lrow) {
+            free(gen_row);
             free(unary); free(cand); free(proj_h); free(scores);
             return OC_ERR_OOM;
         }
-        gemv_w(lm_head, draft_hidden + p * H, lrow);
+        if (lm_head->data || lm_head->bf16) {
+            gemv_w(lm_head, draft_hidden + p * H, lrow);
+        } else {
+            for (size_t v = 0; v < vocab; v++) {
+                lm_head->generate(v, H, gen_row, lm_head->gen_user);
+                lrow[v] = df2_dot(gen_row, draft_hidden + p * H, H);
+            }
+        }
         for (size_t k = 0; k < top_k; k++) {
             size_t best = 0;
             for (size_t v = 1; v < vocab; v++)
@@ -2113,6 +2135,7 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
         }
         free(lrow);
     }
+    free(gen_row);
 
     gemm(&(m->selector.hidden_projection), draft_hidden, n_rows, proj_h);
 
