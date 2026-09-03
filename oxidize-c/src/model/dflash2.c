@@ -680,21 +680,27 @@ static float *load_tensor_f32(const OcSafetensorsFile *f,
     size_t elems = 1;
     for (uint32_t d = 0; d < t->n_dims; d++) elems *= (size_t)t->shape[d];
     if (elems != expect_elems) return NULL;
+    /* Range-validate against the raw data section before touching bytes:
+     * malformed metadata (offset/length past EOF, or a payload shorter than
+     * the declared shape) must fail the load, not read past the mapping. */
+    const size_t dtype_sz = strcmp(t->dtype, "F32") == 0 ? 4
+                          : (strcmp(t->dtype, "BF16") == 0 ? 2 : 0);
+    if (dtype_sz == 0) return NULL;
+    if (t->data_offset > f->file_size - f->data_start ||
+        t->data_offset + expect_elems * dtype_sz > f->file_size - f->data_start)
+        return NULL;
     float *dst = malloc(expect_elems * sizeof(float));
     if (!dst) return NULL;
     const uint8_t *raw = (const uint8_t *)f->raw_data + t->data_offset;
-    if (strcmp(t->dtype, "F32") == 0) {
+    if (dtype_sz == 4) {
         memcpy(dst, raw, expect_elems * 4);
-    } else if (strcmp(t->dtype, "BF16") == 0) {
+    } else {
         for (size_t i = 0; i < expect_elems; i++) {
             uint16_t h;
             memcpy(&h, raw + i * 2, 2);
             uint32_t bits = (uint32_t)h << 16;
             memcpy(&dst[i], &bits, 4);
         }
-    } else {
-        free(dst);
-        return NULL;
     }
     return dst;
 }
@@ -733,6 +739,17 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
     for (uint32_t d = 0; d < t->n_dims; d++) got *= (size_t)t->shape[d];
     if (got != elems) {
         fprintf(stderr, "dflash2: bad tensor %s\n", name);
+        w->rows = rows;
+        w->cols = cols;
+        w->data = NULL;
+        return OC_ERR_FORMAT;
+    }
+    /* Same range validation as load_tensor_f32: the BF16-keep path below
+     * copies directly from the raw section, so it must not run on a
+     * malformed (out-of-range) descriptor either. */
+    if (t->data_offset > f->file_size - f->data_start ||
+        t->data_offset + got * 2 > f->file_size - f->data_start) {
+        fprintf(stderr, "dflash2: bad tensor range %s\n", name);
         w->rows = rows;
         w->cols = cols;
         w->data = NULL;
