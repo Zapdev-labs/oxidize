@@ -1132,8 +1132,11 @@ OcError oc_dflash2_set_context(OcDFlash2Model *m,
         return OC_ERR_INVALID_ARG;
     /* The reference passes whatever context the target produced (prefill
      * rows at step 0, then the per-verify rows); only the KV window bounds
-     * the usable length. */
-    if (n_ctx_rows > m->kv_capacity) return OC_ERR_INVALID_ARG;
+     * the usable length. The block forward appends n_ctx + block rows to
+     * each ring in one timeline, so the context must leave room for the
+     * block: n_ctx + block_size <= capacity. */
+    if (n_ctx_rows + m->cfg.block_size > m->kv_capacity)
+        return OC_ERR_INVALID_ARG;
     const size_t H = m->cfg.hidden_size;
 
     /* ctx = hidden_norm(fc @ concat(target hiddens)), per row. */
@@ -1501,6 +1504,7 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
     float *attn_out = s->attn_out, *attn_proj = s->attn_proj;
     float *mlp_gu = s->mlp_gu, *mlp_up_out = s->mlp_up_out;
     float *mlp_out = s->mlp_out, *x = s->x;
+    OcError ae;   /* ring-append result per layer */
 
     memcpy(hidden, noise_emb, block * H * sizeof(float));
 
@@ -1608,8 +1612,11 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
 
         df2_pt_mark(PT_NORM);
 
-        /* Append K/V (already RoPE'd) to the ring, then attend. */
-        oc_dflash2_kvring_append(ring, k_all, v_all, ctx_pos0, n_k);
+        /* Append K/V (already RoPE'd) to the ring, then attend. A failed
+         * append (n_k > capacity) must abort, not attend over stale
+         * entries and return tokens from wrong attention state. */
+        ae = oc_dflash2_kvring_append(ring, k_all, v_all, ctx_pos0, n_k);
+        if (ae != OC_OK) return ae;
 
         attn_ring(ring, q, start, block, n_heads, hd,
                   1.0f / sqrtf((float)hd), m->cfg.sliding_window, attn_out);
@@ -2009,6 +2016,25 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     df2_pt_on = 0; /* no phase timing on the debug path */
     OcError e = dflash2_forward_block(m, noise_emb, block, &s, out_hidden);
     if (e != OC_OK) {
+        /* Restore the ring even on failure so the debug path stays
+         * side-effect free; earlier layers may have appended. */
+        for (size_t li = 0; li < n_layers; li++) {
+            OcDFlash2KvRing *r = &m->kv[li];
+            for (size_t i = 0; i < n_overwrite; i++) {
+                size_t slot = (saved_total[li] + i) % r->capacity;
+                const uint8_t *src = saved_slots +
+                    (li * n_overwrite + i) * slot_bytes;
+                memcpy(r->k + slot * vec_save, src, vec_save * sizeof(float));
+                memcpy(r->v + slot * vec_save,
+                       src + vec_save * sizeof(float),
+                       vec_save * sizeof(float));
+                memcpy(&r->pos[slot],
+                       src + 2 * vec_save * sizeof(float), sizeof(int64_t));
+            }
+            r->total = saved_total[li];
+            r->len = saved_total[li] < r->capacity
+                         ? saved_total[li] : r->capacity;
+        }
         dflash2_block_scratch_free(&s);
         free(saved_slots);
         return e;

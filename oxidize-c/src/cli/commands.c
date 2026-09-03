@@ -1776,10 +1776,14 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     /* Context rows per step: --bench-prompt-tokens drives how much target
      * context each propose consumes, exercising the full KV window (the
      * reference model would feed the target's hidden states for the last
-     * `ctx_rows` positions). Capped by the KV ring capacity. */
+     * `ctx_rows` positions). Capped so the block forward's
+     * n_ctx + block append fits the KV ring (set_context enforces the
+     * same bound). */
     size_t ctx_rows = ctx->bench_prompt_tokens > 0
                     ? (size_t)ctx->bench_prompt_tokens : 1;
-    if (ctx_rows > model.kv_capacity) ctx_rows = model.kv_capacity;
+    if (ctx_rows + block > model.kv_capacity)
+        ctx_rows = model.kv_capacity > block
+                     ? model.kv_capacity - block : 1;
     if (ctx_rows < 1) ctx_rows = 1;
     const size_t ctx_cap = model.kv_capacity;
 
