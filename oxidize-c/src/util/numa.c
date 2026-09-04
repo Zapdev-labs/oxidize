@@ -270,6 +270,28 @@ OcError oc_numa_bind_thread(uint32_t node)
 #endif
 }
 
+/* Pre-pin affinity mask for the pool-creator thread, captured by
+ * oc_numa_pin_save_orig before the pool pins the calling thread as
+ * worker 0. Single file-scope state written only by the thread that
+ * resizes the pool (the pool API itself is not thread-safe), so no
+ * atomics are needed. */
+#if defined(__linux__)
+static cpu_set_t g_pin_orig_mask;
+static bool g_pin_have_orig = false;
+#endif
+
+/* Snapshot the calling thread's current affinity mask (idempotent).
+ * The pool calls this before it pins the calling thread as worker 0. */
+void oc_numa_pin_save_orig(void)
+{
+#if defined(__linux__)
+    if (g_pin_have_orig) return;
+    CPU_ZERO(&g_pin_orig_mask);
+    if (sched_getaffinity(0, sizeof(g_pin_orig_mask), &g_pin_orig_mask) == 0)
+        g_pin_have_orig = true;
+#endif
+}
+
 OcError oc_numa_pin_cpu(uint32_t cpu)
 {
 #if defined(__linux__)
@@ -282,6 +304,23 @@ OcError oc_numa_pin_cpu(uint32_t cpu)
 #else
     (void)cpu;  /* CPU affinity is Linux-only; no-op elsewhere. */
     return OC_OK;
+#endif
+}
+
+/* Undo oc_numa_pin_cpu on the calling thread: restore the affinity mask
+ * captured by oc_numa_pin_save_orig. A one-CPU worker pin belongs to the
+ * thread, not to the pool that requested it — it survives the pool
+ * shutdown, and every worker of a later pool created by this thread
+ * inherits the mask. No-op when nothing was saved (never pinned). */
+void oc_numa_pin_restore(void)
+{
+#if defined(__linux__)
+    if (!g_pin_have_orig) return;
+    cpu_set_t cur;
+    CPU_ZERO(&cur);
+    if (sched_getaffinity(0, sizeof(cur), &cur) == 0 &&
+        !CPU_EQUAL(&cur, &g_pin_orig_mask))
+        sched_setaffinity(0, sizeof(g_pin_orig_mask), &g_pin_orig_mask);
 #endif
 }
 
@@ -324,6 +363,24 @@ static void build_core_list_once(void)
     size_t n_cores = 0;
     uint32_t seen_siblings[OC_NUMA_MAX_CPUS];
     size_t n_seen = 0;
+    /* Usable CPUs = online (sysfs files only exist for online CPUs) AND
+     * inside the process affinity mask. Under a cpuset limit — or when a
+     * lower-numbered SMT sibling is offline — the lowest sibling id is
+     * often NOT pin-able, and oc_numa_pin_cpu would fail for every
+     * worker that drew it, silently dropping the pinning. Intersect
+     * first and pick the lowest sibling that is actually usable. */
+    uint32_t usable[OC_NUMA_MAX_CPUS];
+    size_t n_usable = 0;
+#if defined(__linux__) && defined(CPU_COUNT)
+    {
+        cpu_set_t mask;
+        CPU_ZERO(&mask);
+        if (sched_getaffinity(0, sizeof(mask), &mask) == 0) {
+            for (uint32_t cpu = 0; cpu < OC_NUMA_MAX_CPUS; cpu++)
+                if (CPU_ISSET(cpu, &mask)) usable[n_usable++] = cpu;
+        }
+    }
+#endif
     for (uint32_t cpu = 0; cpu < OC_NUMA_MAX_CPUS; cpu++) {
         char path[128], buf[256];
         snprintf(path, sizeof(path),
@@ -333,9 +390,18 @@ static void build_core_list_once(void)
         uint32_t sib[64];
         size_t ns = parse_cpu_list(buf, sib, 64);
         if (ns == 0) continue;
-        /* Core representative = lowest sibling id; skip cores already
-         * seen (each core appears once per sibling CPU). */
-        uint32_t first = sib[0];
+        /* Core representative: lowest sibling that is usable for this
+         * process; skip cores already seen (each core appears once per
+         * sibling CPU). */
+        uint32_t first = 0;
+        bool have = false;
+        for (size_t i = 0; i < ns; i++) {
+            bool ok = n_usable == 0; /* no affinity info: trust sysfs */
+            for (size_t u = 0; u < n_usable && !ok; u++)
+                if (usable[u] == sib[i]) ok = true;
+            if (ok) { first = sib[i]; have = true; break; }
+        }
+        if (!have) continue; /* entire core excluded from this process */
         bool dup = false;
         for (size_t i = 0; i < n_seen; i++)
             if (seen_siblings[i] == first) { dup = true; break; }

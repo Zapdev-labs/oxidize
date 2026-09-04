@@ -145,6 +145,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "lm load failed\n");
         return 1;
     }
+    /* lm feeds gemv as float: anything but float32 would be read as
+     * garbage 4-byte values. */
+    if (strcmp(dtype, "<f4") != 0) {
+        fprintf(stderr, "lm artifact must be float32 (got %s)\n", dtype);
+        return 1;
+    }
     OcDFlash2Weight lmw = { lm, NULL, m.cfg.vocab_size, H, 0, NULL, NULL };
 
     int all_ok = 1;
@@ -156,7 +162,8 @@ int main(int argc, char **argv)
         size_t n_ctx = (size_t)n_ctx_steps[s];
         snprintf(p2, sizeof(p2), "%s/dflash2_ms_noise%d.npy", val_dir, s);
         size_t n_noise;
-        float *noise = npy_load(p2, dtype, &n_noise, &fo);
+        char dtype_noise[8];
+        float *noise = npy_load(p2, dtype_noise, &n_noise, &fo);
         snprintf(p2, sizeof(p2), "%s/dflash2_ms_ctx%d.npy", val_dir, s);
         size_t n_ctx_elems;
         float *ctx = npy_load(p2, dtype, &n_ctx_elems, &fo);
@@ -175,10 +182,16 @@ int main(int argc, char **argv)
             return 1;
         }
         /* Token-id artifacts must be int64; anything else reads as
-         * garbage 8-byte values in the comparisons below. */
+         * garbage 8-byte values in the comparisons below. noise/ctx feed
+         * the model as float and must be float32. */
         if (strcmp(dtype_path, "<i8") != 0 || strcmp(dtype_cand, "<i8") != 0) {
             fprintf(stderr, "step %d path/cand must be int64 (got %s / %s)\n",
                     s, dtype_path, dtype_cand);
+            return 1;
+        }
+        if (strcmp(dtype_noise, "<f4") != 0 || strcmp(dtype, "<f4") != 0) {
+            fprintf(stderr, "step %d noise/ctx must be float32 (got %s / %s)\n",
+                    s, dtype_noise, dtype);
             return 1;
         }
 
@@ -208,7 +221,19 @@ int main(int argc, char **argv)
             if ((int64_t)out_tok[i] != gold_path[i]) { path_ok = 0; break; }
         /* Candidate sets must match as multi-sets: each gold entry is
          * consumed by at most one output so duplicates cannot pass by
-         * reusing a single gold row (e.g. out [a,a,b] vs gold [a,b,c]). */
+         * reusing a single gold row (e.g. out [a,a,b] vs gold [a,b,c]).
+         * The comparison stays in int64: narrowing gold to uint32_t
+         * would let an out-of-range gold id wrap onto a valid output. */
+        for (size_t p = 0; p < n_draft; p++) {
+            for (size_t k = 0; k < top_k; k++) {
+                if (gold_cand[p * top_k + k] < 0 ||
+                    (uint64_t)gold_cand[p * top_k + k] >=
+                        (uint64_t)m.cfg.vocab_size) {
+                    fprintf(stderr, "step %d gold candidate out of vocab\n", s);
+                    return 1;
+                }
+            }
+        }
         char *matched = calloc(top_k, 1);
         if (!matched) { fprintf(stderr, "oom\n"); return 1; }
         int cand_ok = 1;
@@ -218,8 +243,8 @@ int main(int argc, char **argv)
                 int found = 0;
                 for (size_t j = 0; j < top_k; j++) {
                     if (matched[j]) continue;
-                    if ((uint32_t)gold_cand[p * top_k + j] ==
-                        out_cand[p * top_k + k]) {
+                    if (gold_cand[p * top_k + j] ==
+                        (int64_t)out_cand[p * top_k + k]) {
                         matched[j] = 1;
                         found = 1;
                         break;

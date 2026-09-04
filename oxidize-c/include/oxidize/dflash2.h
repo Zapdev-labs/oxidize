@@ -161,6 +161,11 @@ typedef struct OcDFlash2KvRing {
     size_t head_dim;
     size_t total;        /* monotonic writes since clear */
     size_t len;          /* valid entries = min(total, capacity) */
+    float *undo_k;       /* slots overwritten by the latest append */
+    float *undo_v;
+    int64_t *undo_pos;
+    size_t undo_total;   /* total before the latest append */
+    size_t undo_n;
 } OcDFlash2KvRing;
 
 OcError oc_dflash2_kvring_init(OcDFlash2KvRing *ring, size_t capacity,
@@ -320,14 +325,9 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
                                   uint32_t *out_cand);
 
 /* Trim KV entries whose absolute position >= pos_keep_exclusive. The next
- * append must be at position pos_keep_exclusive. Used to roll the ring
- * back to the last committed position after a propose step.
- *
- * Caveat: entries are dropped by rewinding the write counters, so once
- * the ring has wrapped, a later append at an older position rewrites the
- * slots and the trimmed history is lost. Callers that need true rollback
- * semantics across a wrap must snapshot the slots (as the debug forward
- * does) or keep speculative writes on scratch rings. */
+ * append must be at position pos_keep_exclusive. Used immediately after a
+ * propose-step append to roll the ring back to the last committed position;
+ * overwritten live slots from that append are restored across ring wrap. */
 void oc_dflash2_kvring_trim(OcDFlash2KvRing *ring, int64_t pos_keep_exclusive);
 
 /* Last-step hidden states of the latest propose call, normed: useful for

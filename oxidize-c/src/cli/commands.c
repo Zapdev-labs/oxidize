@@ -445,7 +445,8 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --bench-prompt-tokens N  Synthetic context rows per step (default 1)\n"
                "  --lm-materialize       Pre-materialize the lm_head in BF16 so the vocab\n"
                "                          scan measures real streaming bandwidth (~1.27 GB)\n"
-               "  --threads N          Worker threads; 0 = online CPUs (default 8)\n"
+               "  --threads N          Worker threads; 0 = online CPUs (default: one\n"
+               "                       per physical core)\n"
                "  --seed N              Deterministic input seed (default 42)\n"
                "  --json                Machine-readable results\n");
         break;
@@ -1709,7 +1710,12 @@ static void dflash2_gen_lm_row(size_t row, size_t cols, float *buf, void *user)
 
 OcError oc_cli_run_dflash2(OcCliContext *ctx)
 {
-    if (!ctx || !ctx->model_path) {
+    if (!ctx) return OC_ERR_INVALID_ARG;
+    if (ctx->threads_set && ctx->threads < 0) {
+        cli_error("--threads must be non-negative");
+        return OC_ERR_INVALID_ARG;
+    }
+    if (!ctx->model_path) {
         cli_error("dflash2 requires --model <path/to/model.safetensors>");
         return OC_ERR_INVALID_ARG;
     }
@@ -1770,6 +1776,13 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
      * per step: 7 for GLM-5.3-Flash-DFlash2 (block 8). */
     const size_t H = model.cfg.hidden_size;
     const size_t block = model.cfg.block_size;
+    if (block < 2) {
+        /* block - 1 drafts per step; a block of 1 drafts zero tokens
+         * and the per-draft division below would divide by zero. */
+        cli_error("DFlash2 block size must be at least 2 (got %zu)", block);
+        oc_dflash2_model_free(&model);
+        return OC_ERR_FORMAT;
+    }
     const size_t n_target_w = model.cfg.n_target_layer_ids * H;
     const size_t top_k = model.cfg.selector_top_k;
     const size_t vocab = model.cfg.vocab_size;
@@ -1923,9 +1936,15 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
         for (size_t i = 0; i < block; i++)
             block_ids[i] = dflash2_lcg(&seed) % (uint32_t)vocab;
 
-        /* Per-step: only the newly produced rows enter the context, like
-         * the reference's output.hidden_states[:, :produced, :]. */
-        e = oc_dflash2_set_context(&model, ctx_new, block - 1);
+        /* Per-step context: the FIRST proposal runs against the full
+         * prefill (like dflash_generate's step 0, which consumes the
+         * whole prefill context); later steps set only the newly
+         * produced rows, like the reference's
+         * output.hidden_states[:, :produced, :]. Feeding only block-1
+         * rows at step 0 would benchmark against a nearly-empty KV. */
+        e = oc_dflash2_set_context(&model,
+                                   it == 0 ? ctx_prefill : ctx_new,
+                                   it == 0 ? ctx_rows : (block - 1));
         if (e != OC_OK) break;
         anchors[0] = block_ids[0];
 

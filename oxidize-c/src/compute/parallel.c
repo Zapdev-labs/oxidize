@@ -196,6 +196,13 @@ void oc_parallel_shutdown(void)
 
 OcError oc_parallel_set_threads(size_t n_threads)
 {
+    /* Undo the calling thread's worker-0 pin before resizing the pool:
+     * the affinity belongs to the thread and survives
+     * oc_parallel_shutdown, and every worker of the new pool inherits
+     * the calling thread's mask — the resize path would otherwise
+     * collapse all replacement workers onto worker 0's single core.
+     * No-op when this thread was never pinned. */
+    oc_numa_pin_restore();
     oc_parallel_shutdown();
 
     if (n_threads == 0) {
@@ -240,9 +247,12 @@ OcError oc_parallel_set_threads(size_t n_threads)
             return (i > 1) ? OC_OK : OC_ERR_INTERNAL;
         }
     }
-    /* The calling thread is worker 0: same one-core-per-worker advice. */
+    /* The calling thread is worker 0: same one-core-per-worker advice.
+     * Snapshot its pre-pin mask first so a later oc_parallel_set_threads
+     * can restore (see the top of this function). */
     {
         uint32_t cpu;
+        oc_numa_pin_save_orig();
         if (oc_numa_distinct_core_for_worker(0, n_threads, &cpu)) {
             OcError pe = oc_numa_pin_cpu(cpu);
             if (pe != OC_OK)

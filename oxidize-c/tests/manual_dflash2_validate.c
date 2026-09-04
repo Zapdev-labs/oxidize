@@ -30,15 +30,15 @@ static void *npy_load(const char *path, char *dtype, size_t *n_elems,
     if (memcmp(magic, "\x93NUMPY", 6) != 0) { fclose(f); return NULL; }
     uint8_t ver[2];
     if (fread(ver, 1, 2, f) != 2) { fclose(f); return NULL; }
-    uint16_t hlen;
+    uint32_t hlen;
     if (ver[0] == 1) {
         uint8_t hb[2];
         if (fread(hb, 1, 2, f) != 2) { fclose(f); return NULL; }
-        hlen = (uint16_t)(hb[0] | (hb[1] << 8));
+        hlen = (uint32_t)(hb[0] | (hb[1] << 8));
     } else {
         uint8_t hb[4];
         if (fread(hb, 1, 4, f) != 4) { fclose(f); return NULL; }
-        hlen = (uint16_t)(hb[0] | (hb[1] << 8) | (hb[2] << 16) | (hb[3] << 24));
+        hlen = (uint32_t)(hb[0] | (hb[1] << 8) | (hb[2] << 16) | (hb[3] << 24));
     }
     char *hdr = malloc((size_t)hlen + 1);
     if (!hdr) { fclose(f); return NULL; }
@@ -200,7 +200,15 @@ int main(int argc, char **argv)
            max_abs, sum_abs / (block * H), max_abs / (gold_scale / (block * H)),
            worst_i / H, worst_i % H);
 
-    int hidden_ok = max_abs < 2e-2; /* BF16 reference tolerance */
+    /* Gate near the measured parity (1.79e-4): the old 2e-2 floor was
+     * ~112x looser, so a 100x parity regression still printed PASS.
+     * 1e-3 leaves ~5x headroom for compiler/UB reordering noise while a
+     * real regression (wrong eps, wrong conv taps, ring-order bug) is
+     * orders of magnitude larger. The margin is printed so drift is
+     * visible even inside the pass band. */
+    int hidden_ok = max_abs < 1e-3;
+    printf("hidden gate: %.5e vs %.0e (%.1fx margin)\n",
+           max_abs, 1e-3, 1e-3 / (max_abs > 0.0 ? max_abs : 1e-12));
 
     /* Stage-wise: compare against per-layer captures when present.
      * layer{N}.attn = attention output AFTER o_proj (pre-conv-finish),
@@ -244,7 +252,19 @@ int main(int argc, char **argv)
 
     /* Candidate sets: same multi-set of members regardless of order. Each
      * gold entry is consumed at most once so duplicate outputs cannot
-     * pass by reusing a single gold row. */
+     * pass by reusing a single gold row. The comparison stays in int64
+     * (narrowing gold to uint32_t could wrap an out-of-range id onto a
+     * valid output); gold ids are range-checked against the vocab. */
+    for (size_t p = 0; p < n_draft; p++) {
+        for (size_t k = 0; k < top_k; k++) {
+            if (gold_cand[p * top_k + k] < 0 ||
+                (uint64_t)gold_cand[p * top_k + k] >=
+                    (uint64_t)m.cfg.vocab_size) {
+                fprintf(stderr, "gold candidate out of vocab\n");
+                return 1;
+            }
+        }
+    }
     char *matched = calloc(top_k, 1);
     if (!matched) { fprintf(stderr, "oom\n"); return 1; }
     int cand_ok = 1;
@@ -254,8 +274,8 @@ int main(int argc, char **argv)
             int found = 0;
             for (size_t j = 0; j < top_k; j++) {
                 if (matched[j]) continue;
-                if ((uint32_t)gold_cand[p * top_k + j] ==
-                    out_cand[p * top_k + k]) {
+                if (gold_cand[p * top_k + j] ==
+                    (int64_t)out_cand[p * top_k + k]) {
                     matched[j] = 1;
                     found = 1;
                     break;

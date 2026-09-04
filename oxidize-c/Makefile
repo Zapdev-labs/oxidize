@@ -143,21 +143,26 @@ test: test_runner
 # 2.35 GB checkpoint and the generated gold tensors. Usage:
 #   make manual-tests VAL_DIR=/tmp CKPT_DIR=/path/to/dflash2-checkpoint
 # VAL_DIR: dir holding dflash2_val_*.npy / dflash2_ms_*.npy gold artifacts.
-# CKPT_DIR: the DFlash2 checkpoint directory (model.safetensors + config.json);
-#   required — the validators refuse the hard-coded fallback when run from
-#   the Makefile. Falls back to $OXIDIZE_DFLASH2_CKPT only when unset here.
+# CKPT_DIR: the DFlash2 checkpoint directory (model.safetensors + config.json).
+#   Falls back to $OXIDIZE_DFLASH2_CKPT when not passed on the command line;
+#   if neither is set the target refuses to run (the validators would
+#   otherwise silently use a developer-specific cache path).
 # Each validator prints PASS and exits 0 on token-identical output.
 VAL_DIR ?= /tmp
-CKPT_DIR ?=
+CKPT_DIR ?= $(OXIDIZE_DFLASH2_CKPT)
 manual-tests: $(LIB_OBJS)
 	@if [ -z "$(CKPT_DIR)" ]; then \
-		echo "manual-tests: CKPT_DIR is required (checkpoint dir with model.safetensors + config.json)" >&2; \
+		echo "manual-tests: CKPT_DIR is required (checkpoint dir with model.safetensors + config.json, or set OXIDIZE_DFLASH2_CKPT)" >&2; \
+		exit 2; \
+	fi
+	@if [ -z "$(wildcard tests/manual_*.c)" ]; then \
+		echo "manual-tests: no tests/manual_*.c validators found — refusing to report a vacuous PASS" >&2; \
 		exit 2; \
 	fi
 	@for t in $(sort $(patsubst %.c,%,$(wildcard tests/manual_*.c))); do \
 		echo "== $$t =="; \
 		$(CC) $(CPPFLAGS) $(CFLAGS) -o /tmp/oxidize_manual_val $$t.c $(LIB_OBJS) $(LDFLAGS) || exit 1; \
-		/tmp/oxidize_manual_val $(VAL_DIR) $(CKPT_DIR) || exit 1; \
+		/tmp/oxidize_manual_val "$(VAL_DIR)" "$(CKPT_DIR)" || exit 1; \
 	done
 	@echo "manual validators: all PASS"
 
@@ -237,4 +242,4 @@ clean:
 	      $(DEP_FILES) \
 	      oxidize-c test_runner liboxidize-c.a
 
-.PHONY: build lib test lint clean avx512 cuda
+.PHONY: build lib test lint clean avx512 cuda manual-tests

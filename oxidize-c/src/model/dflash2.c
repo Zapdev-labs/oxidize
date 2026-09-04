@@ -26,6 +26,7 @@
 #include "oxidize/simd.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -626,12 +627,22 @@ void oc_dflash2_kvring_free(OcDFlash2KvRing *ring)
     free(ring->k);
     free(ring->v);
     free(ring->pos);
+    free(ring->undo_k);
+    free(ring->undo_v);
+    free(ring->undo_pos);
     memset(ring, 0, sizeof(*ring));
 }
 
 void oc_dflash2_kvring_clear(OcDFlash2KvRing *ring)
 {
     if (!ring) return;
+    free(ring->undo_k);
+    free(ring->undo_v);
+    free(ring->undo_pos);
+    ring->undo_k = NULL;
+    ring->undo_v = NULL;
+    ring->undo_pos = NULL;
+    ring->undo_n = 0;
     ring->len = 0;
     ring->total = 0;
 }
@@ -643,6 +654,38 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
     if (!ring || !k || !v) return OC_ERR_INVALID_ARG;
     if (n > ring->capacity) return OC_ERR_INVALID_ARG;
     const size_t vec = ring->n_kv_heads * ring->head_dim;
+    free(ring->undo_k);
+    free(ring->undo_v);
+    free(ring->undo_pos);
+    ring->undo_k = NULL;
+    ring->undo_v = NULL;
+    ring->undo_pos = NULL;
+    ring->undo_n = 0;
+
+    if (n > ring->capacity - ring->len) {
+        ring->undo_k = malloc(n * vec * sizeof(float));
+        ring->undo_v = malloc(n * vec * sizeof(float));
+        ring->undo_pos = malloc(n * sizeof(int64_t));
+        if (!ring->undo_k || !ring->undo_v || !ring->undo_pos) {
+            free(ring->undo_k);
+            free(ring->undo_v);
+            free(ring->undo_pos);
+            ring->undo_k = NULL;
+            ring->undo_v = NULL;
+            ring->undo_pos = NULL;
+            return OC_ERR_OOM;
+        }
+        ring->undo_total = ring->total;
+        ring->undo_n = n;
+        for (size_t i = 0; i < n; i++) {
+            const size_t slot = (ring->total + i) % ring->capacity;
+            memcpy(ring->undo_k + i * vec, ring->k + slot * vec,
+                   vec * sizeof(float));
+            memcpy(ring->undo_v + i * vec, ring->v + slot * vec,
+                   vec * sizeof(float));
+            ring->undo_pos[i] = ring->pos[slot];
+        }
+    }
     for (size_t i = 0; i < n; i++) {
         size_t slot = (ring->total + i) % ring->capacity;
         memcpy(ring->k + slot * vec, k + i * vec, vec * sizeof(float));
@@ -657,6 +700,7 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
 void oc_dflash2_kvring_trim(OcDFlash2KvRing *ring, int64_t pos_keep_exclusive)
 {
     if (!ring) return;
+    const size_t appended_total = ring->total;
     /* Drop the newest entries with pos >= pos_keep_exclusive. Writes are
      * in increasing position order, so scan write indices from the end. */
     while (ring->total > 0) {
@@ -667,10 +711,55 @@ void oc_dflash2_kvring_trim(OcDFlash2KvRing *ring, int64_t pos_keep_exclusive)
         else
             break;
     }
+    if (ring->undo_n > 0 && ring->total >= ring->undo_total) {
+        const size_t first = ring->total - ring->undo_total;
+        const size_t end = appended_total - ring->undo_total;
+        const size_t vec = ring->n_kv_heads * ring->head_dim;
+        for (size_t i = first; i < end && i < ring->undo_n; i++) {
+            const size_t slot = (ring->undo_total + i) % ring->capacity;
+            memcpy(ring->k + slot * vec, ring->undo_k + i * vec,
+                   vec * sizeof(float));
+            memcpy(ring->v + slot * vec, ring->undo_v + i * vec,
+                   vec * sizeof(float));
+            ring->pos[slot] = ring->undo_pos[i];
+        }
+    }
+    free(ring->undo_k);
+    free(ring->undo_v);
+    free(ring->undo_pos);
+    ring->undo_k = NULL;
+    ring->undo_v = NULL;
+    ring->undo_pos = NULL;
+    ring->undo_n = 0;
     ring->len = ring->total < ring->capacity ? ring->total : ring->capacity;
 }
 
 /* ─── Weight loading ────────────────────────────────────────────────── */
+
+/* Validated raw payload for a tensor: routes the access through
+ * oc_safetensors_get_tensor_data (offset+length bounds-checked against
+ * the file) and additionally requires the descriptor's declared byte
+ * range to cover EXACTLY the requested dtype payload — a shorter (or
+ * padded) range is malformed metadata and must fail the load, not read
+ * past the mapping. Sets *dtype_sz_out (4 = F32, 2 = BF16). */
+static const uint8_t *df2_tensor_raw(const OcSafetensorsFile *f,
+                                     const OcSafetensorsTensor *t,
+                                     size_t expect_elems,
+                                     size_t *dtype_sz_out)
+{
+    const size_t dtype_sz = strcmp(t->dtype, "F32") == 0 ? 4
+                          : (strcmp(t->dtype, "BF16") == 0 ? 2 : 0);
+    if (dtype_sz == 0) return NULL;
+    /* Shape arithmetic can wrap on adversarial dimensions; the
+     * byte-count math below must not. */
+    if (expect_elems > SIZE_MAX / dtype_sz) return NULL;
+    const void *raw = NULL;
+    if (oc_safetensors_get_tensor_data(f, t, &raw) != OC_OK) return NULL;
+    if (t->data_length != (uint64_t)expect_elems * (uint64_t)dtype_sz)
+        return NULL;
+    *dtype_sz_out = dtype_sz;
+    return (const uint8_t *)raw;
+}
 
 static float *load_tensor_f32(const OcSafetensorsFile *f,
                               const char *name, size_t expect_elems)
@@ -686,22 +775,12 @@ static float *load_tensor_f32(const OcSafetensorsFile *f,
     size_t elems = 1;
     for (uint32_t d = 0; d < t->n_dims; d++) elems *= (size_t)t->shape[d];
     if (elems != expect_elems) return NULL;
-    /* Range-validate against the raw data section before touching bytes:
-     * malformed metadata (offset/length past EOF, or a payload shorter than
-     * the declared shape) must fail the load, not read past the mapping. */
-    const size_t dtype_sz = strcmp(t->dtype, "F32") == 0 ? 4
-                          : (strcmp(t->dtype, "BF16") == 0 ? 2 : 0);
-    if (dtype_sz == 0) return NULL;
-    /* Shape arithmetic above can wrap on adversarial dimensions; the
-     * byte-count math below must not. */
-    if (expect_elems > SIZE_MAX / sizeof(float) ||
-        expect_elems > SIZE_MAX / dtype_sz) return NULL;
-    if (t->data_offset > f->file_size - f->data_start ||
-        t->data_offset + expect_elems * dtype_sz > f->file_size - f->data_start)
-        return NULL;
+    if (expect_elems > SIZE_MAX / sizeof(float)) return NULL;
+    size_t dtype_sz = 0;
+    const uint8_t *raw = df2_tensor_raw(f, t, expect_elems, &dtype_sz);
+    if (!raw) return NULL;
     float *dst = malloc(expect_elems * sizeof(float));
     if (!dst) return NULL;
-    const uint8_t *raw = (const uint8_t *)f->raw_data + t->data_offset;
     if (dtype_sz == 4) {
         memcpy(dst, raw, expect_elems * 4);
     } else {
@@ -754,12 +833,14 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
         w->data = NULL;
         return OC_ERR_FORMAT;
     }
-    /* Same range validation as load_tensor_f32: the BF16-keep path below
-     * copies directly from the raw section, so it must not run on a
-     * malformed (out-of-range) descriptor either. */
-    if (got > SIZE_MAX / 2 ||
-        t->data_offset > f->file_size - f->data_start ||
-        t->data_offset + got * 2 > f->file_size - f->data_start) {
+    /* Range + dtype validation via the shared df2_tensor_raw (see its
+     * comment): the BF16-keep path below copies directly from the raw
+     * section, so it must not run on a malformed descriptor either.
+     * The exact-length check here also catches an F32 payload where
+     * BF16 is required. */
+    size_t dtype_sz = 0;
+    const uint8_t *raw = df2_tensor_raw(f, t, elems, &dtype_sz);
+    if (!raw) {
         fprintf(stderr, "dflash2: bad tensor range %s\n", name);
         w->rows = rows;
         w->cols = cols;
@@ -767,8 +848,7 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
         return OC_ERR_FORMAT;
     }
 
-    const uint8_t *raw = (const uint8_t *)f->raw_data + t->data_offset;
-    if (strcmp(t->dtype, "BF16") == 0 && elems >= OC_DF2_BF16_KEEP_MIN_ELEMS) {
+    if (dtype_sz == 2 && elems >= OC_DF2_BF16_KEEP_MIN_ELEMS) {
         size_t bytes = elems * sizeof(uint16_t);
         w->bf16 = df2_alloc_huge(bytes);
         w->data = NULL;
@@ -868,21 +948,40 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
     memset(m, 0, sizeof(*m));
     oc_dflash2_config_init(&m->cfg);
     if (config_json_path) {
+        /* An explicitly supplied config must actually read. A missing or
+         * unreadable file silently fell back to the GLM defaults before,
+         * which would misinterpret every tensor below. */
         FILE *fh = fopen(config_json_path, "rb");
-        if (fh) {
-            char *buf = malloc(1 << 16);
-            if (!buf) { fclose(fh); return OC_ERR_OOM; }
-            size_t got = fread(buf, 1, (1 << 16) - 1, fh);
-            buf[got] = '\0';
-            fclose(fh);
-            parse_config_json(&m->cfg, buf);
+        if (!fh) {
+            fprintf(stderr, "dflash2: cannot open config %s\n",
+                    config_json_path);
+            return OC_ERR_IO;
+        }
+        char *buf = malloc(1 << 16);
+        if (!buf) { fclose(fh); return OC_ERR_OOM; }
+        size_t got = fread(buf, 1, (1 << 16) - 1, fh);
+        bool io_err = ferror(fh) != 0;
+        fclose(fh);
+        if (io_err || got == 0) {
             free(buf);
+            fprintf(stderr, "dflash2: config %s is empty/unreadable\n",
+                    config_json_path);
+            return io_err ? OC_ERR_IO : OC_ERR_FORMAT;
+        }
+        buf[got] = '\0';
+        parse_config_json(&m->cfg, buf);
+        /* Sanity: a config that yields no hidden_size at all was not a
+         * DFlash2 config.json — garbage JSON would otherwise keep the
+         * GLM defaults and load the checkpoint with wrong dimensions. */
+        double probe;
+        bool has_hidden = cfg_num(buf, "hidden_size", &probe);
+        free(buf);
+        if (!has_hidden) {
+            fprintf(stderr, "dflash2: config %s has no hidden_size\n",
+                    config_json_path);
+            return OC_ERR_FORMAT;
         }
     }
-
-    OcSafetensorsFile f;
-    OcError e = oc_safetensors_open(st_path, &f);
-    if (e != OC_OK) return e;
 
     /* oc_dflash2_selector_scores is specialized to OC_DFLASH2_RANK (the
      * codebook stride everywhere); reject checkpoints that configure a
@@ -890,14 +989,14 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
     if (m->cfg.selector_rank != OC_DFLASH2_RANK) {
         fprintf(stderr, "dflash2: unsupported selector_rank %zu (need %d)\n",
                 m->cfg.selector_rank, OC_DFLASH2_RANK);
-        oc_safetensors_close(&f);
         return OC_ERR_FORMAT;
     }
 
     /* Validate every dimension the derive step turns into a tensor shape,
      * VLA size, or ring capacity, before anything is derived from it. A
      * malformed config (zero or oversized field) must fail the load here
-     * rather than under-allocate downstream. */
+     * rather than under-allocate downstream. conv_group_size is checked
+     * BEFORE the hidden_size % conv_group_size divide. */
     if (m->cfg.hidden_size == 0 ||
         m->cfg.num_hidden_layers == 0 ||
         m->cfg.num_hidden_layers > OC_DFLASH2_MAX_LAYERS ||
@@ -908,8 +1007,8 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         m->cfg.n_target_layer_ids == 0 ||
         m->cfg.n_target_layer_ids > OC_DFLASH2_MAX_TARGET_LAYERS ||
         m->cfg.num_attention_heads % m->cfg.num_key_value_heads != 0 ||
-        m->cfg.hidden_size % m->cfg.conv_group_size != 0 ||
         m->cfg.conv_group_size == 0 ||
+        m->cfg.hidden_size % m->cfg.conv_group_size != 0 ||
         m->cfg.conv_kernel_size == 0 ||
         m->cfg.block_size == 0 ||
         m->cfg.block_size > OC_DFLASH2_MAX_BLOCK ||
@@ -918,9 +1017,12 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         m->cfg.sliding_window == 0 ||
         m->cfg.vocab_size == 0) {
         fprintf(stderr, "dflash2: invalid config dimensions\n");
-        oc_safetensors_close(&f);
         return OC_ERR_FORMAT;
     }
+
+    OcSafetensorsFile f;
+    OcError e = oc_safetensors_open(st_path, &f);
+    if (e != OC_OK) return e;
 
     const size_t H = m->cfg.hidden_size;
     const size_t n_layers = m->cfg.num_hidden_layers;
@@ -1134,8 +1236,10 @@ OcError oc_dflash2_set_context(OcDFlash2Model *m,
      * rows at step 0, then the per-verify rows); only the KV window bounds
      * the usable length. The block forward appends n_ctx + block rows to
      * each ring in one timeline, so the context must leave room for the
-     * block: n_ctx + block_size <= capacity. */
-    if (n_ctx_rows + m->cfg.block_size > m->kv_capacity)
+     * block: n_ctx + block_size <= capacity. Checked by subtraction —
+     * the addition form would wrap for adversarial n_ctx_rows. */
+    if (m->cfg.block_size > m->kv_capacity ||
+        n_ctx_rows > m->kv_capacity - m->cfg.block_size)
         return OC_ERR_INVALID_ARG;
     const size_t H = m->cfg.hidden_size;
 
@@ -1165,6 +1269,7 @@ typedef struct OcDFlash2TopKCtx {
     uint32_t *tidx;          /* [n_threads, n_draft, top_k] per-thread best ids */
     float *tval;             /* [n_threads, n_draft, top_k] per-thread best vals */
     size_t H;
+    _Atomic int *err;       /* shared worker failure (0 = ok; 1 = OOM) */
 } OcDFlash2TopKCtx;
 
 #if OC_DF2_SIMD_X86
@@ -1246,7 +1351,13 @@ static void dflash2_topk_par_fn(size_t begin, size_t end, size_t tid,
     float *val = c->tval + tid * n_draft * top_k;
     float *gen_buf = oc_parallel_scratch(tid, H * sizeof(float));
     const bool generated = !c->lm->data && !c->lm->bf16;
-    if (generated && !gen_buf) return;
+    /* A failed scratch alloc must not silently drop this worker's vocab
+     * slice (the top-k would come back incomplete yet OC_OK); mark the
+     * shared error so propose can fail. */
+    if (generated && !gen_buf) {
+        atomic_store_explicit(c->err, 1, memory_order_relaxed);
+        return;
+    }
 
     for (size_t v = begin; v < end; v++) {
         const float *wr;
@@ -1357,11 +1468,19 @@ static void attn_ring_job(size_t job, OcDFlash2AttnRingCtx *c)
 
     float m = -INFINITY;   /* running max of scaled scores */
     float denom = 0.0f;     /* running softmax denominator */
+    /* Live entries are write indices [total - len, total), each at slot
+     * (w % capacity). Iterating physical slots [0, len) happens to cover
+     * the same SET (the live span is contiguous mod capacity), but in the
+     * wrong ORDER once the ring has wrapped — and the online softmax is
+     * order-sensitive at the ulp level, so the accumulation order must
+     * stay chronological to match the reference. */
+    const size_t w0 = ring->total - ring->len;
     for (size_t s = 0; s < ring->len; s++) {
-        int64_t dq = qpos - ring->pos[s];
+        const size_t slot = (w0 + s) % ring->capacity;
+        int64_t dq = qpos - ring->pos[slot];
         if (dq >= (int64_t)c->window || -dq >= (int64_t)c->window) continue;
-        const float *kh = ring->k + s * vec + hg * head_dim;
-        const float *vh = ring->v + s * vec + hg * head_dim;
+        const float *kh = ring->k + slot * vec + hg * head_dim;
+        const float *vh = ring->v + slot * vec + hg * head_dim;
         float sc = df2_dot(qh, kh, head_dim) * c->scale;
         if (sc > m) {
             /* New max: rescale the accumulator + denominator. */
@@ -1692,6 +1811,12 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     if (!lm_head || (!lm_head->data && !lm_head->bf16 &&
                       !lm_head->generate))
         return OC_ERR_INVALID_ARG;
+    /* The lm_head must actually be [vocab, hidden]: a mismatched cols
+     * would be read with inconsistent strides (wrong logits), and rows
+     * below selector_top_k (or zero) cannot fill the candidate lattice. */
+    if (lm_head->cols != m->cfg.hidden_size || lm_head->rows == 0 ||
+        lm_head->rows < m->cfg.selector_top_k)
+        return OC_ERR_INVALID_ARG;
     if (!out_tokens) return OC_ERR_INVALID_ARG;
 
     const size_t H = m->cfg.hidden_size;
@@ -1744,7 +1869,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         if (!m->last_hidden) {
             m->last_hidden_len = 0;
             dflash2_block_scratch_free(&s);
-            return OC_ERR_OOM;
+            goto fail_after_fwd;
         }
         m->last_hidden_len = block;
     }
@@ -1767,7 +1892,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     if (!unary || !cand || !proj_h || !scores) {
         free(unary); free(cand); free(proj_h); free(scores);
         dflash2_block_scratch_free(&s);
-        return OC_ERR_OOM;
+        goto fail_after_fwd;
     }
 
     /* logits: one pass over the vocab, dotting each row against all n_draft
@@ -1809,6 +1934,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                 tval[i] = -INFINITY;
 
             OcDFlash2TopKCtx c;
+            _Atomic int wk_err = 0;
             c.lm = lm_head;
             c.x = draft_hidden;
             c.n_draft = n_draft;
@@ -1817,7 +1943,15 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
             c.tidx = tidx;
             c.tval = tval;
             c.H = H;
+            c.err = &wk_err;
             oc_parallel_for(vocab_eff, dflash2_topk_par_fn, &c);
+            if (atomic_load_explicit(&wk_err, memory_order_relaxed) != 0) {
+                free(tidx);
+                free(tval);
+                free(unary); free(cand); free(proj_h); free(scores);
+                dflash2_block_scratch_free(&s);
+                goto fail_after_fwd;
+            }
 
             /* Merge per-thread k-best lists into the final top-k. */
             for (size_t p = 0; p < n_draft; p++) {
@@ -1862,7 +1996,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     if (logit_err) {
         free(unary); free(cand); free(proj_h); free(scores);
         dflash2_block_scratch_free(&s);
-        return OC_ERR_OOM;
+        goto fail_after_fwd;
     }
 
     /* hidden_projection for each draft row. */
@@ -1874,7 +2008,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     if (!A_buf) {
         free(unary); free(cand); free(proj_h); free(scores);
         dflash2_block_scratch_free(&s);
-        return OC_ERR_OOM;
+        goto fail_after_fwd;
     }
     for (size_t p = 0; p < n_draft; p++) {
         df2_widen_row(&m->selector.predecessor_codebook, predecessor, A_buf);
@@ -1886,7 +2020,7 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
             free(A_buf);
             free(unary); free(cand); free(proj_h); free(scores);
             dflash2_block_scratch_free(&s);
-            return OC_ERR_OOM;
+            goto fail_after_fwd;
         }
         for (size_t k = 0; k < top_k; k++)
             df2_widen_row(&m->selector.successor_codebook,
@@ -1951,6 +2085,15 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     dflash2_block_scratch_free(&s);
     (void)block_ids;
     return OC_OK;
+
+fail_after_fwd:
+    /* Selector-stage failure AFTER the block forward already appended
+     * this step's speculative rows to the rings: roll them back to the
+     * last committed position so the caller's retry / next proposal does
+     * not start from speculative cache state. */
+    for (size_t li = 0; li < m->n_layers; li++)
+        oc_dflash2_kvring_trim(&m->kv[li], start);
+    return OC_ERR_OOM;
 }
 
 /* ─── Debug / validation entry points ────────────────────────────────── */
@@ -2081,6 +2224,10 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
         return OC_ERR_INVALID_ARG;
     if (anchor_ids[n_anchor - 1] >= m->cfg.vocab_size)
         return OC_ERR_INVALID_ARG; /* codebook row would be OOB */
+    /* Same [vocab, hidden] contract as oc_dflash2_propose. */
+    if (lm_head->cols != m->cfg.hidden_size || lm_head->rows == 0 ||
+        lm_head->rows < m->cfg.selector_top_k)
+        return OC_ERR_INVALID_ARG;
 
     const size_t H = m->cfg.hidden_size;
     const size_t top_k = m->cfg.selector_top_k;

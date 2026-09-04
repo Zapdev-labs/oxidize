@@ -63,8 +63,17 @@ OcError oc_numa_set_policy(OcNumaMemPolicy policy, uint32_t node);
 /* Bind the calling thread to a specific NUMA node's CPUs. */
 OcError oc_numa_bind_thread(uint32_t node);
 
+/* Snapshot the calling thread's affinity mask so oc_numa_pin_restore can
+ * undo a later oc_numa_pin_cpu (see its comment). */
+void oc_numa_pin_save_orig(void);
+
 /* Pin a thread to specific CPU. */
 OcError oc_numa_pin_cpu(uint32_t cpu);
+
+/* Restore the calling thread's pre-pin affinity mask (undoes the
+ * oc_numa_pin_cpu restriction on this thread; no-op if nothing was
+ * saved). */
+void oc_numa_pin_restore(void);
 
 /* Allocate memory on a specific NUMA node. */
 void *oc_numa_alloc(size_t size, uint32_t node);
