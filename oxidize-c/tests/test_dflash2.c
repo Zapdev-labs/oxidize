@@ -54,6 +54,33 @@ Test(dflash2, trim_restores_entry_when_append_crosses_wrap)
     oc_dflash2_kvring_free(&ring);
 }
 
+Test(dflash2, trim_full_capacity_append_restores_all_history)
+{
+    /* Given: a full ring whose entire physical storage is overwritten by
+     * one speculative append. */
+    OcDFlash2KvRing ring;
+    cr_assert_eq(oc_dflash2_kvring_init(&ring, 4, 1, 1), OC_OK);
+    const float initial[] = { 0.0f, 1.0f, 2.0f, 3.0f };
+    const float speculative[] = { 4.0f, 5.0f, 6.0f, 7.0f };
+    cr_assert_eq(oc_dflash2_kvring_append(&ring, initial, initial, 0, 4),
+                 OC_OK);
+    cr_assert_eq(oc_dflash2_kvring_append(&ring, speculative, speculative,
+                                          4, 4), OC_OK);
+
+    /* When: every row from the latest append is rolled back. */
+    oc_dflash2_kvring_trim(&ring, 4);
+
+    /* Then: the original logical history and payloads are intact. */
+    cr_assert_eq(ring.total, 4);
+    cr_assert_eq(ring.len, 4);
+    for (size_t i = 0; i < 4; i++) {
+        cr_assert_eq(ring.pos[i], (int64_t)i);
+        cr_assert_float_eq(ring.k[i], initial[i], 0.0f);
+        cr_assert_float_eq(ring.v[i], initial[i], 0.0f);
+    }
+    oc_dflash2_kvring_free(&ring);
+}
+
 Test(dflash2, model_load_rejects_overflowing_config_before_weights)
 {
     char path[] = "/tmp/oxidize-dflash2-config-XXXXXX";

@@ -701,9 +701,10 @@ void oc_dflash2_kvring_trim(OcDFlash2KvRing *ring, int64_t pos_keep_exclusive)
 {
     if (!ring) return;
     const size_t appended_total = ring->total;
+    const size_t scan_floor = ring->undo_n > 0 ? ring->undo_total : 0;
     /* Drop the newest entries with pos >= pos_keep_exclusive. Writes are
      * in increasing position order, so scan write indices from the end. */
-    while (ring->total > 0) {
+    while (ring->total > scan_floor) {
         size_t w = ring->total - 1;
         size_t slot = w % ring->capacity;
         if (ring->pos[slot] >= pos_keep_exclusive)
@@ -722,6 +723,15 @@ void oc_dflash2_kvring_trim(OcDFlash2KvRing *ring, int64_t pos_keep_exclusive)
             memcpy(ring->v + slot * vec, ring->undo_v + i * vec,
                    vec * sizeof(float));
             ring->pos[slot] = ring->undo_pos[i];
+        }
+    }
+    /* If the entire latest append was removed, its overwritten slots are
+     * restored now and an older trim can safely continue into history. */
+    if (ring->undo_n > 0 && ring->total == ring->undo_total) {
+        while (ring->total > 0) {
+            const size_t slot = (ring->total - 1) % ring->capacity;
+            if (ring->pos[slot] < pos_keep_exclusive) break;
+            ring->total--;
         }
     }
     free(ring->undo_k);
@@ -962,7 +972,7 @@ static bool df2_config_extents_valid(const OcDFlash2Config *cfg)
         !df2_size_mul(slot_floats, sizeof(float), &extent) ||
         !df2_size_add(extent, sizeof(int64_t), &extent) ||
         !df2_size_mul(extent, cfg->block_size, &extent) ||
-        !df2_size_mul(extent, cfg->n_target_layer_ids, &extent))
+        !df2_size_mul(extent, cfg->num_hidden_layers, &extent))
         return false;
 
     return capacity <= SIZE_MAX / sizeof(int64_t) &&
