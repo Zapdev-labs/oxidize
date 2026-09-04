@@ -334,6 +334,7 @@ void oc_numa_pin_restore(void)
  * throughput) than one-thread-per-core, so the pool consults this before
  * workers start. */
 
+#if defined(__linux__)
 /* Parse "0-3,8,10-11" (or a single "N") into ascending CPU ids. */
 static size_t parse_cpu_list(const char *s, uint32_t *out, size_t cap)
 {
@@ -411,6 +412,7 @@ static void build_core_list_once(void)
     }
     g_n_cores = n_cores;
 }
+#endif
 
 bool oc_numa_distinct_core_for_worker(size_t tid, size_t n_threads,
                                       uint32_t *out_cpu)
