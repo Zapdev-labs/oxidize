@@ -1,0 +1,19 @@
+oxidize-core/src/model/sampling.rs
+  s_453def152fa7cf::t_c65d01270c31a4 357-359,374-375
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "8ccd47f89bd9da9ab45ff25680abf56d3c7ad27a",
+  "prompts": {},
+  "sessions": {
+    "s_453def152fa7cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06bab-9644-7313-898a-4dcc3f8a41c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
