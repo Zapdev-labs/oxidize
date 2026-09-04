@@ -1,6 +1,9 @@
 /* strdup is POSIX.1-2008; needs _POSIX_C_SOURCE to be declared. Must be
  * the first non-comment thing in the file, before any system header. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 
 /*
  * commands.c — CLI subcommand implementation for oxidize-c.
