@@ -82,6 +82,32 @@ Test(dflash2, trim_full_capacity_append_restores_all_history)
     oc_dflash2_kvring_free(&ring);
 }
 
+Test(dflash2, failed_append_preserves_prior_rollback_journal)
+{
+    /* Given: a wrapped append with a live rollback journal. */
+    OcDFlash2KvRing ring;
+    cr_assert_eq(oc_dflash2_kvring_init(&ring, 2, 1, 1), OC_OK);
+    const float initial[] = { 0.0f, 1.0f };
+    const float speculative = 2.0f;
+    cr_assert_eq(oc_dflash2_kvring_append(&ring, initial, initial, 0, 2),
+                 OC_OK);
+    cr_assert_eq(oc_dflash2_kvring_append(&ring, &speculative, &speculative,
+                                          2, 1), OC_OK);
+
+    /* When: the next append is rejected before it can mutate the ring. */
+    const float invalid[] = { 3.0f, 4.0f, 5.0f };
+    cr_assert_eq(oc_dflash2_kvring_append(&ring, invalid, invalid, 3, 3),
+                 OC_ERR_INVALID_ARG);
+    oc_dflash2_kvring_trim(&ring, 2);
+
+    /* Then: the earlier journal still restores the overwritten row. */
+    cr_assert_eq(ring.total, 2);
+    cr_assert_eq(ring.pos[0], 0);
+    cr_assert_float_eq(ring.k[0], 0.0f, 0.0f);
+    cr_assert_float_eq(ring.v[0], 0.0f, 0.0f);
+    oc_dflash2_kvring_free(&ring);
+}
+
 Test(dflash2, model_load_rejects_overflowing_config_before_weights)
 {
     char path[] = "/tmp/oxidize-dflash2-config-XXXXXX";

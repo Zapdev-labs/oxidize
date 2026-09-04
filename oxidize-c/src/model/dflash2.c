@@ -1580,6 +1580,25 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
     float *mlp_gu = s->mlp_gu, *mlp_up_out = s->mlp_up_out;
     float *mlp_out = s->mlp_out, *x = s->x;
     OcError ae;   /* ring-append result per layer */
+    typedef struct {
+        float *k;
+        float *v;
+        int64_t *pos;
+        size_t n;
+        size_t total;
+    } UndoState;
+    UndoState *prior_undo = calloc(m->n_layers, sizeof(*prior_undo));
+    if (!prior_undo) return OC_ERR_OOM;
+    for (size_t li = 0; li < m->n_layers; li++) {
+        OcDFlash2KvRing *ring = &m->kv[li];
+        prior_undo[li] = (UndoState){ ring->undo_k, ring->undo_v,
+                                     ring->undo_pos, ring->undo_n,
+                                     ring->undo_total };
+        ring->undo_k = NULL;
+        ring->undo_v = NULL;
+        ring->undo_pos = NULL;
+        ring->undo_n = 0;
+    }
 
     memcpy(hidden, noise_emb, block * H * sizeof(float));
 
@@ -1691,7 +1710,22 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
          * append (n_k > capacity) must abort, not attend over stale
          * entries and return tokens from wrong attention state. */
         ae = oc_dflash2_kvring_append(ring, k_all, v_all, ctx_pos0, n_k);
-        if (ae != OC_OK) return ae;
+        if (ae != OC_OK) {
+            for (size_t ri = 0; ri < m->n_layers; ri++) {
+                OcDFlash2KvRing *restore = &m->kv[ri];
+                if (ri < li) oc_dflash2_kvring_trim(restore, ctx_pos0);
+                free(restore->undo_k);
+                free(restore->undo_v);
+                free(restore->undo_pos);
+                restore->undo_k = prior_undo[ri].k;
+                restore->undo_v = prior_undo[ri].v;
+                restore->undo_pos = prior_undo[ri].pos;
+                restore->undo_n = prior_undo[ri].n;
+                restore->undo_total = prior_undo[ri].total;
+            }
+            free(prior_undo);
+            return ae;
+        }
 
         attn_ring(ring, q, start, block, n_heads, hd,
                   1.0f / sqrtf((float)hd), m->cfg.sliding_window, attn_out);
@@ -1745,6 +1779,12 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
     /* Final norm on all block rows. */
     for (size_t i = 0; i < block; i++)
         rms_norm_row(hidden + i * H, m->norm, out_normed + i * H, H, eps);
+    for (size_t li = 0; li < m->n_layers; li++) {
+        free(prior_undo[li].k);
+        free(prior_undo[li].v);
+        free(prior_undo[li].pos);
+    }
+    free(prior_undo);
     return OC_OK;
 }
 
