@@ -2,6 +2,7 @@
 #include <criterion/criterion.h>
 
 #include <stdio.h>
+#include <stdint.h>
 #include <unistd.h>
 
 #include "oxidize/dflash2.h"
@@ -96,4 +97,50 @@ Test(dflash2, model_load_rejects_overflowing_config_before_weights)
     cr_assert_eq(oc_dflash2_model_load(&model, "/does/not/exist", path),
                  OC_ERR_FORMAT);
     cr_assert_eq(unlink(path), 0);
+}
+
+Test(dflash2, kvring_init_rejects_overflowing_geometry)
+{
+    OcDFlash2KvRing ring;
+    cr_assert_eq(oc_dflash2_kvring_init(&ring, 8, SIZE_MAX / 8 + 1, 1),
+                 OC_ERR_INVALID_ARG);
+}
+
+Test(dflash2, model_load_rejects_non_integer_config_before_weights)
+{
+    char path[] = "/tmp/oxidize-dflash2-config-XXXXXX";
+    int fd = mkstemp(path);
+    cr_assert_geq(fd, 0);
+    FILE *config = fdopen(fd, "w");
+    cr_assert_not_null(config);
+    cr_assert_gt(fputs("{\"hidden_size\":4096.5}", config), 0);
+    cr_assert_eq(fclose(config), 0);
+
+    OcDFlash2Model model;
+    cr_assert_eq(oc_dflash2_model_load(&model, "/does/not/exist", path),
+                 OC_ERR_FORMAT);
+    cr_assert_eq(unlink(path), 0);
+}
+
+Test(dflash2, selector_debug_rejects_overflowing_row_extent)
+{
+    OcDFlash2Model model = { 0 };
+    model.loaded = true;
+    model.cfg.hidden_size = 1;
+    model.cfg.vocab_size = 1;
+    model.cfg.selector_top_k = 1;
+    model.cfg.selector_rank = 2;
+    OcDFlash2Weight lm_head = { 0 };
+    float weight = 0.0f;
+    lm_head.data = &weight;
+    lm_head.rows = 1;
+    lm_head.cols = 1;
+    float hidden = 0.0f;
+    uint32_t anchor = 0;
+    uint32_t token = 0;
+
+    cr_assert_eq(oc_dflash2_selector_debug(&model, &hidden, SIZE_MAX,
+                                           &anchor, 1, &lm_head, &token,
+                                           NULL),
+                 OC_ERR_INVALID_ARG);
 }

@@ -25,6 +25,8 @@
 #include "oxidize/safetensors.h"
 #include "oxidize/simd.h"
 
+#include <errno.h>
+#include <float.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -58,6 +60,7 @@ void *oc_dflash2_alloc_huge(size_t n)
 {
     if (n < 1u << 20) return malloc(n);       /* small: plain malloc */
     size_t pg = df2_hp_pagesize();
+    if (n > SIZE_MAX - (pg - 1)) return NULL;
     size_t n2 = (n + pg - 1) & ~(pg - 1);
     void *p = mmap(NULL, n2, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -77,6 +80,7 @@ void oc_dflash2_free_huge(void *p, size_t n)
     if (!p) return;
     if (n < 1u << 20) { free(p); return; }
     size_t pg = df2_hp_pagesize();
+    if (n > SIZE_MAX - (pg - 1)) return;
     size_t n2 = (n + pg - 1) & ~(pg - 1);
     munmap(p, n2);
 }
@@ -104,83 +108,18 @@ static void rms_norm_row(const float *x, const float *w, float *out,
 
 static float silu(float x) { return x / (1.0f + expf(-x)); }
 
-/* ─── SIMD dispatch (AVX2 + FMA when available) ─────────────────────── */
-/*
- * The kernels below are hot-path F32 dot products; on x86-64 they dispatch
- * to AVX2+FMA versions guarded by __attribute__((target("avx2,fma"))) so a
- * single binary runs on any host (scalar fallback otherwise), mirroring the
- * oxk/simd conventions. Note the SIMD versions reassociate the sum order
- * (8-lane lanes then a final horizontal add), so outputs can differ from
- * the scalar path in the last ulp — acceptable here: the reference parity
- * tolerance for BF16 weights is 2e-4, far above that.
- */
-
-#if defined(__x86_64__) || defined(__i386__)
-#define OC_DF2_SIMD_X86 1
-#include <immintrin.h>
-
-__attribute__((target("avx2,fma")))
-static float df2_dot_avx2(const float *a, const float *b, size_t n)
-{
-    /* Four independent FMA chains break the serial dependency; Zen 3
-     * retires 2 FMAs/cycle, so the chain is the throughput limiter. */
-    __m256 a0 = _mm256_setzero_ps();
-    __m256 a1 = _mm256_setzero_ps();
-    __m256 a2 = _mm256_setzero_ps();
-    __m256 a3 = _mm256_setzero_ps();
-    size_t i = 0;
-    for (; i + 32 <= n; i += 32) {
-        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
-                             _mm256_loadu_ps(b + i), a0);
-        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),
-                             _mm256_loadu_ps(b + i + 8), a1);
-        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16),
-                             _mm256_loadu_ps(b + i + 16), a2);
-        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24),
-                             _mm256_loadu_ps(b + i + 24), a3);
-    }
-    for (; i + 8 <= n; i += 8)
-        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
-                             _mm256_loadu_ps(b + i), a0);
-    __m256 acc = _mm256_add_ps(_mm256_add_ps(a0, a1),
-                               _mm256_add_ps(a2, a3));
-    float s0 = acc[0] + acc[1] + acc[2] + acc[3];
-    float s1 = acc[4] + acc[5] + acc[6] + acc[7];
-    float sum = s0 + s1;
-    for (; i < n; i++) sum += a[i] * b[i];
-    return sum;
-}
-
-/* out[i, :] = W @ x[i, :] for n input rows; weights streamed per worker. */
-__attribute__((target("avx2,fma")))
-static void df2_gemv_rows_avx2(const float *w, size_t rows, size_t cols,
-                               const float *x, float *out)
-{
-    for (size_t r = 0; r < rows; r++) {
-        const float *wr = w + r * cols;
-        out[r] = df2_dot_avx2(wr, x, cols);
-    }
-}
+static bool df2_size_mul(size_t a, size_t b, size_t *out);
+static bool df2_size_add(size_t a, size_t b, size_t *out);
+static bool df2_float_extent(size_t count);
 
 static float df2_dot(const float *a, const float *b, size_t n)
 {
-    if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
-        oc_simd_caps()->level == OC_SIMD_AVX512)
-        return df2_dot_avx2(a, b, n);
+    float result;
+    if (oc_simd_try_dflash2_dot_f32(a, b, n, &result)) return result;
     float acc = 0.0f;
     for (size_t i = 0; i < n; i++) acc += a[i] * b[i];
     return acc;
 }
-
-#else
-/* Non-x86: plain scalar dot; the helpers below build on it portably. */
-static float df2_dot(const float *a, const float *b, size_t n)
-{
-    float acc = 0.0f;
-    for (size_t i = 0; i < n; i++) acc += a[i] * b[i];
-    return acc;
-}
-#endif
 
 /* ── Portable scalar helpers (both x86 and non-x86) ─────────────────── */
 
@@ -194,63 +133,10 @@ static float df2_dot_pre(const float *ap, const float *b, size_t n)
 /* BF16 x F32 dot: the weight row is raw BF16 (the high 16 bits of an
  * F32), the activation is F32. Widening via cvtepu16 + 32-bit shift
  * (NOT cvtph_ps, which is IEEE half precision). */
-#if OC_DF2_SIMD_X86
-__attribute__((target("avx2,fma")))
-static float df2_dot_bf16_avx2(const uint16_t *w, const float *x, size_t n)
-{
-    /* Four independent FMA chains (see df2_dot_avx2). */
-    __m256 a0 = _mm256_setzero_ps();
-    __m256 a1 = _mm256_setzero_ps();
-    __m256 a2 = _mm256_setzero_ps();
-    __m256 a3 = _mm256_setzero_ps();
-    size_t i = 0;
-    for (; i + 32 <= n; i += 32) {
-        for (size_t j = 0; j < 4; j++) {
-            __m128i h = _mm_loadu_si128((const __m128i *)(w + i + j * 8));
-            __m256i w32 = _mm256_slli_epi32(
-                _mm256_cvtepu16_epi32(h), 16);
-            __m256 wv;
-            memcpy(&wv, &w32, sizeof(wv));
-            if (j == 0)
-                a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), a0);
-            else if (j == 1)
-                a1 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 8), a1);
-            else if (j == 2)
-                a2 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 16), a2);
-            else
-                a3 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 24), a3);
-        }
-    }
-    for (; i + 8 <= n; i += 8) {
-        __m128i h = _mm_loadu_si128((const __m128i *)(w + i));
-        __m256i w32 = _mm256_slli_epi32(
-            _mm256_cvtepu16_epi32(h), 16);
-        __m256 wv;
-        memcpy(&wv, &w32, sizeof(wv));
-        a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), a0);
-    }
-    __m256 acc = _mm256_add_ps(_mm256_add_ps(a0, a1),
-                               _mm256_add_ps(a2, a3));
-    float s0 = acc[0] + acc[1] + acc[2] + acc[3];
-    float s1 = acc[4] + acc[5] + acc[6] + acc[7];
-    float sum = s0 + s1;
-    for (; i < n; i++) {
-        uint32_t bits = (uint32_t)w[i] << 16;
-        float wv;
-        memcpy(&wv, &bits, 4);
-        sum += wv * x[i];
-    }
-    return sum;
-}
-#endif
-
 static float df2_dot_bf16(const uint16_t *w, const float *x, size_t n)
 {
-#if OC_DF2_SIMD_X86
-    if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
-        oc_simd_caps()->level == OC_SIMD_AVX512)
-        return df2_dot_bf16_avx2(w, x, n);
-#endif
+    float result;
+    if (oc_simd_try_dflash2_dot_bf16(w, x, n, &result)) return result;
     float sum = 0.0f;
     for (size_t i = 0; i < n; i++) {
         uint32_t bits = (uint32_t)w[i] << 16;
@@ -288,11 +174,7 @@ static void df2_widen_row(const OcDFlash2Weight *w, size_t row, float *dst)
 static void gemv_rows_dispatch(const float *w, size_t rows, size_t cols,
                                const float *x, float *out)
 {
-#if OC_DF2_SIMD_X86
-    if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
-        oc_simd_caps()->level == OC_SIMD_AVX512)
-        return (void)df2_gemv_rows_avx2(w, rows, cols, x, out);
-#endif
+    if (oc_simd_try_dflash2_gemv_rows_f32(w, rows, cols, x, out)) return;
     for (size_t r = 0; r < rows; r++)
         out[r] = df2_dot(w + r * cols, x, cols);
 }
@@ -353,12 +235,6 @@ typedef struct OcDFlash2GemmCtx {
 
 /* out[i, :] = W @ x[i, :] for n input rows; weights streamed per worker. */
 
-/* Defined below (topk section); shared with the block-GEMM worker. */
-#if OC_DF2_SIMD_X86
-static void df2_dot_bf16_batch_avx2(const uint16_t *w, const float *x,
-                                    size_t H, size_t n_draft, float *out);
-#endif
-
 /* Batch size cap for the fused BF16 block-GEMM kernel: one W row is
  * loaded/widened once and FMAd against up to 8 x rows (8 accumulator
  * sets fit comfortably in registers; beyond that fall back per-row). */
@@ -371,26 +247,33 @@ static void dflash2_gemm_par_fn(size_t begin, size_t end, size_t tid,
     OcDFlash2GemmCtx *c = (OcDFlash2GemmCtx *)ud;
     /* W-row outer loop: weight streamed once per region, x rows stay in
      * cache (x is at most block*4096*4 = 128 KB for the block sizes here). */
-#if OC_DF2_SIMD_X86
     /* BF16 weights with a small x-row count: the fused kernel loads and
      * widens each W chunk once for ALL x rows (the per-row loop would
      * re-load + re-widen the row once per x row, which measured ~1.6x
      * slower streaming on cold DRAM). Falls back per-row for F32 weights
      * (small/synthetic) and n > 8. */
-    if (c->w->bf16 && c->n <= OC_DF2_GEMM_FUSED_MAX_N &&
-        (oc_simd_caps()->level == OC_SIMD_AVX2 ||
-         oc_simd_caps()->level == OC_SIMD_AVX512)) {
+    if (c->w->bf16 && c->n <= OC_DF2_GEMM_FUSED_MAX_N) {
         const size_t H = c->w->cols;
         float out[OC_DF2_GEMM_FUSED_MAX_N];
-        for (size_t r = begin; r < end; r++) {
-            df2_dot_bf16_batch_avx2(c->w->bf16 + r * H, c->x,
-                                    H, c->n, out);
+        if (begin < end && oc_simd_try_dflash2_dot_bf16_batch(
+                c->w->bf16 + begin * H, c->x, H, c->n, out)) {
             for (size_t i = 0; i < c->n; i++)
-                c->out[i * c->out_row_stride + r] = out[i];
+                c->out[i * c->out_row_stride + begin] = out[i];
+            for (size_t r = begin + 1; r < end; r++) {
+                if (oc_simd_try_dflash2_dot_bf16_batch(
+                        c->w->bf16 + r * H, c->x, H, c->n, out)) {
+                    for (size_t i = 0; i < c->n; i++)
+                        c->out[i * c->out_row_stride + r] = out[i];
+                } else {
+                    for (size_t i = 0; i < c->n; i++)
+                        c->out[i * c->out_row_stride + r] =
+                            df2_dot_bf16(c->w->bf16 + r * H,
+                                         c->x + i * H, H);
+                }
+            }
+            return;
         }
-        return;
     }
-#endif
     for (size_t r = begin; r < end; r++) {
         for (size_t i = 0; i < c->n; i++)
             c->out[i * c->out_row_stride + r] =
@@ -457,17 +340,14 @@ static void dflash2_multigemm_par_fn(size_t begin, size_t end, size_t tid,
         const float *x = c->xs[wsel];
         const size_t r = ur - c->row0[wsel];
         const size_t H = w->cols;
-#if OC_DF2_SIMD_X86
         float out[OC_DF2_GEMM_FUSED_MAX_N];
         if (w->bf16 && c->n <= OC_DF2_GEMM_FUSED_MAX_N &&
-            (oc_simd_caps()->level == OC_SIMD_AVX2 ||
-             oc_simd_caps()->level == OC_SIMD_AVX512)) {
-            df2_dot_bf16_batch_avx2(w->bf16 + r * H, x, H, c->n, out);
+            oc_simd_try_dflash2_dot_bf16_batch(
+                w->bf16 + r * H, x, H, c->n, out)) {
             for (size_t i = 0; i < c->n; i++)
                 c->outs[wsel][i * w->rows + r] = out[i];
             continue;
         }
-#endif
         for (size_t i = 0; i < c->n; i++)
             c->outs[wsel][i * w->rows + r] = df2_dot_wrow(w, r, x + i * H);
     }
@@ -493,32 +373,10 @@ static void gemm_multi(OcDFlash2MultiGemmCtx *c)
 
 /* ─── Grouped dynamic causal conv ───────────────────────────────────── */
 
-#if OC_DF2_SIMD_X86
-/* ob[c] += (kb[c] + dv) * xb[c] for one channel group. */
-__attribute__((target("avx2,fma")))
-static void conv_mac_avx2(float *ob, const float *kb, const float *xb,
-                          float dv, size_t n)
-{
-    __m256 d = _mm256_set1_ps(dv);
-    size_t c = 0;
-    for (; c + 8 <= n; c += 8) {
-        __m256 k = _mm256_add_ps(_mm256_loadu_ps(kb + c), d);
-        __m256 x = _mm256_loadu_ps(xb + c);
-        __m256 o = _mm256_loadu_ps(ob + c);
-        _mm256_storeu_ps(ob + c, _mm256_fmadd_ps(k, x, o));
-    }
-    for (; c < n; c++) ob[c] += (kb[c] + dv) * xb[c];
-}
-#endif
-
 static void conv_mac(float *ob, const float *kb, const float *xb,
                      float dv, size_t n)
 {
-#if OC_DF2_SIMD_X86
-    if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
-        oc_simd_caps()->level == OC_SIMD_AVX512)
-        return conv_mac_avx2(ob, kb, xb, dv, n);
-#endif
+    if (oc_simd_try_dflash2_conv_mac(ob, kb, xb, dv, n)) return;
     for (size_t c = 0; c < n; c++) ob[c] += (kb[c] + dv) * xb[c];
 }
 
@@ -606,13 +464,18 @@ OcError oc_dflash2_kvring_init(OcDFlash2KvRing *ring, size_t capacity,
 {
     if (!ring || capacity == 0 || n_kv_heads == 0 || head_dim == 0)
         return OC_ERR_INVALID_ARG;
+    size_t vec, elems;
+    if (!df2_size_mul(n_kv_heads, head_dim, &vec) ||
+        !df2_size_mul(capacity, vec, &elems) ||
+        !df2_float_extent(elems) ||
+        capacity > SIZE_MAX / sizeof(int64_t))
+        return OC_ERR_INVALID_ARG;
     memset(ring, 0, sizeof(*ring));
     ring->capacity = capacity;
     ring->n_kv_heads = n_kv_heads;
     ring->head_dim = head_dim;
-    size_t vec = n_kv_heads * head_dim;
-    ring->k = malloc(capacity * vec * sizeof(float));
-    ring->v = malloc(capacity * vec * sizeof(float));
+    ring->k = malloc(elems * sizeof(float));
+    ring->v = malloc(elems * sizeof(float));
     ring->pos = malloc(capacity * sizeof(int64_t));
     if (!ring->k || !ring->v || !ring->pos) {
         oc_dflash2_kvring_free(ring);
@@ -652,8 +515,16 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
                                  int64_t pos0, size_t n)
 {
     if (!ring || !k || !v) return OC_ERR_INVALID_ARG;
-    if (n > ring->capacity) return OC_ERR_INVALID_ARG;
-    const size_t vec = ring->n_kv_heads * ring->head_dim;
+    size_t vec, undo_elems, new_total;
+    if (ring->capacity == 0 || n > ring->capacity ||
+        !df2_size_mul(ring->n_kv_heads, ring->head_dim, &vec) ||
+        !df2_size_mul(n, vec, &undo_elems) ||
+        !df2_float_extent(undo_elems) ||
+        n > SIZE_MAX / sizeof(int64_t) ||
+        !df2_size_add(ring->total, n, &new_total) ||
+        (n > 0 && ((n - 1) > (size_t)INT64_MAX ||
+                   pos0 > INT64_MAX - (int64_t)(n - 1))))
+        return OC_ERR_INVALID_ARG;
     free(ring->undo_k);
     free(ring->undo_v);
     free(ring->undo_pos);
@@ -663,8 +534,8 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
     ring->undo_n = 0;
 
     if (n > ring->capacity - ring->len) {
-        ring->undo_k = malloc(n * vec * sizeof(float));
-        ring->undo_v = malloc(n * vec * sizeof(float));
+        ring->undo_k = malloc(undo_elems * sizeof(float));
+        ring->undo_v = malloc(undo_elems * sizeof(float));
         ring->undo_pos = malloc(n * sizeof(int64_t));
         if (!ring->undo_k || !ring->undo_v || !ring->undo_pos) {
             free(ring->undo_k);
@@ -692,7 +563,7 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
         memcpy(ring->v + slot * vec, v + i * vec, vec * sizeof(float));
         ring->pos[slot] = pos0 + (int64_t)i;
     }
-    ring->total += n;
+    ring->total = new_total;
     ring->len = ring->total < ring->capacity ? ring->total : ring->capacity;
     return OC_OK;
 }
@@ -783,7 +654,8 @@ static float *load_tensor_f32(const OcSafetensorsFile *f,
     }
     if (!t) return NULL;
     size_t elems = 1;
-    for (uint32_t d = 0; d < t->n_dims; d++) elems *= (size_t)t->shape[d];
+    for (uint32_t d = 0; d < t->n_dims; d++)
+        if (!df2_size_mul(elems, (size_t)t->shape[d], &elems)) return NULL;
     if (elems != expect_elems) return NULL;
     if (expect_elems > SIZE_MAX / sizeof(float)) return NULL;
     size_t dtype_sz = 0;
@@ -817,7 +689,8 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
     w->generate = NULL;
     w->gen_user = NULL;
     w->bf16 = NULL;
-    const size_t elems = rows * cols;
+    size_t elems;
+    if (!df2_size_mul(rows, cols, &elems)) return OC_ERR_FORMAT;
 
     /* Locate the tensor once; reuse the header walk for both paths. */
     const OcSafetensorsTensor *t = NULL;
@@ -835,7 +708,9 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
         return OC_ERR_FORMAT;
     }
     size_t got = 1;
-    for (uint32_t d = 0; d < t->n_dims; d++) got *= (size_t)t->shape[d];
+    for (uint32_t d = 0; d < t->n_dims; d++)
+        if (!df2_size_mul(got, (size_t)t->shape[d], &got))
+            return OC_ERR_FORMAT;
     if (got != elems) {
         fprintf(stderr, "dflash2: bad tensor %s\n", name);
         w->rows = rows;
@@ -897,14 +772,54 @@ static int cfg_num(const char *json, const char *key, double *out)
     if (!p) return 0;
     p += strlen(pat);
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r') p++;
-    if (*p != ':') return 0;
+    if (*p != ':') return -1;
     p++;
     while (*p == ' ' || *p == '\n' || *p == '\t' || *p == '\r') p++;
     char *end = NULL;
     double v = strtod(p, &end);
-    if (end == p) return 0;
+    if (end == p) return -1;
+    const char *tail = end;
+    while (*tail == ' ' || *tail == '\n' || *tail == '\t' || *tail == '\r')
+        tail++;
+    if (*tail != ',' && *tail != '}' && *tail != ']') return -1;
     *out = v;
     return 1;
+}
+
+static bool cfg_optional_size(const char *json, const char *key, size_t *out)
+{
+    double v;
+    int found = cfg_num(json, key, &v);
+    if (found == 0) return true;
+    if (found < 0) return false;
+    if (!isfinite(v) || v < 0.0 || floor(v) != v ||
+        v >= (double)SIZE_MAX)
+        return false;
+    *out = (size_t)v;
+    return true;
+}
+
+static bool cfg_optional_u32(const char *json, const char *key, uint32_t *out)
+{
+    double v;
+    int found = cfg_num(json, key, &v);
+    if (found == 0) return true;
+    if (found < 0) return false;
+    if (!isfinite(v) || v < 0.0 || floor(v) != v || v > UINT32_MAX)
+        return false;
+    *out = (uint32_t)v;
+    return true;
+}
+
+static bool cfg_optional_float(const char *json, const char *key, float *out)
+{
+    double v;
+    int found = cfg_num(json, key, &v);
+    if (found == 0) return true;
+    if (found < 0) return false;
+    if (!isfinite(v) || v < -FLT_MAX || v > FLT_MAX) return false;
+    *out = (float)v;
+    return true;
 }
 
 static bool df2_size_mul(size_t a, size_t b, size_t *out)
@@ -984,26 +899,26 @@ static bool df2_config_extents_valid(const OcDFlash2Config *cfg)
 /* Parse the model's config.json into cfg. Missing fields keep their
  * defaults from oc_dflash2_config_init, so GLM-only configs work even if
  * they omit fields (e.g. head_dim). */
-static void parse_config_json(OcDFlash2Config *cfg, const char *json)
+static bool parse_config_json(OcDFlash2Config *cfg, const char *json)
 {
-    double v;
-    if (cfg_num(json, "hidden_size", &v)) cfg->hidden_size = (size_t)v;
-    if (cfg_num(json, "intermediate_size", &v)) cfg->intermediate_size = (size_t)v;
-    if (cfg_num(json, "num_hidden_layers", &v)) cfg->num_hidden_layers = (size_t)v;
-    if (cfg_num(json, "num_attention_heads", &v)) cfg->num_attention_heads = (size_t)v;
-    if (cfg_num(json, "num_key_value_heads", &v)) cfg->num_key_value_heads = (size_t)v;
-    if (cfg_num(json, "head_dim", &v)) cfg->head_dim = (size_t)v;
-    if (cfg_num(json, "vocab_size", &v)) cfg->vocab_size = (size_t)v;
-    if (cfg_num(json, "num_target_layers", &v)) cfg->num_target_layers = (size_t)v;
-    if (cfg_num(json, "block_size", &v)) cfg->block_size = (size_t)v;
-    if (cfg_num(json, "conv_kernel_size", &v)) cfg->conv_kernel_size = (size_t)v;
-    if (cfg_num(json, "conv_group_size", &v)) cfg->conv_group_size = (size_t)v;
-    if (cfg_num(json, "mask_token_id", &v)) cfg->mask_token_id = (uint32_t)v;
-    if (cfg_num(json, "selector_rank", &v)) cfg->selector_rank = (size_t)v;
-    if (cfg_num(json, "selector_top_k", &v)) cfg->selector_top_k = (size_t)v;
-    if (cfg_num(json, "sliding_window", &v)) cfg->sliding_window = (size_t)v;
-    if (cfg_num(json, "rope_theta", &v)) cfg->rope_theta = (float)v;
-    if (cfg_num(json, "rms_norm_eps", &v)) cfg->rms_norm_eps = (float)v;
+    if (!cfg_optional_size(json, "hidden_size", &cfg->hidden_size) ||
+        !cfg_optional_size(json, "intermediate_size", &cfg->intermediate_size) ||
+        !cfg_optional_size(json, "num_hidden_layers", &cfg->num_hidden_layers) ||
+        !cfg_optional_size(json, "num_attention_heads", &cfg->num_attention_heads) ||
+        !cfg_optional_size(json, "num_key_value_heads", &cfg->num_key_value_heads) ||
+        !cfg_optional_size(json, "head_dim", &cfg->head_dim) ||
+        !cfg_optional_size(json, "vocab_size", &cfg->vocab_size) ||
+        !cfg_optional_size(json, "num_target_layers", &cfg->num_target_layers) ||
+        !cfg_optional_size(json, "block_size", &cfg->block_size) ||
+        !cfg_optional_size(json, "conv_kernel_size", &cfg->conv_kernel_size) ||
+        !cfg_optional_size(json, "conv_group_size", &cfg->conv_group_size) ||
+        !cfg_optional_u32(json, "mask_token_id", &cfg->mask_token_id) ||
+        !cfg_optional_size(json, "selector_rank", &cfg->selector_rank) ||
+        !cfg_optional_size(json, "selector_top_k", &cfg->selector_top_k) ||
+        !cfg_optional_size(json, "sliding_window", &cfg->sliding_window) ||
+        !cfg_optional_float(json, "rope_theta", &cfg->rope_theta) ||
+        !cfg_optional_float(json, "rms_norm_eps", &cfg->rms_norm_eps))
+        return false;
     /* target_layer_ids lives inside the nested dflash_config object; scan
      * for the array and read up to OC_DFLASH2_MAX_TARGET_LAYERS ints. */
     const char *t = strstr(json, "\"target_layer_ids\"");
@@ -1016,13 +931,23 @@ static void parse_config_json(OcDFlash2Config *cfg, const char *json)
                 while (*p == ' ' || *p == '\n' || *p == '\t' ||
                        *p == '\r' || *p == ',') p++;
                 if (*p == ']' || *p == '\0') break;
-                long id = strtol(p, (char **)&p, 10);
-                if (*p == '\0') break;
+                errno = 0;
+                char *end = NULL;
+                if (*p == '-') return false;
+                unsigned long long id = strtoull(p, &end, 10);
+                if (end == p || errno == ERANGE || id >= (unsigned long long)SIZE_MAX)
+                    return false;
+                const char *tail = end;
+                while (*tail == ' ' || *tail == '\n' || *tail == '\t' ||
+                       *tail == '\r') tail++;
+                if (*tail != ',' && *tail != ']') return false;
+                p = end;
                 cfg->target_layer_ids[n++] = (size_t)id;
             }
             if (n) cfg->n_target_layer_ids = n;
         }
     }
+    return true;
 }
 
 OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
@@ -1053,15 +978,15 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
             return io_err ? OC_ERR_IO : OC_ERR_FORMAT;
         }
         buf[got] = '\0';
-        parse_config_json(&m->cfg, buf);
+        bool parsed = parse_config_json(&m->cfg, buf);
         /* Sanity: a config that yields no hidden_size at all was not a
          * DFlash2 config.json — garbage JSON would otherwise keep the
          * GLM defaults and load the checkpoint with wrong dimensions. */
         double probe;
-        bool has_hidden = cfg_num(buf, "hidden_size", &probe);
+        bool has_hidden = cfg_num(buf, "hidden_size", &probe) == 1;
         free(buf);
-        if (!has_hidden) {
-            fprintf(stderr, "dflash2: config %s has no hidden_size\n",
+        if (!parsed || !has_hidden) {
+            fprintf(stderr, "dflash2: config %s is invalid or has no hidden_size\n",
                     config_json_path);
             return OC_ERR_FORMAT;
         }
@@ -1101,6 +1026,8 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         m->cfg.selector_top_k > OC_DFLASH2_MAX_TOP_K ||
         m->cfg.sliding_window == 0 ||
         m->cfg.vocab_size == 0 ||
+        !isfinite(m->cfg.rope_theta) || m->cfg.rope_theta <= 0.0f ||
+        !isfinite(m->cfg.rms_norm_eps) || m->cfg.rms_norm_eps <= 0.0f ||
         !df2_config_extents_valid(&m->cfg)) {
         fprintf(stderr, "dflash2: invalid config dimensions\n");
         return OC_ERR_FORMAT;
@@ -1358,58 +1285,6 @@ typedef struct OcDFlash2TopKCtx {
     _Atomic int *err;       /* shared worker failure (0 = ok; 1 = OOM) */
 } OcDFlash2TopKCtx;
 
-#if OC_DF2_SIMD_X86
-/* Fused batched BF16 dot: one stream of W, FMAs against n_draft x rows.
- * Each 16-lane W chunk is loaded/widened once and accumulated into all
- * draft rows' accumulator sets, keeping W in registers across the batch
- * (the W row is the bandwidth-limited stream; x rows stay hot in L2/L1). */
-__attribute__((target("avx2,fma")))
-static void df2_dot_bf16_batch_avx2(const uint16_t *w, const float *x,
-                                    size_t H, size_t n_draft, float *out)
-{
-    __m256 acc[OC_DFLASH2_MAX_BLOCK];
-    for (size_t p = 0; p < n_draft; p++)
-        acc[p] = _mm256_setzero_ps();
-    size_t i = 0;
-    for (; i + 32 <= H; i += 32) {
-        /* W chunk [i, i+32): two 256-bit loads = 4 x 8-lane widenings. */
-        __m256i h0 = _mm256_loadu_si256((const __m256i *)(w + i));
-        __m256i h1 = _mm256_loadu_si256((const __m256i *)(w + i + 16));
-        __m128i c0 = _mm256_castsi256_si128(h0);
-        __m128i c1 = _mm256_extracti128_si256(h0, 1);
-        __m128i c2 = _mm256_castsi256_si128(h1);
-        __m128i c3 = _mm256_extracti128_si256(h1, 1);
-        __m256 wv0, wv1, wv2, wv3;
-        {
-            __m256i e0 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c0), 16);
-            __m256i e1 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c1), 16);
-            __m256i e2 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c2), 16);
-            __m256i e3 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(c3), 16);
-            memcpy(&wv0, &e0, 32); memcpy(&wv1, &e1, 32);
-            memcpy(&wv2, &e2, 32); memcpy(&wv3, &e3, 32);
-        }
-        for (size_t p = 0; p < n_draft; p++) {
-            const float *xp = x + p * H + i;
-            acc[p] = _mm256_fmadd_ps(wv0, _mm256_loadu_ps(xp), acc[p]);
-            acc[p] = _mm256_fmadd_ps(wv1, _mm256_loadu_ps(xp + 8), acc[p]);
-            acc[p] = _mm256_fmadd_ps(wv2, _mm256_loadu_ps(xp + 16), acc[p]);
-            acc[p] = _mm256_fmadd_ps(wv3, _mm256_loadu_ps(xp + 24), acc[p]);
-        }
-    }
-    for (size_t p = 0; p < n_draft; p++) {
-        float s0 = acc[p][0] + acc[p][1] + acc[p][2] + acc[p][3];
-        float s1 = acc[p][4] + acc[p][5] + acc[p][6] + acc[p][7];
-        out[p] = s0 + s1;
-    }
-    if (i < H) {
-        /* Tail: finish scalar per draft row (H is a multiple of 16 for all
-         * real configs, so this is a guard only). */
-        for (size_t p = 0; p < n_draft; p++)
-            out[p] += df2_dot_bf16(w + i, x + p * H + i, H - i);
-    }
-}
-#endif
-
 /* K-best insert (descending). Returns early when below current worst. */
 static inline void df2_topk_insert(float *pval, uint32_t *pidx,
                                    size_t top_k, float v_, uint32_t id_)
@@ -1450,18 +1325,14 @@ static void dflash2_topk_par_fn(size_t begin, size_t end, size_t tid,
         if (c->lm->bf16) {
             /* Fused batched BF16 dot: W streamed once, all draft rows
              * accumulated in the same pass. */
-#if OC_DF2_SIMD_X86
             float scores[OC_DFLASH2_MAX_BLOCK];
-            if (oc_simd_caps()->level == OC_SIMD_AVX2 ||
-                oc_simd_caps()->level == OC_SIMD_AVX512) {
-                df2_dot_bf16_batch_avx2(c->lm->bf16 + v * H, c->x,
-                                        H, n_draft, scores);
+            if (oc_simd_try_dflash2_dot_bf16_batch(
+                    c->lm->bf16 + v * H, c->x, H, n_draft, scores)) {
                 for (size_t p = 0; p < n_draft; p++)
                     df2_topk_insert(val + p * top_k, idx + p * top_k,
                                      top_k, scores[p], (uint32_t)v);
                 continue;
             }
-#endif
             for (size_t p = 0; p < n_draft; p++) {
                 float v_ = df2_dot_bf16(c->lm->bf16 + v * H,
                                         c->x + p * H, H);
@@ -2204,13 +2075,20 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
      * too, not just the counters. All rings share one row geometry, so one
      * stride covers every layer. */
     const size_t n_layers = m->n_layers;
+    if (n_layers == 0 || !m->kv || n_layers > SIZE_MAX / sizeof(size_t))
+        return OC_ERR_INVALID_ARG;
     size_t saved_total[n_layers];
     const size_t n_ctx_dbg = m->target_ctx_len;
-    const size_t n_overwrite = n_ctx_dbg + block;
-    const size_t vec_save = n_layers ? m->kv[0].n_kv_heads * m->kv[0].head_dim
-                                     : 0;
-    const size_t slot_bytes = 2 * vec_save * sizeof(float) + sizeof(int64_t);
-    uint8_t *saved_slots = malloc(n_layers * n_overwrite * slot_bytes);
+    size_t n_overwrite, vec_save, float_bytes, slot_bytes, saved_bytes;
+    if (!df2_size_add(n_ctx_dbg, block, &n_overwrite) ||
+        !df2_size_mul(m->kv[0].n_kv_heads, m->kv[0].head_dim, &vec_save) ||
+        !df2_size_mul(vec_save, 2, &float_bytes) ||
+        !df2_size_mul(float_bytes, sizeof(float), &float_bytes) ||
+        !df2_size_add(float_bytes, sizeof(int64_t), &slot_bytes) ||
+        !df2_size_mul(n_layers, n_overwrite, &saved_bytes) ||
+        !df2_size_mul(saved_bytes, slot_bytes, &saved_bytes))
+        return OC_ERR_INVALID_ARG;
+    uint8_t *saved_slots = malloc(saved_bytes);
     if (!saved_slots) return OC_ERR_OOM;
     for (size_t li = 0; li < n_layers; li++) {
         OcDFlash2KvRing *r = &m->kv[li];
@@ -2308,7 +2186,7 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
         !lm_head || (!lm_head->data && !lm_head->bf16 &&
                      !lm_head->generate) || !out_tokens)
         return OC_ERR_INVALID_ARG;
-    if (anchor_ids[n_anchor - 1] >= m->cfg.vocab_size)
+    if (n_rows == 0 || anchor_ids[n_anchor - 1] >= m->cfg.vocab_size)
         return OC_ERR_INVALID_ARG; /* codebook row would be OOB */
     /* Same [vocab, hidden] contract as oc_dflash2_propose. */
     if (lm_head->cols != m->cfg.hidden_size || lm_head->rows == 0 ||
@@ -2318,14 +2196,23 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
     const size_t H = m->cfg.hidden_size;
     const size_t top_k = m->cfg.selector_top_k;
     const size_t rank = m->cfg.selector_rank;
+    size_t unary_count, proj_count;
+    if (!df2_size_mul(n_rows, top_k, &unary_count) ||
+        !df2_float_extent(unary_count) ||
+        unary_count > SIZE_MAX / sizeof(uint32_t) ||
+        !df2_size_mul(n_rows, rank, &proj_count) ||
+        !df2_float_extent(proj_count) ||
+        !df2_float_extent(top_k) || !df2_float_extent(rank) ||
+        !df2_float_extent(H) || !df2_float_extent(lm_head->rows))
+        return OC_ERR_INVALID_ARG;
     /* Candidate ids index the selector codebooks [cfg.vocab_size, rank];
      * an lm_head with more rows must not produce ids past that. */
     const size_t vocab = lm_head->rows < m->cfg.vocab_size
                              ? lm_head->rows : m->cfg.vocab_size;
 
-    float *unary = malloc(n_rows * top_k * sizeof(float));
-    uint32_t *cand = malloc(n_rows * top_k * sizeof(uint32_t));
-    float *proj_h = malloc(n_rows * rank * sizeof(float));
+    float *unary = malloc(unary_count * sizeof(float));
+    uint32_t *cand = malloc(unary_count * sizeof(uint32_t));
+    float *proj_h = malloc(proj_count * sizeof(float));
     float *scores = malloc(top_k * sizeof(float));
     if (!unary || !cand || !proj_h || !scores) {
         free(unary); free(cand); free(proj_h); free(scores);
