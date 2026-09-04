@@ -1,0 +1,19 @@
+oxidize-c/src/util/numa.c
+  s_453def152fa7cf::t_bbec172a118c54 337,415
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "edde8457006ae89f4bbf6ddc56d0467771dfec53",
+  "prompts": {},
+  "sessions": {
+    "s_453def152fa7cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06bab-9644-7313-898a-4dcc3f8a41c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
