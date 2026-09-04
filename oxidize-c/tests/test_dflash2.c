@@ -1,4 +1,8 @@
+#define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
+
+#include <stdio.h>
+#include <unistd.h>
 
 #include "oxidize/dflash2.h"
 
@@ -48,4 +52,21 @@ Test(dflash2, trim_restores_entry_when_append_crosses_wrap)
     cr_assert_float_eq(ring.k[0], 0.0f, 0.0f);
     cr_assert_float_eq(ring.v[0], 0.0f, 0.0f);
     oc_dflash2_kvring_free(&ring);
+}
+
+Test(dflash2, model_load_rejects_overflowing_config_before_weights)
+{
+    char path[] = "/tmp/oxidize-dflash2-config-XXXXXX";
+    int fd = mkstemp(path);
+    cr_assert_geq(fd, 0);
+    FILE *config = fdopen(fd, "w");
+    cr_assert_not_null(config);
+    cr_assert_gt(fputs("{\"hidden_size\":4294967296,"
+                       "\"intermediate_size\":4294967296}", config), 0);
+    cr_assert_eq(fclose(config), 0);
+
+    OcDFlash2Model model;
+    cr_assert_eq(oc_dflash2_model_load(&model, "/does/not/exist", path),
+                 OC_ERR_FORMAT);
+    cr_assert_eq(unlink(path), 0);
 }

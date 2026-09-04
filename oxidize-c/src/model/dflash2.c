@@ -897,6 +897,80 @@ static int cfg_num(const char *json, const char *key, double *out)
     return 1;
 }
 
+static bool df2_size_mul(size_t a, size_t b, size_t *out)
+{
+    if (a != 0 && b > SIZE_MAX / a) return false;
+    *out = a * b;
+    return true;
+}
+
+static bool df2_size_add(size_t a, size_t b, size_t *out)
+{
+    if (b > SIZE_MAX - a) return false;
+    *out = a + b;
+    return true;
+}
+
+static bool df2_float_extent(size_t count)
+{
+    return count <= SIZE_MAX / sizeof(float);
+}
+
+/* Validate all config-derived extents used by tensor shapes, KV storage,
+ * and the largest block-forward scratch buffers before opening weights. */
+static bool df2_config_extents_valid(const OcDFlash2Config *cfg)
+{
+    size_t target_width, q_rows, kv_rows, kernel_rows, groups, capacity;
+    size_t extent, context_rows, slot_floats;
+
+    if (!df2_size_mul(cfg->n_target_layer_ids, cfg->hidden_size,
+                      &target_width) ||
+        !df2_size_mul(cfg->num_attention_heads, cfg->head_dim, &q_rows) ||
+        !df2_size_mul(cfg->num_key_value_heads, cfg->head_dim, &kv_rows) ||
+        !df2_size_mul(2, cfg->conv_kernel_size, &kernel_rows) ||
+        !df2_size_add(cfg->sliding_window, cfg->block_size, &capacity))
+        return false;
+    groups = cfg->hidden_size / cfg->conv_group_size;
+    if (!df2_size_mul(kernel_rows, groups, &kernel_rows)) return false;
+
+#define DF2_FLOAT_PRODUCT(a, b) \
+    (df2_size_mul((a), (b), &extent) && df2_float_extent(extent))
+    if (!DF2_FLOAT_PRODUCT(cfg->hidden_size, target_width) ||
+        !DF2_FLOAT_PRODUCT(cfg->vocab_size, cfg->selector_rank) ||
+        !DF2_FLOAT_PRODUCT(cfg->selector_rank, cfg->hidden_size) ||
+        !DF2_FLOAT_PRODUCT(q_rows, cfg->hidden_size) ||
+        !DF2_FLOAT_PRODUCT(kv_rows, cfg->hidden_size) ||
+        !DF2_FLOAT_PRODUCT(kernel_rows, cfg->hidden_size) ||
+        !DF2_FLOAT_PRODUCT(cfg->intermediate_size, cfg->hidden_size) ||
+        !DF2_FLOAT_PRODUCT(capacity, kv_rows) ||
+        !DF2_FLOAT_PRODUCT(capacity, cfg->hidden_size) ||
+        !DF2_FLOAT_PRODUCT(cfg->block_size, cfg->hidden_size) ||
+        !DF2_FLOAT_PRODUCT(cfg->block_size, q_rows) ||
+        !DF2_FLOAT_PRODUCT(cfg->block_size, kv_rows) ||
+        !DF2_FLOAT_PRODUCT(cfg->block_size, kernel_rows) ||
+        !DF2_FLOAT_PRODUCT(cfg->block_size, cfg->intermediate_size))
+        return false;
+#undef DF2_FLOAT_PRODUCT
+
+    if (!df2_size_add(capacity, cfg->block_size, &context_rows) ||
+        !df2_size_mul(context_rows, kv_rows, &extent) ||
+        !df2_float_extent(extent))
+        return false;
+
+    if (!df2_size_mul(kv_rows, 2, &slot_floats) ||
+        !df2_float_extent(slot_floats) ||
+        !df2_size_mul(slot_floats, sizeof(float), &extent) ||
+        !df2_size_add(extent, sizeof(int64_t), &extent) ||
+        !df2_size_mul(extent, cfg->block_size, &extent) ||
+        !df2_size_mul(extent, cfg->n_target_layer_ids, &extent))
+        return false;
+
+    return capacity <= SIZE_MAX / sizeof(int64_t) &&
+           cfg->num_hidden_layers <= SIZE_MAX / sizeof(OcDFlash2Layer) &&
+           cfg->num_hidden_layers <= SIZE_MAX / sizeof(OcDFlash2KvRing) &&
+           cfg->head_dim / 2 <= SIZE_MAX / sizeof(float);
+}
+
 /* Parse the model's config.json into cfg. Missing fields keep their
  * defaults from oc_dflash2_config_init, so GLM-only configs work even if
  * they omit fields (e.g. head_dim). */
@@ -998,6 +1072,7 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
      * rather than under-allocate downstream. conv_group_size is checked
      * BEFORE the hidden_size % conv_group_size divide. */
     if (m->cfg.hidden_size == 0 ||
+        m->cfg.intermediate_size == 0 ||
         m->cfg.num_hidden_layers == 0 ||
         m->cfg.num_hidden_layers > OC_DFLASH2_MAX_LAYERS ||
         m->cfg.num_attention_heads == 0 ||
@@ -1015,7 +1090,8 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         m->cfg.selector_top_k == 0 ||
         m->cfg.selector_top_k > OC_DFLASH2_MAX_TOP_K ||
         m->cfg.sliding_window == 0 ||
-        m->cfg.vocab_size == 0) {
+        m->cfg.vocab_size == 0 ||
+        !df2_config_extents_valid(&m->cfg)) {
         fprintf(stderr, "dflash2: invalid config dimensions\n");
         return OC_ERR_FORMAT;
     }

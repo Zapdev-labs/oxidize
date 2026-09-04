@@ -270,14 +270,13 @@ OcError oc_numa_bind_thread(uint32_t node)
 #endif
 }
 
-/* Pre-pin affinity mask for the pool-creator thread, captured by
- * oc_numa_pin_save_orig before the pool pins the calling thread as
- * worker 0. Single file-scope state written only by the thread that
- * resizes the pool (the pool API itself is not thread-safe), so no
- * atomics are needed. */
+/* Pre-pin affinity mask for each calling thread. The public API is
+ * thread-scoped even when the current pool implementation calls it only
+ * from the pool creator, so one caller must never restore another caller's
+ * mask. */
 #if defined(__linux__)
-static cpu_set_t g_pin_orig_mask;
-static bool g_pin_have_orig = false;
+static _Thread_local cpu_set_t g_pin_orig_mask;
+static _Thread_local bool g_pin_have_orig = false;
 #endif
 
 /* Snapshot the calling thread's current affinity mask (idempotent).
@@ -318,9 +317,10 @@ void oc_numa_pin_restore(void)
     if (!g_pin_have_orig) return;
     cpu_set_t cur;
     CPU_ZERO(&cur);
-    if (sched_getaffinity(0, sizeof(cur), &cur) == 0 &&
-        !CPU_EQUAL(&cur, &g_pin_orig_mask))
-        sched_setaffinity(0, sizeof(g_pin_orig_mask), &g_pin_orig_mask);
+    if (sched_getaffinity(0, sizeof(cur), &cur) != 0) return;
+    if (CPU_EQUAL(&cur, &g_pin_orig_mask) ||
+        sched_setaffinity(0, sizeof(g_pin_orig_mask), &g_pin_orig_mask) == 0)
+        g_pin_have_orig = false;
 #endif
 }
 

@@ -1,7 +1,12 @@
+#define _GNU_SOURCE
 /* test_numa.c — NUMA awareness tests. */
 #include <criterion/criterion.h>
 #include "oxidize/numa.h"
 #include <string.h>
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#endif
 
 Test(numa, detect)
 {
@@ -178,3 +183,68 @@ Test(numa, pin_cpu)
     OcError e = oc_numa_pin_cpu(0);
     (void)e;
 }
+
+#if defined(__linux__)
+typedef struct {
+    uint32_t own_cpu;
+    uint32_t pin_cpu;
+    pthread_barrier_t *saved;
+    bool restored_own_mask;
+    bool restored_fresh_mask;
+} PinRestoreCtx;
+
+static void *pin_restore_worker(void *arg)
+{
+    PinRestoreCtx *ctx = (PinRestoreCtx *)arg;
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(ctx->own_cpu, &mask);
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) return NULL;
+    oc_numa_pin_save_orig();
+    pthread_barrier_wait(ctx->saved);
+    if (oc_numa_pin_cpu(ctx->pin_cpu) == OC_OK) oc_numa_pin_restore();
+    CPU_ZERO(&mask);
+    ctx->restored_own_mask =
+        sched_getaffinity(0, sizeof(mask), &mask) == 0 &&
+        CPU_COUNT(&mask) == 1 && CPU_ISSET(ctx->own_cpu, &mask);
+
+    CPU_ZERO(&mask);
+    CPU_SET(ctx->pin_cpu, &mask);
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) return NULL;
+    oc_numa_pin_save_orig();
+    if (oc_numa_pin_cpu(ctx->own_cpu) == OC_OK) oc_numa_pin_restore();
+    CPU_ZERO(&mask);
+    ctx->restored_fresh_mask =
+        sched_getaffinity(0, sizeof(mask), &mask) == 0 &&
+        CPU_COUNT(&mask) == 1 && CPU_ISSET(ctx->pin_cpu, &mask);
+    return NULL;
+}
+
+Test(numa, pin_restore_state_is_per_thread)
+{
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    cr_assert_eq(sched_getaffinity(0, sizeof(allowed), &allowed), 0);
+    uint32_t cpus[2];
+    size_t n = 0;
+    for (uint32_t cpu = 0; cpu < CPU_SETSIZE && n < 2; cpu++) {
+        if (CPU_ISSET(cpu, &allowed)) cpus[n++] = cpu;
+    }
+    if (n < 2) cr_skip_test("requires two allowed CPUs");
+
+    pthread_barrier_t saved;
+    cr_assert_eq(pthread_barrier_init(&saved, NULL, 2), 0);
+    PinRestoreCtx a = { cpus[0], cpus[1], &saved, false, false };
+    PinRestoreCtx b = { cpus[1], cpus[0], &saved, false, false };
+    pthread_t ta, tb;
+    cr_assert_eq(pthread_create(&ta, NULL, pin_restore_worker, &a), 0);
+    cr_assert_eq(pthread_create(&tb, NULL, pin_restore_worker, &b), 0);
+    cr_assert_eq(pthread_join(ta, NULL), 0);
+    cr_assert_eq(pthread_join(tb, NULL), 0);
+    cr_assert(a.restored_own_mask);
+    cr_assert(b.restored_own_mask);
+    cr_assert(a.restored_fresh_mask);
+    cr_assert(b.restored_fresh_mask);
+    pthread_barrier_destroy(&saved);
+}
+#endif
