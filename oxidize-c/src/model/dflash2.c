@@ -525,38 +525,36 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
         (n > 0 && ((n - 1) > (size_t)INT64_MAX ||
                    pos0 > INT64_MAX - (int64_t)(n - 1))))
         return OC_ERR_INVALID_ARG;
+    float *next_undo_k = NULL;
+    float *next_undo_v = NULL;
+    int64_t *next_undo_pos = NULL;
+    if (n > ring->capacity - ring->len) {
+        next_undo_k = malloc(undo_elems * sizeof(float));
+        next_undo_v = malloc(undo_elems * sizeof(float));
+        next_undo_pos = malloc(n * sizeof(int64_t));
+        if (!next_undo_k || !next_undo_v || !next_undo_pos) {
+            free(next_undo_k);
+            free(next_undo_v);
+            free(next_undo_pos);
+            return OC_ERR_OOM;
+        }
+        for (size_t i = 0; i < n; i++) {
+            const size_t slot = (ring->total + i) % ring->capacity;
+            memcpy(next_undo_k + i * vec, ring->k + slot * vec,
+                   vec * sizeof(float));
+            memcpy(next_undo_v + i * vec, ring->v + slot * vec,
+                   vec * sizeof(float));
+            next_undo_pos[i] = ring->pos[slot];
+        }
+    }
     free(ring->undo_k);
     free(ring->undo_v);
     free(ring->undo_pos);
-    ring->undo_k = NULL;
-    ring->undo_v = NULL;
-    ring->undo_pos = NULL;
-    ring->undo_n = 0;
-
-    if (n > ring->capacity - ring->len) {
-        ring->undo_k = malloc(undo_elems * sizeof(float));
-        ring->undo_v = malloc(undo_elems * sizeof(float));
-        ring->undo_pos = malloc(n * sizeof(int64_t));
-        if (!ring->undo_k || !ring->undo_v || !ring->undo_pos) {
-            free(ring->undo_k);
-            free(ring->undo_v);
-            free(ring->undo_pos);
-            ring->undo_k = NULL;
-            ring->undo_v = NULL;
-            ring->undo_pos = NULL;
-            return OC_ERR_OOM;
-        }
-        ring->undo_total = ring->total;
-        ring->undo_n = n;
-        for (size_t i = 0; i < n; i++) {
-            const size_t slot = (ring->total + i) % ring->capacity;
-            memcpy(ring->undo_k + i * vec, ring->k + slot * vec,
-                   vec * sizeof(float));
-            memcpy(ring->undo_v + i * vec, ring->v + slot * vec,
-                   vec * sizeof(float));
-            ring->undo_pos[i] = ring->pos[slot];
-        }
-    }
+    ring->undo_k = next_undo_k;
+    ring->undo_v = next_undo_v;
+    ring->undo_pos = next_undo_pos;
+    ring->undo_total = ring->total;
+    ring->undo_n = next_undo_k ? n : 0;
     for (size_t i = 0; i < n; i++) {
         size_t slot = (ring->total + i) % ring->capacity;
         memcpy(ring->k + slot * vec, k + i * vec, vec * sizeof(float));
@@ -1024,6 +1022,7 @@ OcError oc_dflash2_model_load(OcDFlash2Model *m, const char *st_path,
         m->cfg.block_size > OC_DFLASH2_MAX_BLOCK ||
         m->cfg.selector_top_k == 0 ||
         m->cfg.selector_top_k > OC_DFLASH2_MAX_TOP_K ||
+        m->cfg.selector_top_k > m->cfg.vocab_size ||
         m->cfg.sliding_window == 0 ||
         m->cfg.vocab_size == 0 ||
         !isfinite(m->cfg.rope_theta) || m->cfg.rope_theta <= 0.0f ||
@@ -2078,6 +2077,11 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     if (n_layers == 0 || !m->kv || n_layers > SIZE_MAX / sizeof(size_t))
         return OC_ERR_INVALID_ARG;
     size_t saved_total[n_layers];
+    float *saved_undo_k[n_layers];
+    float *saved_undo_v[n_layers];
+    int64_t *saved_undo_pos[n_layers];
+    size_t saved_undo_n[n_layers];
+    size_t saved_undo_total[n_layers];
     const size_t n_ctx_dbg = m->target_ctx_len;
     size_t n_overwrite, vec_save, float_bytes, slot_bytes, saved_bytes;
     if (!df2_size_add(n_ctx_dbg, block, &n_overwrite) ||
@@ -2117,38 +2121,25 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
         free(saved_slots);
         return OC_ERR_OOM;
     }
+    for (size_t li = 0; li < n_layers; li++) {
+        OcDFlash2KvRing *r = &m->kv[li];
+        saved_undo_k[li] = r->undo_k;
+        saved_undo_v[li] = r->undo_v;
+        saved_undo_pos[li] = r->undo_pos;
+        saved_undo_n[li] = r->undo_n;
+        saved_undo_total[li] = r->undo_total;
+        r->undo_k = NULL;
+        r->undo_v = NULL;
+        r->undo_pos = NULL;
+        r->undo_n = 0;
+    }
     /* Same shared layer loop as propose: identical eps handling and OOM
      * behavior by construction (the review flagged the duplicated loops
      * already diverging on eps). */
     df2_pt_on = 0; /* no phase timing on the debug path */
     OcError e = dflash2_forward_block(m, noise_emb, block, &s, out_hidden);
-    if (e != OC_OK) {
-        /* Restore the ring even on failure so the debug path stays
-         * side-effect free; earlier layers may have appended. */
-        for (size_t li = 0; li < n_layers; li++) {
-            OcDFlash2KvRing *r = &m->kv[li];
-            for (size_t i = 0; i < n_overwrite; i++) {
-                size_t slot = (saved_total[li] + i) % r->capacity;
-                const uint8_t *src = saved_slots +
-                    (li * n_overwrite + i) * slot_bytes;
-                memcpy(r->k + slot * vec_save, src, vec_save * sizeof(float));
-                memcpy(r->v + slot * vec_save,
-                       src + vec_save * sizeof(float),
-                       vec_save * sizeof(float));
-                memcpy(&r->pos[slot],
-                       src + 2 * vec_save * sizeof(float), sizeof(int64_t));
-            }
-            r->total = saved_total[li];
-            r->len = saved_total[li] < r->capacity
-                         ? saved_total[li] : r->capacity;
-        }
-        dflash2_block_scratch_free(&s);
-        free(saved_slots);
-        return e;
-    }
-
-    /* Restore ring state: counters and the slots the debug append
-     * overwrote (only live while wrapped; harmless otherwise). */
+    /* Restore visible ring state and the caller's rollback journal on both
+     * success and failure; the debug append owns only its temporary journal. */
     for (size_t li = 0; li < n_layers; li++) {
         OcDFlash2KvRing *r = &m->kv[li];
         for (size_t i = 0; i < n_overwrite; i++) {
@@ -2164,11 +2155,19 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
         }
         r->total = saved_total[li];
         r->len = saved_total[li] < r->capacity ? saved_total[li] : r->capacity;
+        free(r->undo_k);
+        free(r->undo_v);
+        free(r->undo_pos);
+        r->undo_k = saved_undo_k[li];
+        r->undo_v = saved_undo_v[li];
+        r->undo_pos = saved_undo_pos[li];
+        r->undo_n = saved_undo_n[li];
+        r->undo_total = saved_undo_total[li];
     }
     free(saved_slots);
 
     dflash2_block_scratch_free(&s);
-    return OC_OK;
+    return e;
 }
 
 /*

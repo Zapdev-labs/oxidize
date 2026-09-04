@@ -1,11 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 
+#include "oxidize/dflash2.h"
+
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
-
-#include "oxidize/dflash2.h"
 
 Test(dflash2, trim_restores_committed_entry_after_wrap)
 {

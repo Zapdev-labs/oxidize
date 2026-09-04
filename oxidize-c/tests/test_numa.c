@@ -199,7 +199,10 @@ static void *pin_restore_worker(void *arg)
     cpu_set_t mask;
     CPU_ZERO(&mask);
     CPU_SET(ctx->own_cpu, &mask);
-    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) return NULL;
+    if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+        pthread_barrier_wait(ctx->saved);
+        return NULL;
+    }
     oc_numa_pin_save_orig();
     pthread_barrier_wait(ctx->saved);
     if (oc_numa_pin_cpu(ctx->pin_cpu) == OC_OK) oc_numa_pin_restore();
