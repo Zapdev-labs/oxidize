@@ -76,7 +76,7 @@ TEST_OBJS := $(TEST_SRCS:.c=.o)
 # same APIs through libSystem and has no separate librt.
 TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
                -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 \
-               -ffp-contract=off \
+               -ffp-contract=off -DOC_TESTING \
                -I$(CRITERION_INCLUDE)
 TEST_SYSTEM_LIBS := -lm -lpthread -ldl
 ifneq ($(shell uname -s),Darwin)

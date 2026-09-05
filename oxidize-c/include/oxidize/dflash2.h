@@ -179,6 +179,10 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
                                  const float *k, const float *v,
                                  int64_t pos0, size_t n);
 
+#ifdef OC_TESTING
+void oc_dflash2_test_fail_wrapped_append_after(size_t successful_appends);
+#endif
+
 /* ─── Model ─────────────────────────────────────────────────────────── */
 
 typedef struct OcDFlash2Model {

@@ -112,6 +112,16 @@ static bool df2_size_mul(size_t a, size_t b, size_t *out);
 static bool df2_size_add(size_t a, size_t b, size_t *out);
 static bool df2_float_extent(size_t count);
 
+#ifdef OC_TESTING
+static _Atomic size_t df2_test_wrapped_appends_before_failure = SIZE_MAX;
+
+void oc_dflash2_test_fail_wrapped_append_after(size_t successful_appends)
+{
+    atomic_store_explicit(&df2_test_wrapped_appends_before_failure,
+                          successful_appends, memory_order_relaxed);
+}
+#endif
+
 static float df2_dot(const float *a, const float *b, size_t n)
 {
     float result;
@@ -529,6 +539,19 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
     float *next_undo_v = NULL;
     int64_t *next_undo_pos = NULL;
     if (n > ring->capacity - ring->len) {
+#ifdef OC_TESTING
+        size_t remaining = atomic_load_explicit(
+            &df2_test_wrapped_appends_before_failure, memory_order_relaxed);
+        if (remaining != SIZE_MAX) {
+            if (remaining == 0) {
+                atomic_store_explicit(&df2_test_wrapped_appends_before_failure,
+                                      SIZE_MAX, memory_order_relaxed);
+                return OC_ERR_OOM;
+            }
+            atomic_fetch_sub_explicit(&df2_test_wrapped_appends_before_failure,
+                                      1, memory_order_relaxed);
+        }
+#endif
         next_undo_k = malloc(undo_elems * sizeof(float));
         next_undo_v = malloc(undo_elems * sizeof(float));
         next_undo_pos = malloc(n * sizeof(int64_t));
