@@ -177,6 +177,8 @@ Test(dflash2, later_layer_append_failure_restores_exact_ring_state)
         cr_assert_eq(rings[li].len, 2);
         cr_assert_eq(rings[li].pos[0], 2);
         cr_assert_eq(rings[li].pos[1], 1);
+        cr_assert_float_eq(rings[li].k[1], 1.0f, 0.0f);
+        cr_assert_float_eq(rings[li].v[1], 1.0f, 0.0f);
         cr_assert_float_eq(rings[li].k[0], 2.0f, 0.0f);
         cr_assert_float_eq(rings[li].v[0], 2.0f, 0.0f);
         cr_assert_eq(rings[li].undo_k, undo_k[li]);
