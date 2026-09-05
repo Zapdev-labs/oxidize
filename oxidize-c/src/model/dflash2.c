@@ -1585,7 +1585,9 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
         float *v;
         int64_t *pos;
         size_t n;
-        size_t total;
+        size_t undo_total;
+        size_t ring_total;
+        size_t ring_len;
     } UndoState;
     UndoState *prior_undo = calloc(m->n_layers, sizeof(*prior_undo));
     if (!prior_undo) return OC_ERR_OOM;
@@ -1593,7 +1595,8 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
         OcDFlash2KvRing *ring = &m->kv[li];
         prior_undo[li] = (UndoState){ ring->undo_k, ring->undo_v,
                                      ring->undo_pos, ring->undo_n,
-                                     ring->undo_total };
+                                     ring->undo_total, ring->total,
+                                     ring->len };
         ring->undo_k = NULL;
         ring->undo_v = NULL;
         ring->undo_pos = NULL;
@@ -1713,7 +1716,22 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
         if (ae != OC_OK) {
             for (size_t ri = 0; ri < m->n_layers; ri++) {
                 OcDFlash2KvRing *restore = &m->kv[ri];
-                if (ri < li) oc_dflash2_kvring_trim(restore, ctx_pos0);
+                if (ri < li) {
+                    const size_t vec = restore->n_kv_heads * restore->head_dim;
+                    for (size_t i = 0; i < restore->undo_n; i++) {
+                        const size_t slot = (restore->undo_total + i) %
+                                            restore->capacity;
+                        memcpy(restore->k + slot * vec,
+                               restore->undo_k + i * vec,
+                               vec * sizeof(float));
+                        memcpy(restore->v + slot * vec,
+                               restore->undo_v + i * vec,
+                               vec * sizeof(float));
+                        restore->pos[slot] = restore->undo_pos[i];
+                    }
+                    restore->total = prior_undo[ri].ring_total;
+                    restore->len = prior_undo[ri].ring_len;
+                }
                 free(restore->undo_k);
                 free(restore->undo_v);
                 free(restore->undo_pos);
@@ -1721,7 +1739,7 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
                 restore->undo_v = prior_undo[ri].v;
                 restore->undo_pos = prior_undo[ri].pos;
                 restore->undo_n = prior_undo[ri].n;
-                restore->undo_total = prior_undo[ri].total;
+                restore->undo_total = prior_undo[ri].undo_total;
             }
             free(prior_undo);
             return ae;
