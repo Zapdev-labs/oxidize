@@ -1837,6 +1837,8 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     const size_t top_k = m->cfg.selector_top_k;
     const size_t rank = m->cfg.selector_rank;
     const size_t vocab = lm_head->rows;
+    float *next_last_hidden = NULL;
+    uint32_t next_rng_state = m->rng_state;
 
     /* Absolute positions: context rows [start - n_ctx, start), noise rows
      * [start, start + block) where start = next_noise_pos. */
@@ -1876,18 +1878,12 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
         return e;
     }
 
-    /* Retain the normed rows for oc_dflash2_last_hidden callers. */
-    if (!m->last_hidden || m->last_hidden_len != block) {
-        free(m->last_hidden);
-        m->last_hidden = malloc(block * H * sizeof(float));
-        if (!m->last_hidden) {
-            m->last_hidden_len = 0;
-            dflash2_block_scratch_free(&s);
-            goto fail_after_fwd;
-        }
-        m->last_hidden_len = block;
+    next_last_hidden = malloc(block * H * sizeof(float));
+    if (!next_last_hidden) {
+        dflash2_block_scratch_free(&s);
+        goto fail_after_fwd;
     }
-    memcpy(m->last_hidden, s.normed, block * H * sizeof(float));
+    memcpy(next_last_hidden, s.normed, block * H * sizeof(float));
 
     float *normed = s.normed;
 
@@ -2052,8 +2048,8 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
                 scores[k] = expf((scores[k] - mx) / temperature);
                 denom += scores[k];
             }
-            m->rng_state = m->rng_state * 1664525u + 1013904223u;
-            float z = ((float)(m->rng_state >> 8) / 16777216.0f) * denom;
+            next_rng_state = next_rng_state * 1664525u + 1013904223u;
+            float z = ((float)(next_rng_state >> 8) / 16777216.0f) * denom;
             float run = 0.0f;
             for (size_t k = 0; k < top_k; k++) {
                 run += scores[k];
@@ -2095,6 +2091,10 @@ OcError oc_dflash2_propose(OcDFlash2Model *m,
     for (size_t li = 0; li < m->n_layers; li++)
         oc_dflash2_kvring_trim(&m->kv[li], start);
 
+    free(m->last_hidden);
+    m->last_hidden = next_last_hidden;
+    m->last_hidden_len = block;
+    m->rng_state = next_rng_state;
     free(unary); free(cand); free(proj_h); free(scores); free(A_buf);
     dflash2_block_scratch_free(&s);
     (void)block_ids;
@@ -2107,6 +2107,7 @@ fail_after_fwd:
      * not start from speculative cache state. */
     for (size_t li = 0; li < m->n_layers; li++)
         oc_dflash2_kvring_trim(&m->kv[li], start);
+    free(next_last_hidden);
     return OC_ERR_OOM;
 }
 
