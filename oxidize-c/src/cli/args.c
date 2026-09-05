@@ -132,6 +132,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         if (match(arg, "--json"))       { ctx->output_format = OC_CLI_OUTPUT_JSON; continue; }
         if (match(arg, "--no-special")) { ctx->tokens_no_special = true; continue; }
         if (match(arg, "--bench-no-eos")) { ctx->bench_no_eos = true; continue; }
+        if (match(arg, "--lm-materialize")) { ctx->bench_lm_materialize = true; continue; }
         if (match(arg, "--verbose") || match(arg, "-v")) { ctx->verbose = true; continue; }
 
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -148,7 +149,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--kv"))             { ctx->kv_type = val; i++; }
-        else if (match(arg, "--threads"))        { ctx->threads = atoi(val); i++; }
+        else if (match(arg, "--threads"))        { ctx->threads = atoi(val); ctx->threads_set = true; i++; }
         else if (match(arg, "--numa"))           { ctx->numa = val; i++; }
         else if (match(arg, "--backend"))        { ctx->backend = val; i++; }
         /* Sampling. */
@@ -167,8 +168,8 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--rate-limit"))     { ctx->rate_limit_rpm = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--cors-origin"))    { ctx->cors_origin = val; i++; }
         /* Benchmark. */
-        else if (match(arg, "--bench-iters"))    { ctx->bench_iterations = val[0] == '-' ? 0 : atoi(val); i++; }
-        else if (match(arg, "--bench-warmup"))   { ctx->bench_warmup = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--bench-iters"))    { ctx->bench_iterations = val[0] == '-' ? 0 : atoi(val); ctx->bench_iters_set = true; i++; }
+        else if (match(arg, "--bench-warmup"))   { ctx->bench_warmup = (uint32_t)strtoul(val, NULL, 10); ctx->bench_warmup_set = true; i++; }
         else if (match(arg, "--bench-tokens"))   { ctx->bench_tokens = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--bench-prompt-tokens")) { ctx->bench_prompt_tokens = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--bench-decode-tokens")) { ctx->bench_decode_tokens = (uint32_t)strtoul(val, NULL, 10); i++; }

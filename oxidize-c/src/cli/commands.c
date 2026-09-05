@@ -1,6 +1,9 @@
 /* strdup is POSIX.1-2008; needs _POSIX_C_SOURCE to be declared. Must be
  * the first non-comment thing in the file, before any system header. */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 
 /*
  * commands.c — CLI subcommand implementation for oxidize-c.
@@ -43,6 +46,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -71,6 +75,17 @@ static bool ieq(const char *a, const char *b)
         a++; b++;
     }
     return *a == *b;
+}
+
+/* Print progress/diagnostic info to stderr (stdout stays clean). */
+static void cli_info(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "[dflash2] ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
 }
 
 /* JSON-escape a string into buf. Returns bytes written (excl NUL), 0 on overflow. */
@@ -117,8 +132,7 @@ static void cli_error(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "error: ");
-    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "error: ");    vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     va_end(ap);
 }
@@ -219,6 +233,7 @@ const char *oc_cli_command_name(OcCliCommand cmd)
     case OC_CLI_CMD_DETOKENIZE:     return "detokenize";
     case OC_CLI_CMD_PERPLEXITY:     return "perplexity";
     case OC_CLI_CMD_SERVE_REALTIME: return "serve-realtime";
+    case OC_CLI_CMD_DFLASH2:        return "dflash2";
     case OC_CLI_CMD_NONE:           break;
     }
     return "none";
@@ -249,6 +264,7 @@ OcCliCommand oc_cli_command_parse(const char *name)
                                       return OC_CLI_CMD_PERPLEXITY;
     if (ieq(name, "serve-realtime") || ieq(name, "realtime"))
                                       return OC_CLI_CMD_SERVE_REALTIME;
+    if (ieq(name, "dflash2"))         return OC_CLI_CMD_DFLASH2;
     return OC_CLI_CMD_NONE;
 }
 
@@ -312,6 +328,7 @@ OcError oc_cli_command_run(OcCliContext *ctx)
     case OC_CLI_CMD_PERPLEXITY:      return oc_cli_run_perplexity(ctx);
     case OC_CLI_CMD_SERVE:           return oc_cli_run_serve(ctx);
     case OC_CLI_CMD_SERVE_REALTIME:  return oc_cli_run_serve_realtime(ctx);
+    case OC_CLI_CMD_DFLASH2:        return oc_cli_run_dflash2(ctx);
     /* PROMPT and CHAT are handled by the generation path in main.c. */
     case OC_CLI_CMD_PROMPT:
     case OC_CLI_CMD_CHAT:
@@ -421,6 +438,20 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "OPTIONS:\n"
                "  --host HOST           Bind host (default 127.0.0.1)\n"
                "  --port PORT           Bind port (default 8080)\n");
+        break;
+    case OC_CLI_CMD_DFLASH2:
+        printf("DFlash2 draft propose benchmark\n\n"
+               "USAGE: oxidize-c dflash2 --model <dir-or-model.safetensors> [OPTIONS]\n\n"
+               "OPTIONS:\n"
+               "  --bench-iters N       Propose steps to time (default 20)\n"
+               "  --bench-warmup N      Untimed warmup steps (default 3)\n"
+               "  --bench-prompt-tokens N  Synthetic context rows per step (default 1)\n"
+               "  --lm-materialize       Pre-materialize the lm_head in BF16 so the vocab\n"
+               "                          scan measures real streaming bandwidth (~1.27 GB)\n"
+               "  --threads N          Worker threads; 0 = online CPUs (default: one\n"
+               "                       per physical core)\n"
+               "  --seed N              Deterministic input seed (default 42)\n"
+               "  --json                Machine-readable results\n");
         break;
     case OC_CLI_CMD_QUANTIZE:
         printf("re-quantize a GGUF model\n\n"
@@ -1615,5 +1646,373 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
     oc_tokenizer_free(tok);
     oc_llama_free(model);
     free(tok); free(model);
+    return OC_OK;
+}
+
+/* ─── dflash2: draft propose benchmark ───────────────────────────────── */
+
+#include "oxidize/dflash2.h"
+#include "oxidize/numa.h"
+#include "oxidize/parallel.h"
+
+#include <time.h>
+
+static double dflash2_now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+/* Deterministic LCG so runs are reproducible without a real target. */
+static uint32_t dflash2_lcg(uint32_t *s)
+{
+    *s = *s * 1664525u + 1013904223u;
+    return *s;
+}
+
+/* Deterministic pseudo-random lm_head row generator. 8 independent LCG
+ * lanes seeded from the row index; each lane advances once per 8 floats,
+ * so the element loop is dependency-free arithmetic (no serial chain)
+ * and the scan stays dominated by the dot products like a real GEMM. */
+static void dflash2_gen_lm_row(size_t row, size_t cols, float *buf, void *user)
+{
+    (void)user;
+    uint32_t s0 = (uint32_t)row * 1664525u + 1013904223u;
+    uint32_t s1 = s0 * 1664525u + 1013904223u;
+    uint32_t s2 = s1 * 1664525u + 1013904223u;
+    uint32_t s3 = s2 * 1664525u + 1013904223u;
+    uint32_t s4 = s3 * 1664525u + 1013904223u;
+    uint32_t s5 = s4 * 1664525u + 1013904223u;
+    uint32_t s6 = s5 * 1664525u + 1013904223u;
+    uint32_t s7 = s6 * 1664525u + 1013904223u;
+    size_t c = 0;
+    for (; c + 8 <= cols; c += 8) {
+        s0 = s0 * 1664525u + 1013904223u;
+        s1 = s1 * 1664525u + 1013904223u;
+        s2 = s2 * 1664525u + 1013904223u;
+        s3 = s3 * 1664525u + 1013904223u;
+        s4 = s4 * 1664525u + 1013904223u;
+        s5 = s5 * 1664525u + 1013904223u;
+        s6 = s6 * 1664525u + 1013904223u;
+        s7 = s7 * 1664525u + 1013904223u;
+        buf[c + 0] = ((float)(s0 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 1] = ((float)(s1 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 2] = ((float)(s2 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 3] = ((float)(s3 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 4] = ((float)(s4 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 5] = ((float)(s5 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 6] = ((float)(s6 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+        buf[c + 7] = ((float)(s7 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+    }
+    for (; c < cols; c++) {
+        s0 = s0 * 1664525u + 1013904223u;
+        buf[c] = ((float)(s0 >> 8) * (1.0f / 16777216.0f) - 0.5f) * 0.04f;
+    }
+}
+
+OcError oc_cli_run_dflash2(OcCliContext *ctx)
+{
+    if (!ctx) return OC_ERR_INVALID_ARG;
+    if (ctx->threads_set && ctx->threads < 0) {
+        cli_error("--threads must be non-negative");
+        return OC_ERR_INVALID_ARG;
+    }
+    if (!ctx->model_path) {
+        cli_error("dflash2 requires --model <path/to/model.safetensors>");
+        return OC_ERR_INVALID_ARG;
+    }
+
+    /* Resolve model.safetensors + config.json (same dir by default). */
+    char st_path[512], cfg_path[512];
+    snprintf(st_path, sizeof(st_path), "%s", ctx->model_path);
+    /* Accept either the directory or the safetensors file itself. */
+    struct stat sb;
+    if (stat(st_path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+        snprintf(st_path, sizeof(st_path), "%s/model.safetensors", ctx->model_path);
+    }
+    snprintf(cfg_path, sizeof(cfg_path), "%s", st_path);
+    char *slash = strrchr(cfg_path, '/');
+    if (slash) {
+        snprintf(slash + 1, sizeof(cfg_path) - (size_t)(slash + 1 - cfg_path),
+                 "config.json");
+    } else {
+        /* Bare filename (no directory): the sidecar config lives in the
+         * current working directory. Without this, cfg_path stayed
+         * pointing at the checkpoint and the loader parsed SafeTensors
+         * bytes as config.json. */
+        snprintf(cfg_path, sizeof(cfg_path), "config.json");
+    }
+
+    cli_info("loading DFlash2 draft from %s", st_path);
+    /* Command-specific benchmark defaults when the option was omitted:
+     * the shared context ships the generic bench defaults (3 iters /
+     * 5 warmup), but the documented dflash2 workload is 20 / 3. */
+    if (!ctx->bench_iters_set)  ctx->bench_iterations = 20;
+    if (!ctx->bench_warmup_set) ctx->bench_warmup = 3;
+    if (ctx->threads_set) {
+        /* Explicit --threads, including 0 = auto (online CPUs). */
+        oc_parallel_set_threads((size_t)ctx->threads);
+    } else if (ctx->auto_tune ||
+               (ctx->numa && strcmp(ctx->numa, "none") != 0)) {
+        size_t n = (size_t)sysconf(_SC_NPROCESSORS_ONLN);
+        oc_parallel_set_threads(n > 16 ? 16 : n);
+    } else {
+        /* Default: keep init_compute_threads' physical-core pool (already
+         * pinned one-worker-per-core by oc_parallel_set_threads). SMT
+         * siblings contend on the µop-bound phases and measured 19%
+         * slower. */
+    }
+
+    OcDFlash2Model model;
+    double t0 = dflash2_now_sec();
+    OcError e = oc_dflash2_model_load(&model, st_path, cfg_path);
+    if (e != OC_OK) {
+        cli_error("failed to load DFlash2 checkpoint (%s)", oc_error_msg(e));
+        return e;
+    }
+    double load_s = dflash2_now_sec() - t0;
+    cli_info("draft loaded in %.2fs (5 layers, hidden %zu, vocab %zu)",
+             load_s, model.cfg.hidden_size, model.cfg.vocab_size);
+
+    /* Synthetic target inputs: deterministic random. The block-1 drafts
+     * per step: 7 for GLM-5.3-Flash-DFlash2 (block 8). */
+    const size_t H = model.cfg.hidden_size;
+    const size_t block = model.cfg.block_size;
+    if (block < 2) {
+        /* block - 1 drafts per step; a block of 1 drafts zero tokens
+         * and the per-draft division below would divide by zero. */
+        cli_error("DFlash2 block size must be at least 2 (got %zu)", block);
+        oc_dflash2_model_free(&model);
+        return OC_ERR_FORMAT;
+    }
+    const size_t n_target_w = model.cfg.n_target_layer_ids * H;
+    const size_t top_k = model.cfg.selector_top_k;
+    const size_t vocab = model.cfg.vocab_size;
+
+    /* Context rows per step: --bench-prompt-tokens drives how much target
+     * context each propose consumes, exercising the full KV window (the
+     * reference model would feed the target's hidden states for the last
+     * `ctx_rows` positions). Capped so the block forward's
+     * n_ctx + block append fits the KV ring (set_context enforces the
+     * same bound). */
+    size_t ctx_rows = ctx->bench_prompt_tokens > 0
+                    ? (size_t)ctx->bench_prompt_tokens : 1;
+    if (ctx_rows + block > model.kv_capacity)
+        ctx_rows = model.kv_capacity > block
+                     ? model.kv_capacity - block : 1;
+    if (ctx_rows < 1) ctx_rows = 1;
+    const size_t ctx_cap = model.kv_capacity;
+
+    /* Stand-in target lm_head: rows = vocab, cols = H. Too big to
+     * materialize densely in f32 (154880*4096*4 = 2.4 GB) — use a
+     * structured pseudo-random projection: hash rows so each "weight row"
+     * is generated on the fly. That keeps memory flat while exercising
+     * the same FLOPs. */
+    float *noise = malloc(block * H * sizeof(float));
+    uint32_t *block_ids = malloc(block * sizeof(uint32_t));
+    uint32_t *anchors = malloc(sizeof(uint32_t));
+    uint32_t *out_tok = malloc((block - 1) * sizeof(uint32_t));
+    uint32_t *out_cand = malloc((block - 1) * top_k * sizeof(uint32_t));
+    float *out_probs = malloc((block - 1) * top_k * sizeof(float));
+    if (!noise || !block_ids || !anchors || !out_tok ||
+        !out_cand || !out_probs) {
+        free(noise); free(block_ids); free(anchors);
+        free(out_tok); free(out_cand); free(out_probs);
+        oc_dflash2_model_free(&model);
+        return OC_ERR_OOM;
+    }
+
+    /* Synthetic lm_head. Two modes:
+     *  - default: rows generated on the fly (flat memory, but the vocab
+     *    scan is compute-bound on the generator instead of bandwidth).
+     *  - --lm-materialize: pre-materialize the rows in BF16 (vocab*H*2
+     *    bytes, ~1.27 GB for GLM-5.3-Flash) so the scan measures the real
+     *    target-owned lm_head streaming cost from RAM. Same deterministic
+     *    generator, so both modes produce identical rows. */
+    static OcDFlash2Weight lm;
+    lm.rows = vocab;
+    lm.cols = H;
+    lm.gen_user = NULL;
+    lm.generate = dflash2_gen_lm_row;
+    lm.data = NULL;
+    lm.bf16 = NULL;
+    if (ctx->bench_lm_materialize) {
+        size_t n_w = vocab * H;
+        size_t lm_bytes = n_w * sizeof(uint16_t);
+        lm.bf16 = oc_dflash2_alloc_huge(lm_bytes);
+        if (!lm.bf16) {
+            free(noise); free(block_ids); free(anchors);
+            free(out_tok); free(out_cand); free(out_probs);
+            oc_dflash2_model_free(&model);
+            return OC_ERR_OOM;
+        }
+        float *row = malloc(H * sizeof(float));
+        if (!row) {
+            oc_dflash2_free_huge(lm.bf16, lm_bytes); lm.bf16 = NULL;
+            free(noise); free(block_ids); free(anchors);
+            free(out_tok); free(out_cand); free(out_probs);
+            oc_dflash2_model_free(&model);
+            return OC_ERR_OOM;
+        }
+        for (size_t v = 0; v < vocab; v++) {
+            dflash2_gen_lm_row(v, H, row, NULL);
+            for (size_t c = 0; c < H; c++) {
+                uint32_t bits;
+                memcpy(&bits, row + c, 4);
+                lm.bf16[v * H + c] = (uint16_t)(bits >> 16);
+            }
+        }
+        free(row);
+        cli_info("materialized %zu x %zu BF16 lm_head (%.2f GB), "
+                 "vocab scan now bandwidth-bound",
+                 vocab, H, (double)(n_w * 2) / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    uint32_t seed = ctx->seed ? ctx->seed : 42u;
+    const uint32_t iters = (uint32_t)(ctx->bench_iterations > 0
+                                      ? ctx->bench_iterations : 20);
+    const uint32_t warmup = ctx->bench_warmup;
+    double best = INFINITY, total = 0.0;
+    uint64_t drafted_total = 0;
+
+    /* Pre-generate the full synthetic context once (the "prefill": the
+     * target's hidden states for positions [0, ctx_rows)). Each step then
+     * only produces the NEW rows (the accepted tokens of the previous
+     * verify), matching dflash_generate: after the first call the draft
+     * consumes just output.hidden_states[:, :produced, :]. */
+    float *ctx_prefill = malloc(ctx_rows * n_target_w * sizeof(float));
+    float *ctx_new = malloc((block - 1) * n_target_w * sizeof(float));
+    if (!ctx_prefill || !ctx_new) {
+        free(ctx_prefill); free(ctx_new);
+        free(noise); free(block_ids); free(anchors);
+        free(out_tok); free(out_cand); free(out_probs);
+        oc_dflash2_model_free(&model);
+        return OC_ERR_OOM;
+    }
+    for (size_t i = 0; i < ctx_rows * n_target_w; i++)
+        ctx_prefill[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
+    e = oc_dflash2_set_context(&model, ctx_prefill, ctx_rows);
+    model.next_noise_pos = (int64_t)ctx_rows;
+    if (e != OC_OK) {
+        free(ctx_prefill); free(ctx_new);
+        free(noise); free(block_ids); free(anchors);
+        free(out_tok); free(out_cand); free(out_probs);
+        oc_dflash2_model_free(&model);
+        return e;
+    }
+
+    /* Deterministic noise BEFORE any timing: the backbone loop below ran
+     * on uninitialized malloc memory before this point, so backbone_ms
+     * measured indeterminate inputs and was not reproducible. */
+    for (size_t i = 0; i < block * H; i++)
+        noise[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
+
+    /* Backbone-only timing (forward_debug runs the exact same layer math
+     * as propose without the selector/lm_head scan). Reported separately
+     * so the draft-model cost and the target-owned lm_head scan are
+     * distinguishable. */
+    float *bb_hidden = malloc(block * H * sizeof(float));
+    double bb_total = 0.0;
+    if (bb_hidden) {
+        for (uint32_t it = 0; it < iters; it++) {
+            double s0 = dflash2_now_sec();
+            if (oc_dflash2_forward_debug(&model, noise, block, bb_hidden)
+                    != OC_OK) {
+                s0 = 0.0; /* exclude failed calls from the average */
+                break;
+            }
+            bb_total += dflash2_now_sec() - s0;
+        }
+    }
+    double bb_avg = iters ? bb_total / (double)iters : 0.0;
+
+    cli_info("running %u propose steps (block %zu, %zu drafts/step, %zu threads, %zu ctx rows)",
+             iters + warmup, block, block - 1, oc_parallel_n_threads(), ctx_rows);
+
+    for (uint32_t it = 0; it < iters + warmup; it++) {
+        /* Fresh synthetic inputs each step. */
+        for (size_t i = 0; i < block * H; i++)
+            noise[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
+        for (size_t i = 0; i < (size_t)(block - 1) * n_target_w; i++)
+            ctx_new[i] = (float)(int32_t)(dflash2_lcg(&seed) >> 8) / 16777216.0f;
+        for (size_t i = 0; i < block; i++)
+            block_ids[i] = dflash2_lcg(&seed) % (uint32_t)vocab;
+
+        /* Per-step context: the FIRST proposal runs against the full
+         * prefill (like dflash_generate's step 0, which consumes the
+         * whole prefill context); later steps set only the newly
+         * produced rows, like the reference's
+         * output.hidden_states[:, :produced, :]. Feeding only block-1
+         * rows at step 0 would benchmark against a nearly-empty KV. */
+        e = oc_dflash2_set_context(&model,
+                                   it == 0 ? ctx_prefill : ctx_new,
+                                   it == 0 ? ctx_rows : (block - 1));
+        if (e != OC_OK) break;
+        anchors[0] = block_ids[0];
+
+        double s0 = dflash2_now_sec();
+        e = oc_dflash2_propose(&model, anchors, 1, noise, block, block_ids,
+                               &lm, 0.0f, out_tok, out_cand, out_probs);
+        double dt = dflash2_now_sec() - s0;
+        if (e != OC_OK) break;
+        if (it >= warmup) {
+            total += dt;
+            drafted_total += block - 1;
+            if (dt < best) best = dt;
+        }
+        /* Advance like a server: the accepted tokens are committed and the
+         * ring window slides. */
+        model.next_noise_pos += (int64_t)(block - 1);
+    }
+    double prefill_fuse_ms = 0.0; /* reported as 0; fusion is amortized */
+    (void)prefill_fuse_ms;
+    free(ctx_prefill); free(ctx_new);
+    if (e != OC_OK) {
+        cli_error("propose failed (%s)", oc_error_msg(e));
+        free(noise); free(block_ids); free(anchors);
+        free(out_tok); free(out_cand); free(out_probs);
+        oc_dflash2_model_free(&model);
+        return e;
+    }
+
+    double avg = total / (double)iters;
+    double per_draft_tok = avg / (double)(block - 1);
+
+    if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+        char model_esc[512];
+        if (json_escape(ctx->model_path, model_esc, sizeof(model_esc)) == 0)
+            snprintf(model_esc, sizeof(model_esc), "?");
+        printf("{\"command\":\"dflash2\",\"model\":\"%s\","
+               "\"block_size\":%zu,\"drafts_per_step\":%zu,"
+               "\"threads\":%zu,\"ctx_rows\":%zu,\"steps\":%u,"
+               "\"drafted_total\":%llu,"
+               "\"avg_step_ms\":%.3f,\"best_step_ms\":%.3f,"
+               "\"backbone_ms\":%.3f,"
+               "\"draft_tok_per_s\":%.1f}\n",
+               model_esc, block, block - 1,
+               oc_parallel_n_threads(), ctx_rows, iters,
+               (unsigned long long)drafted_total,
+               avg * 1e3, best * 1e3, bb_avg * 1e3, 1.0 / per_draft_tok);
+    } else {
+        printf("DFlash2 propose benchmark — %s\n", ctx->model_path);
+        printf("  block size:        %zu (%zu drafts/step)\n",
+               block, block - 1);
+        printf("  threads:           %zu\n", oc_parallel_n_threads());
+        printf("  context rows:      %zu (KV window %zu)\n", ctx_rows, ctx_cap);
+        printf("  steps:             %u (+%u warmup)\n", iters, warmup);
+        printf("  avg step:          %.3f ms\n", avg * 1e3);
+        printf("  best step:         %.3f ms\n", best * 1e3);
+        printf("  backbone-only:     %.3f ms/step\n", bb_avg * 1e3);
+        printf("  draft throughput:  %.1f draft tok/s\n", 1.0 / per_draft_tok);
+        printf("  (synthetic target inputs; the GLM-5.3-Flash target is "
+               "321B and not co-resident)\n");
+    }
+
+    free(noise); free(block_ids); free(anchors);
+    free(out_tok); free(out_cand); free(out_probs); free(bb_hidden);
+    if (lm.bf16)
+        oc_dflash2_free_huge(lm.bf16, (size_t)vocab * H * sizeof(uint16_t));
+    oc_dflash2_model_free(&model);
     return OC_OK;
 }

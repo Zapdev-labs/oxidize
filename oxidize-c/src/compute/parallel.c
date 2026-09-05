@@ -20,6 +20,7 @@
 #include "oxidize/parallel.h"
 
 #include "oxidize/log.h"
+#include "oxidize/numa.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -103,6 +104,21 @@ static void *worker_main(void *arg)
     Worker *w = (Worker *)arg;
     uint64_t seen = 0;
 
+    /* SMT-aware pinning: when the pool size equals the machine's physical
+     * core count, land this worker on its own core (see numa.c — measured
+     * 19% faster than SMT siblings sharing cores on µop-bound phases).
+     * Advice is cached topology state; no-op anywhere else. */
+    {
+        uint32_t cpu;
+        if (oc_numa_distinct_core_for_worker(w->tid, g_pool.n_threads, &cpu)) {
+            OcError pe = oc_numa_pin_cpu(cpu);
+            if (pe != OC_OK)
+                oc_log(OC_LOG_WARN,
+                       "parallel: worker %zu pin to cpu %u failed", w->tid,
+                       cpu);
+        }
+    }
+
     for (;;) {
         uint64_t gen;
         size_t spins = 0;
@@ -180,6 +196,13 @@ void oc_parallel_shutdown(void)
 
 OcError oc_parallel_set_threads(size_t n_threads)
 {
+    /* Undo the calling thread's worker-0 pin before resizing the pool:
+     * the affinity belongs to the thread and survives
+     * oc_parallel_shutdown, and every worker of the new pool inherits
+     * the calling thread's mask — the resize path would otherwise
+     * collapse all replacement workers onto worker 0's single core.
+     * No-op when this thread was never pinned. */
+    oc_numa_pin_restore();
     oc_parallel_shutdown();
 
     if (n_threads == 0) {
@@ -222,6 +245,19 @@ OcError oc_parallel_set_threads(size_t n_threads)
                    i, n_threads);
             g_pool.n_threads = i;
             return (i > 1) ? OC_OK : OC_ERR_INTERNAL;
+        }
+    }
+    /* The calling thread is worker 0: same one-core-per-worker advice.
+     * Snapshot its pre-pin mask first so a later oc_parallel_set_threads
+     * can restore (see the top of this function). */
+    {
+        uint32_t cpu;
+        oc_numa_pin_save_orig();
+        if (oc_numa_distinct_core_for_worker(0, n_threads, &cpu)) {
+            OcError pe = oc_numa_pin_cpu(cpu);
+            if (pe != OC_OK)
+                oc_log(OC_LOG_WARN,
+                       "parallel: worker 0 pin to cpu %u failed", cpu);
         }
     }
     return OC_OK;
