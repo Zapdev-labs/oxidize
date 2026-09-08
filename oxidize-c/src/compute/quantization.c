@@ -183,6 +183,9 @@ static LayoutInfo layout_for(OcGgufQuantizationType qtype)
     case OC_QUANT_Q5_0:   return (LayoutInfo){ OC_BLOCK_Q5_0_SIZE, OC_QK5_0 };
     case OC_QUANT_Q5_1:   return (LayoutInfo){ OC_BLOCK_Q5_1_SIZE, OC_QK5_1 };
     case OC_QUANT_Q8_0:   return (LayoutInfo){ OC_BLOCK_Q8_0_SIZE, OC_QK8_0 };
+    /* Q8_0_R8 interleaves eight Q8_0 rows without changing the byte
+     * budget, so per-row sizing is identical to Q8_0. */
+    case OC_QUANT_Q8_0_R8: return (LayoutInfo){ OC_BLOCK_Q8_0_SIZE, OC_QK8_0 };
     case OC_QUANT_Q2_K:   return (LayoutInfo){ OC_BLOCK_Q2_K_SIZE, OC_QK_K };
     case OC_QUANT_Q3_K_S:
     case OC_QUANT_Q3_K_M:
@@ -2925,6 +2928,8 @@ static const struct {
     { OC_QUANT_IQ1_S,   "IQ1_S",   19 },
     { OC_QUANT_IQ1_M,   "IQ1_M",   29 },
     { OC_QUANT_IQ1_XXXS, "IQ1_XXXS", 66 },
+    /* ik_llama.cpp interleaved Q8_0. */
+    { OC_QUANT_Q8_0_R8, "Q8_0_R8", 208 },
     { OC_QUANT_NVFP4,   "NVFP4",   40 },
     { OC_QUANT_I8,      "I8",      24 },
     { OC_QUANT_I16,     "I16",     25 },

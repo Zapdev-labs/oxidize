@@ -131,6 +131,10 @@ typedef enum {
     OC_QUANT_I64      = 34,
     OC_QUANT_F64      = 35,
     OC_QUANT_IQ1_XXXS = 36,
+    /* ik_llama.cpp interleaved Q8_0 (ggml id 208): eight consecutive Q8_0
+     * rows share one 272-byte superblock. Same byte budget as Q8_0, so it
+     * reuses the Q8_0 block layout; see oxk_q8_0_r8.h. */
+    OC_QUANT_Q8_0_R8  = 37,
     OC_QUANT__COUNT,
     OC_QUANT_UNKNOWN  = 0xffffffffu,
 } OcGgufQuantizationType;
