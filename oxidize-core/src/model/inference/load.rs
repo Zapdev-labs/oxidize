@@ -538,6 +538,9 @@ impl InferenceModel {
             last_output_hidden,
             eagle3_capture_layers: Vec::new(),
             eagle3_layer_hiddens,
+            dflash_capture_layers: Vec::new(),
+            dflash_capture_row_len: 0,
+            dflash_capture_ring: VecDeque::new(),
             #[cfg(feature = "cuda")]
             pending_embed_token: None,
         })

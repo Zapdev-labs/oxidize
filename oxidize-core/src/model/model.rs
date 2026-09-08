@@ -58,6 +58,27 @@ pub trait Model {
     fn rewind_to(&mut self, _consumed_tokens: usize) -> Result<(), ModelError> {
         Ok(())
     }
+
+    /// Enable per-position capture of the given target layer hidden states for
+    /// DFlash2 fused-context drafting. Default: unsupported (no capture).
+    ///
+    /// WIP: no implementor overrides this yet, so every model currently
+    /// accepts the request and captures nothing.
+    fn set_dflash_capture_layers(&mut self, _layers: Vec<usize>) -> Result<(), ModelError> {
+        Ok(())
+    }
+
+    /// Concatenated per-position captured rows starting at absolute position
+    /// `from`. Returns `(base_position, rows)` where `rows[i]` is the capture for
+    /// position `base_position + i`. Default: capture unavailable.
+    fn dflash_captured_rows(
+        &self,
+        _from: usize,
+    ) -> Result<(usize, Vec<Vec<f32>>), ModelError> {
+        Err(ModelError::InferenceFailed(
+            "dflash capture unsupported".to_string(),
+        ))
+    }
 }
 
 impl Model for Box<dyn Model> {
