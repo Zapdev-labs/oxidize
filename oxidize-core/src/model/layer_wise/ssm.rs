@@ -121,7 +121,6 @@ impl LayerWiseModel {
         } else {
             head_v_dim
         };
-        let head_repeat = num_v_heads / num_k_heads.max(1);
 
         let mut mixed_qkv = vec![0.0_f32; qkv_out_len];
         gemv_weight(&layer.attn_qkv, qkv_out_len, h, &normed, &mut mixed_qkv)
@@ -200,7 +199,9 @@ impl LayerWiseModel {
                 )
             };
             {
-                let k_head = v_head / head_repeat;
+                // Tiled GQA (ggml_repeat), not grouped (repeat_interleave).
+                // See oxidize-c/src/model/qwen35_delta.c for the derivation.
+                let k_head = v_head % num_k_heads.max(1);
                 let q_off = k_head * head_k_dim;
                 let k_off = key_dim + k_head * head_k_dim;
                 let v_off = key_dim * 2 + v_head * head_v_dim;
@@ -358,7 +359,6 @@ impl LayerWiseModel {
             1
         };
         let head_k_dim = key_dim.checked_div(num_k_heads).unwrap_or(head_v_dim);
-        let head_repeat = num_v_heads / num_k_heads.max(1);
 
         // Batched dense projections — all share `normed_all` as input.
         let mut mixed_all = vec![0.0_f32; kk * qkv_out_len];
@@ -451,7 +451,8 @@ impl LayerWiseModel {
             .zip(core_head_major.par_chunks_mut(kk * head_v_dim))
             .enumerate()
             .for_each(|(v_head, (state_h, out_h))| {
-                let k_head = v_head / head_repeat;
+                // Tiled GQA (ggml_repeat), not grouped (repeat_interleave).
+                let k_head = v_head % num_k_heads.max(1);
                 let q_off = k_head * head_k_dim;
                 let k_off = key_dim + k_head * head_k_dim;
                 let v_off = key_dim * 2 + v_head * head_v_dim;
@@ -553,7 +554,7 @@ impl LayerWiseModel {
             }
             let v_head = bi / head_v_dim;
             let j = bi % head_v_dim;
-            let k_head = v_head / head_repeat.max(1);
+            let k_head = v_head % num_k_heads.max(1);
             // Recompute q,k (post conv+silu, l2norm, q_scale) for this head, t=0.
             let conv0 = &conv_all[..qkv_out_len];
             let q_off = k_head * head_k_dim;
@@ -588,7 +589,7 @@ impl LayerWiseModel {
             );
             // head46 factors: v, k·q, beta — diagnose higher-head collapse
             for &vh in &[1usize, 46usize] {
-                let kh = vh / head_repeat.max(1);
+                let kh = vh % num_k_heads.max(1);
                 let qo = kh * head_k_dim;
                 let ko = key_dim + kh * head_k_dim;
                 let vo = key_dim * 2 + vh * head_v_dim;
