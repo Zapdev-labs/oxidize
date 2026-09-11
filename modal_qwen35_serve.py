@@ -215,7 +215,8 @@ def serve() -> None:
             "Create it with `modal secret create llama-api-key LLAMA_API_KEY=<random>`."
         )
     argv = _server_argv(api_key)
-    print(" ".join("<redacted>" if a == api_key else a for a in argv), flush=True)
+    # Log a placeholder argv so the real key never reaches the log.
+    print(" ".join(_server_argv("<redacted>")), flush=True)
     subprocess.Popen(argv)
 
 
