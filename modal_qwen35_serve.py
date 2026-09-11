@@ -146,15 +146,13 @@ def fetch_model() -> str:
     return str(dest)
 
 
-def _server_argv(api_key: str) -> list[str]:
-    """llama-server flags, each earning its place."""
+def _server_argv() -> list[str]:
+    """llama-server flags, each earning its place. serve() appends --api-key."""
     return [
         "/opt/llama.cpp/build/bin/llama-server",
         "--model", MODEL_PATH,
         "--host", "0.0.0.0",
         "--port", str(PORT),
-        # The Modal web endpoint is public; require a bearer token on every request.
-        "--api-key", api_key,
         # All 65 blocks on the GPU. 15.9 GiB of weights fits any card we target.
         "--n-gpu-layers", "99",
         "--ctx-size", str(N_CTX),
@@ -214,10 +212,11 @@ def serve() -> None:
             "LLAMA_API_KEY is unset: refusing to expose llama-server unauthenticated. "
             "Create it with `modal secret create llama-api-key LLAMA_API_KEY=<random>`."
         )
-    argv = _server_argv(api_key)
-    # Log a placeholder argv so the real key never reaches the log.
-    print(" ".join(_server_argv("<redacted>")), flush=True)
-    subprocess.Popen(argv)
+    argv = _server_argv()
+    # Log the flags before the key is added, so the secret never reaches the log.
+    print(" ".join(argv), "--api-key <redacted>", flush=True)
+    # The Modal web endpoint is public; require a bearer token on every request.
+    subprocess.Popen([*argv, "--api-key", api_key])
 
 
 @app.function(
