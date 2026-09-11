@@ -219,6 +219,7 @@ def bench(n_prompt: int = 512, n_gen: int = 128) -> str:
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     print(out, flush=True)

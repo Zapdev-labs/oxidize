@@ -8,7 +8,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -120,7 +120,13 @@ class HiddenCatcher:
 
 
 def load_target(cfg: DFlashTrainConfig, device: torch.device):
-    from transformers import AutoConfig, AutoModelForImageTextToText, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import (
+        AutoConfig,
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        AutoTokenizer,
+        BitsAndBytesConfig,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.target_model, trust_remote_code=True)
     model_cfg = AutoConfig.from_pretrained(cfg.target_model, trust_remote_code=True)
@@ -170,7 +176,7 @@ def load_target(cfg: DFlashTrainConfig, device: torch.device):
     return target, tokenizer, dtype
 
 
-def messages_from_row(row: dict[str, Any]) -> Optional[list[dict[str, str]]]:
+def messages_from_row(row: dict[str, Any]) -> list[dict[str, str]] | None:
     if "messages" in row and isinstance(row["messages"], list):
         out = []
         for msg in row["messages"]:
@@ -215,7 +221,7 @@ def _to_1d_token_ids(ids: Any) -> torch.Tensor:
     return t.to(dtype=torch.long).reshape(-1)
 
 
-def tokenize_messages(tokenizer, messages: list[dict[str, str]], max_seq_len: int) -> Optional[torch.Tensor]:
+def tokenize_messages(tokenizer, messages: list[dict[str, str]], max_seq_len: int) -> torch.Tensor | None:
     try:
         ids = tokenizer.apply_chat_template(
             messages,

@@ -8,7 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.dflash.config import DFlashTrainConfig, build_target_layer_ids, positional_loss_weights
+from scripts.dflash.config import (
+    DFlashTrainConfig,
+    build_target_layer_ids,
+    positional_loss_weights,
+)
 
 
 class DFlashConfigTests(unittest.TestCase):

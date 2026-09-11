@@ -79,6 +79,7 @@ def unit_tests() -> str:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        check=False,
     )
     text = (proc.stdout or "") + (proc.stderr or "")
     print(text, flush=True)
@@ -121,6 +122,7 @@ def _cfg(smoke: bool, max_steps: int | None, max_samples: int | None):
 )
 def hf_probe() -> str:
     import os
+
     from huggingface_hub import HfApi
     from huggingface_hub.errors import HfHubHTTPError
 
@@ -168,7 +170,6 @@ def hf_probe() -> str:
 )
 def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int:
     import sys
-    from pathlib import Path
 
     sys.path.insert(0, REPO_ROOT)
     from scripts.dflash.train import dump_hiddens
@@ -204,7 +205,6 @@ def train_dflash(
     max_samples: int | None = None,
     hub_repo: str = "",
 ) -> dict[str, Any]:
-    from pathlib import Path
 
     cfg = _cfg(smoke, max_steps, max_samples)
     if hub_repo:
@@ -232,11 +232,11 @@ def train_dflash(
 def upload_job(hub_repo: str = "freakyskittle/Qwen3.8-27B-ABLITERATED-DFlash") -> dict[str, Any]:
     import os
     import sys
-    from pathlib import Path
 
     sys.path.insert(0, REPO_ROOT)
     from huggingface_hub import HfApi
     from huggingface_hub.errors import HfHubHTTPError
+
     from scripts.dflash.config import DFlashTrainConfig
     from scripts.dflash.export_gguf import export_dflash_gguf
     from scripts.dflash.model import DFlashDraftModel

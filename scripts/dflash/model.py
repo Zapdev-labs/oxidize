@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import math
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -74,7 +71,7 @@ class DFlashAttention(nn.Module):
         noise_pos: torch.Tensor,
         context_pos: torch.Tensor,
         rotary: RotaryEmbedding,
-        attn_bias: Optional[torch.Tensor],
+        attn_bias: torch.Tensor | None,
     ) -> torch.Tensor:
         bsz, blk, _ = noise.shape
         ctx_len = context.shape[1]
@@ -129,7 +126,7 @@ class DFlashDecoderLayer(nn.Module):
         noise_pos: torch.Tensor,
         context_pos: torch.Tensor,
         rotary: RotaryEmbedding,
-        attn_bias: Optional[torch.Tensor],
+        attn_bias: torch.Tensor | None,
     ) -> torch.Tensor:
         residual = hidden
         hidden = self.input_layernorm(hidden)
@@ -170,7 +167,7 @@ class DFlashDraftModel(nn.Module):
         target_hidden: torch.Tensor,
         noise_pos: torch.Tensor,
         context_pos: torch.Tensor,
-        attn_bias: Optional[torch.Tensor] = None,
+        attn_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         context = self.fuse_target(target_hidden)
         hidden = noise
