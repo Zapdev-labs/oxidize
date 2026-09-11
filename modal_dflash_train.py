@@ -209,6 +209,12 @@ def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int
         manifest = json.loads(manifest_path.read_text())
     except (OSError, ValueError):
         manifest = None
+    # Earlier manifests stored the commit shas inside "config"; lift them out.
+    if isinstance(manifest, dict) and isinstance(manifest.get("config"), dict):
+        legacy = {k: manifest["config"].pop(k) for k in ("target_sha", "dataset_sha")
+                  if k in manifest["config"]}
+        if legacy and "shas" not in manifest:
+            manifest["shas"] = legacy
     if (
         isinstance(manifest, dict)
         and manifest.get("config") == want
