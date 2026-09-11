@@ -583,8 +583,19 @@ static void matvec_quant_slice(size_t begin, size_t end, size_t tid, void *ud)
 
     for (size_t r = begin; r < end; r++) {
         const uint8_t *row = j->data + r * j->row_bytes;
-        /* Dequantize this weight row into `temp` (SIMD on capable hosts). */
-        oc_quant_dequant_row(j->qtype, row, j->row_bytes, temp, j->cols);
+        /* Dequantize this weight row into `temp` (SIMD on capable hosts).
+         * A type with no decoder (an offline repack layout such as
+         * Q8_0_R8, or a corrupt row length) leaves `temp` untouched, so the
+         * result must not be dotted against it — that would turn scratch
+         * memory into logits. The loader refuses such tensors up front; this
+         * is the defence-in-depth backstop. Zero the slice's remaining
+         * outputs so the vector is deterministic rather than stale, and
+         * stop: the function returns void and cannot report the error. */
+        if (oc_quant_dequant_row(j->qtype, row, j->row_bytes, temp, j->cols)
+                != OC_OK) {
+            for (size_t z = r; z < end; z++) j->output[z] = 0.0f;
+            return;
+        }
         j->output[r] = oc_attn_dot_f32(temp, j->input, j->cols);
     }
 }
@@ -885,8 +896,16 @@ static void matvec_batch_dequant_slice(size_t begin, size_t end, size_t tid,
         /* Dequantize the row once, then dot it against every activation —
          * the same amortization the fused path gets, for types with no
          * integer kernel. */
-        oc_quant_dequant_row(j->qtype, j->data + r * j->row_bytes,
-                             j->row_bytes, temp, j->cols);
+        /* As in matvec_quant_slice: an undecodable type leaves `temp`
+         * uninitialized, so zero this slice's remaining outputs instead of
+         * dotting against scratch memory. */
+        if (oc_quant_dequant_row(j->qtype, j->data + r * j->row_bytes,
+                                 j->row_bytes, temp, j->cols) != OC_OK) {
+            for (size_t z = r; z < end; z++)
+                for (size_t v = 0; v < j->tile; v++)
+                    j->outputs[v * j->out_stride + z] = 0.0f;
+            return;
+        }
         for (size_t v = 0; v < j->tile; v++) {
             const float *in = j->inputs + v * j->in_stride;
             j->outputs[v * j->out_stride + r] =

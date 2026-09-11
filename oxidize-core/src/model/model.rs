@@ -71,10 +71,7 @@ pub trait Model {
     /// Concatenated per-position captured rows starting at absolute position
     /// `from`. Returns `(base_position, rows)` where `rows[i]` is the capture for
     /// position `base_position + i`. Default: capture unavailable.
-    fn dflash_captured_rows(
-        &self,
-        _from: usize,
-    ) -> Result<(usize, Vec<Vec<f32>>), ModelError> {
+    fn dflash_captured_rows(&self, _from: usize) -> Result<(usize, Vec<Vec<f32>>), ModelError> {
         Err(ModelError::InferenceFailed(
             "dflash capture unsupported".to_string(),
         ))
@@ -103,6 +100,12 @@ impl Model for Box<dyn Model> {
     }
     fn rewind_to(&mut self, consumed_tokens: usize) -> Result<(), ModelError> {
         (**self).rewind_to(consumed_tokens)
+    }
+    fn set_dflash_capture_layers(&mut self, layers: Vec<usize>) -> Result<(), ModelError> {
+        (**self).set_dflash_capture_layers(layers)
+    }
+    fn dflash_captured_rows(&self, from: usize) -> Result<(usize, Vec<Vec<f32>>), ModelError> {
+        (**self).dflash_captured_rows(from)
     }
 }
 
@@ -160,6 +163,57 @@ mod tests {
         fn layer_count(&self) -> usize {
             self.layer_count
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct CapturingModel {
+        capture_layers: Vec<usize>,
+    }
+
+    impl Model for CapturingModel {
+        fn forward(
+            &mut self,
+            _tokens: &[Token],
+            _session: &mut Session,
+        ) -> Result<Logits, ModelError> {
+            Ok(Vec::new())
+        }
+
+        fn vocab_size(&self) -> usize {
+            1
+        }
+
+        fn context_size(&self) -> usize {
+            1
+        }
+
+        fn layer_count(&self) -> usize {
+            1
+        }
+
+        fn set_dflash_capture_layers(&mut self, layers: Vec<usize>) -> Result<(), ModelError> {
+            self.capture_layers = layers;
+            Ok(())
+        }
+
+        fn dflash_captured_rows(&self, from: usize) -> Result<(usize, Vec<Vec<f32>>), ModelError> {
+            Ok((from, vec![vec![self.capture_layers.len() as f32]]))
+        }
+    }
+
+    #[test]
+    fn boxed_model_forwards_dflash_capture_hooks() {
+        let mut boxed: Box<dyn Model> = Box::new(CapturingModel::default());
+
+        boxed
+            .set_dflash_capture_layers(vec![3, 7])
+            .expect("boxed set_dflash_capture_layers should forward to the concrete model");
+        let (base, rows) = boxed
+            .dflash_captured_rows(5)
+            .expect("boxed dflash_captured_rows should forward to the concrete model");
+
+        assert_eq!(base, 5);
+        assert_eq!(rows, vec![vec![2.0_f32]]);
     }
 
     #[test]
