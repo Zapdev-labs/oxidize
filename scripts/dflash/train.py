@@ -19,7 +19,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.dflash.config import DFlashTrainConfig, positional_loss_weights
+from scripts.dflash.config import (
+    DFlashTrainConfig,
+    positional_loss_weights,
+    require_commit_sha,
+)
 from scripts.dflash.export_gguf import export_dflash_gguf
 from scripts.dflash.model import DFlashDraftModel, block_attention_bias, sample_anchors
 
@@ -130,8 +134,8 @@ def load_target(cfg: DFlashTrainConfig, device: torch.device):
         BitsAndBytesConfig,
     )
 
-    if cfg.trust_remote_code and not cfg.target_revision:
-        raise ValueError("trust_remote_code requires a pinned --target-revision (commit sha)")
+    if cfg.trust_remote_code:
+        require_commit_sha(cfg.target_revision)
     hub_kwargs: dict[str, Any] = {"trust_remote_code": cfg.trust_remote_code}
     if cfg.target_revision:
         hub_kwargs["revision"] = cfg.target_revision
@@ -681,7 +685,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--no-4bit", action="store_true")
     p.add_argument("--target", default=None)
-    p.add_argument("--target-revision", default=None, help="pinned target repo revision (commit sha)")
+    p.add_argument("--target-revision", default=None, help="pinned target repo revision (full 40-character commit SHA)")
     p.add_argument(
         "--trust-remote-code",
         action="store_true",
@@ -711,8 +715,10 @@ def main() -> None:
     if args.target_revision:
         cfg.target_revision = args.target_revision
     if args.trust_remote_code:
-        if not cfg.target_revision:
-            raise SystemExit("--trust-remote-code requires --target-revision")
+        try:
+            require_commit_sha(cfg.target_revision)
+        except ValueError as exc:
+            raise SystemExit(f"--trust-remote-code: {exc}") from exc
         cfg.trust_remote_code = True
     if args.io_on_cpu:
         cfg.io_on_device = False

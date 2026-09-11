@@ -12,6 +12,7 @@ from scripts.dflash.config import (
     DFlashTrainConfig,
     build_target_layer_ids,
     positional_loss_weights,
+    require_commit_sha,
 )
 
 
@@ -36,6 +37,16 @@ class DFlashConfigTests(unittest.TestCase):
             positional_loss_weights(15, 0.0)
         with self.assertRaises(ValueError):
             positional_loss_weights(15, -1.0)
+
+    def test_remote_code_requires_full_commit_sha(self) -> None:
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        self.assertEqual(require_commit_sha(sha), sha)
+        for bad in (None, "", "main", "v1.0", sha[:12], sha.upper()):
+            with self.assertRaises(ValueError):
+                require_commit_sha(bad)
+        with self.assertRaises(ValueError):
+            DFlashTrainConfig(trust_remote_code=True, target_revision="main")
+        DFlashTrainConfig(trust_remote_code=True, target_revision=sha)
 
     def test_target_layer_ids_are_distinct_or_rejected(self) -> None:
         ids = build_target_layer_ids(3, 8)

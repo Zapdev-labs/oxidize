@@ -19,7 +19,7 @@ shopt -s inherit_errexit
 MODEL="${MODEL:-/home/ai/models/qwen38-27b-ablit/gguf/Qwen3.8-27B-ABLITERATED-Q4_0_R8-MTP.gguf}"
 OX="${OX:-/home/ai/oxidize-c-dflash/oxidize-c}"
 IK="${IK:-/home/ai/ik_llama.cpp/build/bin/llama-cli}"
-SPEC_TYPE="${SPEC_TYPE:-dflash}"
+SPEC_TYPE="${SPEC_TYPE:-dspark}"
 MIN_SPEEDUP="${MIN_SPEEDUP:-1.0}"
 THREADS="${THREADS:-16}"
 CTX="${CTX:-512}"
@@ -61,7 +61,8 @@ run_ox() {
   local name="$1"
   shift
   echo "===== oxidize-c $name =====" >&2
-  "$OX" --model "$MODEL" --prompt "$PROMPT" --n-predict "$GEN_N" --ctx "$CTX" \
+  # The MTP check below reads an INFO line, so pin the child's log level.
+  OX_LOG_LEVEL=INFO "$OX" --model "$MODEL" --prompt "$PROMPT" --n-predict "$GEN_N" --ctx "$CTX" \
     --threads "$THREADS" --numa single --temperature 0 --repeat-penalty 1.0 \
     "$@" 2>"$OUT/${name}.err" | tee "$OUT/${name}.out" >&2
   grep -E "prefill:|speed:|generated |tok/s \(" "$OUT/${name}.err" >&2 \

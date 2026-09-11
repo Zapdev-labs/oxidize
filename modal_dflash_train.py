@@ -179,9 +179,20 @@ def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int
     cfg = _cfg(smoke, None, max_samples)
     cache_dir = Path(OUT_DIR) / "hidden-cache"
     manifest_path = cache_dir / "manifest.json"
+    from huggingface_hub import HfApi
+
+    # Resolve the exact target and dataset commits, so an upstream change at the
+    # same repo id invalidates the cache. The effective target layer ids are a
+    # pure function of the target config and num_target_layers, so the target
+    # commit covers them too.
+    api = HfApi(token=os.environ.get("HF_TOKEN"))
+    target_sha = api.model_info(cfg.target_model, revision=cfg.target_revision or None).sha
+    dataset_sha = api.dataset_info(cfg.dataset_name).sha
     # Snapshot before dump_hiddens: load_target() mutates cfg from the target config.
     want = {
         "target_model": cfg.target_model,
+        "target_sha": target_sha,
+        "dataset_sha": dataset_sha,
         "dataset_name": cfg.dataset_name,
         "dataset_split": cfg.dataset_split,
         "max_seq_len": cfg.max_seq_len,

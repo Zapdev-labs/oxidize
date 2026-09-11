@@ -16,7 +16,8 @@ The GGUF declares ``general.architecture = qwen35``: a hybrid gated-delta-net/SS
 Usage:
     modal volume create oxidize-gguf                       # once
     modal volume put oxidize-gguf <local.gguf> /Qwen3.8-27B-MTP-IQ4_XS.gguf
-    modal secret create llama-api-key LLAMA_API_KEY=<random>   # once; serve() refuses to start without it
+    export LLAMA_API_KEY=$(openssl rand -hex 32)          # keep it: clients send it as a Bearer token
+    modal secret create llama-api-key LLAMA_API_KEY="$LLAMA_API_KEY"   # once; serve() refuses to start without it
     modal serve modal_qwen35_serve.py                      # ephemeral, live-reloading
     modal deploy modal_qwen35_serve.py                     # persistent URL
 
@@ -262,8 +263,9 @@ def main(prompt: str = "Write a Python one-liner that reverses a string.") -> No
     print(f"model ready on volume: {path}")
     print("next: modal serve modal_qwen35_serve.py   (or modal deploy)")
     payload = json.dumps({"messages": [{"role": "user", "content": prompt}]})
+    print("then, with LLAMA_API_KEY exported to the value stored in the llama-api-key secret:")
     print(
-        'then: curl "$URL/v1/chat/completions"'
+        '  curl "$URL/v1/chat/completions"'
         ' -H "Authorization: Bearer $LLAMA_API_KEY"'
         " -H 'Content-Type: application/json'"
         f" -d {shlex.quote(payload)}"

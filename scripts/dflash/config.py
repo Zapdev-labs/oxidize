@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -28,6 +29,19 @@ def positional_loss_weights(block_predict: int, gamma: float) -> list[float]:
     mean = sum(raw) / len(raw)
     return [w / mean for w in raw]
 
+
+
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def require_commit_sha(revision: str | None) -> str:
+    """Remote code must come from an immutable commit, never a branch or tag."""
+    if not revision or not _COMMIT_SHA.fullmatch(revision):
+        raise ValueError(
+            "trust_remote_code requires target_revision to be a full 40-character "
+            f"commit SHA, got {revision!r}"
+        )
+    return revision
 
 @dataclass
 class DFlashTrainConfig:
@@ -82,8 +96,8 @@ class DFlashTrainConfig:
             raise ValueError(f"target_layer_ids contains duplicates: {self.target_layer_ids}")
         if len(self.target_layer_ids) != self.num_target_layers:
             self.num_target_layers = len(self.target_layer_ids)
-        if self.trust_remote_code and not self.target_revision:
-            raise ValueError("trust_remote_code requires a pinned target_revision")
+        if self.trust_remote_code:
+            require_commit_sha(self.target_revision)
 
     @property
     def n_feat(self) -> int:
