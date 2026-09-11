@@ -173,9 +173,10 @@ mod tests {
     impl Model for CapturingModel {
         fn forward(
             &mut self,
-            _tokens: &[Token],
-            _session: &mut Session,
+            tokens: &[Token],
+            session: &mut Session,
         ) -> Result<Logits, ModelError> {
+            session.record_tokens(tokens.len());
             Ok(Vec::new())
         }
 

@@ -50,15 +50,16 @@ image = (
         extra_index_url="https://download.pytorch.org/whl/cu128",
     )
     .pip_install(
-        "accelerate",
-        "bitsandbytes",
-        "datasets",
-        "gguf",
-        "huggingface_hub",
-        "protobuf",
-        "safetensors",
-        "sentencepiece",
-        "git+https://github.com/huggingface/transformers.git",
+        "accelerate==1.15.0",
+        "bitsandbytes==0.50.2",
+        "datasets==5.0.1",
+        "gguf==0.19.0",
+        "huggingface_hub==1.31.0",
+        "protobuf==6.31.1",
+        "safetensors==0.8.0",
+        "sentencepiece==0.2.1",
+        # Target config.json was written by 5.8.0.dev0 (model_type qwen3_5).
+        "transformers==5.8.0",
     )
     .add_local_dir(".", REPO_ROOT, ignore=IGNORE, copy=True)
 )
@@ -169,6 +170,7 @@ def hf_probe() -> str:
     env={"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"},
 )
 def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int:
+    import json
     import sys
 
     sys.path.insert(0, REPO_ROOT)
@@ -176,11 +178,36 @@ def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int
 
     cfg = _cfg(smoke, None, max_samples)
     cache_dir = Path(OUT_DIR) / "hidden-cache"
-    existing = list(cache_dir.glob("[0-9]*.pt"))
-    if len(existing) >= 8:
-        print(f"cache already has {len(existing)} sequences", flush=True)
+    manifest_path = cache_dir / "manifest.json"
+    # Snapshot before dump_hiddens: load_target() mutates cfg from the target config.
+    want = {
+        "target_model": cfg.target_model,
+        "dataset_name": cfg.dataset_name,
+        "dataset_split": cfg.dataset_split,
+        "max_seq_len": cfg.max_seq_len,
+        "max_samples": cfg.max_samples,
+        "num_target_layers": cfg.num_target_layers,
+    }
+    existing = sorted(cache_dir.glob("[0-9]*.pt"))
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        manifest = None
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("config") == want
+        and manifest.get("n") == len(existing)
+        and len(existing) >= 8
+    ):
+        print(f"cache already has {len(existing)} sequences matching config", flush=True)
         return len(existing)
+    if existing or manifest is not None:
+        print(f"hidden cache stale or mismatched (manifest={manifest}); rebuilding", flush=True)
+        manifest_path.unlink(missing_ok=True)
+        for p in existing:
+            p.unlink()
     n = dump_hiddens(cfg, cache_dir, cfg.max_samples)
+    manifest_path.write_text(json.dumps({"config": want, "n": n}, indent=2))
     out_vol.commit()
     hf_cache.commit()
     return n
@@ -261,16 +288,24 @@ def upload_job(hub_repo: str = "freakyskittle/Qwen3.8-27B-ABLITERATED-DFlash") -
             print(f"create_repo failed: {create_exc}", flush=True)
 
     gguf = out_dir / "Qwen3.8-27B-ABLITERATED-DFlash-F16.gguf"
-    ckpts = sorted(out_dir.glob("draft-step*.pt")) + ([out_dir / "dflash_draft.pt"] if (out_dir / "dflash_draft.pt").exists() else [])
+    final_ckpt = out_dir / "dflash_draft.pt"
+
+    def _step_of(p: Path) -> int:
+        suffix = p.stem[len("draft-step"):]
+        return int(suffix) if suffix.isdigit() else -1
+
+    step_ckpts = sorted(out_dir.glob("draft-step*.pt"), key=_step_of)
+    ckpts = step_ckpts + ([final_ckpt] if final_ckpt.exists() else [])
     if not gguf.exists() and ckpts:
         import torch
 
-        latest = ckpts[-1]
+        latest = final_ckpt if final_ckpt.exists() else step_ckpts[-1]
         print(f"exporting GGUF from {latest.name}", flush=True)
-        packed = torch.load(latest, map_location="cpu", weights_only=False)
+        # Checkpoints are {"cfg": plain dict, "draft": state_dict}; weights_only suffices.
+        packed = torch.load(latest, map_location="cpu", weights_only=True)
         cfg = DFlashTrainConfig(**{k: v for k, v in packed["cfg"].items() if k in DFlashTrainConfig.__dataclass_fields__})
         draft = DFlashDraftModel(cfg)
-        draft.load_state_dict(packed["draft"], strict=False)
+        draft.load_state_dict(packed["draft"], strict=True)
         export_dflash_gguf(draft, cfg, gguf)
         out_vol.commit()
     if not gguf.exists() and not ckpts:

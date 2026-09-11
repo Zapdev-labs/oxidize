@@ -29,6 +29,14 @@ static bool r8_span(size_t nrows, size_t cols,
     if ((cols % QK) != 0 || (nrows % OC_Q8_0_R8_PACK) != 0) return false;
 
     const size_t nblock = cols / QK;
+    /* Zero rows needs no bytes at all, whatever `cols` is: report the empty
+     * span before the overflow guards so it cannot be rejected. */
+    if (nrows == 0) {
+        *out_nblock  = nblock;
+        *out_ngroups = 0;
+        *out_gbytes  = 0;
+        return true;
+    }
     /* One full R8 superblock per (group, block) pair: guard nblock * 272. */
     if (nblock != 0 && nblock > SIZE_MAX / R8B) return false;
     const size_t gbytes = nblock * R8B;

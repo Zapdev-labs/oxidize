@@ -9,10 +9,19 @@ def build_target_layer_ids(n_target: int, n_layers: int) -> list[int]:
     if n_target <= 1:
         return [min(start, n_layers - 1)]
     span = end - start
-    return [int(round(start + i * span / (n_target - 1))) for i in range(n_target)]
+    raw = [round(start + i * span / (n_target - 1)) for i in range(n_target)]
+    ids = list(dict.fromkeys(raw))
+    if len(ids) < n_target:
+        raise ValueError(
+            f"cannot pick {n_target} distinct target layers from a {n_layers}-layer model "
+            f"(only {len(ids)} distinct ids in [{start}, {end}]); lower num_target_layers"
+        )
+    return ids
 
 
 def positional_loss_weights(block_predict: int, gamma: float) -> list[float]:
+    if gamma <= 0:
+        raise ValueError(f"loss decay gamma must be > 0, got {gamma}")
     if block_predict <= 0:
         return []
     raw = [pow(2.718281828459045, -i / gamma) for i in range(block_predict)]
@@ -46,11 +55,20 @@ class DFlashTrainConfig:
     weight_decay: float = 0.0
     warmup_ratio: float = 0.04
     grad_clip: float = 1.0
-    epochs: int = 1
+    # Passes over the hidden-cache; training stops at whichever of `epochs`
+    # or `max_steps` is reached first. 0 means no epoch limit (max_steps only).
+    epochs: int = 0
     max_steps: int = 2000
     grad_accum: int = 8
     seed: int = 42
     load_in_4bit: bool = True
+    # Remote code from the target repo is only executed when explicitly opted
+    # in, and then only at a pinned revision (commit sha) of that repo.
+    trust_remote_code: bool = False
+    target_revision: str = ""
+    # Keep the frozen target embeddings / lm_head on the training device in
+    # bf16. Set False to keep them on CPU for low-GPU-memory runs.
+    io_on_device: bool = True
     max_samples: int = 40_000
     hub_repo: str = ""
     hub_private: bool = True
@@ -60,8 +78,12 @@ class DFlashTrainConfig:
             self.target_layer_ids = build_target_layer_ids(
                 self.num_target_layers, self.target_n_layers
             )
+        if len(set(self.target_layer_ids)) != len(self.target_layer_ids):
+            raise ValueError(f"target_layer_ids contains duplicates: {self.target_layer_ids}")
         if len(self.target_layer_ids) != self.num_target_layers:
             self.num_target_layers = len(self.target_layer_ids)
+        if self.trust_remote_code and not self.target_revision:
+            raise ValueError("trust_remote_code requires a pinned target_revision")
 
     @property
     def n_feat(self) -> int:

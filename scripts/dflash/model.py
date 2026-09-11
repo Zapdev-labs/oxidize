@@ -194,10 +194,12 @@ def block_attention_bias(
 
 
 def sample_anchors(seq_len: int, block_size: int, max_anchors: int, generator: torch.Generator) -> torch.Tensor:
+    # An anchor at position a predicts labels seq[a + 1 : a + block_size], so the
+    # last valid anchor is seq_len - block_size (inclusive).
     last = seq_len - block_size
-    if last <= 1:
+    if last < 1:
         return torch.zeros(0, dtype=torch.long)
-    pool = torch.arange(1, last)
+    pool = torch.arange(1, last + 1)
     n = min(max_anchors, pool.numel())
     perm = torch.randperm(pool.numel(), generator=generator)[:n]
     return pool[perm].contiguous()

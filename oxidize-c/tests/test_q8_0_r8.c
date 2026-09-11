@@ -221,6 +221,12 @@ Test(q8_0_r8, empty_shapes_succeed)
     cr_assert_eq(oc_q8_0_r8_unpack_to_q8_0_inplace(buf, 0, 32), 0);
     cr_assert_eq(oc_q8_0_r8_repack(buf, 0, 0, out), 0);
     cr_assert_eq(oc_q8_0_r8_unpack_to_q8_0_inplace(buf, 0, 0), 0);
+
+    /* Zero rows needs no bytes even when cols/32 alone would overflow the
+     * nblock * 272 span guard. */
+    const size_t huge_cols = (SIZE_MAX / OC_Q8_0_R8_SB_BYTES + 1u) * 32u;
+    cr_assert_eq(oc_q8_0_r8_repack(buf, 0, huge_cols, out), 0);
+    cr_assert_eq(oc_q8_0_r8_unpack_to_q8_0_inplace(buf, 0, huge_cols), 0);
 }
 
 /* Dimensions whose derived byte span wraps size_t must be rejected before any

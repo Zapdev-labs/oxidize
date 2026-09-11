@@ -10,6 +10,13 @@ from scripts.dflash.model import DFlashDraftModel
 
 
 def _np(t: torch.Tensor) -> np.ndarray:
+    """Projection weights: stored as F16 (the artifact is named -F16.gguf)."""
+    return t.detach().to(torch.float16).cpu().contiguous().numpy()
+
+
+def _np_f32(t: torch.Tensor) -> np.ndarray:
+    """1-D norm weights stay F32, matching llama.cpp GGUF convention; the
+    oxidize-core loader dequantizes F16/F32 alike (DFlashDraftModel::load_from_gguf)."""
     return t.detach().to(torch.float32).cpu().contiguous().numpy()
 
 
@@ -45,14 +52,20 @@ def export_dflash_gguf(draft: DFlashDraftModel, cfg: DFlashTrainConfig, path: Pa
     writer.add_uint32("dflash-draft.dflash.mask_token_id", cfg.mask_token_id)
     writer.add_array("dflash-draft.target_layer_ids", cfg.target_layer_ids)
     writer.add_array("dflash-draft.dflash.target_layer_ids", cfg.target_layer_ids)
+    # Token embeddings and the output head are intentionally NOT exported: the
+    # draft shares the target's frozen embed_tokens / lm_head (train() loads
+    # them from the target checkpoint and never trains them). oxidize-core
+    # borrows them from the target GGUF at load time via
+    # DFlashDraftModel::load_external_io_from_gguf (oxidize-core/src/model/dflash.rs),
+    # called by oxidize-cli --draft-model and oxidize-server runtime/model.rs.
     writer.add_tensor("dflash_fc.weight", _np(draft.fc.weight))
-    writer.add_tensor("dflash_hidden_norm.weight", _np(draft.hidden_norm.weight))
-    writer.add_tensor("output_norm.weight", _np(draft.norm.weight))
+    writer.add_tensor("dflash_hidden_norm.weight", _np_f32(draft.hidden_norm.weight))
+    writer.add_tensor("output_norm.weight", _np_f32(draft.norm.weight))
     for i, layer in enumerate(draft.layers):
-        writer.add_tensor(f"blk.{i}.attn_norm.weight", _np(layer.input_layernorm.weight))
-        writer.add_tensor(f"blk.{i}.post_attention_norm.weight", _np(layer.post_attention_layernorm.weight))
-        writer.add_tensor(f"blk.{i}.attn_q_norm.weight", _np(layer.self_attn.q_norm.weight))
-        writer.add_tensor(f"blk.{i}.attn_k_norm.weight", _np(layer.self_attn.k_norm.weight))
+        writer.add_tensor(f"blk.{i}.attn_norm.weight", _np_f32(layer.input_layernorm.weight))
+        writer.add_tensor(f"blk.{i}.post_attention_norm.weight", _np_f32(layer.post_attention_layernorm.weight))
+        writer.add_tensor(f"blk.{i}.attn_q_norm.weight", _np_f32(layer.self_attn.q_norm.weight))
+        writer.add_tensor(f"blk.{i}.attn_k_norm.weight", _np_f32(layer.self_attn.k_norm.weight))
         writer.add_tensor(f"blk.{i}.attn_q.weight", _np(layer.self_attn.q_proj.weight))
         writer.add_tensor(f"blk.{i}.attn_k.weight", _np(layer.self_attn.k_proj.weight))
         writer.add_tensor(f"blk.{i}.attn_v.weight", _np(layer.self_attn.v_proj.weight))

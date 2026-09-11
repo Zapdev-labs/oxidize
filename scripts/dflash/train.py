@@ -109,7 +109,9 @@ class HiddenCatcher:
         missing = [i for i in self.layer_ids if i not in self._cache]
         if missing:
             raise RuntimeError(f"missing hidden states for layers {missing}")
-        stacked = torch.cat([self._cache[i] for i in self.layer_ids], dim=-1)
+        # With device_map="auto" the hooked layers can live on different GPUs;
+        # gather on CPU (the dump caches on CPU right after this anyway).
+        stacked = torch.cat([self._cache[i].detach().cpu() for i in self.layer_ids], dim=-1)
         self._cache.clear()
         return stacked
 
@@ -128,8 +130,13 @@ def load_target(cfg: DFlashTrainConfig, device: torch.device):
         BitsAndBytesConfig,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.target_model, trust_remote_code=True)
-    model_cfg = AutoConfig.from_pretrained(cfg.target_model, trust_remote_code=True)
+    if cfg.trust_remote_code and not cfg.target_revision:
+        raise ValueError("trust_remote_code requires a pinned --target-revision (commit sha)")
+    hub_kwargs: dict[str, Any] = {"trust_remote_code": cfg.trust_remote_code}
+    if cfg.target_revision:
+        hub_kwargs["revision"] = cfg.target_revision
+    tokenizer = AutoTokenizer.from_pretrained(cfg.target_model, **hub_kwargs)
+    model_cfg = AutoConfig.from_pretrained(cfg.target_model, **hub_kwargs)
     text_cfg = getattr(model_cfg, "text_config", model_cfg)
     cfg.vocab_size = int(getattr(text_cfg, "vocab_size", cfg.vocab_size))
     cfg.hidden_size = int(getattr(text_cfg, "hidden_size", cfg.hidden_size))
@@ -147,7 +154,7 @@ def load_target(cfg: DFlashTrainConfig, device: torch.device):
     quant = None
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     kwargs: dict[str, Any] = {
-        "trust_remote_code": True,
+        **hub_kwargs,
         "low_cpu_mem_usage": True,
     }
     if cfg.load_in_4bit and device.type == "cuda":
@@ -371,14 +378,16 @@ def push_to_hub(out_dir: Path, cfg: DFlashTrainConfig, extra: dict[str, Any]) ->
     return url
 
 
-def save_embed_and_head_cpu(model_id: str, cache_dir: Path, token: str | None) -> None:
-    import json
-
+def save_embed_and_head_cpu(
+    model_id: str, cache_dir: Path, token: str | None, revision: str | None = None
+) -> None:
     from huggingface_hub import hf_hub_download
     from safetensors import safe_open
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    index_path = hf_hub_download(model_id, "model.safetensors.index.json", token=token)
+    index_path = hf_hub_download(
+        model_id, "model.safetensors.index.json", token=token, revision=revision
+    )
     weight_map = json.loads(Path(index_path).read_text())["weight_map"]
     embed_keys = [
         key
@@ -392,7 +401,7 @@ def save_embed_and_head_cpu(model_id: str, cache_dir: Path, token: str | None) -
         head_keys = embed_keys
     pairs = [("embed.pt", embed_keys[0]), ("lm_head.pt", head_keys[0])]
     for out_name, tensor_name in pairs:
-        shard = hf_hub_download(model_id, weight_map[tensor_name], token=token)
+        shard = hf_hub_download(model_id, weight_map[tensor_name], token=token, revision=revision)
         with safe_open(shard, framework="pt", device="cpu") as handle:
             weight = handle.get_tensor(tensor_name).to(dtype=torch.float16).contiguous()
         torch.save({"weight": weight}, cache_dir / out_name)
@@ -401,7 +410,7 @@ def save_embed_and_head_cpu(model_id: str, cache_dir: Path, token: str | None) -
 
 def dump_hiddens(cfg: DFlashTrainConfig, cache_dir: Path, n_samples: int) -> int:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    save_embed_and_head_cpu(cfg.target_model, cache_dir, hf_token())
+    save_embed_and_head_cpu(cfg.target_model, cache_dir, hf_token(), cfg.target_revision or None)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     target, tokenizer, _dtype = load_target(cfg, device)
     language_model = resolve_language_model(target)
@@ -467,14 +476,16 @@ def one_anchor_loss(
     attn_bias = block_attention_bias(context_keep, blk, dtype)
     hidden = draft(noise, context, noise_pos, context_pos, attn_bias)
     pred = hidden[:, 1:, :]
+    # Frozen head runs in its storage dtype (bf16 on GPU); logits are cast to
+    # float32 before the cross-entropy.
     if isinstance(lm_head, nn.Embedding):
         w = lm_head.weight
-        logits = F.linear(pred.to(device=w.device, dtype=torch.float32), w.float())
+        logits = F.linear(pred.to(device=w.device, dtype=w.dtype), w).float()
         labels = labels.to(w.device)
     else:
-        head_dev = next(lm_head.parameters()).device
-        logits = lm_head(pred.float().to(head_dev))
-        labels = labels.to(head_dev)
+        head_w = next(lm_head.parameters())
+        logits = lm_head(pred.to(device=head_w.device, dtype=head_w.dtype)).float()
+        labels = labels.to(head_w.device)
     token_loss = F.cross_entropy(
         logits.reshape(-1, logits.size(-1)),
         labels.reshape(-1),
@@ -497,12 +508,16 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device} target={cfg.target_model}", flush=True)
     token = hf_token()
-    if not token:
-        raise RuntimeError("HF token missing; Modal secret hf-token is required to upload")
-    from huggingface_hub import HfApi
+    if token:
+        from huggingface_hub import HfApi
 
-    who = HfApi(token=token).whoami()
-    print(f"hf user={who.get('name')} keys={[k for k in os.environ if 'HF' in k.upper() or 'HUGG' in k.upper()]}", flush=True)
+        try:
+            who = HfApi(token=token).whoami()
+            print(f"hf user={who.get('name')}", flush=True)
+        except Exception as exc:  # noqa: BLE001 - informational only; httpx transport errors are not HfHubHTTPError
+            print(f"hf whoami failed ({exc}); upload will be skipped or fail later", flush=True)
+    else:
+        print("no HF token in environment; training locally, hub upload will be skipped", flush=True)
 
     cache_dir = out_dir / "hidden-cache"
     samples = list(cache_dir.glob("[0-9]*.pt"))
@@ -515,14 +530,25 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
 
     embed_w = torch.load(cache_dir / "embed.pt", map_location="cpu", weights_only=True)["weight"]
     head_w = torch.load(cache_dir / "lm_head.pt", map_location="cpu", weights_only=True)["weight"]
-    embeddings = nn.Embedding.from_pretrained(embed_w.float(), freeze=True)
-    lm_head = nn.Linear(head_w.shape[1], head_w.shape[0], bias=False)
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    # Frozen target IO weights (vocab x hidden): keep them on the training
+    # device in the draft dtype so each anchor's full-vocab matmul and its
+    # backward stay on the GPU. cfg.io_on_device=False keeps them on CPU.
+    io_device = device if cfg.io_on_device else torch.device("cpu")
+    io_dtype = dtype if io_device.type == "cuda" else torch.float32
+    embeddings = nn.Embedding.from_pretrained(
+        embed_w.to(device=io_device, dtype=io_dtype), freeze=True
+    )
+    lm_head = nn.Linear(
+        head_w.shape[1], head_w.shape[0], bias=False, device=io_device, dtype=io_dtype
+    )
     with torch.no_grad():
-        lm_head.weight.copy_(head_w.float())
+        lm_head.weight.copy_(head_w.to(device=io_device, dtype=io_dtype))
     for p in lm_head.parameters():
         p.requires_grad_(False)
+    del embed_w, head_w
+    print(f"frozen embeddings/lm_head on {io_device} ({io_dtype})", flush=True)
 
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     draft = DFlashDraftModel(cfg).to(device=device, dtype=dtype)
     draft.train()
     try:
@@ -546,6 +572,9 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
     gen = torch.Generator(device="cpu")
     gen.manual_seed(cfg.seed)
     (out_dir / "config.json").write_text(json.dumps(cfg.__dict__, indent=2) + "\n")
+    total_steps = cfg.max_steps
+    if cfg.epochs > 0:
+        total_steps = min(total_steps, max(cfg.epochs * len(samples) // cfg.grad_accum, 1))
     step = 0
     opt.zero_grad(set_to_none=True)
     t0 = time.time()
@@ -553,11 +582,12 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
     n_loss = 0
     history: list[dict[str, float]] = []
     epoch = 0
-    while step < cfg.max_steps:
+    while step < total_steps and (cfg.epochs <= 0 or epoch < cfg.epochs):
         epoch += 1
+        used = 0
         order = torch.randperm(len(samples), generator=gen).tolist()
         for idx in order:
-            if step >= cfg.max_steps:
+            if step >= total_steps:
                 break
             packed = torch.load(samples[idx], map_location="cpu", weights_only=True)
             ids = packed["input_ids"]
@@ -566,6 +596,7 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
             anchors = sample_anchors(int(seq.numel()), cfg.block_size, cfg.max_anchors, gen)
             if anchors.numel() == 0:
                 continue
+            used += 1
             n_a = int(anchors.numel())
             scale = float(cfg.grad_accum * n_a)
             acc_sum = 0.0
@@ -589,7 +620,7 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
             if n_loss % cfg.grad_accum == 0:
                 nn.utils.clip_grad_norm_(draft.parameters(), cfg.grad_clip)
                 for pg in opt.param_groups:
-                    pg["lr"] = cosine_lr(step, cfg.max_steps, cfg.lr, cfg.warmup_ratio)
+                    pg["lr"] = cosine_lr(step, total_steps, cfg.lr, cfg.warmup_ratio)
                 opt.step()
                 opt.zero_grad(set_to_none=True)
                 step += 1
@@ -603,15 +634,17 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
                 }
                 history.append(row)
                 print(
-                    f"step {step}/{cfg.max_steps} loss={avg:.4f} acc={stats['acc']:.3f} "
+                    f"step {step}/{total_steps} ep={epoch} loss={avg:.4f} acc={stats['acc']:.3f} "
                     f"anchors={int(stats['n_anchors'])} lr={row['lr']:.2e}",
                     flush=True,
                 )
                 running = 0.0
                 n_loss = 0
-                if step % 100 == 0 or step == cfg.max_steps:
+                if step % 100 == 0 or step == total_steps:
                     ckpt = out_dir / f"draft-step{step}.pt"
                     torch.save({"cfg": cfg.__dict__, "draft": draft.state_dict()}, ckpt)
+        if used == 0:
+            raise RuntimeError("no cached sequence is long enough to sample a DFlash anchor")
 
     weights = out_dir / "dflash_draft.pt"
     torch.save({"cfg": cfg.__dict__, "draft": draft.state_dict()}, weights)
@@ -619,6 +652,7 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
     export_dflash_gguf(draft, cfg, gguf_path)
     summary = {
         "steps": step,
+        "epochs": epoch,
         "seconds": time.time() - t0,
         "gguf": str(gguf_path),
         "weights": str(weights),
@@ -647,6 +681,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--no-4bit", action="store_true")
     p.add_argument("--target", default=None)
+    p.add_argument("--target-revision", default=None, help="pinned target repo revision (commit sha)")
+    p.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="execute the target repo's custom code (requires --target-revision)",
+    )
+    p.add_argument("--io-on-cpu", action="store_true", help="keep frozen embeddings/lm_head on CPU")
     return p.parse_args()
 
 
@@ -667,6 +708,14 @@ def main() -> None:
         cfg.epochs = args.epochs
     if args.no_4bit:
         cfg.load_in_4bit = False
+    if args.target_revision:
+        cfg.target_revision = args.target_revision
+    if args.trust_remote_code:
+        if not cfg.target_revision:
+            raise SystemExit("--trust-remote-code requires --target-revision")
+        cfg.trust_remote_code = True
+    if args.io_on_cpu:
+        cfg.io_on_device = False
     if args.smoke:
         cfg.max_steps = 4
         cfg.max_samples = 16

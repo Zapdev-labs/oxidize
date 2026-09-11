@@ -31,6 +31,52 @@ class DFlashConfigTests(unittest.TestCase):
         self.assertAlmostEqual(sum(w) / len(w), 1.0, places=6)
         self.assertGreater(w[0], w[-1])
 
+    def test_loss_weights_reject_non_positive_gamma(self) -> None:
+        with self.assertRaises(ValueError):
+            positional_loss_weights(15, 0.0)
+        with self.assertRaises(ValueError):
+            positional_loss_weights(15, -1.0)
+
+    def test_target_layer_ids_are_distinct_or_rejected(self) -> None:
+        ids = build_target_layer_ids(3, 8)
+        self.assertEqual(len(set(ids)), len(ids))
+        with self.assertRaises(ValueError):
+            build_target_layer_ids(5, 4)
+        with self.assertRaises(ValueError):
+            DFlashTrainConfig(num_target_layers=5, target_n_layers=4)
+
+    def test_duplicate_explicit_target_layer_ids_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            DFlashTrainConfig(target_layer_ids=[1, 1, 2])
+
+
+class DFlashAnchorTests(unittest.TestCase):
+    def test_final_anchor_is_included(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+        from scripts.dflash.model import sample_anchors
+
+        seq_len, block = 10, 4
+        gen = torch.Generator().manual_seed(0)
+        anchors = sample_anchors(seq_len, block, max_anchors=100, generator=gen)
+        self.assertEqual(sorted(anchors.tolist()), list(range(1, seq_len - block + 1)))
+        self.assertIn(seq_len - block, anchors.tolist())
+
+    def test_single_anchor_when_seq_is_block_plus_one(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+        from scripts.dflash.model import sample_anchors
+
+        block = 4
+        gen = torch.Generator().manual_seed(0)
+        anchors = sample_anchors(block + 1, block, max_anchors=8, generator=gen)
+        self.assertEqual(anchors.tolist(), [1])
+        self.assertEqual(sample_anchors(block, block, max_anchors=8, generator=gen).numel(), 0)
+
 
 class DFlashMaskTests(unittest.TestCase):
     def test_block_attention_keeps_prefix_and_full_block(self) -> None:

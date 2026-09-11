@@ -16,6 +16,7 @@ The GGUF declares ``general.architecture = qwen35``: a hybrid gated-delta-net/SS
 Usage:
     modal volume create oxidize-gguf                       # once
     modal volume put oxidize-gguf <local.gguf> /Qwen3.8-27B-MTP-IQ4_XS.gguf
+    modal secret create llama-api-key LLAMA_API_KEY=<random>   # once; serve() refuses to start without it
     modal serve modal_qwen35_serve.py                      # ephemeral, live-reloading
     modal deploy modal_qwen35_serve.py                     # persistent URL
 
@@ -84,6 +85,11 @@ image = (
         " -DGGML_CUDA_FA_ALL_QUANTS=ON"
         " -DLLAMA_BUILD_TESTS=OFF"
         " -DLLAMA_BUILD_EXAMPLES=OFF"
+        # llama-bench and llama-server live under tools/, gated by LLAMA_BUILD_TOOLS
+        # (+ LLAMA_BUILD_SERVER for the server), not by LLAMA_BUILD_EXAMPLES. Both
+        # default ON for a standalone build; pin them so the targets below always exist.
+        " -DLLAMA_BUILD_TOOLS=ON"
+        " -DLLAMA_BUILD_SERVER=ON"
         " -DLLAMA_CURL=ON",
         "cd /opt/llama.cpp && cmake --build build --config Release -j $(nproc) --target llama-server llama-bench",
         # No gpu= here: CMAKE_CUDA_ARCHITECTURES is explicit, so nvcc cross-compiles
@@ -114,6 +120,9 @@ def fetch_model() -> str:
     from huggingface_hub import hf_hub_download
 
     dest = Path(MODEL_PATH)
+    if dest.is_symlink():
+        # Earlier versions moved the HF snapshot symlink here instead of the bytes.
+        dest.unlink()
     if dest.exists():
         print(f"already present: {dest} ({dest.stat().st_size / 2**30:.2f} GiB)", flush=True)
         return str(dest)
@@ -125,19 +134,27 @@ def fetch_model() -> str:
         cache_dir="/tmp/hf",
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(src, dest)
+    # hf_hub_download returns a snapshot symlink into the cache's blobs/ dir; moving it
+    # across filesystems would recreate a dangling symlink on the Volume. Copy the bytes.
+    # Copy to a temporary name and rename, so an interrupted copy never leaves
+    # a truncated GGUF at MODEL_PATH for the exists() check above to accept.
+    tmp = dest.with_name(dest.name + ".partial")
+    shutil.copyfile(os.path.realpath(src), tmp)
+    os.replace(tmp, dest)
     model_vol.commit()
     print(f"staged {dest} ({dest.stat().st_size / 2**30:.2f} GiB)", flush=True)
     return str(dest)
 
 
-def _server_argv() -> list[str]:
+def _server_argv(api_key: str) -> list[str]:
     """llama-server flags, each earning its place."""
     return [
         "/opt/llama.cpp/build/bin/llama-server",
         "--model", MODEL_PATH,
         "--host", "0.0.0.0",
         "--port", str(PORT),
+        # The Modal web endpoint is public; require a bearer token on every request.
+        "--api-key", api_key,
         # All 65 blocks on the GPU. 15.9 GiB of weights fits any card we target.
         "--n-gpu-layers", "99",
         "--ctx-size", str(N_CTX),
@@ -183,15 +200,22 @@ def _server_argv() -> list[str]:
     memory=32768,
     scaledown_window=15 * 60,
     max_containers=1,
+    secrets=[modal.Secret.from_name("llama-api-key")],
 )
 @modal.concurrent(max_inputs=max(N_PARALLEL, 1))
 @modal.web_server(port=PORT, startup_timeout=15 * 60)
 def serve() -> None:
-    """OpenAI-compatible endpoint: POST <url>/v1/chat/completions."""
+    """OpenAI-compatible endpoint: POST <url>/v1/chat/completions (Bearer $LLAMA_API_KEY)."""
     import subprocess
 
-    argv = _server_argv()
-    print(" ".join(argv), flush=True)
+    api_key = os.environ.get("LLAMA_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "LLAMA_API_KEY is unset: refusing to expose llama-server unauthenticated. "
+            "Create it with `modal secret create llama-api-key LLAMA_API_KEY=<random>`."
+        )
+    argv = _server_argv(api_key)
+    print(" ".join("<redacted>" if a == api_key else a for a in argv), flush=True)
     subprocess.Popen(argv)
 
 
@@ -223,13 +247,24 @@ def bench(n_prompt: int = 512, n_gen: int = 128) -> str:
     )
     out = (proc.stdout or "") + (proc.stderr or "")
     print(out, flush=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"llama-bench exited with code {proc.returncode}:\n{out}")
     return out
 
 
 @app.local_entrypoint()
 def main(prompt: str = "Write a Python one-liner that reverses a string.") -> None:
     """`modal run modal_qwen35_serve.py` -> stage the model, then report its size."""
+    import json
+    import shlex
+
     path = fetch_model.remote()
     print(f"model ready on volume: {path}")
     print("next: modal serve modal_qwen35_serve.py   (or modal deploy)")
-    print(f"then: curl $URL/v1/chat/completions -d '{{\"messages\":[{{\"role\":\"user\",\"content\":\"{prompt}\"}}]}}'")
+    payload = json.dumps({"messages": [{"role": "user", "content": prompt}]})
+    print(
+        'then: curl "$URL/v1/chat/completions"'
+        ' -H "Authorization: Bearer $LLAMA_API_KEY"'
+        " -H 'Content-Type: application/json'"
+        f" -d {shlex.quote(payload)}"
+    )
