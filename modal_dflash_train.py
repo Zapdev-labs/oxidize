@@ -181,24 +181,29 @@ def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int
     manifest_path = cache_dir / "manifest.json"
     from huggingface_hub import HfApi
 
-    # Resolve the exact target and dataset commits, so an upstream change at the
-    # same repo id invalidates the cache. The effective target layer ids are a
-    # pure function of the target config and num_target_layers, so the target
-    # commit covers them too.
-    api = HfApi(token=os.environ.get("HF_TOKEN"))
-    target_sha = api.model_info(cfg.target_model, revision=cfg.target_revision or None).sha
-    dataset_sha = api.dataset_info(cfg.dataset_name).sha
     # Snapshot before dump_hiddens: load_target() mutates cfg from the target config.
     want = {
         "target_model": cfg.target_model,
-        "target_sha": target_sha,
-        "dataset_sha": dataset_sha,
         "dataset_name": cfg.dataset_name,
         "dataset_split": cfg.dataset_split,
         "max_seq_len": cfg.max_seq_len,
         "max_samples": cfg.max_samples,
         "num_target_layers": cfg.num_target_layers,
     }
+    # Resolve the exact target and dataset commits, so an upstream change at the
+    # same repo id invalidates the cache. The effective target layer ids are a
+    # pure function of the target config and num_target_layers, so the target
+    # commit covers them too. A Hub outage must not block reuse of a cache that
+    # otherwise matches, so a failed lookup only skips the commit check.
+    try:
+        api = HfApi(token=os.environ.get("HF_TOKEN"))
+        shas = {
+            "target_sha": api.model_info(cfg.target_model, revision=cfg.target_revision or None).sha,
+            "dataset_sha": api.dataset_info(cfg.dataset_name).sha,
+        }
+    except Exception as exc:  # noqa: BLE001 - any Hub failure just skips the commit check
+        print(f"could not resolve hub commits ({exc}); matching cache on config only", flush=True)
+        shas = None
     existing = sorted(cache_dir.glob("[0-9]*.pt"))
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -207,6 +212,7 @@ def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int
     if (
         isinstance(manifest, dict)
         and manifest.get("config") == want
+        and (shas is None or manifest.get("shas") == shas)
         and manifest.get("n") == len(existing)
         and len(existing) >= 8
     ):
@@ -218,7 +224,7 @@ def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int
         for p in existing:
             p.unlink()
     n = dump_hiddens(cfg, cache_dir, cfg.max_samples)
-    manifest_path.write_text(json.dumps({"config": want, "n": n}, indent=2))
+    manifest_path.write_text(json.dumps({"config": want, "shas": shas, "n": n}, indent=2))
     out_vol.commit()
     hf_cache.commit()
     return n
