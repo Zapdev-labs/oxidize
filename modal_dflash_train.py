@@ -204,6 +204,10 @@ def dump_hiddens_job(smoke: bool = False, max_samples: int | None = None) -> int
     except Exception as exc:  # noqa: BLE001 - any Hub failure just skips the commit check
         print(f"could not resolve hub commits ({exc}); matching cache on config only", flush=True)
         shas = None
+    if shas is not None:
+        # Dump exactly the commits recorded in the manifest.
+        cfg.target_revision = shas["target_sha"]
+        cfg.dataset_revision = shas["dataset_sha"]
     existing = sorted(cache_dir.glob("[0-9]*.pt"))
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -319,10 +323,13 @@ def upload_job(hub_repo: str = "freakyskittle/Qwen3.8-27B-ABLITERATED-DFlash") -
 
     step_ckpts = sorted(out_dir.glob("draft-step*.pt"), key=_step_of)
     ckpts = step_ckpts + ([final_ckpt] if final_ckpt.exists() else [])
-    if not gguf.exists() and ckpts:
+    latest = (final_ckpt if final_ckpt.exists() else step_ckpts[-1]) if ckpts else None
+    # A GGUF older than the newest checkpoint is stale (training stopped after a
+    # checkpoint but before re-export); regenerate it before uploading.
+    stale = latest is not None and gguf.exists() and gguf.stat().st_mtime < latest.stat().st_mtime
+    if latest is not None and (not gguf.exists() or stale):
         import torch
 
-        latest = final_ckpt if final_ckpt.exists() else step_ckpts[-1]
         print(f"exporting GGUF from {latest.name}", flush=True)
         # Checkpoints are {"cfg": plain dict, "draft": state_dict}; weights_only suffices.
         packed = torch.load(latest, map_location="cpu", weights_only=True)

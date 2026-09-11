@@ -252,7 +252,12 @@ def tokenize_messages(tokenizer, messages: list[dict[str, str]], max_seq_len: in
 def iter_tokenized(cfg: DFlashTrainConfig, tokenizer):
     from datasets import load_dataset
 
-    ds = load_dataset(cfg.dataset_name, split=cfg.dataset_split, streaming=True)
+    ds = load_dataset(
+        cfg.dataset_name,
+        split=cfg.dataset_split,
+        streaming=True,
+        revision=cfg.dataset_revision or None,
+    )
     n = 0
     for row in ds:
         if n >= cfg.max_samples:
@@ -649,6 +654,22 @@ def train(cfg: DFlashTrainConfig, out_dir: Path) -> dict[str, Any]:
                     torch.save({"cfg": cfg.__dict__, "draft": draft.state_dict()}, ckpt)
         if used == 0:
             raise RuntimeError("no cached sequence is long enough to sample a DFlash anchor")
+
+    # Apply a trailing partial accumulation batch rather than dropping it: each
+    # sample's loss was scaled by 1/grad_accum, so rescale to 1/n_loss first.
+    if n_loss > 0 and step < total_steps:
+        for p in draft.parameters():
+            if p.grad is not None:
+                p.grad.mul_(cfg.grad_accum / n_loss)
+        nn.utils.clip_grad_norm_(draft.parameters(), cfg.grad_clip)
+        for pg in opt.param_groups:
+            pg["lr"] = cosine_lr(step, total_steps, cfg.lr, cfg.warmup_ratio)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+        step += 1
+        print(f"step {step}/{total_steps} (partial batch of {n_loss}) loss={running / n_loss:.4f}", flush=True)
+    if step == 0:
+        raise RuntimeError("training ran no optimizer step; refusing to export an untrained draft")
 
     weights = out_dir / "dflash_draft.pt"
     torch.save({"cfg": cfg.__dict__, "draft": draft.state_dict()}, weights)

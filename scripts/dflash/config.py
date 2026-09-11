@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -21,8 +22,8 @@ def build_target_layer_ids(n_target: int, n_layers: int) -> list[int]:
 
 
 def positional_loss_weights(block_predict: int, gamma: float) -> list[float]:
-    if gamma <= 0:
-        raise ValueError(f"loss decay gamma must be > 0, got {gamma}")
+    if not math.isfinite(gamma) or gamma <= 0:
+        raise ValueError(f"loss decay gamma must be a finite number > 0, got {gamma}")
     if block_predict <= 0:
         return []
     raw = [pow(2.718281828459045, -i / gamma) for i in range(block_predict)]
@@ -80,6 +81,7 @@ class DFlashTrainConfig:
     # in, and then only at a pinned revision (commit sha) of that repo.
     trust_remote_code: bool = False
     target_revision: str = ""
+    dataset_revision: str = ""
     # Keep the frozen target embeddings / lm_head on the training device in
     # bf16. Set False to keep them on CPU for low-GPU-memory runs.
     io_on_device: bool = True

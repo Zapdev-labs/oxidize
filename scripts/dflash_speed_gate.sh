@@ -62,9 +62,11 @@ run_ox() {
   shift
   echo "===== oxidize-c $name =====" >&2
   # The MTP check below reads an INFO line, so pin the child's log level.
-  OX_LOG_LEVEL=INFO "$OX" --model "$MODEL" --prompt "$PROMPT" --n-predict "$GEN_N" --ctx "$CTX" \
+  if ! OX_LOG_LEVEL=INFO "$OX" --model "$MODEL" --prompt "$PROMPT" --n-predict "$GEN_N" --ctx "$CTX" \
     --threads "$THREADS" --numa single --temperature 0 --repeat-penalty 1.0 \
-    "$@" 2>"$OUT/${name}.err" | tee "$OUT/${name}.out" >&2
+    "$@" 2>"$OUT/${name}.err" | tee "$OUT/${name}.out" >&2; then
+    die 1 "oxidize-c run '$name' failed (see $OUT/${name}.err)"
+  fi
   grep -E "prefill:|speed:|generated |tok/s \(" "$OUT/${name}.err" >&2 \
     || echo "warning: no timing lines in $OUT/${name}.err" >&2
   local tps
@@ -74,7 +76,8 @@ run_ox() {
 }
 
 echo "===== oxidize-c tokenize ====="
-"$OX" tokenize --model "$MODEL" --prompt "$PROMPT" 2>"$OUT/tok.err" | tee "$OUT/tok.out"
+"$OX" tokenize --model "$MODEL" --prompt "$PROMPT" 2>"$OUT/tok.err" | tee "$OUT/tok.out" \
+  || die 1 "oxidize-c tokenize failed (see $OUT/tok.err)"
 
 base_tps="$(run_ox greedy --spec-type none)"
 spec_tps="$(run_ox "$SPEC_TYPE" --spec-type "$SPEC_TYPE")"
@@ -84,6 +87,12 @@ spec_tps="$(run_ox "$SPEC_TYPE" --spec-type "$SPEC_TYPE")"
 # would compare greedy against greedy.
 grep -q "MTP/nextn block loaded" "$OUT/${SPEC_TYPE}.err" \
   || die 2 "model has no MTP/nextn head, so --spec-type $SPEC_TYPE ran plain greedy; cannot evaluate the gate"
+
+# Speculative decoding greedy-verifies every draft against the target, so its
+# text must match the greedy baseline exactly. A faster run that emits
+# different tokens is a correctness failure, not a speedup.
+cmp -s "$OUT/greedy.out" "$OUT/${SPEC_TYPE}.out" \
+  || die 1 "${SPEC_TYPE} output differs from greedy (diff $OUT/greedy.out $OUT/${SPEC_TYPE}.out)"
 
 echo "===== gate ====="
 echo "baseline (greedy): ${base_tps} tok/s"

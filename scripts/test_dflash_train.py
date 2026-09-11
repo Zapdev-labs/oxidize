@@ -37,6 +37,9 @@ class DFlashConfigTests(unittest.TestCase):
             positional_loss_weights(15, 0.0)
         with self.assertRaises(ValueError):
             positional_loss_weights(15, -1.0)
+        for bad in (float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                positional_loss_weights(15, bad)
 
     def test_remote_code_requires_full_commit_sha(self) -> None:
         sha = "0123456789abcdef0123456789abcdef01234567"

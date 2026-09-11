@@ -116,6 +116,7 @@ app = modal.App("oxidize-qwen35-mtp")
 def fetch_model() -> str:
     """Pull the GGUF straight from HF into the Volume (faster than uploading 16 GB from home)."""
     import shutil
+    import tempfile
     from pathlib import Path
 
     from huggingface_hub import hf_hub_download
@@ -139,9 +140,15 @@ def fetch_model() -> str:
     # across filesystems would recreate a dangling symlink on the Volume. Copy the bytes.
     # Copy to a temporary name and rename, so an interrupted copy never leaves
     # a truncated GGUF at MODEL_PATH for the exists() check above to accept.
-    tmp = dest.with_name(dest.name + ".partial")
-    shutil.copyfile(os.path.realpath(src), tmp)
-    os.replace(tmp, dest)
+    # A unique name per invocation, so concurrent stagings never share a temp file.
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".", suffix=".partial")
+    os.close(fd)
+    try:
+        shutil.copyfile(os.path.realpath(src), tmp_name)
+        os.replace(tmp_name, dest)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
     model_vol.commit()
     print(f"staged {dest} ({dest.stat().st_size / 2**30:.2f} GiB)", flush=True)
     return str(dest)
