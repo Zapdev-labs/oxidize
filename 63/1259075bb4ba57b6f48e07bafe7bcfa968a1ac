@@ -1,0 +1,36 @@
+oxidize-c/src/model/dflash2.c
+  s_00efa08b7891dc::t_7e28440e3bf7e3 270
+  s_00efa08b7891dc::t_3ee89260da14dc 146-147
+  s_00efa08b7891dc::t_82250a6d1ca5f2 446-508,518-520,523-524
+  s_00efa08b7891dc::t_662b52d3e9c132 198-200
+  s_00efa08b7891dc::t_e0abd0c12b3f2d 44-104,112-132
+  s_00efa08b7891dc::t_ff249d633ed5de 155
+  s_00efa08b7891dc::t_86506cf41cb0dd 282-287
+  s_00efa08b7891dc::t_1bed3e89fe6975 723-724,727-728,731-732,742-744,756-768
+  s_00efa08b7891dc::t_7237cc1c529987 23
+  s_00efa08b7891dc::t_640398aabfb180 218-245
+  s_00efa08b7891dc::t_302db558b6a6ab 105-107
+  s_00efa08b7891dc::t_0b1630c4e60bd0 108-111
+  s_00efa08b7891dc::t_a2bee456dabd07 182-183,190,195
+  s_00efa08b7891dc::t_25414a1f5c1290 826,837
+  s_00efa08b7891dc::t_59a4c321c62efc 1080-1082,1085-1089,1100-1101,1103-1113,1117-1118,1127-1129,1131-1153,1157-1160
+  s_00efa08b7891dc::t_81c80e6096664a 191-194
+oxidize-c/src/cli/commands.c
+  s_00efa08b7891dc::t_02b25176b15ba1 1666-1669,1673-1682,1685-1702
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "631259075bb4ba57b6f48e07bafe7bcfa968a1ac",
+  "prompts": {},
+  "sessions": {
+    "s_00efa08b7891dc": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "0ce28c7d-2cbf-42ab-a37f-cbcafdf3f272",
+        "model": "custom:GLM-5.3-Free-(TokenRouter)-4"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

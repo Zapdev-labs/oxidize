@@ -1,0 +1,19 @@
+oxidize-c/src/model/dflash2.c
+  s_453def152fa7cf::t_33aa623c9844b1 1588-1590,1598-1599,1719-1734,1742
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "8e1551ed6c115fde5f92f2efde3b7730fa01b6ba",
+  "prompts": {},
+  "sessions": {
+    "s_453def152fa7cf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a06bab-9644-7313-898a-4dcc3f8a41c3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}

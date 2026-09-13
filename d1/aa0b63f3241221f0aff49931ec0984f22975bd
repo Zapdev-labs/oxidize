@@ -1,0 +1,24 @@
+oxidize-c/src/model/dflash2.c
+  s_00efa08b7891dc::t_0afb76ef70a5e0 1922
+  s_00efa08b7891dc::t_13b7e168e9939a 1034
+  s_00efa08b7891dc::t_0eff269d9ec696 968-978
+  s_00efa08b7891dc::t_77d629c66ddf49 1497
+oxidize-c/include/oxidize/dflash2.h
+  s_00efa08b7891dc::t_9571a0f4478dae 201-206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d1aa0b63f3241221f0aff49931ec0984f22975bd",
+  "prompts": {},
+  "sessions": {
+    "s_00efa08b7891dc": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "0ce28c7d-2cbf-42ab-a37f-cbcafdf3f272",
+        "model": "custom:GLM-5.3-Free-(TokenRouter)-4"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
