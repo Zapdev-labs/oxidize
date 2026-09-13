@@ -1,7 +1,7 @@
 """Benchmark oxidize-c (quantized-resident CUDA) on Gemma 4 31B IQ4_XS.
 
-    modal run modal_gemma4_bench.py::smoke   # correctness first
-    modal run modal_gemma4_bench.py::bench   # then speed
+    modal run scripts/modal_gemma4_bench.py::smoke   # correctness first
+    modal run scripts/modal_gemma4_bench.py::bench   # then speed
 
 Set OX_GPU to pick the card (default A10G; L40S needs a payment method).
 

@@ -126,6 +126,7 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 - **Test co-location**: Every `.rs` file has `#[cfg(test)]` module at bottom; no separate `tests/` inside `src/`.
 - **AGENTS.md per domain**: Every crate and major `oxidize-core/src/` subdirectory has an `AGENTS.md` — check the map above before exploring blindly.
 - **Port order**: Rust → Go (`oxidize-golang`) → Python (`oxidize-python`); C (`oxidize-c`) and C++ (`oxidize-cpp`) are independent ports.
+- **Scripts go in `scripts/`**: never dump one-off scripts at the repo root. Local scratch belongs in `scripts/local/` (gitignored). Modal harnesses are `scripts/modal_*.py`.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 - `StdMutex` in async context (`oxidize-server/src/runtime/paged.rs`) — should be `tokio::sync::Mutex`.
@@ -195,6 +196,7 @@ make wasm     # outputs to dist/wasm
 - When a user asks to run a model. It means run it using oxidize 
 - Prefer building and testing over starting development servers unless the user explicitly asks to run or serve.
 - Custom Hugging Face repos for quant/model publishing should be private unless the user explicitly requests public.
+- Put scripts in the `scripts/` folder. One-off scripts should be gitignored (`scripts/local/`; root `/modal_*.py` is ignored). Do not leave Modal or bench scripts at the repo root.
 
 ## Learned Workspace Facts
 - `oxidize-golang/` is the active Go port of `oxidize-core`; CLI lives in `internal/cli/` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`); HF GGUF resolver in `hf/`.

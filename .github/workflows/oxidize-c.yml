@@ -155,7 +155,7 @@ jobs:
             echo "Modal secrets not configured, skipping GPU test"
             exit 0
           fi
-          modal run modal_c_app.py::cuda_build
+          modal run scripts/modal_c_app.py::cuda_build
 
       - name: Run GPU inference test on Modal
         env:
@@ -166,7 +166,7 @@ jobs:
             echo "Modal secrets not configured, skipping GPU test"
             exit 0
           fi
-          modal run modal_c_app.py::gpu_test
+          modal run scripts/modal_c_app.py::gpu_test
 
   # ─── Code quality ───────────────────────────────────────────────────────
   lint:
