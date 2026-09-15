@@ -213,8 +213,9 @@ __global__ void k_qwen35_delta_heads(float *recurrent, const float *conv,
 
     const uint32_t tid = threadIdx.x;
     const uint32_t nthreads = blockDim.x;
-    const uint32_t v_per_k = n_value_heads / n_key_heads;
-    const uint32_t key_head = head / v_per_k;
+    /* Tiled GQA (ggml_repeat), not grouped (repeat_interleave) -- see the
+     * comment in src/model/qwen35_delta.c. Must match the CPU path. */
+    const uint32_t key_head = head % n_key_heads;
     const size_t key_total = (size_t)n_key_heads * dk;
     const float *q = conv + (size_t)key_head * dk;
     const float *k = conv + key_total + (size_t)key_head * dk;

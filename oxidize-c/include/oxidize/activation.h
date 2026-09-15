@@ -71,9 +71,14 @@ void oc_apply_rope_norm_f32(const float *in, float *out, size_t head_dim,
                             size_t rope_len, int64_t position, float theta);
 
 /* Apply RoPE with YaRN long-context scaling.
- * YaRN: scale = yarn_factor * (orig_ctx / position) when position > orig_ctx,
- * with a smooth interpolation between [orig_ctx * 0.8, orig_ctx * 1.2].
- * When yarn_factor == 0 or position <= yarn_orig_ctx, behaves as normal RoPE. */
+ *
+ * This is NTK-by-parts, matching llama.cpp's rope_yarn(): frequencies are
+ * interpolated by 1/yarn_factor, a per-dimension ramp between the correction
+ * dims blends interpolated and extrapolated angles, and cos/sin are scaled by
+ * mscale = 1 + 0.1*ln(yarn_factor). The scaling applies at EVERY position, not
+ * only past orig_ctx -- an earlier version of this comment claimed a
+ * position-gated formula that the code has never implemented.
+ * Falls back to plain RoPE when yarn_factor <= 1 or yarn_orig_ctx == 0. */
 /* As oc_apply_rope_yarn_f32, but with an explicit cos/sin amplitude.
  * `attn_factor` < 0 selects the standard YaRN mscale (1 + 0.1*ln(factor));
  * deepseek_yarn models pass the value from oc_rope_deepseek_yarn_scales(),
