@@ -210,11 +210,118 @@ float oc_oxk_dot_q5_k_q8_k_avx2(const uint8_t *row, size_t blocks,
     return oc_oxk_dot_q5_k_q8_k_scalar(row, blocks, q8);
 }
 
+/* ─── AVX2 Q6_K × Q8_K dot product ─────────────────────────────────────
+ *
+ * Q6_K block (210 bytes): [128 ql][64 qh][16 int8 scales][f16 d].
+ * 256 six-bit values: the low 4 bits come from ql, the high 2 from qh.
+ *
+ * Bit-exact against oc_oxk_dot_q6_k_q8_k_scalar. That reference was already
+ * restructured to accumulate each 16-element scale group in int32 and take
+ * one float multiply per block, precisely so a SIMD version could match it
+ * exactly rather than approximately — integer reassociation is exact, so the
+ * lane-wise sums and the hadd reduction below change nothing. The -32 value
+ * offset stays folded out through the activation block sums, as there.
+ *
+ * The 16-wide chunking is not arbitrary: with base = 128*n + l, every scale
+ * group boundary in the reference falls on l = 0 and l = 16, so one 16-byte
+ * chunk of l maps to exactly one group per q-slot. That makes each of the
+ * four unpacked slots a single 16-element dot, which is one maddubs. */
 __attribute__((target("avx2,fma,f16c")))
 float oc_oxk_dot_q6_k_q8_k_avx2(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {
-    return oc_oxk_dot_q6_k_q8_k_scalar(row, blocks, q8);
+    const __m128i m4 = _mm_set1_epi8(0x0F);
+    const __m128i m3 = _mm_set1_epi8(0x03);
+    const __m128i one16 = _mm_set1_epi16(1);
+
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q6_K_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        const uint8_t *ql = wb;
+        const uint8_t *qh = wb + 128;
+        const int8_t  *sc = (const int8_t *)(wb + 192);
+        const float dw = oc_oxk_f16_le_to_f32(wb + 208);
+
+        float dq;
+        memcpy(&dq, qb, 4);
+        const int8_t  *q8v  = (const int8_t *)(qb + 4);
+        const uint8_t *bsums = qb + 4 + 256;
+
+        int32_t grp[16];
+
+        for (int n = 0; n < 2; n++) {
+            const uint8_t *qlc = ql + n * 64;
+            const uint8_t *qhc = qh + n * 32;
+            for (int lc = 0; lc < 2; lc++) {
+                const int l0 = lc * 16;
+                const int8_t *av = q8v + n * 128 + l0;
+
+                const __m128i lo =
+                    _mm_loadu_si128((const __m128i *)(qlc + l0));
+                const __m128i hi =
+                    _mm_loadu_si128((const __m128i *)(qlc + l0 + 32));
+                const __m128i hb =
+                    _mm_loadu_si128((const __m128i *)(qhc + l0));
+
+                /* Per-byte shifts: srli_epi16 then mask leaves exactly the
+                 * bits the scalar code selects, because the mask discards
+                 * whatever bled in from the neighbouring byte. */
+                const __m128i q1 = _mm_or_si128(
+                    _mm_and_si128(lo, m4),
+                    _mm_slli_epi16(_mm_and_si128(hb, m3), 4));
+                const __m128i q2 = _mm_or_si128(
+                    _mm_and_si128(hi, m4),
+                    _mm_slli_epi16(
+                        _mm_and_si128(_mm_srli_epi16(hb, 2), m3), 4));
+                const __m128i q3 = _mm_or_si128(
+                    _mm_and_si128(_mm_srli_epi16(lo, 4), m4),
+                    _mm_slli_epi16(
+                        _mm_and_si128(_mm_srli_epi16(hb, 4), m3), 4));
+                const __m128i q4 = _mm_or_si128(
+                    _mm_and_si128(_mm_srli_epi16(hi, 4), m4),
+                    _mm_slli_epi16(
+                        _mm_and_si128(_mm_srli_epi16(hb, 6), m3), 4));
+
+                /* q is unsigned 0..63 and a is signed, which is the operand
+                 * order maddubs wants. 63*127*2 = 16002 < 32767, so the
+                 * int16 pair sums cannot saturate. */
+                const __m128i p1 = _mm_madd_epi16(
+                    _mm_maddubs_epi16(q1,
+                        _mm_loadu_si128((const __m128i *)(av))), one16);
+                const __m128i p2 = _mm_madd_epi16(
+                    _mm_maddubs_epi16(q2,
+                        _mm_loadu_si128((const __m128i *)(av + 32))), one16);
+                const __m128i p3 = _mm_madd_epi16(
+                    _mm_maddubs_epi16(q3,
+                        _mm_loadu_si128((const __m128i *)(av + 64))), one16);
+                const __m128i p4 = _mm_madd_epi16(
+                    _mm_maddubs_epi16(q4,
+                        _mm_loadu_si128((const __m128i *)(av + 96))), one16);
+
+                /* Fold the four 4-lane partials down to one lane each. */
+                const __m128i s12 = _mm_hadd_epi32(p1, p2);
+                const __m128i s34 = _mm_hadd_epi32(p3, p4);
+                const __m128i s   = _mm_hadd_epi32(s12, s34);
+
+                int32_t out[4];
+                _mm_storeu_si128((__m128i *)out, s);
+                grp[8 * n + 0 + lc] = out[0];
+                grp[8 * n + 2 + lc] = out[1];
+                grp[8 * n + 4 + lc] = out[2];
+                grp[8 * n + 6 + lc] = out[3];
+            }
+        }
+
+        int32_t pos = 0, minc = 0;
+        for (int g = 0; g < 16; g++) {
+            pos  += (int32_t)sc[g] * grp[g];
+            minc += (int32_t)sc[g] *
+                    (int32_t)oc_oxk_read_q8_k_bsum(bsums, (size_t)g);
+        }
+        sum += dw * dq * (float)(pos - 32 * minc);
+    }
+    return sum;
 }
 
 /* ─── AVX2 matvec (forward to scalar) ──────────────────────────────────── */

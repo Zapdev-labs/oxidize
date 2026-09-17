@@ -131,6 +131,15 @@ typedef enum {
     OC_QUANT_I64      = 34,
     OC_QUANT_F64      = 35,
     OC_QUANT_IQ1_XXXS = 36,
+    /* ik_llama.cpp interleaved Q8_0 (ggml id 208): eight consecutive Q8_0
+     * rows share one 272-byte superblock (see oxk_q8_0_r8.h). OFFLINE ONLY —
+     * there is no runtime decoder for it, so `oc_quant_block_size` reports a
+     * zero layout and `oc_quant_is_runtime_supported` returns false; a GGUF
+     * carrying ggml type 208 is refused at load instead of being decoded
+     * through the row-major Q8_0 path, which would read interleaved bytes as
+     * row-major and yield garbage logits. Unpack offline with
+     * `oc_q8_0_r8_unpack_to_q8_0_inplace` first. */
+    OC_QUANT_Q8_0_R8  = 37,
     OC_QUANT__COUNT,
     OC_QUANT_UNKNOWN  = 0xffffffffu,
 } OcGgufQuantizationType;
@@ -138,14 +147,29 @@ typedef enum {
 /* ─── Public API ──────────────────────────────────────────────────────── */
 
 /* `(elements_per_block, bytes_per_block)` for the given quant type, matching
- * Rust `quant_block_layout` bit-exactly. For unknown types returns (0, 0)
- * (VAL-QUANT-013). */
+ * Rust `quant_block_layout` bit-exactly. For unknown types — and for known
+ * types with no runtime decoder, currently only OC_QUANT_Q8_0_R8 — returns
+ * (0, 0) (VAL-QUANT-013). A (0, 0) layout is this port's "refuse this tensor"
+ * signal: `oc_quantized_size` then returns 0 and the model loader fails the
+ * tensor with OC_ERR_QUANT. */
 typedef struct OcQuantBlockLayout {
     size_t elements_per_block;
     size_t bytes_per_block;
 } OcQuantBlockLayout;
 
 OcQuantBlockLayout oc_quant_block_size(OcGgufQuantizationType qtype);
+
+/* True when `qtype` can be decoded by the inference path, i.e. it has a
+ * non-zero block layout AND a dequant implementation. False for
+ * OC_QUANT_UNKNOWN and for "known but not runnable" types — currently only
+ * OC_QUANT_Q8_0_R8, an offline repack layout whose enum slot, name, and
+ * ggml-id mapping stay available to conversion tooling while every runtime
+ * sizing path (`oc_quant_block_size` / `oc_quantized_size`, and therefore the
+ * model loader's tensor sizing) refuses it.
+ *
+ * Loaders should reject a tensor whose type fails this check with
+ * OC_ERR_QUANT rather than attempting to size or decode it. */
+bool oc_quant_is_runtime_supported(OcGgufQuantizationType qtype);
 
 /* Byte length needed to encode `value_count` source values into the given
  * quant type. Returns 0 if `value_count` is not a multiple of

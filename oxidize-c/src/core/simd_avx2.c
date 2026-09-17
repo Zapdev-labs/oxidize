@@ -23,6 +23,7 @@
 
 #include <immintrin.h>
 #include <stdint.h>
+#include <string.h>
 
 /* ─── Shared helpers ──────────────────────────────────────────────────── */
 
@@ -49,6 +50,142 @@ static inline __m256i __attribute__((target("avx2,fma,f16c")))
 cvtepu8_high(const __m128i v)
 {
     return _mm256_cvtepu8_epi32(_mm_srli_si128(v, 8));
+}
+
+__attribute__((target("avx2,fma")))
+float oc_simd_dflash2_dot_f32_avx2(const float *a, const float *b, size_t n)
+{
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
+                             _mm256_loadu_ps(b + i), a0);
+        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),
+                             _mm256_loadu_ps(b + i + 8), a1);
+        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16),
+                             _mm256_loadu_ps(b + i + 16), a2);
+        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24),
+                             _mm256_loadu_ps(b + i + 24), a3);
+    }
+    for (; i + 8 <= n; i += 8)
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
+                             _mm256_loadu_ps(b + i), a0);
+    __m256 acc = _mm256_add_ps(_mm256_add_ps(a0, a1),
+                               _mm256_add_ps(a2, a3));
+    float s0 = acc[0] + acc[1] + acc[2] + acc[3];
+    float s1 = acc[4] + acc[5] + acc[6] + acc[7];
+    float sum = s0 + s1;
+    for (; i < n; i++) sum += a[i] * b[i];
+    return sum;
+}
+
+__attribute__((target("avx2,fma")))
+float oc_simd_dflash2_dot_bf16_avx2(const uint16_t *w, const float *x,
+                                    size_t n)
+{
+    __m256 a0 = _mm256_setzero_ps();
+    __m256 a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps();
+    __m256 a3 = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        for (size_t j = 0; j < 4; j++) {
+            __m128i h = _mm_loadu_si128((const __m128i *)(w + i + j * 8));
+            __m256i w32 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16);
+            __m256 wv = _mm256_castsi256_ps(w32);
+            if (j == 0)
+                a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), a0);
+            else if (j == 1)
+                a1 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 8), a1);
+            else if (j == 2)
+                a2 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 16), a2);
+            else
+                a3 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i + 24), a3);
+        }
+    }
+    for (; i + 8 <= n; i += 8) {
+        __m128i h = _mm_loadu_si128((const __m128i *)(w + i));
+        __m256i w32 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(h), 16);
+        __m256 wv = _mm256_castsi256_ps(w32);
+        a0 = _mm256_fmadd_ps(wv, _mm256_loadu_ps(x + i), a0);
+    }
+    __m256 acc = _mm256_add_ps(_mm256_add_ps(a0, a1),
+                               _mm256_add_ps(a2, a3));
+    float s0 = acc[0] + acc[1] + acc[2] + acc[3];
+    float s1 = acc[4] + acc[5] + acc[6] + acc[7];
+    float sum = s0 + s1;
+    for (; i < n; i++) {
+        uint32_t bits = (uint32_t)w[i] << 16;
+        float wv;
+        memcpy(&wv, &bits, sizeof(wv));
+        sum += wv * x[i];
+    }
+    return sum;
+}
+
+__attribute__((target("avx2,fma")))
+void oc_simd_dflash2_gemv_rows_f32_avx2(const float *w, size_t rows,
+                                        size_t cols, const float *x,
+                                        float *out)
+{
+    for (size_t r = 0; r < rows; r++)
+        out[r] = oc_simd_dflash2_dot_f32_avx2(w + r * cols, x, cols);
+}
+
+__attribute__((target("avx2,fma")))
+void oc_simd_dflash2_dot_bf16_batch_avx2(const uint16_t *w, const float *x,
+                                         size_t width, size_t batch,
+                                         float *out)
+{
+    __m256 acc[32];
+    for (size_t p = 0; p < batch; p++) acc[p] = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 32 <= width; i += 32) {
+        __m256i h0 = _mm256_loadu_si256((const __m256i *)(w + i));
+        __m256i h1 = _mm256_loadu_si256((const __m256i *)(w + i + 16));
+        __m256 wv0 = _mm256_castsi256_ps(_mm256_slli_epi32(
+            _mm256_cvtepu16_epi32(_mm256_castsi256_si128(h0)), 16));
+        __m256 wv1 = _mm256_castsi256_ps(_mm256_slli_epi32(
+            _mm256_cvtepu16_epi32(_mm256_extracti128_si256(h0, 1)), 16));
+        __m256 wv2 = _mm256_castsi256_ps(_mm256_slli_epi32(
+            _mm256_cvtepu16_epi32(_mm256_castsi256_si128(h1)), 16));
+        __m256 wv3 = _mm256_castsi256_ps(_mm256_slli_epi32(
+            _mm256_cvtepu16_epi32(_mm256_extracti128_si256(h1, 1)), 16));
+        for (size_t p = 0; p < batch; p++) {
+            const float *xp = x + p * width + i;
+            acc[p] = _mm256_fmadd_ps(wv0, _mm256_loadu_ps(xp), acc[p]);
+            acc[p] = _mm256_fmadd_ps(wv1, _mm256_loadu_ps(xp + 8), acc[p]);
+            acc[p] = _mm256_fmadd_ps(wv2, _mm256_loadu_ps(xp + 16), acc[p]);
+            acc[p] = _mm256_fmadd_ps(wv3, _mm256_loadu_ps(xp + 24), acc[p]);
+        }
+    }
+    for (size_t p = 0; p < batch; p++) {
+        float s0 = acc[p][0] + acc[p][1] + acc[p][2] + acc[p][3];
+        float s1 = acc[p][4] + acc[p][5] + acc[p][6] + acc[p][7];
+        out[p] = s0 + s1;
+        if (i < width)
+            out[p] += oc_simd_dflash2_dot_bf16_avx2(
+                w + i, x + p * width + i, width - i);
+    }
+}
+
+__attribute__((target("avx2,fma")))
+void oc_simd_dflash2_conv_mac_avx2(float *out, const float *kernel,
+                                   const float *input, float dynamic_value,
+                                   size_t n)
+{
+    __m256 d = _mm256_set1_ps(dynamic_value);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 k = _mm256_add_ps(_mm256_loadu_ps(kernel + i), d);
+        __m256 x = _mm256_loadu_ps(input + i);
+        __m256 o = _mm256_loadu_ps(out + i);
+        _mm256_storeu_ps(out + i, _mm256_fmadd_ps(k, x, o));
+    }
+    for (; i < n; i++) out[i] += (kernel[i] + dynamic_value) * input[i];
 }
 
 /* ─── Q8_0 (block: f16 d, 32×int8) ────────────────────────────────────── */
