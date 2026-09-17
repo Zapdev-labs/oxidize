@@ -203,9 +203,80 @@ Test(cli, context_rejects_invalid_prefill_chunk_size)
 
 Test(cli, context_prefill_chunk_size_is_append_only)
 {
-    cr_assert(offsetof(OcCliContext, host) > offsetof(OcCliContext, kv_type));
-    cr_assert(offsetof(OcCliContext, prefill_chunk_size) >
-              offsetof(OcCliContext, tokens_no_special));
-    cr_assert(offsetof(OcCliContext, prefill_chunk_size) >
-              offsetof(OcCliContext, host));
+    const size_t order[] = {
+        offsetof(OcCliContext, command),
+        offsetof(OcCliContext, output_format),
+        offsetof(OcCliContext, verbose),
+        offsetof(OcCliContext, model_path),
+        offsetof(OcCliContext, prompt),
+        offsetof(OcCliContext, prompt_file),
+        offsetof(OcCliContext, n_predict),
+        offsetof(OcCliContext, n_ctx),
+        offsetof(OcCliContext, threads),
+        offsetof(OcCliContext, numa),
+        offsetof(OcCliContext, auto_tune),
+        offsetof(OcCliContext, no_auto),
+        offsetof(OcCliContext, temperature),
+        offsetof(OcCliContext, top_k),
+        offsetof(OcCliContext, top_p),
+        offsetof(OcCliContext, repeat_penalty),
+        offsetof(OcCliContext, seed),
+        offsetof(OcCliContext, min_p),
+        offsetof(OcCliContext, mirostat_tau),
+        offsetof(OcCliContext, mirostat_eta),
+        offsetof(OcCliContext, backend),
+        offsetof(OcCliContext, kv_type),
+        offsetof(OcCliContext, host),
+        offsetof(OcCliContext, port),
+        offsetof(OcCliContext, api_key),
+        offsetof(OcCliContext, rate_limit_rpm),
+        offsetof(OcCliContext, cors_origin),
+        offsetof(OcCliContext, bench_iterations),
+        offsetof(OcCliContext, bench_warmup),
+        offsetof(OcCliContext, bench_tokens),
+        offsetof(OcCliContext, bench_prompt_tokens),
+        offsetof(OcCliContext, bench_decode_tokens),
+        offsetof(OcCliContext, bench_no_eos),
+        offsetof(OcCliContext, bench_lm_materialize),
+        offsetof(OcCliContext, bench_iters_set),
+        offsetof(OcCliContext, bench_warmup_set),
+        offsetof(OcCliContext, threads_set),
+        offsetof(OcCliContext, input_path),
+        offsetof(OcCliContext, output_path),
+        offsetof(OcCliContext, target_type),
+        offsetof(OcCliContext, arch),
+        offsetof(OcCliContext, merge_strategy),
+        offsetof(OcCliContext, merge_slerp_t),
+        offsetof(OcCliContext, merge_density),
+        offsetof(OcCliContext, prune_sparsity),
+        offsetof(OcCliContext, prune_strategy),
+        offsetof(OcCliContext, dataset_path),
+        offsetof(OcCliContext, output_dir),
+        offsetof(OcCliContext, resume_from),
+        offsetof(OcCliContext, ft_strategy),
+        offsetof(OcCliContext, lora_rank),
+        offsetof(OcCliContext, lora_alpha),
+        offsetof(OcCliContext, epochs),
+        offsetof(OcCliContext, batch_size),
+        offsetof(OcCliContext, learning_rate),
+        offsetof(OcCliContext, hf_repo),
+        offsetof(OcCliContext, hf_file),
+        offsetof(OcCliContext, cache_dir),
+        offsetof(OcCliContext, ppl_max_tokens),
+        offsetof(OcCliContext, token_ids_str),
+        offsetof(OcCliContext, tokens_no_special),
+        offsetof(OcCliContext, prefill_chunk_size),
+    };
+    for (size_t i = 1; i < sizeof(order) / sizeof(order[0]); i++) {
+        cr_assert(order[i] > order[i - 1],
+                  "OcCliContext member %zu is not after the previous field",
+                  i);
+    }
+    cr_assert_eq(order[sizeof(order) / sizeof(order[0]) - 1],
+                 offsetof(OcCliContext, prefill_chunk_size));
+    /* Only alignment padding may follow the last field. */
+    cr_assert_eq(sizeof(OcCliContext),
+                 ((offsetof(OcCliContext, prefill_chunk_size) + sizeof(uint32_t)
+                   + _Alignof(OcCliContext) - 1)
+                  / _Alignof(OcCliContext)) * _Alignof(OcCliContext));
 }

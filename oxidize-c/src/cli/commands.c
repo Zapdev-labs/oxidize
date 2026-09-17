@@ -1494,7 +1494,8 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
                 oc_autotune_clear_gpu_runtime(&plan);
                 oc_autotune_apply(&plan, &model->gguf);
                 oc_autotune_apply_thread_numa(&plan, &cpu, &model->gguf,
-                                             ctx->threads, ctx->numa, true);
+                                             ctx->threads, ctx->numa, true,
+                                             false);
                 oc_openai_apply_tuning_plan(&st, &plan, ctx->prefill_chunk_size,
                                            ctx->kv_type);
             } else if (ctx->prefill_chunk_size > 0 || ctx->kv_type != NULL) {

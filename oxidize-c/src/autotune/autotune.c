@@ -759,7 +759,8 @@ void oc_autotune_apply_thread_numa(const OcTuningPlan *plan,
                                    const OcGgufMmappedFile *weights,
                                    int threads_override,
                                    const char *numa_override,
-                                   bool auto_tune)
+                                   bool auto_tune,
+                                   bool pin_calling_thread)
 {
     uint32_t threads = threads_override > 0 ? (uint32_t)threads_override
                                             : (plan ? plan->threads : 1u);
@@ -806,6 +807,12 @@ void oc_autotune_apply_thread_numa(const OcTuningPlan *plan,
     if (weights != NULL && threads > 1) {
         (void)oc_gguf_map_prefault_parallel(weights, (size_t)threads);
     }
+
+    /* oc_parallel_set_threads pins the caller as worker 0. Generation
+     * keeps that pin; serve restores so later HTTP threads do not inherit
+     * a one-CPU mask. */
+    if (!pin_calling_thread)
+        oc_numa_pin_restore();
 }
 
 OcError oc_autotune_bind_to_numa_node(uint32_t node)

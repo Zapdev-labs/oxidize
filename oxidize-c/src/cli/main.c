@@ -253,7 +253,8 @@ static OcError run_generation(const OcCliArgs *args)
         (args->numa && strcmp(args->numa, "none") != 0))) {
         if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
         oc_autotune_apply_thread_numa(&plan, &cpu, &model.gguf,
-                                     args->threads, args->numa, args->auto_tune);
+                                     args->threads, args->numa, args->auto_tune,
+                                     true);
     }
 
     /* Tokenizer (loaded from the same GGUF metadata). */
@@ -607,7 +608,7 @@ int main(int argc, char **argv)
                         oc_autotune_apply(&plan, &model->gguf);
                         oc_autotune_apply_thread_numa(&plan, &cpu, &model->gguf,
                                                      args.threads, args.numa,
-                                                     true);
+                                                     true, false);
                         oc_openai_apply_tuning_plan(&st, &plan,
                                                    args.prefill_chunk_size,
                                                    args.kv_type);

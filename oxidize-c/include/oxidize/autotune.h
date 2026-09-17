@@ -169,13 +169,17 @@ OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m);
 /* Apply thread count, NUMA bind/interleave, and parallel weight prefault.
  * `threads_override` > 0 wins over plan->threads. numa_override "single" /
  * "interleave" wins over the plan; "none" and NULL leave the plan when
- * auto_tune is true. Call before first-touch of the weight pages. */
+ * auto_tune is true. Call before first-touch of the weight pages.
+ * `pin_calling_thread` keeps the caller as pinned compute worker 0
+ * (generation). Pass false from serve so HTTP workers do not inherit a
+ * one-CPU affinity mask. */
 void oc_autotune_apply_thread_numa(const OcTuningPlan *plan,
                                    const OcCpuInfo *cpu,
                                    const OcGgufMmappedFile *weights,
                                    int threads_override,
                                    const char *numa_override,
-                                   bool auto_tune);
+                                   bool auto_tune,
+                                   bool pin_calling_thread);
 
 /* Bind the calling thread to a single NUMA node (Linux only, best-effort).
  * Used by worker pools to honor plan->numa == OC_NUMA_SINGLE. On non-Linux
