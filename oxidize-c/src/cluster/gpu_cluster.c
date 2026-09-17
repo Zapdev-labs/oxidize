@@ -6,8 +6,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/gpu_cluster.h"
+#include "oxidize/util/string.h"
 
-#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +62,7 @@ static const OcGpuProfile OC_PROFILES[] = {
         .memory_mib = 81920u,
         .tdp_watts = 700u,
         .nvlink = true,
-        .mig_capable = false,
+        .mig_capable = true,
         .time_slice_replicas = 1u,
         .network_class = "infiniband",
         .workload_type = "throughput-inference",
@@ -336,21 +336,6 @@ static void trim_copy(char *dst, size_t cap, const char *src, size_t len)
     dst[len] = '\0';
 }
 
-static bool parse_csv_u32(const char *s, uint32_t *out)
-{
-    char *end = NULL;
-    unsigned long v;
-
-    if (s == NULL || s[0] == '\0' || s[0] == '+' || s[0] == '-')
-        return false;
-    errno = 0;
-    v = strtoul(s, &end, 10);
-    if (end == s || *end != '\0') return false;
-    if (errno == ERANGE || v > (unsigned long)UINT32_MAX) return false;
-    *out = (uint32_t)v;
-    return true;
-}
-
 OcError oc_gpu_parse_nvidia_smi_csv(const char *output, OcGpuDevice *out,
                                       size_t cap, size_t *out_n)
 {
@@ -401,7 +386,7 @@ OcError oc_gpu_parse_nvidia_smi_csv(const char *output, OcGpuDevice *out,
             migbuf[0] = '\0';
 
         uint32_t index = 0, mem = 0;
-        if (!parse_csv_u32(idxbuf, &index) || !parse_csv_u32(membuf, &mem)) {
+        if (!oc_parse_u32(idxbuf, &index) || !oc_parse_u32(membuf, &mem)) {
             line = eol ? eol + 1 : line + linelen;
             continue;
         }

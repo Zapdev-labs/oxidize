@@ -7,10 +7,11 @@
 #include "args.h"
 
 #include "oxidize/cli_commands.h"
+#include "oxidize/util/string.h"
 
-#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,19 +39,16 @@ static bool match(const char *arg, const char *long_name)
     return strcmp(arg, long_name) == 0;
 }
 
-static bool parse_u32_strict(const char *s, uint32_t *out)
+static void parse_prefill_chunk_size(uint32_t *dst, const char *val)
 {
-    char *end = NULL;
-    unsigned long v;
-
-    if (s == NULL || s[0] == '\0' || s[0] == '+' || s[0] == '-')
-        return false;
-    errno = 0;
-    v = strtoul(s, &end, 10);
-    if (end == s || *end != '\0') return false;
-    if (errno == ERANGE || v > (unsigned long)UINT32_MAX) return false;
-    *out = (uint32_t)v;
-    return true;
+    uint32_t n;
+    if (oc_parse_u32(val, &n)) {
+        *dst = n;
+        return;
+    }
+    fprintf(stderr,
+            "warning: invalid --prefill-chunk-size '%s' (ignored)\n",
+            val ? val : "");
 }
 
 static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
@@ -67,9 +65,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--threads"))    { a->threads = atoi(val); *consumed_val = true; }
     else if (match(arg, "--batch-size")) { a->batch_size = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--prefill-chunk-size")) {
-        uint32_t n;
-        if (parse_u32_strict(val, &n))
-            a->prefill_chunk_size = n;
+        parse_prefill_chunk_size(&a->prefill_chunk_size, val);
         *consumed_val = true;
     }
     else if (match(arg, "--numa"))       { a->numa = val; *consumed_val = true; }
@@ -174,9 +170,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--kv"))             { ctx->kv_type = val; i++; }
         else if (match(arg, "--prefill-chunk-size")) {
-            uint32_t n;
-            if (parse_u32_strict(val, &n))
-                ctx->prefill_chunk_size = n;
+            parse_prefill_chunk_size(&ctx->prefill_chunk_size, val);
             i++;
         }
         else if (match(arg, "--threads"))        { ctx->threads = atoi(val); ctx->threads_set = true; i++; }

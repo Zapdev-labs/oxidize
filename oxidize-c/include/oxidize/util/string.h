@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +53,11 @@ char *oc_trim(char *s);
 /* Parse a base-10 integer. Returns true on success, false on parse error or
  * overflow. On success writes the value to `*out`. */
 bool oc_parse_i64(const char *s, long long *out);
+
+/* Parse a base-10 unsigned 32-bit integer. The first character must be an
+ * ASCII digit (no sign, no leading whitespace). Rejects trailing junk and
+ * values above UINT32_MAX. */
+bool oc_parse_u32(const char *s, uint32_t *out);
 
 /* Parse a base-10 float (double). Returns true on success. */
 bool oc_parse_f64(const char *s, double *out);

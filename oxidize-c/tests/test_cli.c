@@ -186,6 +186,10 @@ Test(cli, rejects_invalid_prefill_chunk_size)
     char *overflow[] = {"oxidize-c", "--prefill-chunk-size", "4294967296"};
     oc_cli_parse_args(3, overflow, &a);
     cr_assert_eq(a.prefill_chunk_size, 0u);
+
+    char *ws[] = {"oxidize-c", "--prefill-chunk-size", " 1024"};
+    oc_cli_parse_args(3, ws, &a);
+    cr_assert_eq(a.prefill_chunk_size, 0u);
 }
 
 Test(cli, context_rejects_invalid_prefill_chunk_size)

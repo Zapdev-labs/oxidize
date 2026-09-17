@@ -60,6 +60,13 @@ static size_t openai_prefill_chunk(const OcOpenaiState *st)
     return 0;
 }
 
+static bool kv_override_recognized(const char *s)
+{
+    return s != NULL &&
+           (strcmp(s, "q8") == 0 || strcmp(s, "Q8") == 0 ||
+            strcmp(s, "f32") == 0 || strcmp(s, "F32") == 0);
+}
+
 OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
                                       uint32_t explicit_prefill_chunk,
                                       const char *explicit_kv)
@@ -77,7 +84,7 @@ OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
     }
     if (explicit_prefill_chunk > 0)
         st->sched.prefill_chunk_size = explicit_prefill_chunk;
-    if (explicit_kv != NULL) {
+    if (kv_override_recognized(explicit_kv)) {
         uint32_t n_ctx = (st->model != NULL) ? st->model->cfg.n_ctx : 0;
         st->kv_type = oc_llama_select_kv_type(n_ctx, explicit_kv);
         st->kv_set = true;
@@ -973,7 +980,8 @@ static void handle_embeddings(OcOpenaiState *st, const OcHttpRequest *req,
         *out_body = oc_openai_error_json("allocation failed", "server_error");
         *out_status = 500; return;
     }
-    for (uint32_t i = 0; i < n_embd; i++) embedding[i] = sess.x[i];
+    for (uint32_t i = 0; i < n_embd; i++)
+        embedding[i] = (sess.last_hidden != NULL) ? sess.last_hidden[i] : sess.x[i];
     oc_llama_session_free(&sess);
     pthread_mutex_unlock(&g_generation_mutex);
     free(ids);

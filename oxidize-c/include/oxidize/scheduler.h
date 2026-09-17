@@ -69,6 +69,8 @@ typedef struct OcSchedConfig {
     uint32_t            max_tokens_total;            /* default 8192          */
     OcSchedPreemptMode  preempt_mode;               /* default RECOMPUTE     */
     bool                enable_continuous_batching;  /* default true          */
+    /* Append-only: new fields go at the end. in-tree consumers rebuild with
+     * the headers; there is no frozen C ABI. */
     uint32_t            prefill_chunk_size;         /* 0 = leave default     */
 } OcSchedConfig;
 

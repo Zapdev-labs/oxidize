@@ -367,6 +367,10 @@ static void autotune_set_n_gpu_layers(OcTuningPlan *p,
                                        const OcCpuInfo *cpu,
                                        const OcModelFingerprint *model)
 {
+    /* Inventory for every detected GPU family so --print-plan TPS uses the
+     * device estimate. Hopper-only knobs stay gated in oc_autotune_tier9_hopper.
+     * CUDA still uploads every layer, so this is all-or-nothing: nonzero only
+     * when the full model fits in 85% of VRAM. */
     p->n_gpu_layers = 0;
     if (cpu == NULL || !cpu->has_gpu) return;
 

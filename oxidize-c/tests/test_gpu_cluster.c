@@ -61,7 +61,7 @@ Test(gpu_cluster, profile_h100)
     cr_assert_eq(p->memory_mib, 81920u);
     cr_assert_eq(p->tdp_watts, 700u);
     cr_assert(p->nvlink);
-    cr_assert(!p->mig_capable);
+    cr_assert(p->mig_capable);
     cr_assert_eq(p->time_slice_replicas, 1u);
     cr_assert_str_eq(p->network_class, "infiniband");
     cr_assert_str_eq(p->workload_type, "throughput-inference");
@@ -307,6 +307,18 @@ Test(gpu_cluster, node_pool_yaml_h100)
     cr_assert_not_null(strstr(buf, "hopper"));
     cr_assert_not_null(strstr(buf, "throughput-inference"));
     cr_assert_not_null(strstr(buf, "gpu-h100-pool"));
+    cr_assert_not_null(strstr(buf, "mig: true"));
+}
+
+Test(gpu_cluster, device_plugin_yaml_h100)
+{
+    char buf[4096];
+    OcError e = oc_gpu_cluster_device_plugin_yaml(OC_GPU_FAMILY_H100, buf, sizeof(buf));
+    cr_assert_eq(e, OC_OK);
+    cr_assert_not_null(strstr(buf, "nvidia-device-plugin-h100"));
+    cr_assert_not_null(strstr(buf, "NVIDIA-H100-SXM5-80GB"));
+    cr_assert_not_null(strstr(buf, "NVIDIA_MIG_ENABLED"));
+    cr_assert_not_null(strstr(buf, "\"true\""));
 }
 
 Test(gpu_cluster, from_nvidia_name_classifies_skus)
