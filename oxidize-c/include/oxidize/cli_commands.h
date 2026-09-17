@@ -69,7 +69,9 @@ typedef enum {
 /* ─── CLI context ────────────────────────────────────────────────────────
  *
  * Aggregates all flags needed by any subcommand handler. Fields not
- * relevant to a given command are simply ignored (NULL / 0 / false). */
+ * relevant to a given command are simply ignored (NULL / 0 / false).
+ * Layout is append-only: new fields go at the end so in-tree callers
+ * compiled against an older header keep host/port offsets. */
 typedef struct OcCliContext {
     /* Subcommand + output. */
     OcCliCommand       command;
@@ -103,7 +105,6 @@ typedef struct OcCliContext {
     /* Backend. */
     const char        *backend;        /* "cpu" | "cuda"                    */
     const char        *kv_type;         /* "f32" | "q8"; NULL = auto         */
-    uint32_t           prefill_chunk_size; /* --prefill-chunk-size N (0 = unset) */
 
     /* Server. */
     const char        *host;           /* --host (default 127.0.0.1)        */
@@ -160,6 +161,10 @@ typedef struct OcCliContext {
     /* Tokenize / detokenize. */
     const char        *token_ids_str;   /* --ids "1,2,3" (for detokenize)    */
     bool               tokens_no_special; /* --no-special (disallow special) */
+
+    /* Append-only: --prefill-chunk-size N (0 = unset). Kept last so the
+     * Server / Benchmark / … offsets stay stable for older callers. */
+    uint32_t           prefill_chunk_size;
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.

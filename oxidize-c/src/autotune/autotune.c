@@ -22,6 +22,8 @@
 #include "oxidize/gguf.h"
 #include "oxidize/log.h"
 #include "oxidize/model.h"
+#include "oxidize/numa.h"
+#include "oxidize/parallel.h"
 #include "oxidize/quant.h"
 #include "oxidize/scheduler.h"
 #include "oxidize/simd.h"
@@ -263,15 +265,20 @@ OcError oc_autotune_detect_cpu(OcCpuInfo *out)
     out->gpu_count = 0;
     out->gpu_vram_bytes = 0;
     {
-        OcGpuDevice gpus[16];
+        /* CUDA offload is single-device, so inventory VRAM is the largest
+         * card, not the cluster sum. 128 covers dense HGX / DGX nodes. */
+        enum { OC_AUTOTUNE_GPU_DETECT_CAP = 128 };
+        OcGpuDevice gpus[OC_AUTOTUNE_GPU_DETECT_CAP];
         size_t n = 0;
-        if (oc_gpu_detect(gpus, 16, &n) == OC_OK && n > 0) {
+        if (oc_gpu_detect(gpus, OC_AUTOTUNE_GPU_DETECT_CAP, &n) == OC_OK && n > 0) {
             out->has_gpu = true;
             out->gpu_count = (uint32_t)n;
             uint8_t best_rank = 0;
             for (size_t i = 0; i < n; i++) {
-                out->gpu_vram_bytes +=
-                    (uint64_t)gpus[i].memory_total_mib * 1024ULL * 1024ULL;
+                uint64_t vram = (uint64_t)gpus[i].memory_total_mib
+                                * 1024ULL * 1024ULL;
+                if (vram > out->gpu_vram_bytes)
+                    out->gpu_vram_bytes = vram;
                 if (gpus[i].family < OC_GPU_FAMILY__COUNT) {
                     uint8_t r = oc_gpu_family_rank(gpus[i].family);
                     if (r > best_rank) {
@@ -389,7 +396,10 @@ static OcWeightPlan hopper_weight_plan(OcGgufQuantizationType q)
     switch (q) {
     case OC_QUANT_Q2_K:
     case OC_QUANT_Q3_K_S:
+    case OC_QUANT_Q3_K_M:
+    case OC_QUANT_Q3_K_L:
     case OC_QUANT_Q4_0:
+    case OC_QUANT_Q4_1:
     case OC_QUANT_Q4_K_S:
     case OC_QUANT_Q4_K_M:
     case OC_QUANT_IQ1_S:
@@ -742,6 +752,60 @@ OcError oc_autotune_apply(const OcTuningPlan *plan, OcGgufMmappedFile *m)
         }
     }
     return OC_OK;
+}
+
+void oc_autotune_apply_thread_numa(const OcTuningPlan *plan,
+                                   const OcCpuInfo *cpu,
+                                   const OcGgufMmappedFile *weights,
+                                   int threads_override,
+                                   const char *numa_override,
+                                   bool auto_tune)
+{
+    uint32_t threads = threads_override > 0 ? (uint32_t)threads_override
+                                            : (plan ? plan->threads : 1u);
+    if (threads == 0) threads = 1;
+
+    /* "none" is also the default value of --numa, so it cannot be told
+     * apart from unset and leaves the plan (or OC_NUMA_NONE). */
+    OcNumaPolicy numa = (auto_tune && plan) ? plan->numa : OC_NUMA_NONE;
+    if (numa_override) {
+        if (strcmp(numa_override, "single") == 0)
+            numa = OC_NUMA_SINGLE;
+        else if (strcmp(numa_override, "interleave") == 0)
+            numa = OC_NUMA_INTERLEAVE;
+    }
+
+    uint32_t numa_nodes = cpu && cpu->numa_nodes > 0 ? cpu->numa_nodes : 1u;
+    const char *simd_name = (cpu && cpu->simd.name && cpu->simd.name[0])
+        ? cpu->simd.name : "?";
+
+    if (numa == OC_NUMA_SINGLE) {
+        if (oc_autotune_bind_to_numa_node(0) == OC_OK) {
+            oc_log(OC_LOG_INFO, "autotune: bound to NUMA node 0");
+        }
+        if (oc_numa_set_policy(OC_NUMA_POLICY_BIND, 0) == OC_OK) {
+            oc_log(OC_LOG_INFO, "autotune: memory bound to NUMA node 0");
+        }
+    } else if (numa == OC_NUMA_INTERLEAVE && numa_nodes > 1) {
+        if (oc_numa_set_policy(OC_NUMA_POLICY_INTERLEAVE, 0) == OC_OK) {
+            oc_log(OC_LOG_INFO, "autotune: memory interleaved across %u "
+                   "NUMA nodes", numa_nodes);
+        } else {
+            oc_log(OC_LOG_WARN, "autotune: could not set interleave policy; "
+                   "falling back to first-touch placement");
+        }
+    }
+
+    oc_log(OC_LOG_INFO, "autotune: applying %u threads, numa=%s, simd=%s",
+           threads, oc_autotune_numa_name(numa), simd_name);
+
+    if (oc_parallel_set_threads(threads) != OC_OK) {
+        oc_log(OC_LOG_WARN, "parallel: pool init failed; running inline");
+    }
+
+    if (weights != NULL && threads > 1) {
+        (void)oc_gguf_map_prefault_parallel(weights, (size_t)threads);
+    }
 }
 
 OcError oc_autotune_bind_to_numa_node(uint32_t node)

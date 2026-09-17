@@ -15,11 +15,10 @@
  * Flag set mirrors the Rust `oxidize-cli` conventions and the learned user
  * preferences (--numa, --auto/--no-auto, --print-plan, --serve-api,
  * --threads). --threads/--numa override the autotune plan and are applied
- * by apply_thread_numa_policy() below.
+ * by oc_autotune_apply_thread_numa().
  */
 #include "oxidize/activation.h"   /* ensure link for forward deps */
 #include "oxidize/autotune.h"
-#include "oxidize/numa.h"
 #include "oxidize/parallel.h"
 #include "oxidize/version.h"
 #include "oxidize/cli_commands.h"
@@ -147,75 +146,6 @@ static void print_help(void)
 
 /* ─── Generation ──────────────────────────────────────────────────────── */
 
-/* Apply the thread + NUMA half of a tuning plan, honoring explicit CLI
- * overrides. NUMA policy binds this process to a socket; the thread count
- * resizes the compute pool (already started by init_compute_threads) and
- * drives the parallel weight prefault. */
-static void apply_thread_numa_policy(const OcCliArgs *args,
-                                     const OcTuningPlan *plan,
-                                     const OcCpuInfo *cpu,
-                                     const OcGgufMmappedFile *weights)
-{
-    /* --threads N overrides the plan; 0 means "use the plan". */
-    uint32_t threads = args->threads > 0 ? (uint32_t)args->threads
-                                         : plan->threads;
-    if (threads == 0) threads = 1;
-
-    /* --numa MODE overrides the plan. "none" is also the default value of
-     * the flag, so it cannot be told apart from "unset" and leaves the plan
-     * (or, without --auto, OC_NUMA_NONE) in place. */
-    OcNumaPolicy numa = args->auto_tune ? plan->numa : OC_NUMA_NONE;
-    if (args->numa) {
-        if (strcmp(args->numa, "single") == 0)          numa = OC_NUMA_SINGLE;
-        else if (strcmp(args->numa, "interleave") == 0) numa = OC_NUMA_INTERLEAVE;
-    }
-
-    /* Memory policy must be set BEFORE the weights are faulted in below:
-     * set_mempolicy applies to future faults and does not migrate pages that
-     * already exist. */
-    if (numa == OC_NUMA_SINGLE) {
-        /* Bind to node 0: the plan picks SINGLE only when the model fits in
-         * one socket's memory, so any single node works and 0 always exists.
-         * Bind both the threads (affinity) and the pages (mempolicy) — CPU
-         * affinity alone still lets pages land on the far node. */
-        if (oc_autotune_bind_to_numa_node(0) == OC_OK) {
-            oc_log(OC_LOG_INFO, "autotune: bound to NUMA node 0");
-        }
-        if (oc_numa_set_policy(OC_NUMA_POLICY_BIND, 0) == OC_OK) {
-            oc_log(OC_LOG_INFO, "autotune: memory bound to NUMA node 0");
-        }
-    } else if (numa == OC_NUMA_INTERLEAVE && cpu->numa_nodes > 1) {
-        /* Interleave is NOT the kernel default — MPOL_DEFAULT allocates on
-         * the first-touching thread's local node, so a model faulted in by
-         * threads sitting on one socket lands entirely on that socket and
-         * every read from the other socket crosses the interconnect. Request
-         * it explicitly. */
-        if (oc_numa_set_policy(OC_NUMA_POLICY_INTERLEAVE, 0) == OC_OK) {
-            oc_log(OC_LOG_INFO, "autotune: memory interleaved across %u "
-                   "NUMA nodes", cpu->numa_nodes);
-        } else {
-            oc_log(OC_LOG_WARN, "autotune: could not set interleave policy; "
-                   "falling back to first-touch placement");
-        }
-    }
-
-    oc_log(OC_LOG_INFO, "autotune: applying %u threads, numa=%s, simd=%s",
-           threads, oc_autotune_numa_name(numa), cpu->simd.name);
-
-    /* Start the compute pool. Until this call the forward pass runs inline on
-     * one core no matter what --threads said, which is what made an 8B model
-     * crawl on a 96-core box. */
-    if (oc_parallel_set_threads(threads) != OC_OK) {
-        oc_log(OC_LOG_WARN, "parallel: pool init failed; running inline");
-    }
-
-    /* Fault the weights in with the resolved thread count so the first
-     * tokens don't pay page-fault cost serially. */
-    if (weights != NULL && threads > 1) {
-        (void)oc_gguf_map_prefault_parallel(weights, (size_t)threads);
-    }
-}
-
 static OcError run_generation(const OcCliArgs *args)
 {
     if (args->model_path == NULL) {
@@ -322,7 +252,8 @@ static OcError run_generation(const OcCliArgs *args)
     if (have_plan && (args->auto_tune || args->threads > 0 ||
         (args->numa && strcmp(args->numa, "none") != 0))) {
         if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
-        apply_thread_numa_policy(args, &plan, &cpu, &model.gguf);
+        oc_autotune_apply_thread_numa(&plan, &cpu, &model.gguf,
+                                     args->threads, args->numa, args->auto_tune);
     }
 
     /* Tokenizer (loaded from the same GGUF metadata). */
@@ -403,11 +334,22 @@ static OcError run_generation(const OcCliArgs *args)
      * token. The last token's logits seed the generation loop.
      *
      * The CUDA path keeps the per-token loop: its forward already uploads the
-     * weights once and the batched CPU scratch would not help it. */
+     * weights once and the batched CPU scratch would not help it. Hopper
+     * chunked_prefill_tokens is a CPU/OpenAI scheduler knob; there is no
+     * CUDA batched prefill runtime. */
     float *logits = sess.logits;
     uint32_t next_tok = ids[n_ids - 1];
     const double prefill_start = wall_now();
     if (use_cuda) {
+        uint32_t advertised = args->prefill_chunk_size;
+        if (advertised == 0 && have_plan && args->auto_tune)
+            advertised = plan.chunked_prefill_tokens;
+        if (advertised > 0) {
+            oc_log(OC_LOG_INFO,
+                   "cuda: prompt prefill stays per-token "
+                   "(chunked_prefill=%u is CPU/OpenAI; no CUDA batched prefill)",
+                   advertised);
+        }
         for (size_t i = 0; i + 1 < n_ids; i++) {
             e = oc_cuda_forward(&cuda_ctx, ids[i], sess.pos, NULL);
             if (e != OC_OK) {
@@ -663,6 +605,9 @@ int main(int argc, char **argv)
                          * to CPU OpenAI sessions. */
                         oc_autotune_clear_gpu_runtime(&plan);
                         oc_autotune_apply(&plan, &model->gguf);
+                        oc_autotune_apply_thread_numa(&plan, &cpu, &model->gguf,
+                                                     args.threads, args.numa,
+                                                     true);
                         oc_openai_apply_tuning_plan(&st, &plan,
                                                    args.prefill_chunk_size,
                                                    args.kv_type);

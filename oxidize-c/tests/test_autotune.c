@@ -350,6 +350,20 @@ Test(autotune, hopper_f16_is_fp8)
     cr_assert_float_eq(p.expected_decode_tps, 650.0f, 0.1f);
 }
 
+Test(autotune, hopper_q4_1_is_w4a16)
+{
+    OcCpuInfo cpu;
+    OcModelFingerprint m;
+    hopper_cpu(&cpu, OC_GPU_FAMILY_H100, true);
+    hopper_fp_31b(&m, 4096);
+    m.dominant_qtype = OC_QUANT_Q4_1;
+    OcTuningPlan p = oc_autotune_plan(&cpu, &m);
+    cr_assert_eq(p.weight_plan, OC_WEIGHT_W4A16);
+    cr_assert(p.kv_turboquant);
+    cr_assert_eq(p.kv_cache, OC_KV_Q8);
+    cr_assert_float_eq(p.expected_decode_tps, 1150.0f, 0.1f);
+}
+
 Test(autotune, hopper_q6k_is_native)
 {
     OcCpuInfo cpu;
@@ -359,9 +373,13 @@ Test(autotune, hopper_q6k_is_native)
     m.dominant_qtype = OC_QUANT_Q6_K;
     OcTuningPlan p = oc_autotune_plan(&cpu, &m);
     cr_assert_eq(p.weight_plan, OC_WEIGHT_NATIVE);
+    cr_assert_eq(p.pipeline, OC_PIPELINE_PAGED);
+    cr_assert_eq(p.attention_kernel, OC_ATTN_FLASH_ATTENTION3);
+    cr_assert(p.cuda_graphs);
+    cr_assert(p.n_gpu_layers > 0);
+    cr_assert_eq(p.max_decode_batch, 16u);
     cr_assert_not(p.kv_turboquant);
     cr_assert_float_eq(p.expected_decode_tps, 300.0f, 0.1f);
-    cr_assert_eq(p.attention_kernel, OC_ATTN_FLASH_ATTENTION3);
 }
 
 Test(autotune, hopper_tiny_vram_skips_offload)
@@ -548,9 +566,19 @@ Test(autotune, detect_cpu_gpu_fields_without_device)
 {
     OcCpuInfo cpu;
     cr_assert_eq(oc_autotune_detect_cpu(&cpu), OC_OK);
-    if (!cpu.has_gpu) {
-        cr_assert_eq(cpu.gpu_family, OC_GPU_FAMILY__COUNT);
-        cr_assert_eq(cpu.gpu_count, 0);
-        cr_assert_eq(cpu.gpu_vram_bytes, 0);
-    }
+    if (cpu.has_gpu)
+        cr_skip_test("GPU present; empty-inventory invariants not applicable");
+    cr_assert_eq(cpu.gpu_family, OC_GPU_FAMILY__COUNT);
+    cr_assert_eq(cpu.gpu_count, 0);
+    cr_assert_eq(cpu.gpu_vram_bytes, 0);
+}
+
+Test(autotune, detect_cpu_gpu_fields_with_device)
+{
+    OcCpuInfo cpu;
+    cr_assert_eq(oc_autotune_detect_cpu(&cpu), OC_OK);
+    if (!cpu.has_gpu)
+        cr_skip_test("no GPU present");
+    cr_assert(cpu.gpu_count >= 1);
+    cr_assert(cpu.gpu_vram_bytes > 0);
 }

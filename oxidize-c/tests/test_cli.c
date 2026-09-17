@@ -14,6 +14,7 @@
 #include "../src/cli/args.h"
 #include "oxidize/cli_commands.h"
 
+#include <stddef.h>
 #include <string.h>
 
 Test(cli, defaults_are_sensible)
@@ -198,4 +199,13 @@ Test(cli, context_rejects_invalid_prefill_chunk_size)
     OcCliContext ctx;
     cr_assert(oc_cli_context_parse(4, argv, &ctx));
     cr_assert_eq(ctx.prefill_chunk_size, 0u);
+}
+
+Test(cli, context_prefill_chunk_size_is_append_only)
+{
+    cr_assert(offsetof(OcCliContext, host) > offsetof(OcCliContext, kv_type));
+    cr_assert(offsetof(OcCliContext, prefill_chunk_size) >
+              offsetof(OcCliContext, tokens_no_special));
+    cr_assert(offsetof(OcCliContext, prefill_chunk_size) >
+              offsetof(OcCliContext, host));
 }
