@@ -1,0 +1,3 @@
+# One-off scripts. Put scratch here. These are gitignored.
+# Do not dump scripts at the repo root.
+local/
