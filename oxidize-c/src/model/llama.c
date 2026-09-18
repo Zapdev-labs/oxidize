@@ -2925,6 +2925,12 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     if (sess == NULL || sess->model == NULL) return OC_ERR_INVALID_ARG;
     if ((uint64_t)sess->pos >= sess->model->cfg.n_ctx) return OC_ERR_INVALID_ARG;
 
+    /* Promote last token's staged prerouter heads. pos==0 is the first
+     * prompt token and has nothing to consume; decode steps (and later
+     * prompt tokens on the per-token fallback) get a one-token lead. */
+    if (sess->prerouter && sess->pos > 0)
+        oc_prerouter_advance(sess->prerouter);
+
     /* Architecture dispatch: LayerNorm-family models use the dedicated
      * forward passes in arch_forward.c. */
     switch (sess->model->arch) {
@@ -3434,6 +3440,14 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         free(seen);
     }
 
+    if (s->prerouter && layer != UINT32_MAX) {
+        for (size_t j = 0; j < n; j++) {
+            (void)oc_prerouter_commit(s->prerouter, layer,
+                                      b->normed + j * b->n_embd,
+                                      b->sel + j * k, k);
+        }
+    }
+
     /* 5. Counting sort of (token, weight) pairs into per-expert groups. */
     for (uint32_t e = 0; e < n_slots; e++) b->ex_off[e + 1] += b->ex_off[e];
     for (size_t j = 0; j < n; j++) {
@@ -3514,12 +3528,31 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
                  n, b);
         mm_batch(&L->ffn_up_shexp,   b->normed, b->n_embd, b->ffn_b, b->ffw,
                  n, b);
+        const size_t shared_size = c->shared_expert_intermediate_size
+                                     ? c->shared_expert_intermediate_size
+                                     : i_size;
+        if (s->lora && layer != UINT32_MAX) {
+            for (size_t j = 0; j < n; j++) {
+                const float *x = b->normed + j * b->n_embd;
+                apply_lora_at(s, s->lora->shexp_gate_adapters, layer, x,
+                              b->ffn_a + j * b->ffw);
+                apply_lora_at(s, s->lora->shexp_up_adapters, layer, x,
+                              b->ffn_b + j * b->ffw);
+            }
+        }
         for (size_t j = 0; j < n; j++) {
             oc_swiglu_inplace_f32(b->ffn_a + j * b->ffw,
-                                  b->ffn_b + j * b->ffw, i_size);
+                                  b->ffn_b + j * b->ffw, shared_size);
         }
         mm_batch(&L->ffn_down_shexp, b->ffn_a, b->ffw, b->gath, b->n_embd,
                  n, b);
+        if (s->lora && layer != UINT32_MAX) {
+            for (size_t j = 0; j < n; j++) {
+                apply_lora_at(s, s->lora->shexp_down_adapters, layer,
+                              b->ffn_a + j * b->ffw,
+                              b->gath + j * b->n_embd);
+            }
+        }
         if (L->ffn_gate_inp_shexp.data != NULL) {
             /* One logit per token; rows == 1, so this is a cheap batched dot. */
             mm_batch(&L->ffn_gate_inp_shexp, b->normed, b->n_embd,
@@ -3724,6 +3757,19 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
              c->ssm_value_heads, n, b);
     mm_batch(&L->ssm_alpha, b->normed, b->n_embd, b->q35_ralpha,
              c->ssm_value_heads, n, b);
+    if (s->lora) {
+        for (size_t j = 0; j < n; j++) {
+            const float *x = b->normed + j * b->n_embd;
+            apply_lora_at(s, s->lora->ssm_qkv_adapters, layer, x,
+                          b->q35_rqkv + j * conv_dim);
+            apply_lora_at(s, s->lora->ssm_gate_adapters, layer, x,
+                          b->q35_rgate + j * c->ssm_inner_size);
+            apply_lora_at(s, s->lora->ssm_beta_adapters, layer, x,
+                          b->q35_rbeta + j * c->ssm_value_heads);
+            apply_lora_at(s, s->lora->ssm_alpha_adapters, layer, x,
+                          b->q35_ralpha + j * c->ssm_value_heads);
+        }
+    }
     g_pf_t.qkv += pf_now() - t_q0;
 
     const OcQwen35DeltaParams params = {
@@ -3759,6 +3805,13 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
     double t_p0 = pf_now();
     mm_batch(&L->ssm_out, b->q35_delta, c->ssm_inner_size,
              b->proj, b->n_embd, n, b);
+    if (s->lora) {
+        for (size_t j = 0; j < n; j++) {
+            apply_lora_at(s, s->lora->ssm_out_adapters, layer,
+                          b->q35_delta + j * c->ssm_inner_size,
+                          b->proj + j * b->n_embd);
+        }
+    }
     for (size_t j = 0; j < n; j++) {
         float *x = b->x + j * b->n_embd;
         const float *p = b->proj + j * b->n_embd;
@@ -3788,6 +3841,17 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
              2u * qdim, n, b);
     mm_batch(&L->attn_k, b->normed, b->n_embd, b->k_buf, b->kv_row, n, b);
     mm_batch(&L->attn_v, b->normed, b->n_embd, b->v_buf, b->kv_row, n, b);
+    if (s->lora) {
+        for (size_t j = 0; j < n; j++) {
+            const float *x = b->normed + j * b->n_embd;
+            apply_lora_at(s, s->lora->q_adapters, layer, x,
+                          b->q35_qgate + j * 2u * qdim);
+            apply_lora_at(s, s->lora->k_adapters, layer, x,
+                          b->k_buf + j * b->kv_row);
+            apply_lora_at(s, s->lora->v_adapters, layer, x,
+                          b->v_buf + j * b->kv_row);
+        }
+    }
 
     /* Per-token QK-norm + RoPE + KV store. Every token is independent, and at
      * a 512-token chunk this is 512*24 head-sized RMSNorms — enough that
@@ -3813,6 +3877,13 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
     oc_parallel_for(n * c->n_head, attention_slice, &ajob);
     mm_batch(&L->attn_output, b->attn_out, b->n_qo,
              b->proj, b->n_embd, n, b);
+    if (s->lora) {
+        for (size_t j = 0; j < n; j++) {
+            apply_lora_at(s, s->lora->o_adapters, layer,
+                          b->attn_out + j * b->n_qo,
+                          b->proj + j * b->n_embd);
+        }
+    }
     for (size_t j = 0; j < n; j++) {
         float *x = b->x + j * b->n_embd;
         const float *p = b->proj + j * b->n_embd;

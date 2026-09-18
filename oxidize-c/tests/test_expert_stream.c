@@ -90,3 +90,35 @@ Test(expert_stream, reclaim_drops_cold_experts)
     cr_assert(oc_expert_stream_reclaim_bytes(pool) > 0);
     oc_expert_stream_free(pool);
 }
+
+Test(expert_stream, retouch_does_not_double_count)
+{
+    OcLlamaModel model;
+    memset(&model, 0, sizeof(model));
+    model.cfg.n_layer = 1;
+    model.cfg.num_experts = 4;
+    OcLlamaLayer layer;
+    memset(&layer, 0, sizeof(layer));
+    uint8_t blob[256];
+    memset(blob, 1, sizeof(blob));
+    layer.ffn_gate_exps = (OcWeightView){
+        .data = blob, .qtype = OC_QUANT_F32, .rows = 8, .cols = 4,
+        .row_bytes = 16,
+    };
+    layer.ffn_up_exps = layer.ffn_gate_exps;
+    layer.ffn_down_exps = layer.ffn_gate_exps;
+    model.layers = &layer;
+
+    OcExpertStreamConfig cfg;
+    oc_expert_stream_config_init(&cfg);
+    cfg.cache_bytes = 1u << 20;
+    OcExpertStreamPool *pool = NULL;
+    cr_assert_eq(oc_expert_stream_new(&model, &cfg, &pool), OC_OK);
+    uint32_t experts[] = {0, 2};
+    cr_assert_eq(oc_expert_stream_touch(pool, 0, experts, 2, false), OC_OK);
+    uint64_t once = oc_expert_stream_resident_bytes(pool);
+    cr_assert(once > 0);
+    cr_assert_eq(oc_expert_stream_touch(pool, 0, experts, 2, false), OC_OK);
+    cr_assert_eq(oc_expert_stream_resident_bytes(pool), once);
+    oc_expert_stream_free(pool);
+}

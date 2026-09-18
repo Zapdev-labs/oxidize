@@ -104,6 +104,8 @@ Test(prerouter, commit_then_consume)
     float hidden_v[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     uint32_t sel[2] = {1, 3};
     cr_assert_eq(oc_prerouter_commit(p, 0, hidden_v, sel, k), OC_OK);
+    cr_assert_not(oc_prerouter_has_prediction(p, 1));
+    oc_prerouter_advance(p);
     cr_assert(oc_prerouter_has_prediction(p, 1));
     cr_assert_not(oc_prerouter_has_prediction(p, 0));
 
@@ -120,6 +122,20 @@ Test(prerouter, commit_then_consume)
     oc_prerouter_free(p);
     unlink(path);
     free(fc1); free(fc2); free(lin);
+}
+
+Test(prerouter, same_token_does_not_consume)
+{
+    OcPrerouter *p = NULL;
+    cr_assert_eq(oc_prerouter_new(2, 4, 4, 2, &p), OC_OK);
+    uint32_t sel[2] = {0, 1};
+    float hidden_v[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    cr_assert_eq(oc_prerouter_commit(p, 0, hidden_v, sel, 2), OC_OK);
+    cr_assert_not(oc_prerouter_has_prediction(p, 1));
+    uint32_t got[2] = {0};
+    float w[4];
+    cr_assert_neq(oc_prerouter_consume(p, 1, got, 2, w), OC_OK);
+    oc_prerouter_free(p);
 }
 
 Test(prerouter, rejects_empty_file)

@@ -429,6 +429,7 @@ Test(mmap, open_readonly_flags_no_readahead)
     cr_assert_eq(oc_mmap_advise_range(m, 0, 32, OC_MMAP_ADVICE_RANDOM), OC_OK);
     cr_assert_eq(oc_mmap_advise_range(m, 0, 32, OC_MMAP_ADVICE_WILLNEED), OC_OK);
     cr_assert_eq(oc_mmap_advise_range(m, 64, 32, OC_MMAP_ADVICE_DONTNEED), OC_OK);
+    cr_assert_eq(oc_mmap_fault_range(m, 0, 32), OC_OK);
     cr_assert_eq(oc_mmap_bytes(m)[0], 'G');
     oc_mmap_close(m);
 }
@@ -443,5 +444,7 @@ Test(mmap, advise_range_rejects_bad_args)
                  OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_mmap_advise_range(m, 200, 8, OC_MMAP_ADVICE_RANDOM),
                  OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_mmap_fault_range(NULL, 0, 1), OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_mmap_fault_range(m, 0, 0), OC_ERR_INVALID_ARG);
     oc_mmap_close(m);
 }

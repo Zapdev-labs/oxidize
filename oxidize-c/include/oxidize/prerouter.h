@@ -2,9 +2,12 @@
  * prerouter.h — Cross-token MoE routing prediction (Edge0).
  *
  * Each owner layer runs fc1 → erf-GELU → fc2 plus a linear residual on
- * concat(hidden, onehot(curr_topk), onehot(prev_topk)). The prediction for
- * layer N+1 at token t+1 is consumed as routing at decode so SSD reads can
- * overlap the current forward pass.
+ * concat(hidden, onehot(curr_topk), onehot(prev_topk)).
+ *
+ * Double shift (Edge0 §3.2): the head owned by layer N at token t predicts
+ * layer N+1's routing at token t+1. Commit writes a staged prediction;
+ * oc_prerouter_advance() promotes it at the next token so SSD reads overlap
+ * a whole decode step. Consume uses the promoted prediction as routing.
  */
 #ifndef OXIDIZE_PREROUTER_H
 #define OXIDIZE_PREROUTER_H
@@ -42,10 +45,14 @@ OcError oc_prerouter_consume(OcPrerouter *p, uint32_t layer,
                              uint32_t *sel, uint32_t k, float *weights_out);
 
 /* After native or predicted routing: record one-hots, run the owner head,
- * prefetch the predicted experts for the next token. */
+ * stage a prediction for layer N+1 at the next token, and prefetch those
+ * experts. Does not make the prediction consumable until advance(). */
 OcError oc_prerouter_commit(OcPrerouter *p, uint32_t layer,
                             const float *hidden,
                             const uint32_t *sel, uint32_t k);
+
+/* Promote staged (t → t+1) predictions so the next token can consume them. */
+void oc_prerouter_advance(OcPrerouter *p);
 
 void oc_prerouter_reset(OcPrerouter *p);
 void oc_prerouter_free(OcPrerouter *p);

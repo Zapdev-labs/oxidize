@@ -305,12 +305,40 @@ OcError oc_mmap_advise_range(OcMmap *m, size_t offset, size_t size,
     case OC_MMAP_ADVICE_NORMAL:      hint = MADV_NORMAL; break;
     }
     (void)madvise((uint8_t *)m->addr + start, len, hint);
-    if (advice == OC_MMAP_ADVICE_WILLNEED && m->fd >= 0) {
-        (void)posix_fadvise(m->fd, (off_t)start, (off_t)len, POSIX_FADV_WILLNEED);
+    if (m->fd >= 0) {
+        if (advice == OC_MMAP_ADVICE_WILLNEED)
+            (void)posix_fadvise(m->fd, (off_t)start, (off_t)len,
+                                POSIX_FADV_WILLNEED);
+        else if (advice == OC_MMAP_ADVICE_DONTNEED)
+            (void)posix_fadvise(m->fd, (off_t)start, (off_t)len,
+                                POSIX_FADV_DONTNEED);
     }
 #else
     (void)advice;
 #endif
+    return OC_OK;
+}
+
+OcError oc_mmap_fault_range(OcMmap *m, size_t offset, size_t size)
+{
+    if (!m || !m->addr || size == 0) return OC_ERR_INVALID_ARG;
+    if (offset >= m->len) return OC_ERR_INVALID_ARG;
+    const uint8_t *bytes = (const uint8_t *)m->addr;
+    size_t end = offset + size;
+    if (end < offset || end > m->len) end = m->len;
+#ifdef __linux__
+    long page_l = sysconf(_SC_PAGESIZE);
+    size_t page = page_l > 0 ? (size_t)page_l : 4096u;
+#else
+    size_t page = 4096u;
+#endif
+    size_t start = offset & ~(page - 1);
+    uint8_t checksum = 0;
+    for (size_t off = start; off < end; off += page)
+        checksum ^= oc_read_volatile_byte(bytes, m->len, off);
+    if (end > 0)
+        checksum ^= oc_read_volatile_byte(bytes, m->len, end - 1);
+    (void)checksum;
     return OC_OK;
 }
 

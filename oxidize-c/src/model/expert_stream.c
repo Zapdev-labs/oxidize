@@ -35,6 +35,8 @@ struct OcExpertStreamPool {
     OcLlamaModel *model;
     OcExpertLayerLayout *layers;
     uint32_t n_layers;
+    uint32_t n_experts;
+    uint8_t *cached;
     OcExpertHot *hot;
     size_t hot_len;
     size_t hot_cap;
@@ -84,6 +86,19 @@ static void advise_span(const OcExpertTensorSpan *span, uint32_t expert,
     (void)oc_mmap_advise_range(span->mmap, off, span->expert_bytes, advice);
 }
 
+static void fault_span(const OcExpertTensorSpan *span, uint32_t expert)
+{
+    if (!span || !span->mmap || span->expert_bytes == 0) return;
+    size_t off = span->mmap_offset + (size_t)expert * span->expert_bytes;
+    (void)oc_mmap_fault_range(span->mmap, off, span->expert_bytes);
+}
+
+static size_t cache_key(const OcExpertStreamPool *pool, uint32_t layer,
+                        uint32_t expert)
+{
+    return (size_t)layer * pool->n_experts + expert;
+}
+
 static uint64_t expert_bytes(const OcExpertLayerLayout *L)
 {
     if (!L) return 0;
@@ -97,11 +112,13 @@ static void reclaim_one(OcExpertStreamPool *pool)
     OcExpertHot hot = pool->hot[pool->hot_head];
     pool->hot_head = (pool->hot_head + 1) % pool->hot_cap;
     pool->hot_len--;
-    if (hot.layer >= pool->n_layers) return;
+    if (hot.layer >= pool->n_layers || hot.expert >= pool->n_experts) return;
     const OcExpertLayerLayout *L = &pool->layers[hot.layer];
     advise_span(&L->gate, hot.expert, OC_MMAP_ADVICE_DONTNEED);
     advise_span(&L->up, hot.expert, OC_MMAP_ADVICE_DONTNEED);
     advise_span(&L->down, hot.expert, OC_MMAP_ADVICE_DONTNEED);
+    if (pool->cached)
+        pool->cached[cache_key(pool, hot.layer, hot.expert)] = 0;
     if (pool->resident_bytes >= hot.bytes)
         pool->resident_bytes -= hot.bytes;
     else
@@ -113,6 +130,9 @@ static OcError record_hot(OcExpertStreamPool *pool, uint32_t layer,
                           uint32_t expert, uint64_t bytes)
 {
     if (!pool->hot || pool->hot_cap == 0) return OC_OK;
+    if (layer >= pool->n_layers || expert >= pool->n_experts) return OC_OK;
+    if (pool->cached && pool->cached[cache_key(pool, layer, expert)])
+        return OC_OK;
     if (pool->hot_len == pool->hot_cap) reclaim_one(pool);
     size_t idx = (pool->hot_head + pool->hot_len) % pool->hot_cap;
     pool->hot[idx].layer = layer;
@@ -120,6 +140,8 @@ static OcError record_hot(OcExpertStreamPool *pool, uint32_t layer,
     pool->hot[idx].bytes = bytes;
     pool->hot_len++;
     pool->resident_bytes += bytes;
+    if (pool->cached)
+        pool->cached[cache_key(pool, layer, expert)] = 1;
     while (pool->cfg.reclaim && pool->resident_bytes > pool->cfg.cache_bytes &&
            pool->hot_len > 1) {
         reclaim_one(pool);
@@ -150,6 +172,7 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
         return OC_ERR_OOM;
     }
     uint32_t n_exp = model->cfg.num_experts;
+    pool->n_experts = n_exp;
     for (uint32_t i = 0; i < pool->n_layers; i++) {
         const OcLlamaLayer *L = &model->layers[i];
         pool->layers[i].n_experts = n_exp;
@@ -160,10 +183,18 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
         (void)span_from_view(&model->gguf, &L->ffn_down_exps, n_exp,
                              &pool->layers[i].down);
     }
-    size_t cap = (size_t)pool->n_layers * 64u;
+    size_t nslot = (size_t)pool->n_layers * (size_t)n_exp;
+    pool->cached = calloc(nslot ? nslot : 1, 1);
+    if (!pool->cached) {
+        free(pool->layers);
+        free(pool);
+        return OC_ERR_OOM;
+    }
+    size_t cap = nslot;
     if (cap < 256) cap = 256;
     pool->hot = calloc(cap, sizeof(*pool->hot));
     if (!pool->hot) {
+        free(pool->cached);
         free(pool->layers);
         free(pool);
         return OC_ERR_OOM;
@@ -177,6 +208,7 @@ void oc_expert_stream_free(OcExpertStreamPool *pool)
 {
     if (!pool) return;
     free(pool->layers);
+    free(pool->cached);
     free(pool->hot);
     free(pool);
 }
@@ -251,6 +283,11 @@ OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
         advise_span(&L->gate, idx, advice);
         advise_span(&L->up, idx, advice);
         advise_span(&L->down, idx, advice);
+        if (!prefetch) {
+            fault_span(&L->gate, idx);
+            fault_span(&L->up, idx);
+            fault_span(&L->down, idx);
+        }
         if (prefetch) pool->prefetch_bytes += bytes;
         record_hot(pool, layer, idx, bytes);
     }

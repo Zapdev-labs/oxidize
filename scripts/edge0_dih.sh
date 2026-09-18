@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stream a Qwen3.6-35B-A3B GGUF the Edge0 way on dih@192.168.1.15:
-# mmap experts, prerouter-as-routing, unmerged Recover-LoRA.
+# mmap experts, prerouter-as-routing (double-shift), unmerged Recover-LoRA.
 set -euo pipefail
 
 HOST="${EDGE0_HOST:-dih@192.168.1.15}"
@@ -55,6 +55,7 @@ find_model() {
         /home/ai/models/qwen36-35b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
         /home/dih/models/qwen36-35b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
         /home/ai/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+        /home/dih/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
     )
     local p
     for p in "${candidates[@]}"; do
@@ -87,9 +88,15 @@ download_adapters() {
     done
 }
 
+repo_root() {
+    local root
+    root=$(cd "$(dirname "$0")/.." && pwd)
+    printf '%s\n' "$root"
+}
+
 build_and_run() {
     local src root model bin
-    root=$(cd "$(dirname "$0")/.." && pwd)
+    root=$(repo_root)
     if [[ -f "$root/oxidize-c/Makefile" ]]; then
         src="$root/oxidize-c"
     elif [[ -f "$PWD/oxidize-c/Makefile" ]]; then
@@ -141,6 +148,7 @@ find_model() {
         /home/ai/models/qwen36-35b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
         /home/dih/models/qwen36-35b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
         /home/ai/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+        /home/dih/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
     )
     local p
     for p in "${candidates[@]}"; do
@@ -178,7 +186,7 @@ model=$(find_model) || {
     echo "error: no Qwen3.6-35B-A3B GGUF found. Set EDGE0_MODEL" >&2
     exit 1
 }
-echo "model=$model"
+echo "model=$model src=$SRC"
 make -C "$SRC" -j"$(nproc)" oxidize-c CFLAGS='-std=c11 -O3 -march=native -DNDEBUG'
 /usr/bin/time -v "$SRC/oxidize-c" prompt \
     --model "$model" \
@@ -196,6 +204,18 @@ make -C "$SRC" -j"$(nproc)" oxidize-c CFLAGS='-std=c11 -O3 -march=native -DNDEBU
 REMOTE
 }
 
+rsync_src() {
+    local root
+    root=$(repo_root)
+    printf 'rsync oxidize-c -> %s:oxidize/oxidize-c/\n' "$HOST" >&2
+    ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" 'mkdir -p "$HOME/oxidize/oxidize-c"'
+    rsync -az --delete \
+        --exclude '*.o' --exclude '*.d' --exclude '*.asan.o' --exclude '*.asan.d' \
+        --exclude 'oxidize-c' --exclude 'test_runner' --exclude 'liboxidize-c.a' \
+        --exclude '.git' \
+        "$root/oxidize-c/" "$HOST:oxidize/oxidize-c/"
+}
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
     printf 'host=%s local=%s model=%s cache=%s\n' "$HOST" "$LOCAL" "${MODEL:-auto}" "$CACHE"
     remote_body
@@ -208,13 +228,19 @@ if [[ "$LOCAL" -eq 1 ]]; then
 fi
 
 if ! ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" true; then
-    printf 'error: cannot ssh to %s — run this script on that host with --local\n' "$HOST" >&2
+    printf 'error: cannot ssh to %s — copy this tree and run with --local\n' "$HOST" >&2
     printf 'recipe:\n' >&2
+    printf '  rsync -az --delete --exclude "*.o" --exclude oxidize-c %s/oxidize-c/ %s:~/oxidize/oxidize-c/\n' \
+        "$(repo_root)" "$HOST" >&2
+    printf '  ssh %s env EDGE0_SRC=\$HOME/oxidize/oxidize-c EDGE0_MODEL=%s bash -s <<'"'"'EOF'"'"'\n' \
+        "$HOST" "${MODEL:-}" >&2
     remote_body >&2
+    printf 'EOF\n' >&2
     exit 1
 fi
 
-ssh "$HOST" env \
+rsync_src
+ssh "$HOST" \
     EDGE0_MODEL="${MODEL:-}" \
     EDGE0_CACHE="$CACHE" \
     EDGE0_PROMPT="$PROMPT" \
@@ -222,7 +248,6 @@ ssh "$HOST" env \
     EDGE0_THREADS="$THREADS" \
     EDGE0_EXPERT_CACHE_MB="$CACHE_MB" \
     EDGE0_CTX="$CTX" \
-    EDGE0_SRC="${EDGE0_SRC:-}" \
-    bash -s <<EOF
+    'EDGE0_SRC=$HOME/oxidize/oxidize-c bash -s' <<EOF
 $(remote_body)
 EOF

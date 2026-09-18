@@ -98,6 +98,10 @@ typedef enum {
 OcError oc_mmap_advise_range(OcMmap *m, size_t offset, size_t size,
                              OcMmapAdvice advice);
 
+/* Fault every page of [offset, offset+size) with volatile reads so the
+ * current token's experts are resident before compute. Best-effort. */
+OcError oc_mmap_fault_range(OcMmap *m, size_t offset, size_t size);
+
 /* Underlying file descriptor, or -1 if the mapping does not own one. */
 int oc_mmap_fd(const OcMmap *m);
 

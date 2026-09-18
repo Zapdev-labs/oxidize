@@ -44,7 +44,10 @@ struct OcPrerouter {
     uint32_t *curr_sel;
     uint32_t *pred_sel;
     float *pred_w;
+    uint32_t *staged_sel;
+    float *staged_w;
     uint8_t *has_pred;
+    uint8_t *has_staged;
     uint8_t *has_curr;
     uint8_t *has_prev;
 };
@@ -145,12 +148,16 @@ OcError oc_prerouter_new(uint32_t n_layers, uint32_t n_experts,
     p->curr_sel = calloc((size_t)n_layers * p->top_k, sizeof(uint32_t));
     p->pred_sel = calloc((size_t)n_layers * p->top_k, sizeof(uint32_t));
     p->pred_w = calloc((size_t)n_layers * p->top_k, sizeof(float));
+    p->staged_sel = calloc((size_t)n_layers * p->top_k, sizeof(uint32_t));
+    p->staged_w = calloc((size_t)n_layers * p->top_k, sizeof(float));
     p->has_pred = calloc(n_layers, 1);
+    p->has_staged = calloc(n_layers, 1);
     p->has_curr = calloc(n_layers, 1);
     p->has_prev = calloc(n_layers, 1);
     if (!p->concat || !p->logits || !p->resid || !p->scratch_w || !p->order ||
         !p->prev_sel || !p->curr_sel || !p->pred_sel || !p->pred_w ||
-        !p->has_pred || !p->has_curr || !p->has_prev) {
+        !p->staged_sel || !p->staged_w ||
+        !p->has_pred || !p->has_staged || !p->has_curr || !p->has_prev) {
         oc_prerouter_free(p);
         return OC_ERR_OOM;
     }
@@ -353,8 +360,8 @@ OcError oc_prerouter_commit(OcPrerouter *p, uint32_t layer,
     uint32_t consumer = layer + 1;
     if (consumer >= p->n_layers) return OC_OK;
 
-    uint32_t *pred = p->pred_sel + (size_t)consumer * p->top_k;
-    float *pw = p->pred_w + (size_t)consumer * p->top_k;
+    uint32_t *pred = p->staged_sel + (size_t)consumer * p->top_k;
+    float *pw = p->staged_w + (size_t)consumer * p->top_k;
     OcError e = run_head(p, h, hidden,
                          p->curr_sel + (size_t)layer * p->top_k,
                          p->has_prev[layer]
@@ -362,17 +369,30 @@ OcError oc_prerouter_commit(OcPrerouter *p, uint32_t layer,
                              : p->curr_sel + (size_t)layer * p->top_k,
                          p->top_k, pred, pw);
     if (e != OC_OK) return e;
-    p->has_pred[consumer] = 1;
+    p->has_staged[consumer] = 1;
     if (p->stream) {
         (void)oc_expert_stream_touch(p->stream, consumer, pred, p->top_k, true);
     }
     return OC_OK;
 }
 
+void oc_prerouter_advance(OcPrerouter *p)
+{
+    if (!p || !p->has_staged || !p->has_pred) return;
+    size_t nsel = (size_t)p->n_layers * p->top_k;
+    if (p->pred_sel && p->staged_sel)
+        memcpy(p->pred_sel, p->staged_sel, nsel * sizeof(uint32_t));
+    if (p->pred_w && p->staged_w)
+        memcpy(p->pred_w, p->staged_w, nsel * sizeof(float));
+    memcpy(p->has_pred, p->has_staged, p->n_layers);
+    memset(p->has_staged, 0, p->n_layers);
+}
+
 void oc_prerouter_reset(OcPrerouter *p)
 {
     if (!p) return;
     if (p->has_pred) memset(p->has_pred, 0, p->n_layers);
+    if (p->has_staged) memset(p->has_staged, 0, p->n_layers);
     if (p->has_curr) memset(p->has_curr, 0, p->n_layers);
     if (p->has_prev) memset(p->has_prev, 0, p->n_layers);
 }
@@ -398,7 +418,10 @@ void oc_prerouter_free(OcPrerouter *p)
     free(p->curr_sel);
     free(p->pred_sel);
     free(p->pred_w);
+    free(p->staged_sel);
+    free(p->staged_w);
     free(p->has_pred);
+    free(p->has_staged);
     free(p->has_curr);
     free(p->has_prev);
     free(p);
