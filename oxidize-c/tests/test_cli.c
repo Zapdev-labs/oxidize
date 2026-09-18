@@ -151,3 +151,33 @@ Test(cli, parses_kv_type)
     oc_cli_parse_args(5, argv, &a);
     cr_assert_str_eq(a.kv_type, "q8");
 }
+
+Test(cli, parses_edge0_stream_flags)
+{
+    char *argv[] = {"oxidize-c", "--model", "m.gguf",
+                    "--stream-experts", "--expert-cache-mb", "512",
+                    "--prerouter", "pre.safetensors",
+                    "--lora", "lora.safetensors",
+                    "--experts-per-tok", "4",
+                    "--prerouter-prefetch"};
+    OcCliArgs a;
+    oc_cli_parse_args(13, argv, &a);
+    cr_assert(a.stream_experts);
+    cr_assert_eq(a.expert_cache_mb, 512);
+    cr_assert_str_eq(a.prerouter_path, "pre.safetensors");
+    cr_assert_str_eq(a.lora_path, "lora.safetensors");
+    cr_assert_eq(a.experts_per_tok, 4);
+    cr_assert(a.prerouter_prefetch);
+}
+
+Test(cli, parses_edge0_stream_flags_subcommand)
+{
+    char *argv[] = {"oxidize-c", "prompt", "--model", "m.gguf",
+                    "--stream-experts", "--prerouter", "p.st",
+                    "--experts-per-tok", "4"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(9, argv, &ctx));
+    cr_assert(ctx.stream_experts);
+    cr_assert_str_eq(ctx.prerouter_path, "p.st");
+    cr_assert_eq(ctx.experts_per_tok, 4);
+}

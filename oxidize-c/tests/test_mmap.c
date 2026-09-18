@@ -418,3 +418,30 @@ Test(gguf_map, total_bytes_matches_file_size)
 
     oc_gguf_map_free(&m);
 }
+
+Test(mmap, open_readonly_flags_no_readahead)
+{
+    OcMmap *m = NULL;
+    OcError e = oc_mmap_open_readonly_flags(FIXTURE("valid-v3.gguf"),
+                                           OC_MMAP_F_NO_READAHEAD, &m);
+    cr_assert_eq(e, OC_OK, "open flags: %s", oc_error_msg(e));
+    cr_assert_eq(oc_mmap_len(m), 132);
+    cr_assert_eq(oc_mmap_advise_range(m, 0, 32, OC_MMAP_ADVICE_RANDOM), OC_OK);
+    cr_assert_eq(oc_mmap_advise_range(m, 0, 32, OC_MMAP_ADVICE_WILLNEED), OC_OK);
+    cr_assert_eq(oc_mmap_advise_range(m, 64, 32, OC_MMAP_ADVICE_DONTNEED), OC_OK);
+    cr_assert_eq(oc_mmap_bytes(m)[0], 'G');
+    oc_mmap_close(m);
+}
+
+Test(mmap, advise_range_rejects_bad_args)
+{
+    OcMmap *m = NULL;
+    cr_assert_eq(oc_mmap_open_readonly(FIXTURE("valid-v3.gguf"), &m), OC_OK);
+    cr_assert_eq(oc_mmap_advise_range(NULL, 0, 1, OC_MMAP_ADVICE_RANDOM),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_mmap_advise_range(m, 0, 0, OC_MMAP_ADVICE_RANDOM),
+                 OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_mmap_advise_range(m, 200, 8, OC_MMAP_ADVICE_RANDOM),
+                 OC_ERR_INVALID_ARG);
+    oc_mmap_close(m);
+}

@@ -20,15 +20,20 @@
 #include "oxidize/arch_forward.h"
 #include "oxidize/arena.h"
 #include "oxidize/attn_kernels.h"
+#include "oxidize/expert_stream.h"
 #include "oxidize/gguf.h"
 #include "oxidize/log.h"
+#include "oxidize/lora.h"
 #include "oxidize/matvec.h"
 #include "oxidize/model.h"
 #include "oxidize/parallel.h"
+#include "oxidize/prerouter.h"
 #include "oxidize/quant.h"
 #include "oxidize/sampling.h"
+#include "oxidize/util/mmap.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <time.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1059,10 +1064,17 @@ static OcError resolve_weights(OcLlamaModel *m)
 
 OcError oc_llama_load(const char *path, OcLlamaModel *out)
 {
+    return oc_llama_load_flags(path, 0u, out);
+}
+
+OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
+{
     if (path == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
+    out->load_flags = flags;
 
-    OcError e = oc_gguf_map_open(path, &out->gguf);
+    unsigned mmap_flags = (flags & OC_LLAMA_LOAD_STREAM) ? OC_MMAP_F_NO_READAHEAD : 0u;
+    OcError e = oc_gguf_map_open_flags(path, mmap_flags, &out->gguf);
     if (e != OC_OK) return e;
 
     out->arch = oc_gguf_arch_from_file(&out->gguf.unified);
@@ -1118,6 +1130,71 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out)
     if (out->cfg.uses_mla || out->cfg.is_longcat)
         oc_log(OC_LOG_INFO,
                "llama: batched prefill unavailable for this architecture; using per-token prefill");
+    if (flags & OC_LLAMA_LOAD_STREAM)
+        oc_log(OC_LOG_INFO, "llama: mmap opened without readahead (expert stream)");
+    return OC_OK;
+}
+
+OcError oc_llama_enable_expert_stream(OcLlamaModel *model,
+                                      const OcExpertStreamConfig *cfg)
+{
+    if (!model) return OC_ERR_INVALID_ARG;
+    if (model->expert_stream) {
+        oc_expert_stream_free(model->expert_stream);
+        model->expert_stream = NULL;
+    }
+    OcError e = oc_expert_stream_new(model, cfg, &model->expert_stream);
+    if (e != OC_OK) return e;
+    return oc_expert_stream_prepare_mapping(model->expert_stream);
+}
+
+OcError oc_llama_session_load_prerouter(OcLlamaSession *sess, const char *path,
+                                        bool replace_routing)
+{
+    if (!sess || !sess->model || !path) return OC_ERR_INVALID_ARG;
+    const OcLlamaConfig *c = &sess->model->cfg;
+    if (c->num_experts == 0) return OC_ERR_MODEL;
+    if (sess->prerouter) {
+        oc_prerouter_free(sess->prerouter);
+        sess->prerouter = NULL;
+    }
+    uint32_t k = c->num_experts_per_tok ? c->num_experts_per_tok : 1;
+    OcError e = oc_prerouter_new(c->n_layer, c->num_experts, c->n_embd, k,
+                                 &sess->prerouter);
+    if (e != OC_OK) return e;
+    e = oc_prerouter_load_safetensors(sess->prerouter, path);
+    if (e != OC_OK) {
+        oc_prerouter_free(sess->prerouter);
+        sess->prerouter = NULL;
+        return e;
+    }
+    oc_prerouter_set_replace_routing(sess->prerouter, replace_routing);
+    oc_prerouter_set_stream(sess->prerouter, sess->expert_stream);
+    return OC_OK;
+}
+
+OcError oc_llama_session_load_lora(OcLlamaSession *sess, const char *path)
+{
+    if (!sess || !sess->model || !path) return OC_ERR_INVALID_ARG;
+    if (sess->lora) {
+        oc_lora_model_free(sess->lora);
+        free(sess->lora);
+        sess->lora = NULL;
+    }
+    OcLoraModel *lm = calloc(1, sizeof(*lm));
+    if (!lm) return OC_ERR_OOM;
+    OcError e = oc_lora_model_init(lm, sess->model->cfg.n_layer);
+    if (e != OC_OK) {
+        free(lm);
+        return e;
+    }
+    e = oc_lora_load_safetensors(lm, path, 2.0f);
+    if (e != OC_OK) {
+        oc_lora_model_free(lm);
+        free(lm);
+        return e;
+    }
+    sess->lora = lm;
     return OC_OK;
 }
 
@@ -1259,6 +1336,7 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     }
     memset(out, 0, sizeof(*out));
     out->model = model;
+    out->expert_stream = model->expert_stream;
     /* For MLA, each head has its own K/V (no GQA sharing); for Gemma 4 this is
      * the max over the two layer geometries. See kv_row_floats_for(). */
     out->kv_row_floats = kv_row_floats_for(model);
@@ -1521,6 +1599,7 @@ void oc_llama_session_reset(OcLlamaSession *sess)
         for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++)
             oc_qwen35_delta_state_reset(&sess->qwen35_delta[l]);
     }
+    if (sess->prerouter) oc_prerouter_reset(sess->prerouter);
 }
 
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos)
@@ -1566,6 +1645,11 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->qwen35_alpha);
     free(sess->qwen35_conv_output);
     free(sess->qwen35_delta_output);
+    if (sess->prerouter) oc_prerouter_free(sess->prerouter);
+    if (sess->lora) {
+        oc_lora_model_free(sess->lora);
+        free(sess->lora);
+    }
     memset(sess, 0, sizeof(*sess));
 }
 
@@ -1603,6 +1687,7 @@ void oc_llama_free(OcLlamaModel *model)
     free(model->final_norm);
     free(model->final_norm_bias);
     free(model->cfg.layer_is_swa);
+    if (model->expert_stream) oc_expert_stream_free(model->expert_stream);
     oc_gguf_map_free(&model->gguf);
     memset(model, 0, sizeof(*model));
 }
@@ -1965,6 +2050,23 @@ static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     oc_attn_add_f32(s->x, s->normed, c->n_embd);
 }
 
+static uint32_t moe_layer_index(const OcLlamaSession *s, const OcLlamaLayer *L)
+{
+    if (!s || !s->model || !s->model->layers || !L) return UINT32_MAX;
+    if (L < s->model->layers) return UINT32_MAX;
+    ptrdiff_t d = L - s->model->layers;
+    if (d < 0 || (size_t)d >= s->model->cfg.n_layer) return UINT32_MAX;
+    return (uint32_t)d;
+}
+
+static void apply_lora_at(OcLlamaSession *s, const OcLoraAdapter *arr,
+                          uint32_t layer, const float *x, float *out)
+{
+    if (!s || !s->lora || !oc_lora_is_active(s->lora) || !arr) return;
+    if ((size_t)layer >= s->lora->n_layers) return;
+    oc_lora_apply(&arr[layer], x, out, s->dequant_temp);
+}
+
 /* ─── MoE FFN (Qwen3-MoE / Mixtral path) ────────────────────────────────
  *
  * Port of oxidize-core inference.rs::moe_ffn_forward_weights +
@@ -1990,51 +2092,66 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     if (k > n_slots) k = n_slots;
     uint32_t i_size = c->expert_intermediate_size;
     if (i_size == 0) i_size = c->n_ff;
-
-    /* 1. Router logits: ffn_gate_inp @ normed → [n_slots]. */
-    matvec(&L->ffn_gate_inp, s->normed, s->router_logits, s->dequant_temp);
-
-    /* 2. Gating: softmax (Qwen3-MoE) or sigmoid (DeepSeek). */
-    if (!c->expert_gating_sigmoid) {
-        float mx = s->router_logits[0];
-        for (uint32_t i = 1; i < n_slots; i++) {
-            if (s->router_logits[i] > mx) mx = s->router_logits[i];
-        }
-        double sum = 0.0;
-        for (uint32_t i = 0; i < n_slots; i++) {
-            s->router_logits[i] = expf(s->router_logits[i] - mx);
-            sum += (double)s->router_logits[i];
-        }
-        if (sum > 0.0) {
-            float inv = (float)(1.0 / sum);
-            for (uint32_t i = 0; i < n_slots; i++) s->router_logits[i] *= inv;
-        }
-    } else {
-        for (uint32_t i = 0; i < n_slots; i++) {
-            s->router_logits[i] = 1.0f / (1.0f + expf(-s->router_logits[i]));
-        }
-    }
-
-    /* 3. Top-k selection by descending weight (partial selection sort). */
+    uint32_t layer = moe_layer_index(s, L);
     uint32_t *sel = s->selected_experts;
     if (sel == NULL) { forward_dense_ffn(s, L); return; }
-    for (uint32_t i = 0; i < n_slots; i++) sel[i] = i;
-    /* exp_probs_b steers WHICH slots win top-k without changing how much
-     * their output counts, so ranking uses logit + bias while the applied
-     * gate below stays the unbiased probability. */
-    for (uint32_t i = 0; i < k; i++) {
-        uint32_t best = i;
-        for (uint32_t j = i + 1; j < n_slots; j++) {
-            float sj = s->router_logits[sel[j]];
-            float sb = s->router_logits[sel[best]];
-            if (L->exp_probs_b) {
-                sj += L->exp_probs_b[sel[j]];
-                sb += L->exp_probs_b[sel[best]];
-            }
-            if (sj > sb) best = j;
+
+    bool predicted = false;
+    if (s->prerouter && layer != UINT32_MAX &&
+        oc_prerouter_has_prediction(s->prerouter, layer)) {
+        if (oc_prerouter_consume(s->prerouter, layer, sel, k,
+                                 s->router_logits) == OC_OK) {
+            predicted = true;
         }
-        uint32_t tmp = sel[i]; sel[i] = sel[best]; sel[best] = tmp;
     }
+
+    if (!predicted) {
+        /* 1. Router logits: ffn_gate_inp @ normed → [n_slots]. */
+        matvec(&L->ffn_gate_inp, s->normed, s->router_logits, s->dequant_temp);
+
+        /* 2. Gating: softmax (Qwen3-MoE) or sigmoid (DeepSeek). */
+        if (!c->expert_gating_sigmoid) {
+            float mx = s->router_logits[0];
+            for (uint32_t i = 1; i < n_slots; i++) {
+                if (s->router_logits[i] > mx) mx = s->router_logits[i];
+            }
+            double sum = 0.0;
+            for (uint32_t i = 0; i < n_slots; i++) {
+                s->router_logits[i] = expf(s->router_logits[i] - mx);
+                sum += (double)s->router_logits[i];
+            }
+            if (sum > 0.0) {
+                float inv = (float)(1.0 / sum);
+                for (uint32_t i = 0; i < n_slots; i++) s->router_logits[i] *= inv;
+            }
+        } else {
+            for (uint32_t i = 0; i < n_slots; i++) {
+                s->router_logits[i] = 1.0f / (1.0f + expf(-s->router_logits[i]));
+            }
+        }
+
+        /* 3. Top-k selection by descending weight (partial selection sort). */
+        for (uint32_t i = 0; i < n_slots; i++) sel[i] = i;
+        /* exp_probs_b steers WHICH slots win top-k without changing how much
+         * their output counts, so ranking uses logit + bias while the applied
+         * gate below stays the unbiased probability. */
+        for (uint32_t i = 0; i < k; i++) {
+            uint32_t best = i;
+            for (uint32_t j = i + 1; j < n_slots; j++) {
+                float sj = s->router_logits[sel[j]];
+                float sb = s->router_logits[sel[best]];
+                if (L->exp_probs_b) {
+                    sj += L->exp_probs_b[sel[j]];
+                    sb += L->exp_probs_b[sel[best]];
+                }
+                if (sj > sb) best = j;
+            }
+            uint32_t tmp = sel[i]; sel[i] = sel[best]; sel[best] = tmp;
+        }
+    }
+
+    if (s->expert_stream && layer != UINT32_MAX)
+        (void)oc_expert_stream_touch(s->expert_stream, layer, sel, k, false);
 
     /* 4. Renormalize top-k weights (norm_topk_prob).
      *
@@ -2190,9 +2307,18 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         L->ffn_down_shexp.data != NULL) {
         matvec(&L->ffn_gate_shexp, s->normed, s->shexp_gate, s->dequant_temp);
         matvec(&L->ffn_up_shexp,   s->normed, s->shexp_up,   s->dequant_temp);
+        if (s->lora && layer != UINT32_MAX) {
+            apply_lora_at(s, s->lora->shexp_gate_adapters, layer,
+                          s->normed, s->shexp_gate);
+            apply_lora_at(s, s->lora->shexp_up_adapters, layer,
+                          s->normed, s->shexp_up);
+        }
         const size_t shared_size = c->shared_expert_intermediate_size;
         oc_swiglu_inplace_f32(s->shexp_gate, s->shexp_up, shared_size);
         matvec(&L->ffn_down_shexp, s->shexp_gate, s->shexp_out, s->dequant_temp);
+        if (s->lora && layer != UINT32_MAX)
+            apply_lora_at(s, s->lora->shexp_down_adapters, layer,
+                          s->shexp_gate, s->shexp_out);
         /* Optional sigmoid gate. */
         if (L->ffn_gate_inp_shexp.data != NULL) {
             float gate_logit = 0.0f;
@@ -2202,6 +2328,9 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         }
         for (size_t i = 0; i < c->n_embd; i++) s->expert_out[i] += s->shexp_out[i];
     }
+
+    if (s->prerouter && layer != UINT32_MAX)
+        (void)oc_prerouter_commit(s->prerouter, layer, s->normed, sel, k);
 
     /* 7. Residual add: x += ffn_out. */
     for (size_t i = 0; i < c->n_embd; i++) s->x[i] += s->expert_out[i];
@@ -2430,6 +2559,12 @@ static OcError forward_qwen35_recurrent(OcLlamaSession *s, uint32_t layer)
         for (size_t i = 0; i < 4; i++)
             matvec(projections[i], s->normed, outputs[i], s->dequant_temp);
     }
+    if (s->lora) {
+        apply_lora_at(s, s->lora->ssm_qkv_adapters, layer, s->normed, s->qwen35_qkv);
+        apply_lora_at(s, s->lora->ssm_gate_adapters, layer, s->normed, s->qwen35_gate);
+        apply_lora_at(s, s->lora->ssm_beta_adapters, layer, s->normed, s->qwen35_beta);
+        apply_lora_at(s, s->lora->ssm_alpha_adapters, layer, s->normed, s->qwen35_alpha);
+    }
 
     OcQwen35DeltaParams params = {
         .conv_weight = (const float *)weights->ssm_conv1d.data,
@@ -2460,6 +2595,9 @@ static OcError forward_qwen35_recurrent(OcLlamaSession *s, uint32_t layer)
     if (error != OC_OK) return error;
     matvec(&weights->ssm_out, s->qwen35_delta_output, s->normed,
            s->dequant_temp);
+    if (s->lora)
+        apply_lora_at(s, s->lora->ssm_out_adapters, layer,
+                      s->qwen35_delta_output, s->normed);
     oc_attn_add_f32(s->x, s->normed, c->n_embd);
     return OC_OK;
 }
@@ -2497,6 +2635,14 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
         matvec(&weights->attn_q, s->normed, s->qwen35_qkv, s->dequant_temp);
         matvec(&weights->attn_k, s->normed, s->k, s->dequant_temp);
         matvec(&weights->attn_v, s->normed, s->v, s->dequant_temp);
+    }
+    if (s->lora) {
+        uint32_t lidx = moe_layer_index(s, weights);
+        if (lidx != UINT32_MAX) {
+            apply_lora_at(s, s->lora->q_adapters, lidx, s->normed, s->qwen35_qkv);
+            apply_lora_at(s, s->lora->k_adapters, lidx, s->normed, s->k);
+            apply_lora_at(s, s->lora->v_adapters, lidx, s->normed, s->v);
+        }
     }
     for (uint32_t head = 0; head < c->n_head; head++) {
         const float *packed = s->qwen35_qkv + 2u * head * head_dim;
@@ -2563,6 +2709,11 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
     }
     matvec(&weights->attn_output, s->attn_out, s->normed,
            s->dequant_temp);
+    if (s->lora) {
+        uint32_t lidx = moe_layer_index(s, weights);
+        if (lidx != UINT32_MAX)
+            apply_lora_at(s, s->lora->o_adapters, lidx, s->attn_out, s->normed);
+    }
     oc_attn_add_f32(s->x, s->normed, c->n_embd);
 }
 
@@ -2604,6 +2755,11 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
         matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
         matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+        if (s->lora) {
+            apply_lora_at(s, s->lora->q_adapters, layer, s->normed, s->q);
+            apply_lora_at(s, s->lora->k_adapters, layer, s->normed, s->k);
+            apply_lora_at(s, s->lora->v_adapters, layer, s->normed, s->v);
+        }
         /* Muse Glimmer's attention-output gate is projected from the same
          * pre-attention normed hidden state as Q/K/V, so it has to be taken
          * before `normed` is reused as the output-projection buffer below. */
@@ -2720,6 +2876,8 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
 
         /* Output projection. */
         matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+        if (s->lora)
+            apply_lora_at(s, s->lora->o_adapters, layer, s->attn_out, s->normed);
         /* Gemma "sandwich" norm: the attention branch output is normed again
          * before it rejoins the residual stream (HF post_attention_layernorm
          * on the branch, not on the input). Skipped when the tensor is absent,
@@ -3177,6 +3335,7 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
     uint32_t i_size = c->expert_intermediate_size;
     if (i_size == 0) i_size = c->n_ff;
     const float routed_scale = c->expert_weights_scale;
+    uint32_t layer = moe_layer_index(s, L);
 
     /* 1. Router logits for every token in one matmul. */
     double t_r0 = pf_now();
@@ -3250,6 +3409,29 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
                 routed_scale * (float)(rl[sel[i]] / weight_norm);
             b->ex_off[sel[i] + 1]++;      /* histogram for the counting sort */
         }
+    }
+
+    /* Fault only the experts this batch actually routed to. Prefetching the
+     * whole stacked tensor would pull the entire MoE checkpoint into RAM. */
+    if (s->expert_stream && layer != UINT32_MAX && n_exp > 0) {
+        uint32_t *uniq = (uint32_t *)malloc((size_t)n_exp * sizeof(uint32_t));
+        uint8_t *seen = (uint8_t *)calloc(n_exp, 1);
+        if (uniq && seen) {
+            uint32_t nu = 0;
+            for (size_t j = 0; j < n; j++) {
+                for (uint32_t i = 0; i < k; i++) {
+                    uint32_t idx = b->sel[j * k + i];
+                    if (idx >= n_exp || seen[idx]) continue;
+                    seen[idx] = 1;
+                    uniq[nu++] = idx;
+                }
+            }
+            if (nu > 0)
+                (void)oc_expert_stream_touch(s->expert_stream, layer,
+                                             uniq, nu, true);
+        }
+        free(uniq);
+        free(seen);
     }
 
     /* 5. Counting sort of (token, weight) pairs into per-expert groups. */

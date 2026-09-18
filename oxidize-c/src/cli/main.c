@@ -26,6 +26,7 @@
 #include "oxidize/cuda.h"
 #include "oxidize/dspark.h"
 #include "oxidize/error.h"
+#include "oxidize/expert_stream.h"
 #include "oxidize/gguf.h"
 #include "oxidize/http.h"
 #include "oxidize/llama.h"
@@ -138,6 +139,12 @@ static void print_help(void)
 "  --draft-tokens N       MTP/DSpark draft block size (default 4)\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
+"  --stream-experts       SSD expert offload (no whole-file readahead/mlock)\n"
+"  --expert-cache-mb N    Expert working set budget (default 3072)\n"
+"  --prerouter PATH       Edge0 prerouter.safetensors (prediction is routing)\n"
+"  --prerouter-prefetch   Load prerouter heads but keep native router\n"
+"  --lora PATH            Edge0 Recover-LoRA safetensors (unmerged, scale α/r=2)\n"
+"  --experts-per-tok K    Override MoE top-k (Edge0 adapters were trained at 4)\n"
 "  -v, --verbose          Verbose logging\n"
 "  -h, --help             Show this help\n"
 "  --version              Print version and exit\n",
@@ -209,8 +216,9 @@ static void apply_thread_numa_policy(const OcCliArgs *args,
     }
 
     /* Fault the weights in with the resolved thread count so the first
-     * tokens don't pay page-fault cost serially. */
-    if (weights != NULL && threads > 1) {
+     * tokens don't pay page-fault cost serially. Skip when streaming
+     * experts: a full prefault would pull the entire MoE checkpoint in. */
+    if (weights != NULL && threads > 1 && !args->stream_experts) {
         (void)oc_gguf_map_prefault_parallel(weights, (size_t)threads);
     }
 }
@@ -244,7 +252,8 @@ static OcError run_generation(const OcCliArgs *args)
 
     oc_log(OC_LOG_INFO, "loading model: %s", args->model_path);
     OcLlamaModel model;
-    OcError e = oc_llama_load(args->model_path, &model);
+    unsigned load_flags = args->stream_experts ? OC_LLAMA_LOAD_STREAM : 0u;
+    OcError e = oc_llama_load_flags(args->model_path, load_flags, &model);
     if (e != OC_OK) {
         fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
         free(file_prompt);
@@ -268,6 +277,11 @@ static OcError run_generation(const OcCliArgs *args)
                    args->n_ctx > 0 ? "" : " (default; --ctx N to change)");
             model.cfg.n_ctx = want;
         }
+    }
+    if (args->experts_per_tok > 0 && model.cfg.num_experts > 0) {
+        oc_log(OC_LOG_INFO, "moe: experts-per-tok %u -> %u",
+               model.cfg.num_experts_per_tok, args->experts_per_tok);
+        model.cfg.num_experts_per_tok = args->experts_per_tok;
     }
 
     /* CUDA backend: upload weights to GPU and use GPU forward path. */
@@ -302,8 +316,24 @@ static OcError run_generation(const OcCliArgs *args)
         if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
             oc_autotune_fingerprint_gguf(&model.gguf, &fp) == OC_OK) {
             OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
-            if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
+            if (args->auto_tune && !args->stream_experts)
+                oc_autotune_apply(&plan, &model.gguf);
             apply_thread_numa_policy(args, &plan, &cpu, &model.gguf);
+        }
+    }
+
+    if (args->stream_experts) {
+        OcExpertStreamConfig scfg;
+        oc_expert_stream_config_init(&scfg);
+        if (args->expert_cache_mb > 0)
+            scfg.cache_bytes = (uint64_t)args->expert_cache_mb << 20;
+        e = oc_llama_enable_expert_stream(&model, &scfg);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: expert stream init failed (%s)\n",
+                    oc_error_msg(e));
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
         }
     }
 
@@ -326,6 +356,31 @@ static OcError run_generation(const OcCliArgs *args)
         oc_llama_free(&model);
         free(file_prompt);
         return e;
+    }
+
+    if (args->prerouter_path) {
+        e = oc_llama_session_load_prerouter(&sess, args->prerouter_path,
+                                            !args->prerouter_prefetch);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: prerouter load failed (%s)\n",
+                    oc_error_msg(e));
+            oc_llama_session_free(&sess);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
+    }
+    if (args->lora_path) {
+        e = oc_llama_session_load_lora(&sess, args->lora_path);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: lora load failed (%s)\n", oc_error_msg(e));
+            oc_llama_session_free(&sess);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
     }
 
     /* Encode prompt. */
@@ -498,6 +553,16 @@ static OcError run_generation(const OcCliArgs *args)
         }
         if (emitted > 0) fputs("\n", stdout);
         oc_log(OC_LOG_INFO, "generated %zu tokens", emitted);
+        if (model.expert_stream) {
+            oc_log(OC_LOG_INFO,
+                   "expert-stream: resident=%.1f MiB prefetch=%.1f MiB reclaim=%.1f MiB",
+                   oc_expert_stream_resident_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_prefetch_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_reclaim_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0));
+        }
         if (decode_start > 0 && emitted > 0) {
             double elapsed = wall_now() - decode_start;
             if (elapsed > 0) {
@@ -560,6 +625,41 @@ int main(int argc, char **argv)
      * every existing script keep working. */
     OcCliContext ctx;
     if (oc_cli_context_parse(argc, argv, &ctx)) {
+        if (ctx.command == OC_CLI_CMD_PROMPT) {
+            OcCliArgs args;
+            oc_cli_args_defaults(&args);
+            args.model_path = ctx.model_path;
+            args.prompt = ctx.prompt;
+            args.prompt_file = ctx.prompt_file;
+            args.n_predict = ctx.n_predict;
+            args.n_ctx = ctx.n_ctx;
+            args.kv_type = ctx.kv_type;
+            args.threads = ctx.threads;
+            args.numa = ctx.numa;
+            args.auto_tune = ctx.auto_tune;
+            args.no_auto = ctx.no_auto;
+            args.temperature = ctx.temperature;
+            args.top_k = ctx.top_k;
+            args.top_p = ctx.top_p;
+            args.repeat_penalty = ctx.repeat_penalty;
+            args.seed = ctx.seed;
+            args.min_p = ctx.min_p;
+            args.mirostat_tau = ctx.mirostat_tau;
+            args.mirostat_eta = ctx.mirostat_eta;
+            args.backend = ctx.backend;
+            args.verbose = ctx.verbose;
+            args.stream_experts = ctx.stream_experts;
+            args.expert_cache_mb = ctx.expert_cache_mb;
+            args.prerouter_path = ctx.prerouter_path;
+            args.lora_path = ctx.lora_path;
+            args.experts_per_tok = ctx.experts_per_tok;
+            args.prerouter_prefetch = ctx.prerouter_prefetch;
+            if (args.verbose) oc_log_set_level(OC_LOG_DEBUG);
+            init_compute_threads(args.threads);
+            OcError ge = run_generation(&args);
+            oc_parallel_shutdown();
+            return ge == OC_OK ? 0 : 1;
+        }
         init_compute_threads(ctx.threads);
         OcError ce = oc_cli_command_run(&ctx);
         oc_parallel_shutdown();

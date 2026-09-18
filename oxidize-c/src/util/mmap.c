@@ -71,6 +71,12 @@ static OcMmap *mmap_alloc(void)
 
 OcError oc_mmap_open_readonly(const char *path, OcMmap **out)
 {
+    return oc_mmap_open_readonly_flags(path, 0u, out);
+}
+
+OcError oc_mmap_open_readonly_flags(const char *path, unsigned flags,
+                                    OcMmap **out)
+{
     if (!path || !out) return OC_ERR_INVALID_ARG;
     *out = NULL;
 
@@ -122,10 +128,12 @@ OcError oc_mmap_open_readonly(const char *path, OcMmap **out)
     m->len  = len;
     m->fd   = fd;
 
-    /* Best-effort: tell the kernel we'll read sequentially + will need the
-     * pages. Matches Rust `load_mapped_gguf`. */
-    oc_mmap_advise_sequential(m);
-    oc_mmap_advise_willneed(m);
+    if (flags & OC_MMAP_F_NO_READAHEAD) {
+        oc_mmap_advise_random(m);
+    } else {
+        oc_mmap_advise_sequential(m);
+        oc_mmap_advise_willneed(m);
+    }
     *out = m;
     return OC_OK;
 #else
@@ -264,6 +272,44 @@ OcError oc_mmap_advise_willneed(OcMmap *m)
     if (madvise(m->addr, m->len, MADV_WILLNEED) != 0) {
         oc_log(OC_LOG_WARN, "mmap: MADV_WILLNEED failed: %s", strerror(errno));
     }
+#endif
+    return OC_OK;
+}
+
+int oc_mmap_fd(const OcMmap *m)
+{
+    return m ? m->fd : -1;
+}
+
+OcError oc_mmap_advise_range(OcMmap *m, size_t offset, size_t size,
+                             OcMmapAdvice advice)
+{
+    if (!m || !m->addr || size == 0) return OC_ERR_INVALID_ARG;
+    if (offset >= m->len) return OC_ERR_INVALID_ARG;
+#ifdef __linux__
+    long page_l = sysconf(_SC_PAGESIZE);
+    size_t page = page_l > 0 ? (size_t)page_l : 4096u;
+    size_t start = offset & ~(page - 1);
+    size_t end = offset + size;
+    if (end < offset || end > m->len) end = m->len;
+    end = (end + page - 1) & ~(page - 1);
+    if (end > m->len) end = m->len;
+    if (end <= start) return OC_OK;
+    size_t len = end - start;
+    int hint = MADV_NORMAL;
+    switch (advice) {
+    case OC_MMAP_ADVICE_WILLNEED:    hint = MADV_WILLNEED; break;
+    case OC_MMAP_ADVICE_DONTNEED:    hint = MADV_DONTNEED; break;
+    case OC_MMAP_ADVICE_RANDOM:      hint = MADV_RANDOM; break;
+    case OC_MMAP_ADVICE_SEQUENTIAL:  hint = MADV_SEQUENTIAL; break;
+    case OC_MMAP_ADVICE_NORMAL:      hint = MADV_NORMAL; break;
+    }
+    (void)madvise((uint8_t *)m->addr + start, len, hint);
+    if (advice == OC_MMAP_ADVICE_WILLNEED && m->fd >= 0) {
+        (void)posix_fadvise(m->fd, (off_t)start, (off_t)len, POSIX_FADV_WILLNEED);
+    }
+#else
+    (void)advice;
 #endif
     return OC_OK;
 }

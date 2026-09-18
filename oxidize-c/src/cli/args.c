@@ -70,6 +70,10 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--mirostat-tau"))  { a->mirostat_tau = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--mirostat-eta"))  { a->mirostat_eta = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--bench-iters"))   { a->bench_iterations = val[0] == '-' ? 0 : atoi(val); *consumed_val = true; }
+    else if (match(arg, "--expert-cache-mb")) { a->expert_cache_mb = (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
+    else if (match(arg, "--prerouter"))     { a->prerouter_path = val; *consumed_val = true; }
+    else if (match(arg, "--lora"))          { a->lora_path = val; *consumed_val = true; }
+    else if (match(arg, "--experts-per-tok")) { a->experts_per_tok = (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else return false;
     return true;
 }
@@ -91,6 +95,8 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
         if (match(arg, "--verbose") || match(arg, "-v")) { a->verbose = true; continue; }
         if (match(arg, "--help") || match(arg, "-h"))    { a->show_help = true; continue; }
         if (match(arg, "--version"))         { a->show_version = true; continue; }
+        if (match(arg, "--stream-experts"))  { a->stream_experts = true; continue; }
+        if (match(arg, "--prerouter-prefetch")) { a->prerouter_prefetch = true; continue; }
 
         bool consumed_val = false;
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
@@ -134,6 +140,8 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         if (match(arg, "--bench-no-eos")) { ctx->bench_no_eos = true; continue; }
         if (match(arg, "--lm-materialize")) { ctx->bench_lm_materialize = true; continue; }
         if (match(arg, "--verbose") || match(arg, "-v")) { ctx->verbose = true; continue; }
+        if (match(arg, "--stream-experts")) { ctx->stream_experts = true; continue; }
+        if (match(arg, "--prerouter-prefetch")) { ctx->prerouter_prefetch = true; continue; }
 
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
         if (val == NULL) {
@@ -203,6 +211,10 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         /* Perplexity / tokenize. */
         else if (match(arg, "--max-tokens"))     { ctx->ppl_max_tokens = (size_t)strtoull(val, NULL, 10); i++; }
         else if (match(arg, "--ids"))            { ctx->token_ids_str = val; i++; }
+        else if (match(arg, "--expert-cache-mb")) { ctx->expert_cache_mb = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--prerouter"))      { ctx->prerouter_path = val; i++; }
+        else if (match(arg, "--lora"))           { ctx->lora_path = val; i++; }
+        else if (match(arg, "--experts-per-tok")) { ctx->experts_per_tok = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (arg[0] != '-' && ctx->prompt == NULL) { ctx->prompt = arg; }
     }
     return true;
