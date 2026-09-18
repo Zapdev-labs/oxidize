@@ -63,6 +63,8 @@ typedef struct OcCliArgs {
      * tokens (and, on MoE, packs more tokens into each expert) at a linear
      * cost in scratch memory. */
     uint32_t   batch_size;
+    /* --prefill-chunk-size N: 0 = unset (plan or --batch-size wins). */
+    uint32_t   prefill_chunk_size;
     bool       verbose;
     bool       inspect;           /* print model info and exit             */
     bool       perplexity;        /* compute perplexity on input text       */

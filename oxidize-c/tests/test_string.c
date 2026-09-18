@@ -78,3 +78,21 @@ Test(string, parse_i64_f64)
     cr_assert(!oc_parse_f64("not-a-num", &d), "");
 }
 
+Test(string, parse_u32)
+{
+    uint32_t n;
+    cr_assert(oc_parse_u32("0", &n), "");
+    cr_assert_eq(n, 0u, "");
+    cr_assert(oc_parse_u32("1024", &n), "");
+    cr_assert_eq(n, 1024u, "");
+    cr_assert(oc_parse_u32("4294967295", &n), "");
+    cr_assert_eq(n, 4294967295u, "");
+    cr_assert(!oc_parse_u32("4294967296", &n), "");
+    cr_assert(!oc_parse_u32("-1", &n), "");
+    cr_assert(!oc_parse_u32("+1", &n), "");
+    cr_assert(!oc_parse_u32(" 1024", &n), "");
+    cr_assert(!oc_parse_u32("1024abc", &n), "");
+    cr_assert(!oc_parse_u32("", &n), "");
+    cr_assert(!oc_parse_u32(NULL, &n), "");
+}
+
