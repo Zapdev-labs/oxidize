@@ -1,0 +1,19 @@
+oxidize-training/tools/oxtr_to_hf.py
+  s_519170796c41c1::t_ee040e02a668a9 1-287
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "73218fe52609813fa9e724f21c91292f0437c24c",
+  "prompts": {},
+  "sessions": {
+    "s_519170796c41c1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "64536a7d-13f3-49a3-a68d-be1be45e042e",
+        "model": "default"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
