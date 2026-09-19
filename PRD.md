@@ -27,7 +27,7 @@ Build a high-performance, dependency-light LLM inference engine in Rust that run
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    APPLICATION LAYER                        │
-│  CLI │ HTTP Server │ Python Bindings │ WASM │ FFI          │
+│  CLI │ HTTP Server │ C FFI │ C11 port │ WASM               │
 ├─────────────────────────────────────────────────────────────┤
 │                    API LAYER                                │
 │  Session Management │ Sampling │ Tokenization │ Scheduling  │
@@ -339,22 +339,14 @@ pub trait Quantization {
 
 ---
 
-### MODULE 13: Python Bindings
+### MODULE 13: C ABI and C11 port
 
-**Objective:** Python interface via PyO3
+**Objective:** Embed the engine from C without extra language runtimes
 
-- [x] **TODO-13.1:** Set up `pyo3` workspace
-- [x] **TODO-13.2:** Create `oxidize` Python package
-- [x] **TODO-13.3:** Implement `Llama` class with methods:
-  - `__init__`
-  - `generate`
-  - `create_chat_completion`
-  - `embed`
-- [x] **TODO-13.4:** Add async support with `asyncio`
-- [x] **TODO-13.5:** Support `numpy` and `torch` tensor interop
-- [x] **TODO-13.6:** Create `pip` installable wheels (maturin)
-- [x] **TODO-13.7:** Add Python type stubs
-- [x] **TODO-13.8:** Match `llama-cpp-python` API for compatibility
+- [x] **TODO-13.1:** C-ABI crate (`oxidize-ffi`) over `oxidize-core`
+- [x] **TODO-13.2:** Standalone C11 port (`oxidize-c`) with CLI + optional CUDA
+- [x] **TODO-13.3:** Shared GGUF / AL-family quant types with the Rust core
+- [x] **TODO-13.4:** Autotune flags (`--auto`, `--print-plan`, `--numa`) on the C CLI
 
 **Estimated Effort:** 7-10 days
 **Priority:** P2 (Medium)
@@ -459,7 +451,7 @@ pub trait Quantization {
 | Serialization | serde | - |
 | CUDA Bindings | cudarc | rustacuda, cust |
 | Metal Bindings | metal-rs | - |
-| Python Bindings | pyo3 + maturin | - |
+| C embedding | oxidize-ffi + oxidize-c | - |
 | WASM | wasm-bindgen | - |
 | Logging | tracing | log |
 | Error Handling | thiserror + anyhow | - |

@@ -1,8 +1,7 @@
 /*
  * hf_hub.c — HuggingFace Hub GGUF model downloader implementation.
  *
- * Ports the HF resolver from oxidize-golang/hf/hub.go and the pure-Python
- * oxidize_python.hf.hub module into the dependency-free C11 port. Uses a
+ * HuggingFace Hub GGUF downloader for the C11 port. Uses a
  * raw-socket HTTP/1.1 client (no libcurl) consistent with mesh.c/http.c.
  *
  * TLS note: HuggingFace's production API is HTTPS-only. This client

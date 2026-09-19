@@ -1,12 +1,13 @@
 # oxidize
 
-`oxidize` is a Rust workspace for local LLM tooling:
+`oxidize` is a Rust workspace for local LLM tooling, plus a standalone C11 port:
 
 - `oxidize-core`: model loading, quantization, tensor/sampling primitives, and optional WASM support
 - `oxidize-cli`: local CLI for prompt runs, chat mode, model planning, and profiling hooks
 - `oxidize-server`: OpenAI-compatible HTTP API surface
 - `oxidize-quantize`: file quantization utility
-- `oxidize-py`: Python bindings built with `pyo3`
+- `oxidize-ffi`: C-ABI over `oxidize-core`
+- `oxidize-c`: dependency-free C11 inference binary (`make c-build`)
 
 ## Install with your AI agent
 
@@ -57,13 +58,13 @@ This release brings together a complete core-to-interface stack:
 - `oxidize-core` for model loading, quantization primitives, and generation
 - `oxidize-cli` for prompt and chat runs with profiling hooks
 - `oxidize-server` for OpenAI-compatible HTTP endpoints
-- `oxidize-py` for Python integration
+- `oxidize-ffi` / `oxidize-c` for C embedding and a libc-only binary
 - `oxidize-quantize` for offline model conversion
 
 What this means for early users:
 
 - Start quickly with one workspace and consistent commands (`make build`, `make test`, `make lint`)
-- Deploy the same inference behavior across CLI, server, and Python surfaces
+- Deploy the same inference behavior across CLI, server, FFI, and the C port
 - Tune memory and latency tradeoffs using quantization targets that fit your hardware
 
 Thank you to everyone testing early builds and sharing feedback. `0.1.0` is our stability baseline, and future releases will focus on performance, platform parity, and better developer ergonomics.
@@ -88,17 +89,11 @@ cargo run -p oxidize-cli -- --chat
 cargo run -p oxidize-cli -- --model /path/to/model.gguf --n-gpu-layers 20 --gpus 2 --parallelism pipeline
 ```
 
-### Terminal UI
-
-`oxidize-tui` is a full-screen console over the engine: chat with streaming, a GGUF model
-browser, live server metrics, and the server log — with a `ctrl+k` command palette. It
-drives `oxidize serve` for you, or attaches to a server you already have running.
+### C port
 
 ```bash
-cd oxidize-tui && bun install
-bun run start                                   # browse and load a model
-bun run start -- /path/to/model.gguf --backend cuda
-bun run start -- --api http://127.0.0.1:8080    # attach to a running server
+make c-build
+./oxidize-c/oxidize-c --model /path/to/model.gguf --prompt "hello" --max-tokens 128 --auto
 ```
 
 ### Server (OpenAI-compatible endpoints)
@@ -263,17 +258,18 @@ Practical tuning priorities:
 `oxidize` is organized as a layered workspace:
 
 - **Core compute layer (`oxidize-core`)**: owns GGUF parsing, tensor + quantization primitives, model loading, token generation loop, and backend-specific execution paths (CPU, CUDA, Metal, WASM).
-- **Interface layer (`oxidize-cli`, `oxidize-server`, `oxidize-py`)**: exposes core capabilities through a CLI, OpenAI-compatible HTTP routes, and Python bindings without duplicating inference logic.
+- **Interface layer (`oxidize-cli`, `oxidize-server`, `oxidize-ffi`)**: exposes core capabilities through a CLI, OpenAI-compatible HTTP routes, and a C ABI without duplicating inference logic.
 - **Utility layer (`oxidize-quantize`)**: handles offline model weight conversion and quantization workflows.
-- **Terminal UI (`oxidize-tui`)**: an OpenTUI/Bun front end that talks to `oxidize-server` over HTTP/SSE rather than linking the engine, so it stays a pure client.
+- **C port (`oxidize-c`)**: a standalone C11 engine for deployments that cannot link Rust.
 
 At runtime, request flow is: input prompt -> interface crate -> `oxidize-core` model/session setup -> token generation + sampling -> streamed or buffered output to the caller.
 
 Design goals:
 
-- Keep inference and model logic centralized in `oxidize-core` so all frontends share the same behavior.
-- Keep transport/UI concerns at the edge crates (`oxidize-cli`, `oxidize-server`, `oxidize-py`) for maintainability.
+- Keep inference and model logic centralized in `oxidize-core` so all Rust frontends share the same behavior.
+- Keep transport concerns at the edge crates (`oxidize-cli`, `oxidize-server`, `oxidize-ffi`) for maintainability.
 - Support multiple acceleration targets behind stable core APIs to keep feature parity across platforms.
+- Mirror behavior in `oxidize-c` instead of maintaining extra language ports.
 
 ## License
 

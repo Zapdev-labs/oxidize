@@ -7,9 +7,6 @@
 //! "1 GEMV = 1 token" fiction.
 //!
 //! Env: OXK_BENCH_LAYERS (default 48), OXK_BENCH_TOKENS (default 5).
-//!
-//! Keep the plan in sync with oxidize-golang/cmd/bench_oxk/main.go and
-//! bench_oxk.py.
 
 #![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 
