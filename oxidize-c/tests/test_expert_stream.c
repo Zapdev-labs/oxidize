@@ -83,6 +83,9 @@ Test(expert_stream, reclaim_drops_cold_experts)
     OcExpertStreamConfig cfg;
     oc_expert_stream_config_init(&cfg);
     cfg.cache_bytes = 80;
+    OcExpertStreamPool *pool = NULL;
+    cr_assert_eq(oc_expert_stream_new(&model, &cfg, &pool), OC_OK);
+    uint32_t experts[] = {0, 1, 2, 3};
     cr_assert_eq(oc_expert_stream_touch(pool, 0, experts, 4, false), OC_OK);
     cr_assert(oc_expert_stream_reclaim_bytes(pool) > 0);
     oc_expert_stream_free(pool);

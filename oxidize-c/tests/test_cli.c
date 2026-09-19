@@ -180,7 +180,7 @@ Test(cli, parses_edge0_stream_flags_subcommand)
                     "--expert-cache-mb", "256",
                     "--prerouter-prefetch"};
     OcCliContext ctx;
-    cr_assert(oc_cli_context_parse(15, argv, &ctx));
+    cr_assert(oc_cli_context_parse(14, argv, &ctx));
     cr_assert(ctx.stream_experts);
     cr_assert_str_eq(ctx.prerouter_path, "p.st");
     cr_assert_eq(ctx.experts_per_tok, 4);

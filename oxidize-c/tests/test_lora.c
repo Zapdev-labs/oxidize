@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* test_lora.c — LoRA adapter inference tests. */
 #include <criterion/criterion.h>
 #include "oxidize/lora.h"
