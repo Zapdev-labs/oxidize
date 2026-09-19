@@ -42,7 +42,17 @@ typedef struct OcLoraModel {
     OcLoraAdapter *gate_adapters; /* per-layer ffn_gate adapters     */
     OcLoraAdapter *up_adapters;   /* per-layer ffn_up adapters       */
     OcLoraAdapter *down_adapters; /* per-layer ffn_down adapters     */
+    OcLoraAdapter *shexp_gate_adapters;
+    OcLoraAdapter *shexp_up_adapters;
+    OcLoraAdapter *shexp_down_adapters;
+    OcLoraAdapter *ssm_qkv_adapters;
+    OcLoraAdapter *ssm_gate_adapters;
+    OcLoraAdapter *ssm_out_adapters;
+    OcLoraAdapter *ssm_alpha_adapters;
+    OcLoraAdapter *ssm_beta_adapters;
     size_t n_layers;
+    uint32_t max_rank;
+    float scale;            /* applied as adapter->alpha; Edge0 uses α/r = 2 */
     bool active;
 } OcLoraModel;
 
@@ -71,6 +81,11 @@ void oc_lora_model_free(OcLoraModel *lm);
 
 /* Check if any adapters are loaded. */
 bool oc_lora_is_active(const OcLoraModel *lm);
+
+/* Load Edge0 / PEFT-style `*.lora_A` / `*.lora_B` (or lora_a/lora_b) tensors.
+ * `scale` is stored as each adapter's alpha (Edge0 Recover-LoRA: 2.0 = α/r).
+ * Pass 0 to default to 2.0. */
+OcError oc_lora_load_safetensors(OcLoraModel *lm, const char *path, float scale);
 
 /* ─── LoRA plan (auto-matching adapter tensors to base tensors) ─────── */
 

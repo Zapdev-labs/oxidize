@@ -153,6 +153,42 @@ Test(cli, parses_kv_type)
     cr_assert_str_eq(a.kv_type, "q8");
 }
 
+Test(cli, parses_edge0_stream_flags)
+{
+    char *argv[] = {"oxidize-c", "--model", "m.gguf",
+                    "--stream-experts", "--expert-cache-mb", "512",
+                    "--prerouter", "pre.safetensors",
+                    "--lora", "lora.safetensors",
+                    "--experts-per-tok", "4",
+                    "--prerouter-prefetch"};
+    OcCliArgs a;
+    oc_cli_parse_args(13, argv, &a);
+    cr_assert(a.stream_experts);
+    cr_assert_eq(a.expert_cache_mb, 512);
+    cr_assert_str_eq(a.prerouter_path, "pre.safetensors");
+    cr_assert_str_eq(a.lora_path, "lora.safetensors");
+    cr_assert_eq(a.experts_per_tok, 4);
+    cr_assert(a.prerouter_prefetch);
+}
+
+Test(cli, parses_edge0_stream_flags_subcommand)
+{
+    char *argv[] = {"oxidize-c", "prompt", "--model", "m.gguf",
+                    "--stream-experts", "--prerouter", "p.st",
+                    "--experts-per-tok", "4",
+                    "--lora", "lora.st",
+                    "--expert-cache-mb", "256",
+                    "--prerouter-prefetch"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(14, argv, &ctx));
+    cr_assert(ctx.stream_experts);
+    cr_assert_str_eq(ctx.prerouter_path, "p.st");
+    cr_assert_eq(ctx.experts_per_tok, 4);
+    cr_assert_str_eq(ctx.lora_path, "lora.st");
+    cr_assert_eq(ctx.expert_cache_mb, 256);
+    cr_assert(ctx.prerouter_prefetch);
+}
+
 Test(cli, parses_prefill_chunk_size)
 {
     char *argv[] = {"oxidize-c", "--prefill-chunk-size", "1024"};
@@ -265,6 +301,12 @@ Test(cli, context_prefill_chunk_size_is_append_only)
         offsetof(OcCliContext, ppl_max_tokens),
         offsetof(OcCliContext, token_ids_str),
         offsetof(OcCliContext, tokens_no_special),
+        offsetof(OcCliContext, stream_experts),
+        offsetof(OcCliContext, expert_cache_mb),
+        offsetof(OcCliContext, prerouter_path),
+        offsetof(OcCliContext, lora_path),
+        offsetof(OcCliContext, experts_per_tok),
+        offsetof(OcCliContext, prerouter_prefetch),
         offsetof(OcCliContext, prefill_chunk_size),
     };
     for (size_t i = 1; i < sizeof(order) / sizeof(order[0]); i++) {

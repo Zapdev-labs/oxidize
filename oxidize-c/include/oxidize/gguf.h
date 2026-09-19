@@ -274,6 +274,11 @@ typedef struct OcGgufMmappedFile {
  * On error, `*out` is zeroed. */
 OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out);
 
+/* Same as oc_gguf_map_open, passing `flags` through to mmap (see
+ * OC_MMAP_F_NO_READAHEAD). */
+OcError oc_gguf_map_open_flags(const char *path, unsigned flags,
+                               OcGgufMmappedFile *out);
+
 /* Apply MADV_HUGEPAGE to every shard (Linux only, best-effort). The caller
  * is responsible for headroom policy: only enable THP when the model fits in
  * RAM with >= 2x headroom (model_bytes * 2 <= MemAvailable). Sets

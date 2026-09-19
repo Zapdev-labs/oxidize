@@ -21,6 +21,7 @@
 #include <stdint.h>
 
 #include "oxidize/error.h"
+#include "oxidize/expert_stream.h"
 #include "oxidize/gguf.h"
 #include "oxidize/quant.h"
 #include "oxidize/qwen35_delta.h"
@@ -28,6 +29,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct OcPrerouter OcPrerouter;
+typedef struct OcLoraModel OcLoraModel;
 
 /* ─── Config (port of InferenceConfig, Llama-relevant subset) ──────────── */
 typedef struct OcLlamaConfig {
@@ -305,6 +309,9 @@ typedef struct OcLlamaModel {
      * zeroed. */
     OcWeightView     ngram_embd[OC_LONGCAT_MAX_NGRAM];
     OcWeightView     ngram_proj[OC_LONGCAT_MAX_NGRAM];
+    unsigned         load_flags;
+    OcExpertStreamPool *expert_stream; /* owned; SSD expert offload        */
+    uint32_t         live_sessions;
 } OcLlamaModel;
 
 /* KV cache element type.
@@ -394,6 +401,9 @@ typedef struct OcLlamaSession {
     float *mtp_concat;
     uint32_t last_token;
     uint32_t mtp_pos;
+    OcExpertStreamPool *expert_stream; /* borrowed from model              */
+    OcPrerouter        *prerouter;     /* owned                            */
+    OcLoraModel        *lora;          /* owned                            */
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -465,6 +475,20 @@ void oc_batch_session_free(OcBatchSession *bs);
  * OC_ERR_IO, OC_ERR_FORMAT, OC_ERR_MODEL (unsupported arch / missing
  * tensors), or OC_ERR_OOM. */
 OcError oc_llama_load(const char *path, OcLlamaModel *out);
+
+/* Skip kernel readahead of the whole GGUF so routed experts can stream
+ * from SSD (Edge0-style). Combine with oc_llama_enable_expert_stream(). */
+#define OC_LLAMA_LOAD_STREAM 1u
+
+OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out);
+
+OcError oc_llama_enable_expert_stream(OcLlamaModel *model,
+                                      const OcExpertStreamConfig *cfg);
+
+OcError oc_llama_session_load_prerouter(OcLlamaSession *sess, const char *path,
+                                        bool replace_routing);
+
+OcError oc_llama_session_load_lora(OcLlamaSession *sess, const char *path);
 
 /* Initialize a session with a fresh KV cache for `model`. */
 /* Initialize a session with an f32 KV cache, unless OX_KV_TYPE=q8 is set in
@@ -544,7 +568,8 @@ void oc_llama_session_reset(OcLlamaSession *sess);
  * Only the KV position is restored. Recurrent state (Qwen3.5 DeltaNet conv
  * and recurrent matrices) has already absorbed every token stepped through,
  * and no snapshot of it is kept, so a rewind cannot undo it. That is why
- * oc_speculative_generate() refuses is_qwen35 models outright. */
+ * oc_speculative_generate() refuses is_qwen35 models outright.
+ * Prerouter predictions are reset so rejected draft tokens cannot leak. */
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);
