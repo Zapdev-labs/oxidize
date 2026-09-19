@@ -50,6 +50,9 @@ extern "C" {
 
 #define OC_OXK_BLOCK_Q4_0_SIZE   18u   /* f16 d + 16 packed 4-bit values      */
 #define OC_OXK_BLOCK_Q4_1_SIZE   20u   /* f16 d + f16 m + 16 packed 4-bit     */
+#define OC_OXK_BLOCK_Q5_0_SIZE   22u   /* f16 d + 4 qh + 16 packed 4-bit      */
+#define OC_OXK_BLOCK_Q5_1_SIZE   24u   /* f16 d + f16 m + 4 qh + 16 packed    */
+#define OC_OXK_BLOCK_AL5_XS_SIZE 14u   /* f16 d + 12 packed 3-bit             */
 #define OC_OXK_BLOCK_Q8_0_SIZE   34u   /* f16 d + 32 int8 values              */
 #define OC_OXK_BLOCK_Q2_K_SIZE   84u   /* 16 scale/min bytes + 64 packed 2-bit + f16 d + f16 dmin */
 #define OC_OXK_BLOCK_Q3_K_SIZE  110u  /* 32 hmask + 64 packed 2-bit + 12 packed 6-bit scales + f16 d */
@@ -187,6 +190,12 @@ float oc_oxk_dot_q6_k_q8_k(const uint8_t *row, size_t blocks_per_row,
                            const uint8_t *q8);
 float oc_oxk_dot_q8_0_q8_0(const uint8_t *row, size_t blocks_per_row,
                             const uint8_t *q8);
+float oc_oxk_dot_q5_0_q8_0(const uint8_t *row, size_t blocks_per_row,
+                            const uint8_t *q8);
+float oc_oxk_dot_q5_1_q8_0(const uint8_t *row, size_t blocks_per_row,
+                            const uint8_t *q8);
+float oc_oxk_dot_al5_xs_q8_0(const uint8_t *row, size_t blocks_per_row,
+                             const uint8_t *q8);
 
 /* ─── Prepared Q4_K rows (batched matmul) ────────────────────────────────
  *
@@ -313,6 +322,12 @@ float oc_oxk_dot_q6_k_q8_k_scalar(const uint8_t *row, size_t blocks_per_row,
                                   const uint8_t *q8);
 float oc_oxk_dot_q8_0_q8_0_scalar(const uint8_t *row, size_t blocks_per_row,
                                   const uint8_t *q8);
+float oc_oxk_dot_q5_0_q8_0_scalar(const uint8_t *row, size_t blocks_per_row,
+                                  const uint8_t *q8);
+float oc_oxk_dot_q5_1_q8_0_scalar(const uint8_t *row, size_t blocks_per_row,
+                                  const uint8_t *q8);
+float oc_oxk_dot_al5_xs_q8_0_scalar(const uint8_t *row, size_t blocks_per_row,
+                                   const uint8_t *q8);
 
 void oc_oxk_matvec_q4_0_f32_scalar(const uint8_t *w, size_t n_rows,
                                    size_t row_bytes, const float *x, float *out);

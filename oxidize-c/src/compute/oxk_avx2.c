@@ -1,10 +1,9 @@
 /*
  * oxk_avx2.c — AVX2 optimized OXK kernels.
  *
- * Real AVX2 implementations for Q8_0 and Q4_K; Q4_0/Q4_1/Q5_K/Q6_K still
- * forward to scalar. Q4_K matters most in practice — it is what most models
- * ship as — and running it on the scalar path made Q4_K_M slower than the
- * physically larger Q8_0.
+ * Real AVX2 implementations for Q8_0, Q4_0, Q4_K, and Q6_K. Q4_1 still
+ * forwards to scalar. Q4_K matters most for K-quant models. Q4_0 is the
+ * AL5 decode path.
  *
  * Every vectorized kernel here must be BIT-EXACT against its scalar
  * counterpart, not merely close; test_oxk_avx2_parity.c enforces that with a
@@ -91,16 +90,39 @@ float oc_oxk_dot_q8_0_q8_0_avx2(const uint8_t *row, size_t blocks,
     return _mm_cvtss_f32(sum);
 }
 
+/* Horizontal sum of eight int32 lanes. */
+__attribute__((target("avx2,f16c")))
+static inline int32_t hsum_i32_8(__m256i v);
+
 /* ─── AVX2 Q4_0 × Q8_0 dot product ─────────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
 float oc_oxk_dot_q4_0_q8_0_avx2(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {
-    /* For now, forward to scalar for correctness.
-     * A true AVX2 implementation would unpack 4-bit nibbles using
-     * _mm256_and_si256 and _mm256_srli_epi16, then multiply by Q8 values. */
-    return oc_oxk_dot_q4_0_q8_0_scalar(row, blocks, q8);
+    const __m128i nibble = _mm_set1_epi8(0x0F);
+    const __m256i eight = _mm256_set1_epi16(8);
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q4_0_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_0_SIZE;
+        const float dw = oc_oxk_f16_le_to_f32(wb);
+        const float dq = oc_oxk_f16_le_to_f32(qb);
+        const __m128i qs = _mm_loadu_si128((const __m128i *)(wb + 2));
+        const __m128i lo = _mm_and_si128(qs, nibble);
+        const __m128i hi = _mm_and_si128(_mm_srli_epi16(qs, 4), nibble);
+        __m256i wlo = _mm256_sub_epi16(_mm256_cvtepu8_epi16(lo), eight);
+        __m256i whi = _mm256_sub_epi16(_mm256_cvtepu8_epi16(hi), eight);
+        const __m256i a0 = _mm256_cvtepi8_epi16(
+            _mm_loadu_si128((const __m128i *)(qb + 2)));
+        const __m256i a1 = _mm256_cvtepi8_epi16(
+            _mm_loadu_si128((const __m128i *)(qb + 18)));
+        const __m256i prod = _mm256_add_epi32(
+            _mm256_madd_epi16(wlo, a0),
+            _mm256_madd_epi16(whi, a1));
+        sum += dw * dq * (float)hsum_i32_8(prod);
+    }
+    return sum;
 }
 
 /* ─── AVX2 Q4_1 × Q8_0 dot product ─────────────────────────────────────── */
