@@ -25,6 +25,7 @@ typedef enum {
     OC_GPU_FAMILY_B200 = 0,
     OC_GPU_FAMILY_A100 = 1,
     OC_GPU_FAMILY_RTX_PRO_6000 = 2,
+    OC_GPU_FAMILY_H100 = 3,
     OC_GPU_FAMILY__COUNT, /* sentinel; not a valid family */
 } OcGpuFamily;
 
@@ -91,6 +92,34 @@ OcError oc_gpu_cluster_node_pool_yaml(OcGpuFamily family, uint32_t replicas,
  * invalid families, OC_ERR_INVALID_ARG for NULL out buffer, OC_ERR_INTERNAL
  * if the manifest would overflow `out_len`. */
 OcError oc_gpu_cluster_device_plugin_yaml(OcGpuFamily family, char *out, size_t out_len);
+
+/* Classify an NVML / nvidia-smi product name into a family. Pure, case-
+ * insensitive substring match (H100, H100 80GB, NVIDIA H100 SXM5, …).
+ * Returns OC_GPU_FAMILY__COUNT for NULL or unrecognized names. A plain
+ * "RTX 6000" (non-Pro) does not match. */
+OcGpuFamily oc_gpu_family_from_nvidia_name(const char *name);
+
+/* One GPU reported by nvidia-smi. `family` is OC_GPU_FAMILY__COUNT when
+ * the product name is not one of the catalogued families. */
+typedef struct OcGpuDevice {
+    uint32_t    index;
+    char        name[128];
+    uint32_t    memory_total_mib;
+    bool        mig_enabled;
+    OcGpuFamily family;
+} OcGpuDevice;
+
+/* Parse CSV from
+ *   nvidia-smi --query-gpu=index,name,memory.total,mig.mode.current
+ *               --format=csv,noheader,nounits
+ * Unparseable lines are skipped. Writes at most `cap` entries into `out`.
+ * `out_n` receives the number written. */
+OcError oc_gpu_parse_nvidia_smi_csv(const char *output, OcGpuDevice *out,
+                                      size_t cap, size_t *out_n);
+
+/* Probe nvidia-smi. Missing binary or a failed probe is not an error:
+ * returns OC_OK with *out_n = 0. */
+OcError oc_gpu_detect(OcGpuDevice *out, size_t cap, size_t *out_n);
 
 #ifdef __cplusplus
 }

@@ -87,6 +87,26 @@ bool oc_simd_try_dequant(OcGgufQuantizationType qtype,
                          const uint8_t *src, size_t src_len,
                          float *dst, size_t value_count);
 
+/* DFlash2 hot paths use the same runtime dispatch boundary as dequantization.
+ * Each function returns false without touching its output when no supported
+ * SIMD kernel is available, so the model can run its portable scalar path.
+ * The BF16 batch entry accepts 1..32 rows. These inference kernels preserve
+ * the existing AVX2 reduction order and its last-ulp tolerance; unlike the
+ * dequantization kernels above, they are not bit-exact with scalar sums. */
+bool oc_simd_try_dflash2_dot_f32(const float *a, const float *b, size_t n,
+                                 float *result);
+bool oc_simd_try_dflash2_dot_bf16(const uint16_t *w, const float *x, size_t n,
+                                  float *result);
+bool oc_simd_try_dflash2_gemv_rows_f32(const float *w, size_t rows,
+                                       size_t cols, const float *x,
+                                       float *out);
+bool oc_simd_try_dflash2_dot_bf16_batch(const uint16_t *w, const float *x,
+                                        size_t width, size_t batch,
+                                        float *out);
+bool oc_simd_try_dflash2_conv_mac(float *out, const float *kernel,
+                                  const float *input, float dynamic_value,
+                                  size_t n);
+
 /* ─── Direct kernel entry points (for testing/benchmarking) ─────────────
  *
  * Exposed so tests can exercise each kernel directly without going through

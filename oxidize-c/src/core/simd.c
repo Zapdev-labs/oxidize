@@ -17,6 +17,48 @@
 #include <stdatomic.h>
 #include <string.h>
 
+#if defined(__x86_64__) || defined(__i386__)
+float oc_simd_dflash2_dot_f32_avx2(const float *a, const float *b, size_t n);
+float oc_simd_dflash2_dot_bf16_avx2(const uint16_t *w, const float *x,
+                                    size_t n);
+void oc_simd_dflash2_gemv_rows_f32_avx2(const float *w, size_t rows,
+                                        size_t cols, const float *x,
+                                        float *out);
+void oc_simd_dflash2_dot_bf16_batch_avx2(const uint16_t *w, const float *x,
+                                         size_t width, size_t batch,
+                                         float *out);
+void oc_simd_dflash2_conv_mac_avx2(float *out, const float *kernel,
+                                   const float *input, float dynamic_value,
+                                   size_t n);
+#endif
+
+typedef float (*OcDFlash2DotF32Fn)(const float *, const float *, size_t);
+typedef float (*OcDFlash2DotBf16Fn)(const uint16_t *, const float *, size_t);
+typedef void (*OcDFlash2GemvRowsF32Fn)(const float *, size_t, size_t,
+                                      const float *, float *);
+typedef void (*OcDFlash2DotBf16BatchFn)(const uint16_t *, const float *,
+                                        size_t, size_t, float *);
+typedef void (*OcDFlash2ConvMacFn)(float *, const float *, const float *,
+                                   float, size_t);
+
+typedef struct OcDFlash2SimdDispatch {
+    OcDFlash2DotF32Fn dot_f32;
+    OcDFlash2DotBf16Fn dot_bf16;
+    OcDFlash2GemvRowsF32Fn gemv_rows_f32;
+    OcDFlash2DotBf16BatchFn dot_bf16_batch;
+    OcDFlash2ConvMacFn conv_mac;
+} OcDFlash2SimdDispatch;
+
+#if defined(__x86_64__) || defined(__i386__)
+static const OcDFlash2SimdDispatch s_dflash2_avx2 = {
+    oc_simd_dflash2_dot_f32_avx2,
+    oc_simd_dflash2_dot_bf16_avx2,
+    oc_simd_dflash2_gemv_rows_f32_avx2,
+    oc_simd_dflash2_dot_bf16_batch_avx2,
+    oc_simd_dflash2_conv_mac_avx2,
+};
+#endif
+
 /* ─── Capability detection ────────────────────────────────────────────── */
 
 /* Raw cpuid instead of __builtin_cpu_supports: older clang rejects feature
@@ -111,6 +153,70 @@ const OcSimdCaps *oc_simd_caps(void)
         while (atomic_load_explicit(&s_state, memory_order_acquire) != 2) {}
     }
     return &s_caps;
+}
+
+static const OcDFlash2SimdDispatch *dflash2_dispatch(void)
+{
+#if defined(__x86_64__) || defined(__i386__)
+    const OcSimdLevel level = oc_simd_caps()->level;
+    if (level == OC_SIMD_AVX2 || level == OC_SIMD_AVX512)
+        return &s_dflash2_avx2;
+#endif
+    return NULL;
+}
+
+bool oc_simd_try_dflash2_dot_f32(const float *a, const float *b, size_t n,
+                                 float *result)
+{
+    if (!a || !b || !result || n == 0) return false;
+    const OcDFlash2SimdDispatch *dispatch = dflash2_dispatch();
+    if (!dispatch) return false;
+    *result = dispatch->dot_f32(a, b, n);
+    return true;
+}
+
+bool oc_simd_try_dflash2_dot_bf16(const uint16_t *w, const float *x, size_t n,
+                                  float *result)
+{
+    if (!w || !x || !result || n == 0) return false;
+    const OcDFlash2SimdDispatch *dispatch = dflash2_dispatch();
+    if (!dispatch) return false;
+    *result = dispatch->dot_bf16(w, x, n);
+    return true;
+}
+
+bool oc_simd_try_dflash2_gemv_rows_f32(const float *w, size_t rows,
+                                       size_t cols, const float *x,
+                                       float *out)
+{
+    if (!w || !x || !out || rows == 0 || cols == 0) return false;
+    const OcDFlash2SimdDispatch *dispatch = dflash2_dispatch();
+    if (!dispatch) return false;
+    dispatch->gemv_rows_f32(w, rows, cols, x, out);
+    return true;
+}
+
+bool oc_simd_try_dflash2_dot_bf16_batch(const uint16_t *w, const float *x,
+                                        size_t width, size_t batch,
+                                        float *out)
+{
+    if (!w || !x || !out || width == 0 || batch == 0 || batch > 32)
+        return false;
+    const OcDFlash2SimdDispatch *dispatch = dflash2_dispatch();
+    if (!dispatch) return false;
+    dispatch->dot_bf16_batch(w, x, width, batch, out);
+    return true;
+}
+
+bool oc_simd_try_dflash2_conv_mac(float *out, const float *kernel_values,
+                                  const float *input, float dynamic_value,
+                                  size_t n)
+{
+    if (!out || !kernel_values || !input || n == 0) return false;
+    const OcDFlash2SimdDispatch *dispatch = dflash2_dispatch();
+    if (!dispatch) return false;
+    dispatch->conv_mac(out, kernel_values, input, dynamic_value, n);
+    return true;
 }
 
 /* ─── Dispatch entry ──────────────────────────────────────────────────── */

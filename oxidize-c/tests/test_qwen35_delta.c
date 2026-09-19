@@ -128,7 +128,8 @@ static void scalar_step(float *conv_state, float *recurrent,
         }
     }
     for (size_t h = 0; h < NV; h++) {
-        const size_t key_head = h / (NV / NK);
+        /* Tiled GQA (ggml_repeat / llama.cpp iv1 % neq1), matching qwen35_delta.c. */
+        const size_t key_head = h % NK;
         const float *q = conv + key_head * DK;
         const float *k = conv + KEY_DIM + key_head * DK;
         const float *v = conv + 2u * KEY_DIM + h * DV;

@@ -960,13 +960,18 @@ static OcError cuda_qwen35_full_attn(OcCudaContext *ctx, uint32_t l,
                                      ctx->d_qwen35_gate, n_head, hd_l, NULL))
         return OC_ERR_BACKEND;
 
+    /* YaRN, matching the CPU qwen35 path (oc_apply_rope_yarn_scaled_f32 with
+     * attn_factor -1): k_qk_norm_rope applies the standard mscale
+     * 1 + 0.1*ln(factor) and falls back to plain RoPE when factor <= 1. */
     if (!oc_cuda_qk_norm_rope(ctx->d_q, ctx->d_attn_q_norm[l],
                               n_head, hd_l, rd_l, (int64_t)pos, rth_l,
-                              eps, 0.0f, 0u, NULL))
+                              eps, ctx->yarn_factor, ctx->yarn_orig_ctx,
+                              NULL))
         return OC_ERR_BACKEND;
     if (!oc_cuda_qk_norm_rope(ctx->d_k, ctx->d_attn_k_norm[l],
                               nkv_l, hd_l, rd_l, (int64_t)pos, rth_l,
-                              eps, 0.0f, 0u, NULL))
+                              eps, ctx->yarn_factor, ctx->yarn_orig_ctx,
+                              NULL))
         return OC_ERR_BACKEND;
 
     const uint32_t kv_slot = ctx->l_kv_index ? ctx->l_kv_index[l] : l;

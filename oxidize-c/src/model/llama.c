@@ -2722,9 +2722,17 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
                         head_dim, c->rms_norm_eps);
         memcpy(s->q + (size_t)head * head_dim, s->qwen35_conv_output,
                head_dim * sizeof(float));
-        oc_apply_rope_f32(s->q + (size_t)head * head_dim,
+        /* YaRN when the GGUF asks for it. qwen35 ships
+         * rope.scaling.type=yarn (factor 4, original_context 262144) and this
+         * path used to call the unscaled RoPE, silently ignoring cfg's
+         * yarn_factor -- fine at short positions, wrong past orig_ctx.
+         * attn_factor -1 selects the standard mscale = 1 + 0.1*ln(factor),
+         * matching llama.cpp's rope_yarn() with its default attn_factor 1.0.
+         * The helper falls back to plain RoPE when yarn_factor <= 1. */
+        oc_apply_rope_yarn_scaled_f32(s->q + (size_t)head * head_dim,
                           s->q + (size_t)head * head_dim, head_dim,
-                          weights->rope_dim, rope_pos, weights->rope_theta);
+                          weights->rope_dim, rope_pos, weights->rope_theta,
+                          c->yarn_factor, c->yarn_orig_ctx, -1.0f);
     }
     for (uint32_t head = 0; head < weights->n_head_kv; head++) {
         oc_rms_norm_f32(s->k + (size_t)head * head_dim,
@@ -2732,9 +2740,10 @@ static void forward_qwen35_full_attention_w(OcLlamaSession *s,
                         head_dim, c->rms_norm_eps);
         memcpy(s->k + (size_t)head * head_dim, s->qwen35_conv_output,
                head_dim * sizeof(float));
-        oc_apply_rope_f32(s->k + (size_t)head * head_dim,
+        oc_apply_rope_yarn_scaled_f32(s->k + (size_t)head * head_dim,
                           s->k + (size_t)head * head_dim, head_dim,
-                          weights->rope_dim, rope_pos, weights->rope_theta);
+                          weights->rope_dim, rope_pos, weights->rope_theta,
+                          c->yarn_factor, c->yarn_orig_ctx, -1.0f);
     }
 
     const size_t cache_row = s->kv_row_floats;
@@ -3682,6 +3691,8 @@ typedef struct {
     size_t              qdim;
     float               eps;
     uint32_t            n_ctx;
+    float               yarn_factor;      /* 0 or <=1 means plain RoPE   */
+    uint32_t            yarn_orig_ctx;
 } Qwen35QkJob;
 
 static void qwen35_qk_slice(size_t begin, size_t end, size_t tid, void *ud)
@@ -3704,13 +3715,19 @@ static void qwen35_qk_slice(size_t begin, size_t end, size_t tid, void *ud)
             memcpy(qh, packed + 2u * (size_t)h * hd, hd * sizeof(float));
             oc_rms_norm_f32(qh, L->attn_q_norm, tmp, hd, j->eps);
             memcpy(qh, tmp, hd * sizeof(float));
-            oc_apply_rope_f32(qh, qh, hd, L->rope_dim, pos, L->rope_theta);
+            /* Same YaRN treatment as the per-token path above, so
+             * prefill and decode agree on every position. */
+            oc_apply_rope_yarn_scaled_f32(qh, qh, hd, L->rope_dim, pos,
+                                          L->rope_theta, j->yarn_factor,
+                                          j->yarn_orig_ctx, -1.0f);
         }
         for (uint32_t h = 0; h < j->n_head_kv; h++) {
             float *kh = k + (size_t)h * hd;
             oc_rms_norm_f32(kh, L->attn_k_norm, tmp, hd, j->eps);
             memcpy(kh, tmp, hd * sizeof(float));
-            oc_apply_rope_f32(kh, kh, hd, L->rope_dim, pos, L->rope_theta);
+            oc_apply_rope_yarn_scaled_f32(kh, kh, hd, L->rope_dim, pos,
+                                          L->rope_theta, j->yarn_factor,
+                                          j->yarn_orig_ctx, -1.0f);
         }
         const size_t kv_off = ((size_t)L->kv_cache_index * j->n_ctx +
                                (size_t)pos) * s->kv_row_floats;
@@ -3845,7 +3862,7 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
      * and fall back to serial if the pool cannot provide it. */
     Qwen35QkJob qjob = { s, b, L, pos0, hd, kvdim, c->n_head, L->n_head_kv,
                          c->n_head_kv, (size_t)qdim, c->rms_norm_eps,
-                         c->n_ctx };
+                         c->n_ctx, c->yarn_factor, c->yarn_orig_ctx };
     const size_t qk_scratch = hd * sizeof(float);
     bool qk_serial = false;
     const size_t nt = oc_parallel_n_threads();

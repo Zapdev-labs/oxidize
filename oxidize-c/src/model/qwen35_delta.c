@@ -300,9 +300,18 @@ static void delta_heads(size_t begin, size_t end, size_t tid, void *user_data)
     size_t key_total = ctx->g->n_key_heads * dk;
     const float *values = ctx->conv_output + 2 * key_total;
     for (size_t head = begin; head < end; head++) {
-        size_t value_heads_per_key =
-            ctx->g->n_value_heads / ctx->g->n_key_heads;
-        size_t key_head = head / value_heads_per_key;
+        /* GQA here is ggml_repeat (tiled), NOT repeat_interleave (grouped):
+         * llama.cpp's GATED_DELTA_NET indexes q/k as iq1 = iv1 % neq1
+         * (ggml/src/ggml-cpu/ops.cpp), and the non-fused graph builds the
+         * same thing with ggml_repeat_4d. Dividing instead of taking the
+         * modulo pairs value head v with key head v/(n_v/n_k) rather than
+         * v % n_k -- with 48 value and 16 key heads that feeds head 45 the
+         * q/k of key head 15 instead of 13, so every recurrent layer
+         * accumulates state from the wrong vectors. The per-head RMSNorm
+         * downstream cancels the magnitude and hides this on short prompts,
+         * which is why it surfaced as slow degeneration into repeated
+         * tokens rather than as obvious garbage. */
+        size_t key_head = head % ctx->g->n_key_heads;
         const float *q = ctx->conv_output + key_head * dk;
         const float *k = ctx->conv_output + key_total + key_head * dk;
         const float *v = values + head * dv;

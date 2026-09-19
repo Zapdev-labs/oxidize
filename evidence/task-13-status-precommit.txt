@@ -1,4 +1,0 @@
-?? .github/workflows/go.yml
-?? evidence/
-?? golang/
-?? plans/

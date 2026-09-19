@@ -1,4 +1,0 @@
-=== RUN   TestManualQAScriptShape
---- PASS: TestManualQAScriptShape (0.00s)
-PASS
-ok  	github.com/Zapdev-labs/oxidize/golang/scripts	0.002s

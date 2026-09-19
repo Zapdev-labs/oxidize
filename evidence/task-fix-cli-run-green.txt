@@ -1,4 +1,0 @@
-=== RUN   TestRunCommandRejectsMissingModel
---- PASS: TestRunCommandRejectsMissingModel (0.00s)
-PASS
-ok  	github.com/Zapdev-labs/oxidize/golang/internal/cli	0.003s

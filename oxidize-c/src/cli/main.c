@@ -15,11 +15,10 @@
  * Flag set mirrors the Rust `oxidize-cli` conventions and the learned user
  * preferences (--numa, --auto/--no-auto, --print-plan, --serve-api,
  * --threads). --threads/--numa override the autotune plan and are applied
- * by apply_thread_numa_policy() below.
+ * by oc_autotune_apply_thread_numa().
  */
 #include "oxidize/activation.h"   /* ensure link for forward deps */
 #include "oxidize/autotune.h"
-#include "oxidize/numa.h"
 #include "oxidize/parallel.h"
 #include "oxidize/version.h"
 #include "oxidize/cli_commands.h"
@@ -119,6 +118,7 @@ static void print_help(void)
 "  --ctx N                Cap KV context below the model's advertised length\n"
 "  --kv f32|q8            KV cache dtype (default: q8 when ctx>=8192)\n"
 "  --kv-compress MODE     none | rotor | helix (default none)\n"
+"  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill this)\n"
 "  --threads N            CPU thread hint (0 = auto)\n"
 "  --numa MODE            single | interleave | none (default none)\n"
 "  --auto                 Enable autotune (detect + plan)\n"
@@ -146,75 +146,6 @@ static void print_help(void)
 }
 
 /* ─── Generation ──────────────────────────────────────────────────────── */
-
-/* Apply the thread + NUMA half of a tuning plan, honoring explicit CLI
- * overrides. NUMA policy binds this process to a socket; the thread count
- * resizes the compute pool (already started by init_compute_threads) and
- * drives the parallel weight prefault. */
-static void apply_thread_numa_policy(const OcCliArgs *args,
-                                     const OcTuningPlan *plan,
-                                     const OcCpuInfo *cpu,
-                                     const OcGgufMmappedFile *weights)
-{
-    /* --threads N overrides the plan; 0 means "use the plan". */
-    uint32_t threads = args->threads > 0 ? (uint32_t)args->threads
-                                         : plan->threads;
-    if (threads == 0) threads = 1;
-
-    /* --numa MODE overrides the plan. "none" is also the default value of
-     * the flag, so it cannot be told apart from "unset" and leaves the plan
-     * (or, without --auto, OC_NUMA_NONE) in place. */
-    OcNumaPolicy numa = args->auto_tune ? plan->numa : OC_NUMA_NONE;
-    if (args->numa) {
-        if (strcmp(args->numa, "single") == 0)          numa = OC_NUMA_SINGLE;
-        else if (strcmp(args->numa, "interleave") == 0) numa = OC_NUMA_INTERLEAVE;
-    }
-
-    /* Memory policy must be set BEFORE the weights are faulted in below:
-     * set_mempolicy applies to future faults and does not migrate pages that
-     * already exist. */
-    if (numa == OC_NUMA_SINGLE) {
-        /* Bind to node 0: the plan picks SINGLE only when the model fits in
-         * one socket's memory, so any single node works and 0 always exists.
-         * Bind both the threads (affinity) and the pages (mempolicy) — CPU
-         * affinity alone still lets pages land on the far node. */
-        if (oc_autotune_bind_to_numa_node(0) == OC_OK) {
-            oc_log(OC_LOG_INFO, "autotune: bound to NUMA node 0");
-        }
-        if (oc_numa_set_policy(OC_NUMA_POLICY_BIND, 0) == OC_OK) {
-            oc_log(OC_LOG_INFO, "autotune: memory bound to NUMA node 0");
-        }
-    } else if (numa == OC_NUMA_INTERLEAVE && cpu->numa_nodes > 1) {
-        /* Interleave is NOT the kernel default — MPOL_DEFAULT allocates on
-         * the first-touching thread's local node, so a model faulted in by
-         * threads sitting on one socket lands entirely on that socket and
-         * every read from the other socket crosses the interconnect. Request
-         * it explicitly. */
-        if (oc_numa_set_policy(OC_NUMA_POLICY_INTERLEAVE, 0) == OC_OK) {
-            oc_log(OC_LOG_INFO, "autotune: memory interleaved across %u "
-                   "NUMA nodes", cpu->numa_nodes);
-        } else {
-            oc_log(OC_LOG_WARN, "autotune: could not set interleave policy; "
-                   "falling back to first-touch placement");
-        }
-    }
-
-    oc_log(OC_LOG_INFO, "autotune: applying %u threads, numa=%s, simd=%s",
-           threads, oc_autotune_numa_name(numa), cpu->simd.name);
-
-    /* Start the compute pool. Until this call the forward pass runs inline on
-     * one core no matter what --threads said, which is what made an 8B model
-     * crawl on a 96-core box. */
-    if (oc_parallel_set_threads(threads) != OC_OK) {
-        oc_log(OC_LOG_WARN, "parallel: pool init failed; running inline");
-    }
-
-    /* Fault the weights in with the resolved thread count so the first
-     * tokens don't pay page-fault cost serially. */
-    if (weights != NULL && threads > 1) {
-        (void)oc_gguf_map_prefault_parallel(weights, (size_t)threads);
-    }
-}
 
 static OcError run_generation(const OcCliArgs *args)
 {
@@ -271,9 +202,23 @@ static OcError run_generation(const OcCliArgs *args)
         }
     }
 
+    /* Autotune plan is computed before CUDA so hopper flags can be stored
+     * on the CUDA context. Explicit --threads/--numa still win. */
+    OcCpuInfo cpu;
+    OcModelFingerprint fp;
+    OcTuningPlan plan;
+    memset(&plan, 0, sizeof(plan));
+    bool have_plan = false;
+    if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+        oc_autotune_fingerprint_gguf(&model.gguf, &fp) == OC_OK) {
+        plan = oc_autotune_plan(&cpu, &fp);
+        have_plan = true;
+    }
+
     /* CUDA backend: upload weights to GPU and use GPU forward path. */
     bool use_cuda = (args->backend && strcmp(args->backend, "cuda") == 0);
     OcCudaContext cuda_ctx;
+    memset(&cuda_ctx, 0, sizeof(cuda_ctx));
     if (use_cuda) {
         if (!oc_cuda_available()) {
             fprintf(stderr, "error: CUDA not available (compiled without OC_CUDA or no GPU)\n");
@@ -287,25 +232,30 @@ static OcError run_generation(const OcCliArgs *args)
                     oc_error_msg(e));
             use_cuda = false;
         } else {
+            if (have_plan && args->auto_tune) {
+                cuda_ctx.cuda_graphs = plan.cuda_graphs;
+                cuda_ctx.persistent_decode_kernels = plan.persistent_decode_kernels;
+                if (plan.cuda_graphs || plan.persistent_decode_kernels) {
+                    oc_log(OC_LOG_INFO,
+                           "cuda: graphs=%s persistent_decode=%s "
+                           "(flags stored; no graph capture runtime)",
+                           plan.cuda_graphs ? "yes" : "no",
+                           plan.persistent_decode_kernels ? "yes" : "no");
+                }
+            }
             oc_log(OC_LOG_INFO, "cuda: model uploaded to GPU, using CUDA forward");
         }
     }
 
-    /* Autotune: detect CPU, fingerprint the model, plan, and apply. The
-     * memory-side policy (hugepages/mlock) goes to the mmap'd weights;
-     * thread and NUMA policy are applied here (see apply_thread_numa_policy).
-     * Explicit --threads/--numa always win over the plan, so the policy runs
-     * even without --auto when the user asked for something specific. */
-    if (args->auto_tune || args->threads > 0 ||
-        (args->numa && strcmp(args->numa, "none") != 0)) {
-        OcCpuInfo cpu;
-        OcModelFingerprint fp;
-        if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
-            oc_autotune_fingerprint_gguf(&model.gguf, &fp) == OC_OK) {
-            OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
-            if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
-            apply_thread_numa_policy(args, &plan, &cpu, &model.gguf);
-        }
+    if (have_plan && args->auto_tune && !use_cuda)
+        oc_autotune_clear_gpu_runtime(&plan);
+
+    if (have_plan && (args->auto_tune || args->threads > 0 ||
+        (args->numa && strcmp(args->numa, "none") != 0))) {
+        if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
+        oc_autotune_apply_thread_numa(&plan, &cpu, &model.gguf,
+                                     args->threads, args->numa, args->auto_tune,
+                                     true);
     }
 
     /* Tokenizer (loaded from the same GGUF metadata). */
@@ -320,6 +270,10 @@ static OcError run_generation(const OcCliArgs *args)
 
     OcLlamaSession sess;
     OcKvCacheType kv = oc_llama_select_kv_type(model.cfg.n_ctx, args->kv_type);
+    if (!oc_cli_kv_compress_enabled(args->kv_compress) &&
+        args->auto_tune && args->kv_type == NULL && have_plan &&
+        plan.kv_turboquant)
+        kv = plan.kv_cache;
     e = oc_llama_session_init_with_compress(&model, &sess, kv, args->kv_compress);
     if (e != OC_OK) {
         fprintf(stderr, "error: session init failed (%s)\n", oc_error_msg(e));
@@ -383,11 +337,22 @@ static OcError run_generation(const OcCliArgs *args)
      * token. The last token's logits seed the generation loop.
      *
      * The CUDA path keeps the per-token loop: its forward already uploads the
-     * weights once and the batched CPU scratch would not help it. */
+     * weights once and the batched CPU scratch would not help it. Hopper
+     * chunked_prefill_tokens is a CPU/OpenAI scheduler knob; there is no
+     * CUDA batched prefill runtime. */
     float *logits = sess.logits;
     uint32_t next_tok = ids[n_ids - 1];
     const double prefill_start = wall_now();
     if (use_cuda) {
+        uint32_t advertised = args->prefill_chunk_size;
+        if (advertised == 0 && have_plan && args->auto_tune)
+            advertised = plan.chunked_prefill_tokens;
+        if (advertised > 0) {
+            oc_log(OC_LOG_INFO,
+                   "cuda: prompt prefill stays per-token "
+                   "(chunked_prefill=%u is CPU/OpenAI; no CUDA batched prefill)",
+                   advertised);
+        }
         for (size_t i = 0; i + 1 < n_ids; i++) {
             e = oc_cuda_forward(&cuda_ctx, ids[i], sess.pos, NULL);
             if (e != OC_OK) {
@@ -403,7 +368,9 @@ static OcError run_generation(const OcCliArgs *args)
             sess.pos++;
         }
     } else {
-        e = oc_llama_prefill(&sess, ids, n_ids, args->batch_size, logits);
+        uint32_t prefill_chunk = args->prefill_chunk_size;
+        if (prefill_chunk == 0) prefill_chunk = args->batch_size;
+        e = oc_llama_prefill(&sess, ids, n_ids, prefill_chunk, logits);
         if (e != OC_OK) {
             fprintf(stderr, "error: prefill failed (%s)\n", oc_error_msg(e));
         }
@@ -640,6 +607,33 @@ int main(int argc, char **argv)
                 st.model_id = strdup(slash ? slash + 1 : args.model_path);
                 oc_log(OC_LOG_INFO, "serve: model loaded, starting server on %s:%d",
                        args.host, args.port);
+                if (args.auto_tune) {
+                    OcCpuInfo cpu;
+                    OcModelFingerprint fp;
+                    if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+                        oc_autotune_fingerprint_gguf(&model->gguf, &fp) == OC_OK) {
+                        OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
+                        /* Serve has no CUDA init; do not apply Hopper knobs
+                         * to CPU OpenAI sessions. */
+                        oc_autotune_clear_gpu_runtime(&plan);
+                        oc_autotune_apply(&plan, &model->gguf);
+                        oc_autotune_apply_thread_numa(&plan, &cpu, &model->gguf,
+                                                     args.threads, args.numa,
+                                                     true, false);
+                        oc_openai_apply_tuning_plan(&st, &plan,
+                                                   args.prefill_chunk_size,
+                                                   args.kv_type);
+                    } else if (args.prefill_chunk_size > 0 ||
+                               args.kv_type != NULL) {
+                        oc_openai_apply_tuning_plan(&st, NULL,
+                                                   args.prefill_chunk_size,
+                                                   args.kv_type);
+                    }
+                } else if (args.prefill_chunk_size > 0 || args.kv_type != NULL) {
+                    oc_openai_apply_tuning_plan(&st, NULL,
+                                                 args.prefill_chunk_size,
+                                                 args.kv_type);
+                }
             } else {
                 fprintf(stderr, "error: failed to load model for serve mode\n");
                 free(model); free(tok);

@@ -9,6 +9,7 @@ follow when adding to the C11 port in `oxidize-c/`.
 |--------------------|-------------------------------------------------------------------|
 | `make` / `make build` | Default CPU-only build (libc only) → `./oxidize-c`            |
 | `make test`        | Build + run the Criterion test suite → `./test_runner`            |
+| `make manual-tests` | Run opt-in DFlash2 parity validators (checkpoint required)          |
 | `make lint`        | clang-tidy on `src/**/*.c`                                        |
 | `make lib`         | Static library `liboxidize-c.a`                                  |
 | `make clean`       | Remove all build artifacts                                        |

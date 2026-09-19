@@ -17,6 +17,7 @@ OcError oc_sched_config_init(OcSchedConfig *cfg)
     cfg->max_tokens_total           = OC_SCHED_DEFAULT_MAX_TOKENS_TOTAL;
     cfg->preempt_mode               = OC_SCHED_PREEMPT_RECOMPUTE;
     cfg->enable_continuous_batching = true;
+    cfg->prefill_chunk_size           = 0;
     return OC_OK;
 }
 
