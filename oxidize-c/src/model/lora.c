@@ -233,24 +233,25 @@ static int lora_parse_kind(const char *rest)
     return -1;
 }
 
-static bool lora_name_is_a(const char *name)
+static bool lora_name_ends(const char *name, const char *suf)
 {
     size_t n = strlen(name);
-    if (n >= 6 && strcmp(name + n - 6, "lora_A") == 0) return true;
-    if (n >= 6 && strcmp(name + n - 6, "lora_a") == 0) return true;
-    if (n >= 14 && strcmp(name + n - 14, "lora_A.weight") == 0) return true;
-    if (n >= 14 && strcmp(name + n - 14, "lora_a.weight") == 0) return true;
-    return false;
+    size_t m = strlen(suf);
+    return n >= m && strcmp(name + n - m, suf) == 0;
+}
+
+static bool lora_name_is_a(const char *name)
+{
+    return lora_name_ends(name, "lora_A") || lora_name_ends(name, "lora_a") ||
+           lora_name_ends(name, "lora_A.weight") ||
+           lora_name_ends(name, "lora_a.weight");
 }
 
 static bool lora_name_is_b(const char *name)
 {
-    size_t n = strlen(name);
-    if (n >= 6 && strcmp(name + n - 6, "lora_B") == 0) return true;
-    if (n >= 6 && strcmp(name + n - 6, "lora_b") == 0) return true;
-    if (n >= 14 && strcmp(name + n - 14, "lora_B.weight") == 0) return true;
-    if (n >= 14 && strcmp(name + n - 14, "lora_b.weight") == 0) return true;
-    return false;
+    return lora_name_ends(name, "lora_B") || lora_name_ends(name, "lora_b") ||
+           lora_name_ends(name, "lora_B.weight") ||
+           lora_name_ends(name, "lora_b.weight");
 }
 
 static OcError lora_copy_f32(const OcSafetensorsFile *st,
@@ -263,7 +264,14 @@ static OcError lora_copy_f32(const OcSafetensorsFile *st,
     if (e != OC_OK) return e;
     uint32_t r = (uint32_t)t->shape[0];
     uint32_t c = (uint32_t)t->shape[1];
+    size_t elem = 0;
+    if (strcmp(t->dtype, "F32") == 0) elem = 4;
+    else if (strcmp(t->dtype, "F16") == 0 || strcmp(t->dtype, "BF16") == 0)
+        elem = 2;
+    else return OC_ERR_FORMAT;
     size_t n = (size_t)r * c;
+    if (c != 0 && n / c != r) return OC_ERR_TENSOR;
+    if (t->data_length < n * elem) return OC_ERR_FORMAT;
     float *buf = malloc(n * sizeof(float));
     if (!buf) return OC_ERR_OOM;
         if (strcmp(t->dtype, "F32") == 0) {
@@ -323,12 +331,14 @@ OcError oc_lora_load_safetensors(OcLoraModel *lm, const char *path, float scale)
     uint32_t loaded = 0;
     for (size_t i = 0; i < st.n_tensors; i++) {
         const OcSafetensorsTensor *t = &st.tensors[i];
+        const char *name = t->name;
+        if (strncmp(name, "base_model.model.", 17) == 0) name += 17;
         unsigned layer = 0;
         char rest[96];
         rest[0] = '\0';
-        if (sscanf(t->name, "language_model.model.layers.%u.%95s", &layer, rest) != 2 &&
-            sscanf(t->name, "model.layers.%u.%95s", &layer, rest) != 2 &&
-            sscanf(t->name, "layers.%u.%95s", &layer, rest) != 2) {
+        if (sscanf(name, "language_model.model.layers.%u.%95s", &layer, rest) != 2 &&
+            sscanf(name, "model.layers.%u.%95s", &layer, rest) != 2 &&
+            sscanf(name, "layers.%u.%95s", &layer, rest) != 2) {
             continue;
         }
         if ((size_t)layer >= lm->n_layers) continue;
@@ -365,6 +375,8 @@ OcError oc_lora_load_safetensors(OcLoraModel *lm, const char *path, float scale)
             if (!slot->a || !slot->b) {
                 free(slot->a);
                 free(slot->b);
+                slot->a = NULL;
+                slot->b = NULL;
                 continue;
             }
             uint32_t rank = slot->a_rows;

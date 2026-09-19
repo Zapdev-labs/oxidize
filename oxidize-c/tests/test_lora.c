@@ -283,36 +283,26 @@ Test(lora, extra_adapter_names)
     oc_lora_model_free(&lm);
 }
 
-static OcError write_lora_safetensors(const char *path,
-                                      const float *a, size_t a_n,
-                                      const float *b, size_t b_n)
-{
-    FILE *fp = fopen(path, "wb");
-    if (!fp) return OC_ERR_IO;
-    const char *json =
-        "{\"language_model.model.layers.0.self_attn.q_proj.lora_A\":"
-        "{\"dtype\":\"F32\",\"shape\":[2,4],\"data_offsets\":[0,32]},"
-        "\"language_model.model.layers.0.self_attn.q_proj.lora_B\":"
-        "{\"dtype\":\"F32\",\"shape\":[3,2],\"data_offsets\":[32,56]}}";
-    uint64_t hdr = (uint64_t)strlen(json);
-    if (fwrite(&hdr, 1, 8, fp) != 8 ||
-        fwrite(json, 1, (size_t)hdr, fp) != (size_t)hdr ||
-        fwrite(a, sizeof(float), a_n, fp) != a_n ||
-        fwrite(b, sizeof(float), b_n, fp) != b_n) {
-        fclose(fp);
-        return OC_ERR_IO;
-    }
-    fclose(fp);
-    return OC_OK;
-}
-
 Test(lora, load_safetensors_q_proj)
 {
     float a[8] = {1, 0, 0, 0, 0, 1, 0, 0};
     float b[6] = {1, 0, 0, 1, 1, 1};
-    char path[256];
-    snprintf(path, sizeof(path), "/tmp/oc_lora_%d.safetensors", (int)getpid());
-    cr_assert_eq(write_lora_safetensors(path, a, 8, b, 6), OC_OK);
+    char path[] = "/tmp/oc_lora_XXXXXX";
+    int fd = mkstemp(path);
+    cr_assert(fd >= 0);
+    FILE *fp = fdopen(fd, "wb");
+    cr_assert_not_null(fp);
+    const char *json =
+        "{\"language_model.model.layers.0.self_attn.q_proj.lora_A.weight\":"
+        "{\"dtype\":\"F32\",\"shape\":[2,4],\"data_offsets\":[0,32]},"
+        "\"language_model.model.layers.0.self_attn.q_proj.lora_B.weight\":"
+        "{\"dtype\":\"F32\",\"shape\":[3,2],\"data_offsets\":[32,56]}}";
+    uint64_t hdr = (uint64_t)strlen(json);
+    cr_assert_eq(fwrite(&hdr, 1, 8, fp), 8);
+    cr_assert_eq(fwrite(json, 1, (size_t)hdr, fp), (size_t)hdr);
+    cr_assert_eq(fwrite(a, sizeof(float), 8, fp), 8);
+    cr_assert_eq(fwrite(b, sizeof(float), 6, fp), 6);
+    fclose(fp);
 
     OcLoraModel lm;
     cr_assert_eq(oc_lora_model_init(&lm, 2), OC_OK);

@@ -311,6 +311,7 @@ typedef struct OcLlamaModel {
     OcWeightView     ngram_proj[OC_LONGCAT_MAX_NGRAM];
     unsigned         load_flags;
     OcExpertStreamPool *expert_stream; /* owned; SSD expert offload        */
+    uint32_t         live_sessions;
 } OcLlamaModel;
 
 /* KV cache element type.
@@ -567,7 +568,8 @@ void oc_llama_session_reset(OcLlamaSession *sess);
  * Only the KV position is restored. Recurrent state (Qwen3.5 DeltaNet conv
  * and recurrent matrices) has already absorbed every token stepped through,
  * and no snapshot of it is kept, so a rewind cannot undo it. That is why
- * oc_speculative_generate() refuses is_qwen35 models outright. */
+ * oc_speculative_generate() refuses is_qwen35 models outright.
+ * Prerouter predictions are reset so rejected draft tokens cannot leak. */
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);

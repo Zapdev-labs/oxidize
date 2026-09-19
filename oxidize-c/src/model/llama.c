@@ -1139,6 +1139,7 @@ OcError oc_llama_enable_expert_stream(OcLlamaModel *model,
                                       const OcExpertStreamConfig *cfg)
 {
     if (!model) return OC_ERR_INVALID_ARG;
+    if (model->live_sessions > 0) return OC_ERR_INVALID_ARG;
     if (model->expert_stream) {
         oc_expert_stream_free(model->expert_stream);
         model->expert_stream = NULL;
@@ -1587,6 +1588,7 @@ OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
     }
     /* KV cache quantization (Q8_0-style: 32-element blocks with f16 scale). */
     out->pos = 0;
+    if (model->live_sessions < UINT32_MAX) model->live_sessions++;
     return OC_OK;
 }
 
@@ -1604,7 +1606,9 @@ void oc_llama_session_reset(OcLlamaSession *sess)
 
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos)
 {
-    if (sess) sess->pos = pos;
+    if (!sess) return;
+    sess->pos = pos;
+    if (sess->prerouter) oc_prerouter_reset(sess->prerouter);
 }
 
 void oc_llama_session_free(OcLlamaSession *sess)
@@ -1650,6 +1654,8 @@ void oc_llama_session_free(OcLlamaSession *sess)
         oc_lora_model_free(sess->lora);
         free(sess->lora);
     }
+    if (sess->model && sess->model->live_sessions > 0)
+        sess->model->live_sessions--;
     memset(sess, 0, sizeof(*sess));
 }
 

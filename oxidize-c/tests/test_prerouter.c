@@ -116,6 +116,7 @@ Test(prerouter, commit_then_consume)
     cr_assert(got[0] < n_exp);
     cr_assert(got[1] < n_exp);
     cr_assert_neq(got[0], got[1]);
+    cr_assert((got[0] == 0 && got[1] == 1) || (got[0] == 1 && got[1] == 0));
     float sum = w[got[0]] + w[got[1]];
     cr_assert_float_eq(sum, 1.0f, 1e-5f);
 
@@ -126,8 +127,28 @@ Test(prerouter, commit_then_consume)
 
 Test(prerouter, same_token_does_not_consume)
 {
+    const uint32_t hidden = 4;
+    const uint32_t n_exp = 4;
+    const uint32_t k = 2;
+    const uint32_t width = 8;
+    const uint32_t input = hidden + 2u * n_exp;
+    float *fc1 = calloc((size_t)width * input, sizeof(float));
+    float *fc2 = calloc((size_t)n_exp * width, sizeof(float));
+    float *lin = calloc((size_t)n_exp * input, sizeof(float));
+    cr_assert(fc1 && fc2 && lin);
+    const char *path = tmp_path();
+    StTensorSpec specs[] = {
+        {"layers.0.fc1.weight", "F32", {width, input}, 2, fc1,
+         (uint64_t)width * input * sizeof(float)},
+        {"layers.0.fc2.weight", "F32", {n_exp, width}, 2, fc2,
+         (uint64_t)n_exp * width * sizeof(float)},
+        {"layers.0.linear_init.weight", "F32", {n_exp, input}, 2, lin,
+         (uint64_t)n_exp * input * sizeof(float)},
+    };
+    cr_assert_eq(write_safetensors(path, specs, 3), OC_OK);
     OcPrerouter *p = NULL;
-    cr_assert_eq(oc_prerouter_new(2, 4, 4, 2, &p), OC_OK);
+    cr_assert_eq(oc_prerouter_new(2, n_exp, hidden, k, &p), OC_OK);
+    cr_assert_eq(oc_prerouter_load_safetensors(p, path), OC_OK);
     uint32_t sel[2] = {0, 1};
     float hidden_v[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     cr_assert_eq(oc_prerouter_commit(p, 0, hidden_v, sel, 2), OC_OK);
@@ -136,23 +157,50 @@ Test(prerouter, same_token_does_not_consume)
     float w[4];
     cr_assert_neq(oc_prerouter_consume(p, 1, got, 2, w), OC_OK);
     oc_prerouter_free(p);
+    unlink(path);
+    free(fc1); free(fc2); free(lin);
 }
 
 Test(prerouter, rejects_empty_file)
 {
     OcPrerouter *p = NULL;
     cr_assert_eq(oc_prerouter_new(2, 4, 4, 2, &p), OC_OK);
-    cr_assert_eq(oc_prerouter_load_safetensors(p, "/tmp/oc_prerouter_missing"),
-                 OC_ERR_IO);
+    cr_assert_eq(oc_prerouter_load_safetensors(p, "/dev/null"), OC_ERR_FORMAT);
     oc_prerouter_free(p);
 }
 
 Test(prerouter, reset_clears_prediction)
 {
+    const uint32_t hidden = 4;
+    const uint32_t n_exp = 4;
+    const uint32_t k = 2;
+    const uint32_t width = 8;
+    const uint32_t input = hidden + 2u * n_exp;
+    float *fc1 = calloc((size_t)width * input, sizeof(float));
+    float *fc2 = calloc((size_t)n_exp * width, sizeof(float));
+    float *lin = calloc((size_t)n_exp * input, sizeof(float));
+    cr_assert(fc1 && fc2 && lin);
+    const char *path = tmp_path();
+    StTensorSpec specs[] = {
+        {"layers.0.fc1.weight", "F32", {width, input}, 2, fc1,
+         (uint64_t)width * input * sizeof(float)},
+        {"layers.0.fc2.weight", "F32", {n_exp, width}, 2, fc2,
+         (uint64_t)n_exp * width * sizeof(float)},
+        {"layers.0.linear_init.weight", "F32", {n_exp, input}, 2, lin,
+         (uint64_t)n_exp * input * sizeof(float)},
+    };
+    cr_assert_eq(write_safetensors(path, specs, 3), OC_OK);
     OcPrerouter *p = NULL;
-    cr_assert_eq(oc_prerouter_new(2, 4, 4, 2, &p), OC_OK);
-    cr_assert_not(oc_prerouter_has_prediction(p, 1));
+    cr_assert_eq(oc_prerouter_new(2, n_exp, hidden, k, &p), OC_OK);
+    cr_assert_eq(oc_prerouter_load_safetensors(p, path), OC_OK);
+    float hidden_v[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    uint32_t sel[2] = {1, 3};
+    cr_assert_eq(oc_prerouter_commit(p, 0, hidden_v, sel, k), OC_OK);
+    oc_prerouter_advance(p);
+    cr_assert(oc_prerouter_has_prediction(p, 1));
     oc_prerouter_reset(p);
-    cr_assert_not(oc_prerouter_has_prediction(p, 0));
+    cr_assert_not(oc_prerouter_has_prediction(p, 1));
     oc_prerouter_free(p);
+    unlink(path);
+    free(fc1); free(fc2); free(lin);
 }

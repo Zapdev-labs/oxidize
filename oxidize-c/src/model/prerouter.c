@@ -36,6 +36,7 @@ struct OcPrerouter {
     OcExpertStreamPool *stream;
     float *concat;
     float *mlp_h;
+    size_t mlp_h_cap;
     float *logits;
     float *resid;
     float *scratch_w;
@@ -98,6 +99,14 @@ static void matvec_f32(const float *w, const float *x, float *out,
     }
 }
 
+static size_t dtype_elem_bytes(const char *dtype)
+{
+    if (!dtype) return 0;
+    if (strcmp(dtype, "F32") == 0) return 4;
+    if (strcmp(dtype, "F16") == 0 || strcmp(dtype, "BF16") == 0) return 2;
+    return 0;
+}
+
 static OcError copy_weight(const OcSafetensorsFile *st,
                            const OcSafetensorsTensor *t, float **out,
                            uint32_t expect_rows, uint32_t expect_cols)
@@ -105,10 +114,14 @@ static OcError copy_weight(const OcSafetensorsFile *st,
     if (!t || t->n_dims != 2) return OC_ERR_FORMAT;
     if (t->shape[0] != expect_rows || t->shape[1] != expect_cols)
         return OC_ERR_TENSOR;
+    size_t elem = dtype_elem_bytes(t->dtype);
+    if (elem == 0) return OC_ERR_FORMAT;
+    size_t n = (size_t)expect_rows * expect_cols;
+    if (expect_cols != 0 && n / expect_cols != expect_rows) return OC_ERR_TENSOR;
+    if (t->data_length < n * elem) return OC_ERR_FORMAT;
     const void *raw = NULL;
     OcError e = oc_safetensors_get_tensor_data(st, t, &raw);
     if (e != OC_OK) return e;
-    size_t n = (size_t)expect_rows * expect_cols;
     float *buf = malloc(n * sizeof(float));
     if (!buf) return OC_ERR_OOM;
     if (strcmp(t->dtype, "F32") == 0) {
@@ -116,6 +129,12 @@ static OcError copy_weight(const OcSafetensorsFile *st,
     } else if (strcmp(t->dtype, "F16") == 0) {
         const uint16_t *h = (const uint16_t *)raw;
         for (size_t i = 0; i < n; i++) buf[i] = oc_f16_to_f32_bits(h[i]);
+    } else if (strcmp(t->dtype, "BF16") == 0) {
+        const uint16_t *h = (const uint16_t *)raw;
+        for (size_t i = 0; i < n; i++) {
+            uint32_t bits = ((uint32_t)h[i]) << 16;
+            memcpy(&buf[i], &bits, sizeof(float));
+        }
     } else {
         free(buf);
         return OC_ERR_FORMAT;
@@ -137,6 +156,7 @@ OcError oc_prerouter_new(uint32_t n_layers, uint32_t n_experts,
     p->n_experts = n_experts;
     p->hidden_dim = hidden_dim;
     p->top_k = top_k > 0 ? top_k : 1;
+    if (p->top_k > n_experts) p->top_k = n_experts;
     p->input_dim = hidden_dim + 2u * n_experts;
     p->replace_routing = true;
     p->concat = calloc(p->input_dim, sizeof(float));
@@ -214,9 +234,11 @@ OcError oc_prerouter_load_safetensors(OcPrerouter *p, const char *path)
             if (t->n_dims != 2) continue;
             h->hidden_width = (uint32_t)t->shape[0];
             if (h->hidden_width == 0) continue;
-            if (!p->mlp_h) {
-                p->mlp_h = calloc(h->hidden_width, sizeof(float));
-                if (!p->mlp_h) { oc_safetensors_close(&st); return OC_ERR_OOM; }
+            if (h->hidden_width > p->mlp_h_cap) {
+                float *nh = realloc(p->mlp_h, (size_t)h->hidden_width * sizeof(float));
+                if (!nh) { oc_safetensors_close(&st); return OC_ERR_OOM; }
+                p->mlp_h = nh;
+                p->mlp_h_cap = h->hidden_width;
             }
             free(h->fc1);
             h->fc1 = NULL;
@@ -240,6 +262,10 @@ OcError oc_prerouter_load_safetensors(OcPrerouter *p, const char *path)
     }
     oc_safetensors_close(&st);
     if (p->n_heads == 0) return OC_ERR_MODEL;
+    for (uint32_t i = 0; i < p->n_heads; i++) {
+        if (!p->heads[i].fc1 || !p->heads[i].fc2 || !p->heads[i].linear_init)
+            return OC_ERR_MODEL;
+    }
     oc_log(OC_LOG_INFO, "prerouter: loaded %u heads from %s (K=%u, replace=%d)",
            p->n_heads, path, p->top_k, (int)p->replace_routing);
     return OC_OK;
@@ -329,6 +355,7 @@ static OcError run_head(OcPrerouter *p, const OcPrerouterHead *h,
 
     softmax_topk(p->logits, p->n_experts, p->top_k, p->order, p->scratch_w);
     uint32_t tk = p->top_k;
+    if (tk > p->n_experts) tk = p->n_experts;
     for (uint32_t i = 0; i < tk; i++) {
         out_sel[i] = p->order[i];
         out_w[i] = p->scratch_w[p->order[i]];

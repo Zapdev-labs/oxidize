@@ -22,6 +22,7 @@
  */
 #include "oxidize/cli_commands.h"
 
+#include "oxidize/autotune.h"
 #include "oxidize/benchmark.h"
 #include "oxidize/error.h"
 #include "oxidize/expert_stream.h"
@@ -168,8 +169,11 @@ static OcError cli_load_llama(const OcCliContext *ctx, OcLlamaModel *model)
     OcError e = oc_llama_load_flags(ctx->model_path, flags, model);
     if (e != OC_OK) return e;
     oc_cli_apply_ctx(ctx, model);
-    if (ctx->experts_per_tok > 0 && model->cfg.num_experts > 0)
-        model->cfg.num_experts_per_tok = ctx->experts_per_tok;
+    if (ctx->experts_per_tok > 0 && model->cfg.num_experts > 0) {
+        uint32_t max = model->cfg.num_experts + model->cfg.zero_expert_count;
+        uint32_t k = ctx->experts_per_tok > max ? max : ctx->experts_per_tok;
+        model->cfg.num_experts_per_tok = k;
+    }
     if (ctx->stream_experts) {
         OcExpertStreamConfig scfg;
         oc_expert_stream_config_init(&scfg);
@@ -412,8 +416,9 @@ void oc_cli_command_help(void)
 "  --model PATH          GGUF model file\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
-"  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
-"  --ctx N               KV context length (default cap 4096)\n"
+               "  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+               "  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill)\n"
+               "  --ctx N               KV context length (default cap 4096)\n"
 "  --verbose, -v         Verbose logging to stderr\n"
 "  --help, -h            Show help\n"
 "  --version             Print version\n"
@@ -481,7 +486,9 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "USAGE: oxidize-c serve --model <path> [OPTIONS]\n\n"
                "OPTIONS:\n"
                "  --host HOST           Bind host (default 127.0.0.1)\n"
-               "  --port PORT           Bind port (default 8080)\n");
+               "  --port PORT           Bind port (default 8080)\n"
+               "  --auto                Apply autotune plan to scheduler/KV\n"
+               "  --prefill-chunk-size N Prefill chunk (overrides plan)\n");
         break;
     case OC_CLI_CMD_SERVE_REALTIME:
         printf("start WebSocket realtime server\n\n"
@@ -1527,6 +1534,29 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
         st.model_id = strdup(slash ? slash + 1 : ctx->model_path);
         progress(ctx, "serve: model loaded, starting server on %s:%d",
                  ctx->host, ctx->port);
+        if (ctx->auto_tune) {
+            OcCpuInfo cpu;
+            OcModelFingerprint fp;
+            if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+                oc_autotune_fingerprint_gguf(&model->gguf, &fp) == OC_OK) {
+                OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
+                /* Serve has no CUDA init; do not apply Hopper knobs
+                 * to CPU OpenAI sessions. */
+                oc_autotune_clear_gpu_runtime(&plan);
+                oc_autotune_apply(&plan, &model->gguf);
+                oc_autotune_apply_thread_numa(&plan, &cpu, &model->gguf,
+                                             ctx->threads, ctx->numa, true,
+                                             false);
+                oc_openai_apply_tuning_plan(&st, &plan, ctx->prefill_chunk_size,
+                                           ctx->kv_type);
+            } else if (ctx->prefill_chunk_size > 0 || ctx->kv_type != NULL) {
+                oc_openai_apply_tuning_plan(&st, NULL, ctx->prefill_chunk_size,
+                                             ctx->kv_type);
+            }
+        } else if (ctx->prefill_chunk_size > 0 || ctx->kv_type != NULL) {
+            oc_openai_apply_tuning_plan(&st, NULL, ctx->prefill_chunk_size,
+                                         ctx->kv_type);
+        }
     } else {
         progress(ctx, "serve: no model — starting placeholder server on %s:%d",
                  ctx->host, ctx->port);

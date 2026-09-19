@@ -5,6 +5,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -121,6 +122,21 @@ bool oc_parse_i64(const char *s, long long *out)
     if (errno != 0) return false;
     if (!end || *end != '\0') return false;
     *out = v;
+    return true;
+}
+
+bool oc_parse_u32(const char *s, uint32_t *out)
+{
+    char *end = NULL;
+    unsigned long v;
+
+    if (!s || !out) return false;
+    if (s[0] < '0' || s[0] > '9') return false;
+    errno = 0;
+    v = strtoul(s, &end, 10);
+    if (end == s || *end != '\0') return false;
+    if (errno == ERANGE || v > (unsigned long)UINT32_MAX) return false;
+    *out = (uint32_t)v;
     return true;
 }
 

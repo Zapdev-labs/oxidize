@@ -240,14 +240,80 @@ if ! ssh -o ConnectTimeout=8 -o BatchMode=yes "$HOST" true; then
 fi
 
 rsync_src
-ssh "$HOST" \
-    EDGE0_MODEL="${MODEL:-}" \
-    EDGE0_CACHE="$CACHE" \
-    EDGE0_PROMPT="$PROMPT" \
-    EDGE0_N_PREDICT="$N_PREDICT" \
-    EDGE0_THREADS="$THREADS" \
-    EDGE0_EXPERT_CACHE_MB="$CACHE_MB" \
-    EDGE0_CTX="$CTX" \
-    'EDGE0_SRC=$HOME/oxidize/oxidize-c bash -s' <<EOF
-$(remote_body)
-EOF
+ssh "$HOST" bash -s -- \
+    "${MODEL:-}" \
+    "${EDGE0_CACHE:-}" \
+    "$PROMPT" \
+    "$N_PREDICT" \
+    "$THREADS" \
+    "$CACHE_MB" \
+    "$CTX" \
+    "$REPO" \
+    <<'REMOTE'
+set -euo pipefail
+MODEL=$1
+CACHE=${2:-$HOME/.cache/oxidize/edge0}
+PROMPT=$3
+N_PREDICT=$4
+THREADS=$5
+CACHE_MB=$6
+CTX=$7
+REPO=${8:-Edge0/Edge0-35B-A3B-preview}
+SRC=$HOME/oxidize/oxidize-c
+
+find_model() {
+    local candidates=(
+        "${MODEL:-}"
+        /home/ai/models/qwen36-35b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+        /home/dih/models/qwen36-35b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+        /home/ai/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+        /home/dih/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+    )
+    local p
+    for p in "${candidates[@]}"; do
+        [[ -n "$p" && -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
+    done
+    p=$(find /run/media/dih /home/dih/models /home/ai/models /mnt -name '*Qwen3.6-35B-A3B*.gguf' -type f 2>/dev/null | head -n 1 || true)
+    [[ -n "$p" && -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
+    return 1
+}
+
+mkdir -p "$CACHE"
+for file in prerouter_edge0_35b.safetensors lora_edge0_35b.safetensors; do
+    if [[ ! -s "$CACHE/$file" ]]; then
+        echo "downloading $REPO/$file"
+        if command -v huggingface-cli >/dev/null 2>&1; then
+            huggingface-cli download "$REPO" "$file" --local-dir "$CACHE"
+        else
+            curl -fL --retry 5 --retry-delay 2 \
+                -o "$CACHE/$file" \
+                "https://huggingface.co/${REPO}/resolve/main/${file}"
+        fi
+    fi
+done
+
+if [[ ! -d "$SRC" ]]; then
+    echo "error: set EDGE0_SRC to the oxidize-c directory" >&2
+    exit 1
+fi
+
+model=$(find_model) || {
+    echo "error: no Qwen3.6-35B-A3B GGUF found. Set EDGE0_MODEL" >&2
+    exit 1
+}
+echo "model=$model src=$SRC"
+make -C "$SRC" -j"$(nproc)" oxidize-c CFLAGS='-std=c11 -O3 -march=native -DNDEBUG'
+/usr/bin/time -v "$SRC/oxidize-c" prompt \
+    --model "$model" \
+    --prompt "$PROMPT" \
+    --n-predict "$N_PREDICT" \
+    --ctx "$CTX" \
+    --threads "$THREADS" \
+    --no-auto \
+    --stream-experts \
+    --expert-cache-mb "$CACHE_MB" \
+    --prerouter "$CACHE/prerouter_edge0_35b.safetensors" \
+    --lora "$CACHE/lora_edge0_35b.safetensors" \
+    --experts-per-tok 4 \
+    --verbose
+REMOTE

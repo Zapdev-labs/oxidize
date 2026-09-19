@@ -7,7 +7,11 @@
 #include "args.h"
 
 #include "oxidize/cli_commands.h"
+#include "oxidize/util/string.h"
 
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,6 +39,18 @@ static bool match(const char *arg, const char *long_name)
     return strcmp(arg, long_name) == 0;
 }
 
+static void parse_prefill_chunk_size(uint32_t *dst, const char *val)
+{
+    uint32_t n;
+    if (oc_parse_u32(val, &n)) {
+        *dst = n;
+        return;
+    }
+    fprintf(stderr,
+            "warning: invalid --prefill-chunk-size '%s' (ignored)\n",
+            val ? val : "");
+}
+
 static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
                              bool *consumed_val)
 {
@@ -48,6 +64,10 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--kv"))         { a->kv_type = val; *consumed_val = true; }
     else if (match(arg, "--threads"))    { a->threads = atoi(val); *consumed_val = true; }
     else if (match(arg, "--batch-size")) { a->batch_size = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
+    else if (match(arg, "--prefill-chunk-size")) {
+        parse_prefill_chunk_size(&a->prefill_chunk_size, val);
+        *consumed_val = true;
+    }
     else if (match(arg, "--numa"))       { a->numa = val; *consumed_val = true; }
     else if (match(arg, "--temperature")||match(arg,"--temp")){a->temperature=(float)atof(val);*consumed_val=true; }
     else if (match(arg, "--top-k"))       { a->top_k = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
@@ -70,10 +90,28 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--mirostat-tau"))  { a->mirostat_tau = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--mirostat-eta"))  { a->mirostat_eta = (float)atof(val); *consumed_val = true; }
     else if (match(arg, "--bench-iters"))   { a->bench_iterations = val[0] == '-' ? 0 : atoi(val); *consumed_val = true; }
-    else if (match(arg, "--expert-cache-mb")) { a->expert_cache_mb = (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
+    else if (match(arg, "--expert-cache-mb")) {
+        uint32_t n;
+        if (!oc_parse_u32(val, &n) || n > (UINT32_MAX >> 20)) {
+            fprintf(stderr, "warning: invalid --expert-cache-mb '%s' (ignored)\n",
+                    val ? val : "");
+        } else {
+            a->expert_cache_mb = n;
+        }
+        *consumed_val = true;
+    }
     else if (match(arg, "--prerouter"))     { a->prerouter_path = val; *consumed_val = true; }
     else if (match(arg, "--lora"))          { a->lora_path = val; *consumed_val = true; }
-    else if (match(arg, "--experts-per-tok")) { a->experts_per_tok = (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
+    else if (match(arg, "--experts-per-tok")) {
+        uint32_t n;
+        if (!oc_parse_u32(val, &n) || n == 0) {
+            fprintf(stderr, "warning: invalid --experts-per-tok '%s' (ignored)\n",
+                    val ? val : "");
+        } else {
+            a->experts_per_tok = n;
+        }
+        *consumed_val = true;
+    }
     else return false;
     return true;
 }
@@ -157,6 +195,10 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--kv"))             { ctx->kv_type = val; i++; }
+        else if (match(arg, "--prefill-chunk-size")) {
+            parse_prefill_chunk_size(&ctx->prefill_chunk_size, val);
+            i++;
+        }
         else if (match(arg, "--threads"))        { ctx->threads = atoi(val); ctx->threads_set = true; i++; }
         else if (match(arg, "--numa"))           { ctx->numa = val; i++; }
         else if (match(arg, "--backend"))        { ctx->backend = val; i++; }
@@ -211,10 +253,28 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         /* Perplexity / tokenize. */
         else if (match(arg, "--max-tokens"))     { ctx->ppl_max_tokens = (size_t)strtoull(val, NULL, 10); i++; }
         else if (match(arg, "--ids"))            { ctx->token_ids_str = val; i++; }
-        else if (match(arg, "--expert-cache-mb")) { ctx->expert_cache_mb = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--expert-cache-mb")) {
+            uint32_t n;
+            if (!oc_parse_u32(val, &n) || n > (UINT32_MAX >> 20)) {
+                fprintf(stderr, "warning: invalid --expert-cache-mb '%s' (ignored)\n",
+                        val ? val : "");
+            } else {
+                ctx->expert_cache_mb = n;
+            }
+            i++;
+        }
         else if (match(arg, "--prerouter"))      { ctx->prerouter_path = val; i++; }
         else if (match(arg, "--lora"))           { ctx->lora_path = val; i++; }
-        else if (match(arg, "--experts-per-tok")) { ctx->experts_per_tok = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--experts-per-tok")) {
+            uint32_t n;
+            if (!oc_parse_u32(val, &n) || n == 0) {
+                fprintf(stderr, "warning: invalid --experts-per-tok '%s' (ignored)\n",
+                        val ? val : "");
+            } else {
+                ctx->experts_per_tok = n;
+            }
+            i++;
+        }
         else if (arg[0] != '-' && ctx->prompt == NULL) { ctx->prompt = arg; }
     }
     return true;

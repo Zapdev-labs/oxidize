@@ -69,7 +69,9 @@ typedef enum {
 /* ─── CLI context ────────────────────────────────────────────────────────
  *
  * Aggregates all flags needed by any subcommand handler. Fields not
- * relevant to a given command are simply ignored (NULL / 0 / false). */
+ * relevant to a given command are simply ignored (NULL / 0 / false).
+ * Layout is append-only: new fields go at the end so in-tree callers
+ * compiled against an older header keep host/port offsets. */
 typedef struct OcCliContext {
     /* Subcommand + output. */
     OcCliCommand       command;
@@ -165,6 +167,10 @@ typedef struct OcCliContext {
     const char        *lora_path;
     uint32_t           experts_per_tok;
     bool               prerouter_prefetch;
+
+    /* Append-only: --prefill-chunk-size N (0 = unset). Kept last so the
+     * Server / Benchmark / … offsets stay stable for older callers. */
+    uint32_t           prefill_chunk_size;
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.

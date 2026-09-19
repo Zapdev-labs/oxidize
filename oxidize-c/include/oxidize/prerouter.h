@@ -40,7 +40,8 @@ uint32_t oc_prerouter_top_k(const OcPrerouter *p);
 
 bool oc_prerouter_has_prediction(const OcPrerouter *p, uint32_t layer);
 
-/* Fill `sel[0..k)` and write selected weights into `weights_out[sel[i]]`. */
+/* Fill `sel[0..k)` and write selected weights into `weights_out`.
+ * `weights_out` must hold `n_experts` floats (the full routing vector). */
 OcError oc_prerouter_consume(OcPrerouter *p, uint32_t layer,
                              uint32_t *sel, uint32_t k, float *weights_out);
 

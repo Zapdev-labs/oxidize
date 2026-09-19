@@ -7,8 +7,10 @@
 #include "oxidize/log.h"
 #include "oxidize/util/mmap.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 typedef struct {
     const uint8_t *base;
@@ -55,25 +57,46 @@ void oc_expert_stream_config_init(OcExpertStreamConfig *cfg)
     cfg->reclaim = true;
 }
 
+static bool mul_size(size_t a, size_t b, size_t *out)
+{
+    if (b != 0 && a > SIZE_MAX / b) return false;
+    *out = a * b;
+    return true;
+}
+
 static bool span_from_view(const OcGgufMmappedFile *gguf, const OcWeightView *view,
-                           size_t n_experts, OcExpertTensorSpan *out)
+                           size_t n_experts, size_t n_embd, size_t inter,
+                           OcExpertTensorSpan *out)
 {
     memset(out, 0, sizeof(*out));
     if (!view || !view->data || n_experts == 0) return false;
-    size_t total = (size_t)view->rows * view->row_bytes;
-    if (total < n_experts) return false;
+    size_t packed = 0;
+    if (!mul_size((size_t)view->rows, view->row_bytes, &packed)) return false;
+    size_t expert_bytes;
+    if ((inter > 0 && view->rows == inter) ||
+        (n_embd > 0 && view->rows == n_embd)) {
+        expert_bytes = packed;
+    } else if (view->rows % n_experts == 0) {
+        expert_bytes = packed / n_experts;
+    } else {
+        expert_bytes = packed;
+    }
+    if (expert_bytes == 0) return false;
+    size_t total = 0;
+    if (!mul_size(expert_bytes, n_experts, &total)) return false;
     out->base = view->data;
-    out->expert_bytes = total / n_experts;
+    out->expert_bytes = expert_bytes;
     if (!gguf || !gguf->shards) return true;
     for (size_t i = 0; i < gguf->n_shards; i++) {
         const uint8_t *bytes = gguf->shards[i].bytes;
         size_t len = gguf->shards[i].len;
         if (!bytes || !gguf->shards[i].mmap) continue;
-        if (view->data >= bytes && view->data + total <= bytes + len) {
-            out->mmap = gguf->shards[i].mmap;
-            out->mmap_offset = (size_t)(view->data - bytes);
-            return true;
-        }
+        if ((const uint8_t *)view->data < bytes) continue;
+        size_t off = (size_t)((const uint8_t *)view->data - bytes);
+        if (off > len || total > len - off) continue;
+        out->mmap = gguf->shards[i].mmap;
+        out->mmap_offset = off;
+        return true;
     }
     return true;
 }
@@ -131,8 +154,21 @@ static OcError record_hot(OcExpertStreamPool *pool, uint32_t layer,
 {
     if (!pool->hot || pool->hot_cap == 0) return OC_OK;
     if (layer >= pool->n_layers || expert >= pool->n_experts) return OC_OK;
-    if (pool->cached && pool->cached[cache_key(pool, layer, expert)])
-        return OC_OK;
+    if (pool->cached && pool->cached[cache_key(pool, layer, expert)]) {
+        for (size_t i = 0; i < pool->hot_len; i++) {
+            size_t idx = (pool->hot_head + i) % pool->hot_cap;
+            if (pool->hot[idx].layer != layer || pool->hot[idx].expert != expert)
+                continue;
+            OcExpertHot h = pool->hot[idx];
+            for (size_t j = i; j + 1 < pool->hot_len; j++) {
+                size_t a = (pool->hot_head + j) % pool->hot_cap;
+                size_t b = (pool->hot_head + j + 1) % pool->hot_cap;
+                pool->hot[a] = pool->hot[b];
+            }
+            pool->hot[(pool->hot_head + pool->hot_len - 1) % pool->hot_cap] = h;
+            return OC_OK;
+        }
+    }
     if (pool->hot_len == pool->hot_cap) reclaim_one(pool);
     size_t idx = (pool->hot_head + pool->hot_len) % pool->hot_cap;
     pool->hot[idx].layer = layer;
@@ -176,12 +212,14 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
     for (uint32_t i = 0; i < pool->n_layers; i++) {
         const OcLlamaLayer *L = &model->layers[i];
         pool->layers[i].n_experts = n_exp;
-        (void)span_from_view(&model->gguf, &L->ffn_gate_exps, n_exp,
-                             &pool->layers[i].gate);
-        (void)span_from_view(&model->gguf, &L->ffn_up_exps, n_exp,
-                             &pool->layers[i].up);
-        (void)span_from_view(&model->gguf, &L->ffn_down_exps, n_exp,
-                             &pool->layers[i].down);
+        size_t n_embd = model->cfg.n_embd;
+        size_t inter = model->cfg.expert_intermediate_size;
+        (void)span_from_view(&model->gguf, &L->ffn_gate_exps, n_exp, n_embd,
+                             inter, &pool->layers[i].gate);
+        (void)span_from_view(&model->gguf, &L->ffn_up_exps, n_exp, n_embd,
+                             inter, &pool->layers[i].up);
+        (void)span_from_view(&model->gguf, &L->ffn_down_exps, n_exp, n_embd,
+                             inter, &pool->layers[i].down);
     }
     size_t nslot = (size_t)pool->n_layers * (size_t)n_exp;
     pool->cached = calloc(nslot ? nslot : 1, 1);
@@ -218,7 +256,7 @@ static void advise_view(const OcGgufMmappedFile *gguf, const OcWeightView *view,
 {
     if (!view || !view->data) return;
     OcExpertTensorSpan span;
-    if (!span_from_view(gguf, view, 1, &span) || !span.mmap) return;
+    if (!span_from_view(gguf, view, 1, 0, 0, &span) || !span.mmap) return;
     size_t bytes = (size_t)view->rows * view->row_bytes;
     (void)oc_mmap_advise_range(span.mmap, span.mmap_offset, bytes, advice);
 }
@@ -274,6 +312,7 @@ OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
 {
     if (!pool || !experts) return OC_ERR_INVALID_ARG;
     if (layer >= pool->n_layers || n == 0) return OC_OK;
+    if (prefetch && !pool->cfg.prefetch) return OC_OK;
     const OcExpertLayerLayout *L = &pool->layers[layer];
     uint64_t bytes = expert_bytes(L);
     OcMmapAdvice advice = OC_MMAP_ADVICE_WILLNEED;
