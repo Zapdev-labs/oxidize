@@ -65,13 +65,13 @@ huggingface-cli download {repo} gemma-4-31B-it-AL5.gguf --local-dir .
   -n 256 --temp 0.7
 ```
 
-## Quick start — oxidize-cpp (CPU)
+## Quick start — oxidize-c (CPU)
 
 ```bash
-git clone {OXIDIZE_GH}.git && cd oxidize/oxidize-cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+git clone {OXIDIZE_GH}.git && cd oxidize
+make c-build
 
-./build/oxidize-cpp --model gemma-4-31B-it-AL5.gguf \\
+./oxidize-c/oxidize-c --model gemma-4-31B-it-AL5.gguf \\
   --prompt "Hello" --max-tokens 128 --auto
 ```
 

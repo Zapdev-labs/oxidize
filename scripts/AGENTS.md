@@ -9,7 +9,7 @@ Mixed Bash + Python helper scripts. No build target — these support CI regress
 | Group | Files | Purpose |
 |-------|-------|---------|
 | CI benchmark gate | `ci_benchmark_regression.py`, `ci_benchmark_dashboard.py` (+ `test_*.py`) | Detect perf regressions; render dashboard |
-| Remote NUMA bench | `bench-ai-box.sh` (defaults to `ai@192.168.1.132`), `bench_al5_remote.sh`, `bench_iq_remote.sh`, `bench_vs_llamacpp.sh`, `*_al_remote.sh`, `qwen*_remote.sh` | Build + benchmark on remote hosts |
+| Remote NUMA bench | `bench-ai-box.sh` (defaults to `ai@192.168.1.132`), `bench_al5_remote.sh`, `bench_iq_remote.sh`, `bench_vs_llamacpp.sh`, `*_al_remote.sh`, `qwen*_remote.sh` | Build + benchmark Rust / oxidize-c on remote hosts |
 | Quant / merge / publish | `publish_gguf_hf.py`, `publish_gguf_remote_hf.sh`, `glm_merge_exporter.py`, `glm_stream_merge.py`, `run_glm_merge_remote.sh` | Quantize, merge, and publish GGUF to HF |
 | DFlash / speculative | `build_kimi26_dflash_from_base.py`, `build_nex_n2_pro_dflash_baseinit.py`, `run_kimi_k26_dflash_ai.sh` | Build/run DFlash draft models |
 | Model setup / run | `setup-glm-5.2.sh`, `glm-52-prune.sh`, `glm-vision-download.sh`, `gen-train-sequence.sh`, `run-minimax-m3-eagle3.sh`, `minimax-m3-eagle3-wait-and-run.sh` (+ `minimax-m3-manifest.json`) | Download/prune/run specific models |

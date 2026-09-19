@@ -3,7 +3,7 @@
 **Domain:** C-ABI FFI layer over `oxidize-core`
 
 ## OVERVIEW
-Thin C-ABI wrapper exposing `oxidize-core` model load/forward, a fused quantized GEMV, and session management to non-Rust callers (e.g. the C/C++ ports). Builds as both `cdylib` and `staticlib`.
+Thin C-ABI wrapper exposing `oxidize-core` model load/forward, a fused quantized GEMV, and session management to C callers. Builds as both `cdylib` and `staticlib`.
 
 ## STRUCTURE
 ```
@@ -40,4 +40,4 @@ cargo build -p oxidize-ffi     # -> liboxidize_ffi.so / liboxidize_ffi.a
 ## NOTES
 - Runtime env var `OXIDIZE_THREADS` overrides the Rayon pool size.
 - Linux-only `advise_huge_pages()` (THP) is applied on model load.
-- Consumers (C/C++) link the `cdylib`/`staticlib` and call the exported symbols.
+- Consumers link the `cdylib`/`staticlib` and call the exported symbols.

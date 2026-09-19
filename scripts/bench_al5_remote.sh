@@ -26,17 +26,16 @@ mkdir -p "$OUT"
 
 cd "$REPO"
 QZ="${QZ:-$REPO/target/release/oxidize-quantize}"
-OX="${OX:-$REPO/oxidize-cpp/build/oxidize-cpp}"
+OC="${OC:-$REPO/oxidize-c/oxidize-c}"
 
 if [[ ! -x "$QZ" ]]; then
   echo "missing $QZ — build locally: cargo build -p oxidize-quantize --release" >&2
   exit 1
 fi
-if [[ ! -x "$OX" ]]; then
-  echo "==> building oxidize-cpp on host (cmake only)"
-  rm -rf oxidize-cpp/build
-  cmake -S oxidize-cpp -B oxidize-cpp/build -DCMAKE_BUILD_TYPE=Release >/dev/null
-  cmake --build oxidize-cpp/build -j"$(nproc)" --target oxidize-cpp
+if [[ ! -x "$OC" ]]; then
+  echo "==> building oxidize-c on host"
+  make -C oxidize-c clean oxidize-c CFLAGS="-O3 -march=native"
+  OC="$REPO/oxidize-c/oxidize-c"
 fi
 
 echo "==> requant F16 -> Q4_0"
@@ -68,7 +67,7 @@ bench_decode() {
   echo "==> decode bench $label"
   local output
   if ! output=$(/usr/bin/time -f "${label} wall=%e s" \
-    "$OX" --model "$gguf" --prompt "The speed of light is" --max-tokens "$DECODE_TOKENS" \
+    "$OC" --model "$gguf" --prompt "The speed of light is" --max-tokens "$DECODE_TOKENS" \
     --threads 16 --no-auto 2>&1); then
     printf '%s\n' "$output" >&2
     return 1

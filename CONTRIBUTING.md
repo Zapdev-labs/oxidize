@@ -68,6 +68,7 @@ Be accurate and ethical: do not overstate performance gains, hide known regressi
 ### Tests
 
 - All workspace tests must pass (`make test` / `cargo test --workspace --all-targets`).
+- C port changes must pass `make c-test`.
 - Add or update tests when behavior changes.
 - Do not disable, skip, or weaken tests to make CI green without reviewer agreement.
 

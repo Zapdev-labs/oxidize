@@ -26,7 +26,8 @@ fn readme_includes_architecture_section() {
         "oxidize-core",
         "oxidize-cli",
         "oxidize-server",
-        "oxidize-py",
+        "oxidize-c",
+        "oxidize-ffi",
         "oxidize-quantize",
         "input prompt -> interface crate -> `oxidize-core`",
     ] {

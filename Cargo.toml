@@ -4,7 +4,6 @@ members = [
     "oxidize-cli",
     "oxidize-server",
     "oxidize-quantize",
-    "oxidize-py",
     "oxidize-train",
     "oxidize-finetuning",
     "oxidize-convert",
@@ -29,7 +28,6 @@ version = "0.1.0"
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
-pyo3 = "0.29"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

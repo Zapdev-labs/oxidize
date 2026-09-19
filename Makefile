@@ -1,18 +1,20 @@
 SHELL := /bin/bash
 
-.PHONY: help fmt lint audit udeps test build wasm check ci
+.PHONY: help fmt lint audit udeps test build wasm check ci c-build c-test
 
 help:
 	@echo "Common tasks:"
-	@echo "  make fmt    - Check Rust formatting"
-	@echo "  make lint   - Run clippy with warnings denied"
-	@echo "  make audit  - Run cargo-deny license/security audit"
-	@echo "  make udeps  - Detect unused Cargo dependencies (cargo-udeps + nightly)"
-	@echo "  make test   - Run workspace tests"
-	@echo "  make build  - Build release binaries for workspace crates"
-	@echo "  make wasm   - Build oxidize-core with wasm-bindgen output"
-	@echo "  make check  - Run fmt + lint + test"
-	@echo "  make ci     - Run check + build + udeps"
+	@echo "  make fmt     - Check Rust formatting"
+	@echo "  make lint    - Run clippy with warnings denied"
+	@echo "  make audit   - Run cargo-deny license/security audit"
+	@echo "  make udeps   - Detect unused Cargo dependencies (cargo-udeps + nightly)"
+	@echo "  make test    - Run workspace tests"
+	@echo "  make build   - Build release binaries for workspace crates"
+	@echo "  make c-build - Build the standalone C11 port"
+	@echo "  make c-test  - Run oxidize-c Criterion tests"
+	@echo "  make wasm    - Build oxidize-core with wasm-bindgen output"
+	@echo "  make check   - Run fmt + lint + test"
+	@echo "  make ci      - Run check + build + udeps"
 
 fmt:
 	cargo fmt --all --check
@@ -38,5 +40,11 @@ wasm:
 	wasm-bindgen --target web --out-dir dist/wasm target/wasm32-unknown-unknown/release/oxidize_core.wasm
 
 check: fmt lint audit test
+
+c-build:
+	$(MAKE) -C oxidize-c build
+
+c-test:
+	$(MAKE) -C oxidize-c test
 
 ci: check udeps build

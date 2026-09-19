@@ -32,9 +32,6 @@ deploy/
 /plans/
 /specs/
 
-# Go build output
-oxidize-golang/oxidize
-
 # IDE / agent session artifacts (never commit)
 .cursor/
 .claire/

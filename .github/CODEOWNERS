@@ -21,11 +21,7 @@
 /oxidize-train/ @Jackson57279 @dogesman098
 /oxidize-finetuning/ @Jackson57279 @dogesman098
 /oxidize-ffi/ @Jackson57279 @dogesman098
-/oxidize-py/ @Jackson57279 @dogesman098
-
-# Parallel language ports.
-/oxidize-golang/ @Jackson57279 @dogesman098
-/oxidize-python/ @Jackson57279 @dogesman098
+/oxidize-c/ @Jackson57279 @dogesman098
 
 # Deployment, containers, scripts, and benchmark tooling.
 /Dockerfile.* @Jackson57279 @dogesman098

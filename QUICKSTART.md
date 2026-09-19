@@ -5,6 +5,7 @@
 - Rust toolchain (`rustup`, `cargo`) with edition 2024 support
 - `make`
 - Optional for WASM builds: `wasm-bindgen-cli`
+- Optional for the C port: `gcc`/`clang` (`make c-build`)
 
 ## Build
 
@@ -98,3 +99,5 @@ make lint
 - `make wasm` - Build oxidize-core with wasm-bindgen output
 - `make check` - Run fmt + lint + test
 - `make ci` - Run check + build
+- `make c-build` - Build the C11 port
+- `make c-test` - Run oxidize-c tests

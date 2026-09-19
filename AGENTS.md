@@ -1,11 +1,9 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-07-07
-**Commit:** 00fb96e (master)
-**Workspace:** Local-first LLM inference in Rust with Go, Python, C, and C++ ports
+**Workspace:** Local-first LLM inference in Rust, with a standalone C11 port
 
 ## OVERVIEW
-This workspace contains the core Rust LLM inference engine (`oxidize-core`) and multiple frontends/bindings (CLI, server, Python bindings), plus parallel language ports in Go, pure Python, C, and C++ for cross-platform deployment. Supporting crates cover quantization, conversion, pruning, merging, finetuning, kernels, and FFI.
+This workspace is the Rust LLM inference engine (`oxidize-core`) plus CLI, server, quantization, conversion, pruning, merge, finetune, kernels, and C-ABI FFI. `oxidize-c` is the only non-Rust product: a dependency-free C11 port of the same inference surface. Duplicate language ports (Go, Python, C++, TypeScript TUI, PyO3) were removed so features live in Rust and C only.
 
 ## STRUCTURE
 ```
@@ -30,12 +28,8 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 ├── oxidize-finetuning/    # LoRA / SFT / self-train (see AGENTS.md)
 ├── oxidize-kernels/       # OXK hand-tuned CPU GEMV kernels (see AGENTS.md)
 ├── oxidize-ffi/           # C-ABI FFI over oxidize-core (see AGENTS.md)
-├── oxidize-py/            # Python bindings (pyo3 + maturin) (see AGENTS.md)
 ├── oxidize-train/         # CSV classifier + video training (see AGENTS.md)
-├── oxidize-golang/        # Go port of oxidize-core (see AGENTS.md)
-├── oxidize-python/        # Pure-Python port (see AGENTS.md)
 ├── oxidize-c/             # Dependency-free C11 port (see AGENTS.md)
-├── oxidize-cpp/           # C++20 Llama-family inference (see AGENTS.md)
 └── scripts/               # CI benchmark regression + remote bench recipes (see AGENTS.md)
 ```
 
@@ -64,12 +58,8 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 | `oxidize-kernels/` | `AGENTS.md` | OXK hand-tuned CPU GEMV kernels |
 | `oxidize-ffi/` | `AGENTS.md` | C-ABI FFI over oxidize-core |
 | `oxidize-train/` | `AGENTS.md` | CSV classifier + video training |
-| **Language ports** | | |
-| `oxidize-py/` | `AGENTS.md` | PyO3 Python bindings |
-| `oxidize-golang/` | `AGENTS.md` | Go port of oxidize-core |
-| `oxidize-python/` | `AGENTS.md` | Pure-Python port |
+| **C port** | | |
 | `oxidize-c/` | `AGENTS.md` | Dependency-free C11 port |
-| `oxidize-cpp/` | `AGENTS.md` | C++20 Llama-family inference |
 | **Tooling** | | |
 | `scripts/` | `AGENTS.md` | CI benchmark gating, remote NUMA bench, publish recipes |
 
@@ -80,13 +70,12 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 | `ComputeBackend` | trait | `oxidize-core/src/backend.rs` | Abstraction all backends implement |
 | `Model` | trait | `oxidize-core/src/model.rs` | Implemented by 5 structs (Inference, Llama, LayerWise, MLX, DFlash) |
 | `GgufQuantizationType` | enum | `oxidize-core/src/format/gguf.rs` | Central type hub; 20+ cross-module refs |
-| `tensor.rs` | module | `oxidize-core/src/compute/` | 5,153 lines; 135 unsafe blocks; SIMD kernels |
+| `tensor.rs` | module | `oxidize-core/src/compute/` | SIMD kernels and tensor ops |
 | `scheduler.rs` | module | `oxidize-core/src/paged_attention/` | vLLM-style request scheduling |
 | `app.rs` | module | `oxidize-server/src/` | Axum route assembly |
 | `TuningPlan` | struct | `oxidize-core/src/autotune/rules.rs` | Fully-resolved autotune plan |
 | `q4k_q8k_row_dot_avx2` | fn | `oxidize-kernels/src/q4k_avx2.rs` | Bit-exact OXK GEMV kernel |
-| `oc_forward` | fn | `oxidize-c/model.c` | C port forward pass |
-| `LlamaModel` | struct | `oxidize-cpp/include/oxidize/model_llama.hpp` | C++ Llama inference |
+| `oc_forward` | fn | `oxidize-c` model path | C port forward pass |
 
 ## WHERE TO LOOK (High-Level)
 | Task | Location | Notes |
@@ -98,60 +87,65 @@ This workspace contains the core Rust LLM inference engine (`oxidize-core`) and 
 | Server route | `oxidize-server/src/routes/` | OpenAI-compatible endpoints |
 | CLI subcommand | `oxidize-cli/src/main.rs` | Also check `src/bin/` for aux tools |
 | Distributed logic | `oxidize-core/src/mesh/` | Only dir with real `mod.rs` + privacy boundaries |
-| Port to Go | `oxidize-golang/` | Mirror Rust structure; see `oxidize-golang/AGENTS.md` |
-| Port to Python | `oxidize-python/` | Mirror Go structure; see `oxidize-python/AGENTS.md` |
 | Port to C | `oxidize-c/` | Intentional standalone C11 port; see `oxidize-c/AGENTS.md` |
-| Port to C++ | `oxidize-cpp/` | llama.cpp parity focus; see `oxidize-cpp/AGENTS.md` |
 | SafeTensors → GGUF | `oxidize-convert/` | Core logic in `oxidize-core/src/format/safetensors_to_gguf.rs` |
-| Wanda pruning | `oxidize-prune/src/wanda.rs` | Per-output-row `|W| · ‖X‖_2`; see `oxidize-prune/AGENTS.md` |
-| Magnitude pruning | `oxidize-prune/src/mask.rs` + `wanda.rs` | Per-output-row `|W|`; per Wanda paper, the right default for LLMs |
-| Activation L2 norms (Wanda calibration) | `oxidize-core/src/compute/activation_stats.rs` | `ActivationStats` + `CalibrationRunner`; consumed by `oxidize-prune` |
+| Wanda pruning | `oxidize-prune/src/wanda.rs` | Per-output-row `|W| · ‖X‖_2` |
+| Magnitude pruning | `oxidize-prune/src/mask.rs` + `wanda.rs` | Per-output-row `|W|` |
+| Activation L2 norms (Wanda calibration) | `oxidize-core/src/compute/activation_stats.rs` | Consumed by `oxidize-prune` |
 | Checkpoint merging | `oxidize-merge/` | Linear/SLERP blend of SafeTensors checkpoints |
 | LoRA / SFT / self-train | `oxidize-finetuning/` | `sft`, `self-train`, `merge` wired; `dpo`/`ppo` are stubs |
 | OXK CPU kernels | `oxidize-kernels/` | Bit-exact Q4_K×Q8_K GEMV; consumed via `oxk` feature |
 | C FFI surface | `oxidize-ffi/src/lib.rs` | `cdylib`/`staticlib` over oxidize-core |
-| Auto-detect + auto-tune | `oxidize-core/src/autotune/` | `detect()` + `fingerprint()` + `plan()`; CLI flags `--auto --no-auto --print-plan` |
+| Auto-detect + auto-tune | `oxidize-core/src/autotune/` | `detect()` + `fingerprint()` + `plan()`; `--auto --no-auto --print-plan` |
 | Vision / multimodal | `oxidize-core/src/vision/` | CLIP-style encoder + `MultimodalPrompt` |
 | Video multimodal | `oxidize-core/src/video/` | Frame sampling + temporal aggregation |
-| Skylake-SP detection (AVX-512 regression gate) | `oxidize-kernels/src/cpu.rs` | `pub fn is_skylake_sp() -> bool` |
+| Skylake-SP detection | `oxidize-kernels/src/cpu.rs` | `pub fn is_skylake_sp() -> bool` |
 | CI benchmark regression | `scripts/ci_benchmark_regression.py` | Perf gate + dashboard |
-| Remote NUMA benchmark | `scripts/bench-ai-box.sh` | Defaults to `ai@192.168.1.132` |
+| Remote NUMA benchmark | `scripts/bench-ai-box.sh` | Defaults to `ai@192.168.1.132`; uses oxidize-c |
 
 ## CONVENTIONS
-- **Flat module system**: `lib.rs` uses `#[path = "..."]` to flatten all modules into crate root. Only `mesh/`, `paged_attention/`, `vision/`, `video/` have real `mod.rs` files.
-- **Config + Error + Trait trinity**: Every subsystem has `XxxConfig`, `XxxError`, and core trait/struct.
-- **Error chaining**: All errors wrap lower-level errors via `From` impls.
-- **Backend dual-file**: `vulkan.rs` + `vulkan_stub.rs` pair (only backend with this pattern).
-- **Build info micro-pattern**: Every backend exposes `XxxBuildInfo` + `xxx_build_info()` for compile-time detection.
-- **Test co-location**: Every `.rs` file has `#[cfg(test)]` module at bottom; no separate `tests/` inside `src/`.
-- **AGENTS.md per domain**: Every crate and major `oxidize-core/src/` subdirectory has an `AGENTS.md` — check the map above before exploring blindly.
-- **Port order**: Rust → Go (`oxidize-golang`) → Python (`oxidize-python`); C (`oxidize-c`) and C++ (`oxidize-cpp`) are independent ports.
+- **Two product languages only:** Rust workspace crates and `oxidize-c`. Do not reintroduce Go, Python, C++, or TypeScript product ports.
+- **Flat module system:** `lib.rs` uses `#[path = "..."]` to flatten modules. Only `mesh/`, `paged_attention/`, `vision/`, `video/` have real `mod.rs` files.
+- **Config + Error + Trait trinity:** Every subsystem has `XxxConfig`, `XxxError`, and core trait/struct.
+- **Error chaining:** All errors wrap lower-level errors via `From` impls.
+- **Backend dual-file:** `vulkan.rs` + `vulkan_stub.rs` pair.
+- **Build info micro-pattern:** Every backend exposes `XxxBuildInfo` + `xxx_build_info()`.
+- **Test co-location:** Every `.rs` file has `#[cfg(test)]` at bottom; no separate `tests/` inside `src/`.
+- Embed C callers through `oxidize-ffi` when they need the Rust engine; use `oxidize-c` when they need a libc-only binary.
+
+Good vs bad (this repo):
+- Good: one implementation of sampling/quant in `oxidize-core`, C port mirrors behavior instead of inventing a third API.
+- Bad: parallel engines in extra languages that drift (the deleted Go/Python/C++ trees).
+- Good: `plan()` in autotune is a pure function with every decision in `plan.rationale`.
+- Bad: `unwrap()` in non-test inference paths; `StdMutex` in async (`oxidize-server` paged runtime).
 
 ## ANTI-PATTERNS (THIS PROJECT)
 - `StdMutex` in async context (`oxidize-server/src/runtime/paged.rs`) — should be `tokio::sync::Mutex`.
-- `tensor.rs` monolith — 5,153 lines mixing kernels, types, and ops. Refactor candidate.
-- Quantization constants shadowed in `tensor.rs` and `cuda.rs` — should be shared.
-- `unwrap()/expect()` proliferation — 1000+ instances in non-test code.
-- Stop trying to use C for tasks that can be done in rust (Claude) — except `oxidize-c/` which is an intentional standalone C port.
+- `tensor.rs` monolith mixing kernels, types, and ops.
+- Quantization constants shadowed in `tensor.rs` and `cuda.rs`.
+- `unwrap()/expect()` proliferation in non-test code.
+- Use C only in `oxidize-c/` or FFI consumers — not for tasks that belong in Rust crates.
 - `oxidize-finetuning` breaks whole-workspace `cargo build --workspace` (pre-existing `qlora.rs` borrow-check error) — build per-crate.
 
 ## UNIQUE STYLES
-- **Bottom-up file organization** (`tensor.rs`): constants → errors → low-level kernels → high-level functions → `Tensor` struct (inverse of typical Rust).
-- **WASM worker type embedding**: `util/web_worker.rs` embeds complete TypeScript interface contracts as 60+ line string literals.
-- **MLX macOS fortress**: `mlx.rs` and `mlx_inference.rs` are heavily `#[cfg(target_os = "macos")]` gated.
-- **OXK bit-exact parity**: `oxidize-kernels` kernels must match scalar reference exactly — parity is a hard invariant.
-- **Autotune pure planner**: `autotune/rules.rs::plan()` is a pure function with every decision in `plan.rationale`.
+- **Bottom-up file organization** (`tensor.rs`): constants → errors → low-level kernels → high-level functions → `Tensor` struct.
+- **WASM worker type embedding:** `util/web_worker.rs` embeds TypeScript interface contracts as string literals (WASM glue, not a product TUI).
+- **MLX macOS fortress:** `mlx.rs` and `mlx_inference.rs` are `#[cfg(target_os = "macos")]` gated.
+- **OXK bit-exact parity:** kernels must match scalar reference exactly.
+- **Autotune pure planner:** `autotune/rules.rs::plan()` is a pure function.
 
 ## COMMANDS
 ```bash
 # Build / test / lint (core product — avoids oxidize-finetuning borrow error)
 cargo build -p oxidize-cli -p oxidize-server -p oxidize-quantize -p oxidize-convert
 cargo test  -p oxidize-core -p oxidize-cli -p oxidize-server -p oxidize-kernels
-make build    # release build (may fail on oxidize-finetuning)
-make test     # workspace tests
-make lint     # clippy -D warnings
-make fmt      # format check
-make ci       # full CI equivalent
+make build
+make test
+make lint
+make fmt
+make ci
+make c-build
+make c-test
 
 # Run
 sfw cargo run -p oxidize-cli -- --prompt "hello"
@@ -160,16 +154,11 @@ sfw cargo run -p oxidize-quantize -- --input in.bin --output out.bin --source F3
 sfw cargo run -p oxidize-convert -- --input model/ --output model.gguf --target Q4_K_M
 sfw cargo run -p oxidize-finetuning -- self-train --model base.gguf --dataset data.jsonl
 
-# C / C++ ports
+# C port
 make -C oxidize-c && ./oxidize-c/oxidize-c --model model.gguf --prompt "hi"
-cmake -B oxidize-cpp/build -S oxidize-cpp && cmake --build oxidize-cpp/build -j
-
-# Go / Python ports
-cd oxidize-golang && CGO_ENABLED=0 go test ./...
-cd oxidize-python && uv run pytest
 
 # WASM
-make wasm     # outputs to dist/wasm
+make wasm
 ```
 
 ## NOTES
@@ -179,41 +168,31 @@ make wasm     # outputs to dist/wasm
 - `.cargo/config.toml` sets custom linker for `aarch64-unknown-linux-gnu` and WASM runner.
 - `oxidize-core/fuzz/` exists but is NOT in workspace members/exclude.
 - `models/` is gitignored but contains tracked files.
-- GGUF/SafeTensors draft-model loading + speculative generation summarizing is active development area.
-- Git installs must name `oxidize-cli` explicitly (`cargo install --git … oxidize-cli --bin oxidize`) because the workspace ships multiple binary crates.
+- GGUF/SafeTensors draft-model loading + speculative generation is an active development area.
+- Git installs must name `oxidize-cli` explicitly (`cargo install --git … oxidize-cli --bin oxidize`).
 
 ## Learned User Preferences
-- When adding `oxidize-python` or expanding `oxidize-golang`, keep all Rust crates and features; do not delete or replace the Rust workspace.
-- Parallel Go/Python ports should reach `oxidize-core` feature parity (Python targeting similar CLOC to Rust); implement in `oxidize-golang` first, mirror to `oxidize-python`, and sync new `master` Rust features.
-- Keep `oxidize-py` (PyO3/maturin bindings) alongside the pure-Python `oxidize-python` package.
-- Prioritize oxidize-cpp speed and llama.cpp feature parity for large-model inference; benchmark CPU deployments on the remote NUMA box `ai@192.168.1.132` when tuning.
-- For Go/Python GPU backends, use pure native implementations (no Rust FFI at runtime; CGO permitted for native GPU bindings); CUDA first, then Vulkan/Metal/WebGPU.
-- Avoid creating extra markdown documentation files unless asked; update README when needed.
-- On feature branches, stage and commit only files related to the task; exclude unrelated workspace changes.
+- Keep all Rust crates and the C port; do not add language ports besides C and Rust.
+- Avoid extra markdown files unless asked; update README when needed.
+- On feature branches, stage and commit only files related to the task.
 - `oxidize run <model>` should start the OpenAI-compatible HTTP/WebSocket server by default; use `--no-api` for local inference only.
-- Contributions should keep tests passing and use clear, ethical PR/markdown descriptions; include benchmarks when claiming performance changes.
-- When a user asks to run a model. It means run it using oxidize 
-- Prefer building and testing over starting development servers unless the user explicitly asks to run or serve.
+- Contributions should keep tests passing and use clear PR descriptions; include benchmarks when claiming performance changes.
+- When a user asks to run a model, run it using oxidize.
+- Prefer building and testing over starting development servers unless asked to serve.
 - Custom Hugging Face repos for quant/model publishing should be private unless the user explicitly requests public.
 
 ## Learned Workspace Facts
-- `oxidize-golang/` is the active Go port of `oxidize-core`; CLI lives in `internal/cli/` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`); HF GGUF resolver in `hf/`.
-- `oxidize-python/` is a pure-Python implementation (`oxidize_python`, `pyproject.toml`, uv/pytest); CLI mirrors Go subcommands; HF resolver in `oxidize_python/hf/hub.py` with cache `~/.cache/oxidize/hf`; `oxidize-py/` is the separate PyO3/maturin bindings crate.
-- Do not modify Rust crates when extending `oxidize-python`; port from `oxidize-golang` or Rust sources.
-- `oxidize-cpp/` is the C++ Llama-family inference port (CPU + optional `OXIDIZE_CUDA` or `OXIDIZE_ROCM`); CLI `--auto`/`--print-plan` autotune NUMA/threads from model file size; CUDA fast path is `resident_forward` (~1 sync/token); llama.cpp parity is an active focus.
-- `oxidize-c/` is a dependency-free C11 port with optional `OC_CUDA` fast path; shares AL-family quant types with Rust/C++.
-- Remote hosts: `ai@192.168.1.132` (primary NUMA bench: 2× Xeon Gold 5220R, 96 logical, 376 GB RAM); `ai@192.168.1.121` (~20 TB storage for large-model quant + HF publish); legacy `ai@192.168.1.68`; `scripts/bench-ai-box.sh` defaults to `.132`; `oxidize-cpp-glm/` is a separate GLM fork (MLA/IQ1/MoE).
-- Custom AL-family quants (`AL5`, `AL5_XS`, `AL6`, `AL8`; ggml types 240–243) live in `oxidize-core`, `oxidize-cpp`, and `oxidize-c`; AL5 is MSE-optimized 4-bit; prioritize speed without quality loss when tuning them.
-- `oxidize-finetuning` exposes `self-train` CLI (`cargo run -p oxidize-finetuning -- self-train`): iterative LoRA SFT with per-round checkpoints, self-dialogue synthetic data (`synthetic.jsonl`), and optional self-critique; resume via `--resume-from`.
-- DFlash speculative decoding in `oxidize-core/src/model/dflash.rs` is an active port target for `oxidize-golang` (and downstream Python); inference needs a compatible target GGUF paired with the draft (hidden-size mismatch falls back to target-only).
-- Rust `oxidize run` rewrites to `--serve-api` by default (background in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime` (`oxidize-server/tests/realtime_ws.rs`).
+- `oxidize-c/` is a dependency-free C11 port with optional `OC_CUDA` fast path; shares AL-family quant types with Rust.
+- Remote hosts: `ai@192.168.1.132` (primary NUMA bench: 2× Xeon Gold 5220R, 96 logical, 376 GB RAM); `ai@192.168.1.121` (~20 TB storage for large-model quant + HF publish); legacy `ai@192.168.1.68`; `scripts/bench-ai-box.sh` defaults to `.132`.
+- Custom AL-family quants (`AL5`, `AL5_XS`, `AL6`, `AL8`; ggml types 240–243) live in `oxidize-core` and `oxidize-c`. AL5 is MSE-optimized 4-bit.
+- `oxidize-finetuning` exposes `self-train` CLI: iterative LoRA SFT with per-round checkpoints and optional self-critique; resume via `--resume-from`.
+- DFlash speculative decoding lives in `oxidize-core/src/model/dflash.rs`; inference needs a compatible target GGUF paired with the draft (hidden-size mismatch falls back to target-only).
+- Rust `oxidize run` rewrites to `--serve-api` by default (in-process server on `--api-host`/`--api-port`); realtime WebSocket at `ws://HOST:PORT/v1/realtime`.
 - `oxidize-convert` converts HuggingFace SafeTensors (file or model directory with `config.json`) to GGUF; core logic in `oxidize-core/src/format/safetensors_to_gguf.rs`.
-- Go/Python ports and `oxidize-cpp` expose `--auto`, `--no-auto`, `--print-plan` autotune; on dual-socket CPU, dense models ≤192 GB use `--numa single --threads 16`, models >192 GB use `--numa interleave --threads 48`; test Go with `CGO_ENABLED=0`, Python with `uv run pytest` (`OXIDIZE_SLOW_TESTS=1` for slow GGUF).
+- Autotune flags `--auto`, `--no-auto`, `--print-plan` exist on Rust CLI and oxidize-c. On dual-socket CPU, dense models ≤192 GB use `--numa single --threads 16`, models >192 GB use `--numa interleave --threads 48`.
 
 ## Cursor Cloud specific instructions
-- The startup update script ensures the Rust `stable` toolchain (edition 2024 needs >= 1.85; the base image ships 1.83 which is too old), `cargo fetch`, Go module deps, and the Python port's `uv sync`. Standard build/test/run commands live in `Makefile`, `QUICKSTART.md`, and `HOW_TO_INSTALL.md`.
+- The startup update script ensures the Rust `stable` toolchain (edition 2024 needs >= 1.85; the base image ships 1.83 which is too old) and `cargo fetch`. Standard commands live in `Makefile`, `QUICKSTART.md`, and `HOW_TO_INSTALL.md`.
 - Non-obvious gotcha: `make build` / `cargo build --workspace` currently FAILS to compile the optional `oxidize-finetuning` crate (`src/qlora.rs` borrow-check error, pre-existing). Build/test the core product per-crate instead, e.g. `cargo build -p oxidize-cli -p oxidize-server -p oxidize-quantize -p oxidize-convert` and `cargo test -p oxidize-core -p oxidize-cli -p oxidize-server -p oxidize-kernels`. The MUST product (CLI + server) is unaffected.
-- `make lint` (clippy `-D warnings`), `make audit` (needs `cargo install cargo-deny`), and the Python `ruff check` all currently report pre-existing warnings/errors; these are code-quality debts, not environment breakage.
-- CLI/server run with placeholder weights when no `--model` is given: `oxidize-cli --prompt ...` echoes the prompt and `/v1/chat/completions` returns an empty `chatcmpl-placeholder`. This is expected; real token generation requires a real GGUF (`--model path.gguf`, or an HF id via the resolver). Committed `oxidize-core/tests/fixtures/*.gguf` are tiny parser fixtures, not runnable models.
-- Go port auto-downloads the `go1.26.2` toolchain via `GOTOOLCHAIN=auto` on first `go build`/`go test` (base image has Go 1.22); no manual Go upgrade needed.
-- `uv` is installed to `~/.local/bin`; if not on PATH, invoke as `~/.local/bin/uv`. Run Python port commands from `oxidize-python/` (or pass `--directory oxidize-python`).
+- `make lint` (clippy `-D warnings`) and `make audit` currently report pre-existing warnings/errors; these are code-quality debts, not environment breakage.
+- CLI/server run with placeholder weights when no `--model` is given: `oxidize-cli --prompt ...` echoes the prompt and `/v1/chat/completions` returns an empty `chatcmpl-placeholder`. Real token generation requires a real GGUF. Committed `oxidize-core/tests/fixtures/*.gguf` are tiny parser fixtures, not runnable models.
