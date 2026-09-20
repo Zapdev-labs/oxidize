@@ -1,6 +1,10 @@
 # Product Requirements Document (PRD)
 
-## Project: oxidize — A Rust-Based LLM Inference Engine
+**Status:** The shipping product is C11 (`oxidize-c`) plus a TypeScript TUI (`oxidize-tui`). Historical Rust-centric text below is not the current architecture.
+
+---
+
+## Project: oxidize — A C11 LLM Inference Engine
 
 **Date:** April 30, 2026
 **Status:** Draft v0.1

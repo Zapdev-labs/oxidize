@@ -1,3 +1,0 @@
-The quick brown fox jumps over the lazy dog.
-Language models estimate the probability of token sequences.
-Perplexity is lower when predicted tokens are more likely.

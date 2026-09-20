@@ -59,7 +59,7 @@ function buildModel(): Buffer {
 
 describe("gguf reader", () => {
   test("parses the oxidize-core v3 fixture", async () => {
-    const header = await readGgufHeader("../oxidize-core/tests/fixtures/valid-v3.gguf")
+    const header = await readGgufHeader("../oxidize-c/tests/fixtures/valid-v3.gguf")
     expect(header.version).toBe(3)
     expect(header.tensorCount).toBe(1)
     expect(header.metadata.get("general.alignment")).toBe(64)
@@ -69,13 +69,13 @@ describe("gguf reader", () => {
 
   test("rejects a bad magic", async () => {
     await expect(
-      readGgufHeader("../oxidize-core/tests/fixtures/invalid-magic.gguf"),
+      readGgufHeader("../oxidize-c/tests/fixtures/invalid-magic.gguf"),
     ).rejects.toThrow(/not a GGUF file/)
   })
 
   test("rejects an unsupported version", async () => {
     await expect(
-      readGgufHeader("../oxidize-core/tests/fixtures/unsupported-version.gguf"),
+      readGgufHeader("../oxidize-c/tests/fixtures/unsupported-version.gguf"),
     ).rejects.toThrow(/unsupported GGUF version/)
   })
 

@@ -205,6 +205,25 @@ Test(cli, context_parses_prefill_chunk_size)
     cr_assert_eq(ctx.prefill_chunk_size, 1024u);
 }
 
+Test(cli, serve_positional_model_matches_tui)
+{
+    char *argv[] = {"oxidize-c", "serve", "model.gguf",
+                    "--host", "127.0.0.1", "--port", "41234",
+                    "--backend", "cpu", "--threads", "8",
+                    "--ctx-size", "8192", "--max-tokens", "256"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(15, argv, &ctx));
+    cr_assert_eq(ctx.command, OC_CLI_CMD_SERVE);
+    cr_assert_str_eq(ctx.model_path, "model.gguf");
+    cr_assert_str_eq(ctx.host, "127.0.0.1");
+    cr_assert_eq(ctx.port, 41234);
+    cr_assert_str_eq(ctx.backend, "cpu");
+    cr_assert_eq(ctx.threads, 8);
+    cr_assert_eq(ctx.n_ctx, 8192u);
+    cr_assert_eq(ctx.n_predict, 256u);
+    cr_assert_eq(ctx.ppl_max_tokens, 256u);
+}
+
 Test(cli, rejects_invalid_prefill_chunk_size)
 {
     char *argv[] = {"oxidize-c", "--prefill-chunk-size", "notanumber"};

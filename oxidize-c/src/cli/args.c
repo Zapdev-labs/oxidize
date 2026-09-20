@@ -39,6 +39,38 @@ static bool match(const char *arg, const char *long_name)
     return strcmp(arg, long_name) == 0;
 }
 
+static bool command_takes_positional_model(OcCliCommand cmd)
+{
+    switch (cmd) {
+    case OC_CLI_CMD_PROMPT:
+    case OC_CLI_CMD_CHAT:
+    case OC_CLI_CMD_BENCH:
+    case OC_CLI_CMD_INSPECT:
+    case OC_CLI_CMD_SERVE:
+    case OC_CLI_CMD_QUANTIZE:
+    case OC_CLI_CMD_PRUNE:
+    case OC_CLI_CMD_FINETUNE:
+    case OC_CLI_CMD_TOKENIZE:
+    case OC_CLI_CMD_DETOKENIZE:
+    case OC_CLI_CMD_PERPLEXITY:
+    case OC_CLI_CMD_SERVE_REALTIME:
+    case OC_CLI_CMD_DFLASH2:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void assign_positional(OcCliContext *ctx, const char *arg)
+{
+    if (arg == NULL || arg[0] == '-') return;
+    if (command_takes_positional_model(ctx->command) && ctx->model_path == NULL) {
+        ctx->model_path = arg;
+        return;
+    }
+    if (ctx->prompt == NULL) ctx->prompt = arg;
+}
+
 static void parse_prefill_chunk_size(uint32_t *dst, const char *val)
 {
     uint32_t n;
@@ -183,8 +215,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
 
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
         if (val == NULL) {
-            /* A trailing bare word is the prompt for generation commands. */
-            if (arg[0] != '-' && ctx->prompt == NULL) ctx->prompt = arg;
+            assign_positional(ctx, arg);
             continue;
         }
 
@@ -193,7 +224,10 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--prompt"))         { ctx->prompt = val; i++; }
         else if (match(arg, "--prompt-file"))    { ctx->prompt_file = val; i++; }
         else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
-        else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--ctx") || match(arg, "--ctx-size")) {
+            ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10);
+            i++;
+        }
         else if (match(arg, "--kv"))             { ctx->kv_type = val; i++; }
         else if (match(arg, "--prefill-chunk-size")) {
             parse_prefill_chunk_size(&ctx->prefill_chunk_size, val);
@@ -251,7 +285,12 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--file"))           { ctx->hf_file = val; i++; }
         else if (match(arg, "--cache-dir"))      { ctx->cache_dir = val; i++; }
         /* Perplexity / tokenize. */
-        else if (match(arg, "--max-tokens"))     { ctx->ppl_max_tokens = (size_t)strtoull(val, NULL, 10); i++; }
+        else if (match(arg, "--max-tokens")) {
+            ctx->ppl_max_tokens = (size_t)strtoull(val, NULL, 10);
+            if (ctx->ppl_max_tokens > 0 && ctx->ppl_max_tokens <= UINT32_MAX)
+                ctx->n_predict = (uint32_t)ctx->ppl_max_tokens;
+            i++;
+        }
         else if (match(arg, "--ids"))            { ctx->token_ids_str = val; i++; }
         else if (match(arg, "--expert-cache-mb")) {
             uint32_t n;
@@ -275,7 +314,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
             }
             i++;
         }
-        else if (arg[0] != '-' && ctx->prompt == NULL) { ctx->prompt = arg; }
+        else if (arg[0] != '-') { assign_positional(ctx, arg); }
     }
     return true;
 }

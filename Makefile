@@ -1,42 +1,36 @@
 SHELL := /bin/bash
 
-.PHONY: help fmt lint audit udeps test build wasm check ci
+.PHONY: help build test lint tui tui-test check ci clean
 
 help:
-	@echo "Common tasks:"
-	@echo "  make fmt    - Check Rust formatting"
-	@echo "  make lint   - Run clippy with warnings denied"
-	@echo "  make audit  - Run cargo-deny license/security audit"
-	@echo "  make udeps  - Detect unused Cargo dependencies (cargo-udeps + nightly)"
-	@echo "  make test   - Run workspace tests"
-	@echo "  make build  - Build release binaries for workspace crates"
-	@echo "  make wasm   - Build oxidize-core with wasm-bindgen output"
-	@echo "  make check  - Run fmt + lint + test"
-	@echo "  make ci     - Run check + build + udeps"
-
-fmt:
-	cargo fmt --all --check
-
-lint:
-	cargo clippy --workspace --all-targets -- -D warnings
-
-audit:
-	cargo deny check
-
-udeps:
-	./scripts/check-udeps.sh
-
-test:
-	cargo test --workspace --all-targets
+	@echo "oxidize — C runtime + TypeScript TUI"
+	@echo "  make build     - Build oxidize-c (CPU)"
+	@echo "  make test      - C tests (ASan/UBSan) + TUI tests"
+	@echo "  make lint      - clang-tidy on oxidize-c (best-effort)"
+	@echo "  make tui       - bun install + typecheck the TUI"
+	@echo "  make tui-test  - bun test in oxidize-tui"
+	@echo "  make check     - build + test"
+	@echo "  make ci        - check + tui"
+	@echo "  make clean     - clean oxidize-c artifacts"
 
 build:
-	cargo build --workspace --release
+	$(MAKE) -C oxidize-c build
 
-wasm:
-	cargo build -p oxidize-core --target wasm32-unknown-unknown --release --features wasm
-	command -v wasm-bindgen >/dev/null || cargo install --locked wasm-bindgen-cli --version 0.2.120
-	wasm-bindgen --target web --out-dir dist/wasm target/wasm32-unknown-unknown/release/oxidize_core.wasm
+test: build
+	$(MAKE) -C oxidize-c test
 
-check: fmt lint audit test
+lint:
+	$(MAKE) -C oxidize-c lint
 
-ci: check udeps build
+tui:
+	cd oxidize-tui && bun install && bun run typecheck
+
+tui-test:
+	cd oxidize-tui && bun install && bun test
+
+check: test tui-test
+
+ci: check lint
+
+clean:
+	$(MAKE) -C oxidize-c clean

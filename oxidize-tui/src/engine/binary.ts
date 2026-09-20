@@ -1,11 +1,11 @@
-/** Locating the `oxidize` binary this TUI should drive. */
+/** Locating the C `oxidize-c` runtime this TUI should drive. */
 import { existsSync, statSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 
 export interface Launcher {
   /** argv[0] */
   cmd: string
-  /** args that must precede user args (e.g. `run -q -p oxidize-cli --`) */
+  /** args that must precede user args (e.g. `make -C oxidize-c --`) */
   prefix: string[]
   /** short human label for the status bar */
   label: string
@@ -13,11 +13,15 @@ export interface Launcher {
   cwd: string
 }
 
+function isWorkspaceRoot(dir: string): boolean {
+  return existsSync(join(dir, "oxidize-c", "Makefile")) && existsSync(join(dir, "oxidize-tui", "package.json"))
+}
+
 /** Walk up from `start` looking for the oxidize workspace root. */
 export function findWorkspaceRoot(start = process.cwd()): string | null {
   let dir = resolve(start)
   for (;;) {
-    if (existsSync(join(dir, "oxidize-core", "Cargo.toml"))) return dir
+    if (isWorkspaceRoot(dir)) return dir
     const up = dirname(dir)
     if (up === dir) return null
     dir = up
@@ -51,23 +55,24 @@ export function resolveLauncher(): Launcher {
   }
 
   if (root) {
-    for (const profile of ["release", "debug"]) {
-      const p = join(root, "target", profile, "oxidize")
-      if (isExec(p)) return { cmd: p, prefix: [], label: `target/${profile}`, cwd }
-    }
+    const built = join(root, "oxidize-c", "oxidize-c")
+    if (isExec(built)) return { cmd: built, prefix: [], label: "oxidize-c", cwd }
   }
+
+  const foundC = onPath("oxidize-c")
+  if (foundC) return { cmd: foundC, prefix: [], label: "PATH", cwd }
 
   const found = onPath("oxidize")
   if (found) return { cmd: found, prefix: [], label: "PATH", cwd }
 
   if (root) {
     return {
-      cmd: "cargo",
-      prefix: ["run", "-q", "--release", "-p", "oxidize-cli", "--bin", "oxidize", "--"],
-      label: "cargo run (will compile)",
+      cmd: join(root, "oxidize-c", "oxidize-c"),
+      prefix: [],
+      label: "oxidize-c (run make first)",
       cwd: root,
     }
   }
 
-  return { cmd: "oxidize", prefix: [], label: "oxidize (not found)", cwd }
+  return { cmd: "oxidize-c", prefix: [], label: "oxidize-c (not found)", cwd }
 }
