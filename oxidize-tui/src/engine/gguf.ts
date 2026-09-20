@@ -3,7 +3,7 @@
  *
  * Reads metadata KVs and tensor descriptors without mapping weights, so the
  * model browser can show architecture / quant / parameter count for a 200 GB
- * file in a few milliseconds. Mirrors `oxidize-core/src/format/gguf.rs`.
+ * file in a few milliseconds. Mirrors `oxidize-c` GGUF header layout.
  */
 import { open, type FileHandle } from "node:fs/promises"
 

@@ -45,6 +45,13 @@
 #if defined(__linux__)
 #include <sys/mman.h>
 #include <unistd.h>
+#ifndef MAP_ANONYMOUS
+#ifdef MAP_ANON
+#define MAP_ANONYMOUS MAP_ANON
+#else
+#define MAP_ANONYMOUS 0x20
+#endif
+#endif
 
 static size_t df2_hp_pagesize(void)
 {

@@ -122,17 +122,10 @@ Enable vision mode with the `--vision` flag and provide an image with `--image`:
 
 ```bash
 # Single image inference
-cargo run -p oxidize-cli -- \
-  --model /path/to/multimodal-model.gguf \
-  --vision \
-  --image /path/to/image.jpg \
-  --prompt "What is in this image?"
+./oxidize-c/oxidize-c --model /path/to/multimodal-model.gguf --prompt "What is in this image?"
 
-# Chat mode with vision
-cargo run -p oxidize-cli -- \
-  --model /path/to/multimodal-model.gguf \
-  --chat \
-  --vision
+# Chat
+./oxidize-c/oxidize-c chat --model /path/to/multimodal-model.gguf
 ```
 
 ### Server API Usage
@@ -274,17 +267,10 @@ Enable speculative decoding with `--draft-model`:
 
 ```bash
 # Basic speculative decoding
-cargo run -p oxidize-cli -- \
-  --model /path/to/target-model.gguf \
-  --draft-model /path/to/dflash-draft.gguf \
-  --prompt "Explain quantum computing"
+./oxidize-c/oxidize-c --model /path/to/target-model.gguf --prompt "Explain quantum computing"
 
-# Adjust draft tokens per step
-cargo run -p oxidize-cli -- \
-  --model /path/to/target-model.gguf \
-  --draft-model /path/to/dflash-draft.gguf \
-  --draft-tokens 8 \
-  --prompt "Write a story about robots"
+# Draft / DSpark
+./oxidize-c/oxidize-c --model /path/to/target-model.gguf --spec-type dspark --draft-tokens 8 --prompt "Write a story about robots"
 ```
 
 ### Fallback Mode
@@ -356,13 +342,7 @@ println!("Estimated speedup: {:.2}x", stats.speedup_estimate());
 ### Combined Example
 
 ```bash
-# Vision + Speculative decoding together
-cargo run -p oxidize-cli -- \
-  --model /path/to/multimodal-model.gguf \
-  --draft-model /path/to/dflash-draft.gguf \
-  --vision \
-  --image /path/to/image.jpg \
-  --prompt "What is unusual about this image?"
+./oxidize-c/oxidize-c --model /path/to/multimodal-model.gguf --spec-type dspark --prompt "What is unusual about this image?"
 ```
 
 ## Performance Tuning
@@ -404,7 +384,7 @@ Expected speedups:
 
 - **Model path errors**: Use absolute paths or verify relative paths from the workspace root.
 - **Memory errors**: Vision encoders and speculative decoding both increase memory usage. Monitor with `--profile perf`.
-- **Build errors**: Ensure all workspace crates are built: `cargo build --workspace`.
+- **Build errors**: `make -C oxidize-c build`.
 
 ## References
 

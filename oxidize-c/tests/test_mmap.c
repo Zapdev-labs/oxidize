@@ -27,7 +27,7 @@
 #include <string.h>     /* memset, str_eq */
 #include <unistd.h>     /* read, lseek, close */
 
-#define FIXTURE_DIR "../oxidize-core/tests/fixtures"
+#define FIXTURE_DIR "tests/fixtures"
 #define FIXTURE(name) FIXTURE_DIR "/" name
 
 Test(mmap, open_readonly_returns_mapped_bytes)

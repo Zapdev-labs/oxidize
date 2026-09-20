@@ -1305,11 +1305,8 @@ static void sha256_hex(const uint8_t hash[32], char out[65])
     out[64] = '\0';
 }
 
-Test(quant, al_iq_constant_table_sha256, .description = "VAL-QUANT-016: AL/IQ/NVFP4 constant table SHA256 matches Rust") {
-    /* Expected SHA256 hashes computed from oxidize-core Rust sources via
-     * scripts/gen_quant_tables.py (one-time Python computation). The Rust
-     * tables are themselves transcribed verbatim from ggml-common.h, so a
-     * matching hash proves bit-exact parity with both. */
+Test(quant, al_iq_constant_table_sha256, .description = "VAL-QUANT-016: AL/IQ/NVFP4 constant table SHA256 is stable") {
+    /* Expected SHA256 hashes of the tables in quant_tables.h (ggml-common.h). */
     struct { const char *name; const void *data; size_t len; const char *expected_sha; } tables[] = {
         { "KVALUES_IQ4NL",       KVALUES_IQ4NL,       sizeof(KVALUES_IQ4NL),
           "61aa47540aa024b5d6ddaa839b84ffe59f3d5a349af5c6c7ffcb5e0474b46163" },

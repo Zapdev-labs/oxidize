@@ -25,7 +25,7 @@ Options:
   -h, --help        this message
 
 Environment:
-  OXIDIZE_BIN       path to the oxidize binary (else target/release, target/debug, then PATH)
+  OXIDIZE_BIN       path to the oxidize-c binary (else oxidize-c/oxidize-c, then PATH)
   OXIDIZE_MODELS    extra ':'-separated directories to scan for .gguf files
 `
 

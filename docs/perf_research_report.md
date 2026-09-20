@@ -1,5 +1,8 @@
 # Performance Research Report: llama.cpp vs oxidize
 
+The shipping oxidize runtime is C11 (`oxidize-c`). Numbers and “Rust” notes
+below are a 2026-05-20 snapshot, not current build instructions.
+
 **Date:** 2026-05-20
 **Branch:** `deepflash-safetensors-perf`
 **Scope:** Compare llama.cpp's key performance optimizations against oxidize's current implementation, identify gaps, and recommend top improvements.

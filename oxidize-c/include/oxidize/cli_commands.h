@@ -79,11 +79,11 @@ typedef struct OcCliContext {
     bool               verbose;
 
     /* Model + generation. */
-    const char        *model_path;     /* --model PATH                      */
+    const char        *model_path;     /* --model PATH / positional path    */
     const char        *prompt;         /* --prompt TEXT / positional       */
     const char        *prompt_file;    /* --prompt-file PATH                */
     uint32_t           n_predict;      /* --n-predict N (default 128)       */
-    /* --ctx N: KV context length. 0 means "use the default cap"; see
+    /* --ctx / --ctx-size N: KV context length. 0 means "use the default cap"; see
      * OC_CLI_DEFAULT_MAX_CTX below. Pass a value larger than the cap to
      * request it explicitly. */
     uint32_t           n_ctx;

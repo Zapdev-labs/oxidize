@@ -23,12 +23,8 @@
 #include "oxidize/log.h"
 #include "oxidize/simd.h"
 
-/* Bit-exact lookup tables for AL/IQ/NVFP4 dequant (port of
- * oxidize-core/src/compute/quantization{.rs,/iq_grids.rs,
- * /iq1s_grid_fragment.rs, /iq2s_grid_fragment.rs, /iq2xs_grid_fragment.rs}).
- * Generated verbatim from ggml-common.h — do not hand-edit; regenerate via
- * scripts/gen_quant_tables.py. SHA256 of each table matches the Rust source
- * (validated by tests/test_quant.c::al_iq_constant_table_sha256). */
+/* Bit-exact lookup tables for AL/IQ/NVFP4 dequant (ggml-common.h).
+ * SHA256 of each table is checked in tests/test_quant.c. */
 #include "quant_tables.h"
 
 #include <math.h>

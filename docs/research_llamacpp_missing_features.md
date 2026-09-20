@@ -125,7 +125,7 @@ llama.cpp has evolved significantly beyond oxidize's current feature set. The bi
 
 ### 4.2 Windows Prebuilt Binaries with Multi-Backend
 **What llama.cpp has:** Prebuilt Windows binaries with CUDA, Vulkan, HIP, SYCL variants.  
-**What oxidize has:** Rust cargo build only.  
+**What oxidize has:** `make -C oxidize-c build` (C11).  
 
 ### 4.3 NPU Backend Support
 **What llama.cpp has:** Experimental NPU backends (mentioned in Wikipedia).  

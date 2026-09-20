@@ -1,5 +1,8 @@
 # MLX Integration Research Report for Oxidize
 
+The shipping oxidize runtime is C11 (`oxidize-c`). This note is research on
+Apple MLX (including its C API). It is not a Rust-port how-to.
+
 ## Executive Summary
 
 Apple's MLX framework has a **official C API (`mlx-c`)** that can be called from Rust. There are multiple Rust binding crates available, with `mlx-rs` (by OxideAI/oxiglade) being the most mature unofficial option. MLX provides a **unified memory model** on Apple Silicon that eliminates CPU↔GPU copies, supports **native quantization** (2-8 bits, mxfp4/8), and offers **dedicated fast ops** for LLM primitives (attention, RMS norm, RoPE). MLX is measurably faster than PyTorch MPS and is now the default backend for Ollama on Apple Silicon.

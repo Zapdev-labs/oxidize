@@ -26,25 +26,18 @@ assert_contains "$tmp/dry-run.out" 'oxidize_binary=/tmp/oxidize-c-green2'
 [[ $(grep -c '^oxidize case=' "$tmp/dry-run.out") -eq 2 ]] || fail 'expected two oxidize cases'
 [[ $(grep -c '^llama case=' "$tmp/dry-run.out") -eq 2 ]] || fail 'expected two llama cases'
 
-# Given native JSON from each engine, when the remote recorder parses it,
-# then both results use the same numeric throughput schema.
-sed -n '/^import json, pathlib, sys$/,/^PY$/p' "$runner" | sed '$d' >"$tmp/parse.py"
-printf 'Elapsed (wall clock) time (h:mm:ss or m:ss): 1:02.50\n' >"$tmp/time.txt"
+cc -std=c11 -Wall -Wextra -Werror -O2 -o "$tmp/qwen36_record" "$root/oxidize-c/tools/qwen36_record.c"
+printf 'Elapsed (wall clock) time (h:mm:ss or m:ss): 1:02.50\nMaximum resident set size (kbytes): 3\n' >"$tmp/time.txt"
 printf '%s\n' '{"results":[{"prefill_tok_per_s":3.25,"decode_tok_per_s":1.75}]}' >"$tmp/oxidize.out"
-python3 "$tmp/parse.py" oxidize-c pp64/tg32 measure 1 command "$tmp/time.txt" "$tmp/oxidize.out" 1 2 3 /model.gguf sha 4 revision commit cpus 0 16 label >"$tmp/oxidize.json"
-printf '%s\n' \
-    '{"n_prompt":64,"n_gen":0,"avg_ts":20.5}' \
-    '{"n_prompt":0,"n_gen":32,"avg_ts":7.25}' >"$tmp/llama.out"
-python3 "$tmp/parse.py" llama pp64/tg32 measure 1 command "$tmp/time.txt" "$tmp/llama.out" 1 2 3 /model.gguf sha 4 revision commit cpus 0 16 label >"$tmp/llama.json"
-python3 - "$tmp/oxidize.json" "$tmp/llama.json" <<'PY'
-import json, pathlib, sys
-oxidize, llama = (json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:])
-assert oxidize['prefill_tok_per_s'] == 3.25
-assert oxidize['decode_tok_per_s'] == 1.75
-assert llama['prefill_tok_per_s'] == 20.5
-assert llama['decode_tok_per_s'] == 7.25
-assert oxidize['timing']['elapsed_s'] == 62.5
-PY
+ox_row=$("$tmp/qwen36_record" row --engine oxidize-c --case pp64/tg32 --phase measure --run 1 --command cmd --timing "$tmp/time.txt" --stdout "$tmp/oxidize.out" --load-before 1 --load-after 2 --rss 3 --model /model.gguf --sha sha --size 4 --revision rev --llama commit --affinity cpus --numa 0 --threads 16 --label lab)
+[[ "$ox_row" == *'"prefill_tok_per_s":3.25'* ]] || fail "oxidize prefill: $ox_row"
+[[ "$ox_row" == *'"decode_tok_per_s":1.75'* ]] || fail "oxidize decode: $ox_row"
+[[ "$ox_row" == *'"elapsed_s":62.5'* ]] || fail "elapsed: $ox_row"
+printf '%s\n' '{"n_prompt":64,"n_gen":0,"avg_ts":20.5}' '{"n_prompt":0,"n_gen":32,"avg_ts":7.25}' >"$tmp/llama.out"
+llama_row=$("$tmp/qwen36_record" row --engine llama --case pp64/tg32 --phase measure --run 1 --command cmd --timing "$tmp/time.txt" --stdout "$tmp/llama.out" --load-before 1 --load-after 2 --rss 3 --model /model.gguf --sha sha --size 4 --revision rev --llama commit --affinity cpus --numa 0 --threads 16 --label lab)
+[[ "$llama_row" == *'"prefill_tok_per_s":20.5'* ]] || fail "llama prefill: $llama_row"
+[[ "$llama_row" == *'"decode_tok_per_s":7.25'* ]] || fail "llama decode: $llama_row"
+! grep -F python3 "$runner" >/dev/null || fail 'bench script still invokes python3'
 
 # Given a fake shared host reporting load 250, when the runner is invoked,
 # then it refuses with EX_TEMPFAIL before any benchmark/build command executes.

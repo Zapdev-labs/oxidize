@@ -10,106 +10,56 @@ permissions:
   contents: read
 
 jobs:
-  rust:
-    name: Build and test (${{ matrix.os }})
+  c:
+    name: oxidize-c (${{ matrix.os }}, ${{ matrix.cc }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-
+        include:
+          - os: ubuntu-24.04
+            cc: gcc
+          - os: ubuntu-24.04
+            cc: clang
+    defaults:
+      run:
+        working-directory: oxidize-c
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Dependency/license audit
-        run: cargo deny check
-
-      - name: Run tests
-        run: cargo test --workspace --all-targets
-
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential clang
       - name: Build
-        run: cargo build --workspace --release
+        env:
+          CC: ${{ matrix.cc }}
+        run: make clean && make -j"$(nproc)" build
+      - name: Version
+        run: ./oxidize-c --version
+      - name: Test
+        env:
+          CC: ${{ matrix.cc }}
+        run: make test
 
-  dead-code:
-    name: Dead code detection (cargo-udeps)
-    runs-on: ubuntu-latest
+  tui:
+    name: oxidize-tui
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust (nightly for cargo-udeps)
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-udeps
-        run: cargo install cargo-udeps --locked
-
-      - name: Detect unused dependencies
-        run: ./scripts/check-udeps.sh
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install and test
+        working-directory: oxidize-tui
+        run: |
+          bun install
+          bun run typecheck
+          bun test
 
   docker:
-    name: Docker build smoke tests
+    name: Docker C image
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build server image
-        run: docker build -f Dockerfile.server -t oxidize-server:test .
-
+      - uses: actions/checkout@v4
       - name: Build CLI image
-        run: docker build -f Dockerfile.cli -t oxidize-cli:test .
-
-  benchmarks:
-    name: Benchmarks and regression detection
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run benchmark regression checker unit tests
-        run: python3 -m unittest scripts/test_ci_benchmark_regression.py
-
-      - name: Run benchmark dashboard unit tests
-        run: python3 -m unittest scripts/test_ci_benchmark_dashboard.py
-
-      - name: Run criterion benchmarks
-        run: cargo bench -p oxidize-core --bench criterion -- --noplot
-
-      - name: Detect benchmark regressions
-        run: python3 scripts/ci_benchmark_regression.py
-
-      - name: Generate benchmark dashboard
-        run: python3 scripts/ci_benchmark_dashboard.py
-
-      - name: Upload benchmark dashboard
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-dashboard
-          path: target/benchmark-dashboard
+        run: docker build -f Dockerfile.cli -t oxidize-c:test .

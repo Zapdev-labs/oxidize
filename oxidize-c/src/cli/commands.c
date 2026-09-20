@@ -491,7 +491,8 @@ void oc_cli_command_help_for(OcCliCommand cmd)
         break;
     case OC_CLI_CMD_SERVE:
         printf("start OpenAI-compatible HTTP server\n\n"
-               "USAGE: oxidize-c serve --model <path> [OPTIONS]\n\n"
+               "USAGE: oxidize-c serve <path.gguf> [OPTIONS]\n"
+               "       oxidize-c serve --model <path> [OPTIONS]\n\n"
                "OPTIONS:\n"
                "  --host HOST           Bind host (default 127.0.0.1)\n"
                "  --port PORT           Bind port (default 8080)\n"

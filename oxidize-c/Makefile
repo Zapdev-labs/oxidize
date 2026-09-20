@@ -236,10 +236,13 @@ cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 %.cuo: %.cu
 	nvcc $(NVCC_FLAGS) -c -o $@ $<
 
+qwen36_record: tools/qwen36_record.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
 clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
 	      $(LIB_ASAN_OBJS) $(CUDA_OBJS) \
 	      $(DEP_FILES) \
-	      oxidize-c test_runner liboxidize-c.a
+	      oxidize-c test_runner liboxidize-c.a qwen36_record
 
-.PHONY: build lib test lint clean avx512 cuda manual-tests
+.PHONY: build lib test lint clean avx512 cuda manual-tests qwen36_record

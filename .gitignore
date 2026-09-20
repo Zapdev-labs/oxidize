@@ -1,16 +1,4 @@
-/target/
 /dist/
-/dist/wasm/
-
-# Rust/profiling artifacts
-*.profraw
-*.profdata
-*.perf.data
-perf.data*
-rust_out
-*.vsix
-
-# Python caches
 __pycache__/
 *.py[cod]
 
@@ -19,21 +7,14 @@ __pycache__/
 .env.*
 /models/
 
-# btca local data
-.btca/
-
 # Local k8s deployment scripts (not part of upstream)
 deploy/
 /bench_results.json
 /results/
-# Local benchmark/audit run logs (output, not source)
 /.audit/
 /evidence/
 /plans/
 /specs/
-
-# Go build output
-oxidize-golang/oxidize
 
 # IDE / agent session artifacts (never commit)
 .cursor/
@@ -42,5 +23,4 @@ oxidize-golang/oxidize
 .crew/
 .firecrawl/
 .omo/
-modal_app.py.tmp.*
 docs/superpowers/

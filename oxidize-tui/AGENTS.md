@@ -22,7 +22,7 @@ oxidize-tui/
     ├── App.tsx       # layout + ALL keyboard routing (single useKeyboard)
     ├── theme.ts      # colours + glyphs — the whole visual system
     ├── engine/
-    │   ├── binary.ts   # locate the oxidize binary (env → target/ → PATH → cargo run)
+    │   ├── binary.ts   # locate oxidize-c (env → oxidize-c/oxidize-c → PATH)
     │   ├── models.ts   # scan model dirs, collapse split shards, enrich headers
     │   ├── gguf.ts     # GGUF v2/v3 header reader, incl. the AL quant family
     │   ├── server.ts   # spawn `oxidize serve`, pump output, poll /readyz
@@ -72,6 +72,5 @@ a layout change: render a view and `console.log` the frame.
 - `<ascii-font>` takes `color`, not `fg`.
 - `InputProps["onSubmit"]` is typed `(v: string | SubmitEvent)`; coerce via the ref.
 - Do not pass `value` to `<input>` — the renderable owns its buffer; use `onInput`.
-- The engine's `serve` subcommand is rewritten internally to `--serve-api --api-only`;
-  pass-through flags are listed in `oxidize-cli/src/main/command_rewrite.rs`.
+- The engine is the C binary: `oxidize-c serve <model.gguf> --host HOST --port PORT`.
 - Model load has **no timeout** — a 300 GB GGUF takes minutes; the user aborts with `esc`.

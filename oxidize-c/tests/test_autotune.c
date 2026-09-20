@@ -145,7 +145,7 @@ Test(autotune, numa_name_covers_enum)
 Test(autotune, fingerprint_handles_parser_fixture)
 {
     OcGgufMmappedFile m;
-    OcError e = oc_gguf_map_open("../oxidize-core/tests/fixtures/valid-v3.gguf", &m);
+    OcError e = oc_gguf_map_open("tests/fixtures/valid-v3.gguf", &m);
     if (e != OC_OK) {
         cr_skip_test("fixture not available at this CWD");
     }
@@ -196,7 +196,7 @@ Test(autotune, apply_noop_plan_does_not_crash)
 {
     /* A plan that requests no hugepages and no mlock should be a no-op. */
     OcGgufMmappedFile m;
-    if (oc_gguf_map_open("../oxidize-core/tests/fixtures/valid-v3.gguf", &m) != OC_OK) {
+    if (oc_gguf_map_open("tests/fixtures/valid-v3.gguf", &m) != OC_OK) {
         cr_skip_test("fixture not available at this CWD");
     }
     OcTuningPlan p;
@@ -213,7 +213,7 @@ Test(autotune, apply_hugepages_best_effort_on_small_file)
     /* Even if the plan requests hugepages, applying to a tiny fixture must
      * not crash; the underlying advise is best-effort. */
     OcGgufMmappedFile m;
-    if (oc_gguf_map_open("../oxidize-core/tests/fixtures/valid-v3.gguf", &m) != OC_OK) {
+    if (oc_gguf_map_open("tests/fixtures/valid-v3.gguf", &m) != OC_OK) {
         cr_skip_test("fixture not available");
     }
     OcCpuInfo cpu;
@@ -555,7 +555,7 @@ Test(autotune, plan_and_apply_without_gpu_does_not_crash)
     m.n_layer = 32;
     OcTuningPlan p = oc_autotune_plan(&cpu, &m);
     OcGgufMmappedFile mf;
-    if (oc_gguf_map_open("../oxidize-core/tests/fixtures/valid-v3.gguf", &mf) != OC_OK) {
+    if (oc_gguf_map_open("tests/fixtures/valid-v3.gguf", &mf) != OC_OK) {
         cr_skip_test("fixture not available at this CWD");
     }
     cr_assert_eq(oc_autotune_apply(&p, &mf), OC_OK);

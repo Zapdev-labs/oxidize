@@ -1,47 +1,14 @@
-FROM rust:1.95-bookworm AS builder
-WORKDIR /workspace
-
-COPY Cargo.toml Cargo.lock ./
-COPY oxidize-core/Cargo.toml oxidize-core/Cargo.toml
-COPY oxidize-core/build.rs oxidize-core/build.rs
-COPY oxidize-server/Cargo.toml oxidize-server/Cargo.toml
-COPY oxidize-cli/Cargo.toml oxidize-cli/Cargo.toml
-COPY oxidize-quantize/Cargo.toml oxidize-quantize/Cargo.toml
-COPY oxidize-py/Cargo.toml oxidize-py/Cargo.toml
-COPY oxidize-train/Cargo.toml oxidize-train/Cargo.toml
-COPY oxidize-finetuning/Cargo.toml oxidize-finetuning/Cargo.toml
-COPY oxidize-convert/Cargo.toml oxidize-convert/Cargo.toml
-COPY oxidize-ffi/Cargo.toml oxidize-ffi/Cargo.toml
-COPY oxidize-kernels/Cargo.toml oxidize-kernels/Cargo.toml
-COPY oxidize-prune/Cargo.toml oxidize-prune/Cargo.toml
-COPY oxidize-merge/Cargo.toml oxidize-merge/Cargo.toml
-COPY vendor/libp2p-dns vendor/libp2p-dns
-COPY vendor/libp2p-mdns vendor/libp2p-mdns
-COPY vendor/libp2p-yamux vendor/libp2p-yamux
-COPY oxidize-core/src oxidize-core/src
-COPY oxidize-core/benches oxidize-core/benches
-COPY oxidize-core/kernels oxidize-core/kernels
-COPY oxidize-server/src oxidize-server/src
-COPY oxidize-cli/src oxidize-cli/src
-COPY oxidize-quantize/src oxidize-quantize/src
-COPY oxidize-py/src oxidize-py/src
-COPY oxidize-train/src oxidize-train/src
-COPY oxidize-finetuning/src oxidize-finetuning/src
-COPY oxidize-convert/src oxidize-convert/src
-COPY oxidize-ffi/src oxidize-ffi/src
-COPY oxidize-kernels/src oxidize-kernels/src
-COPY oxidize-kernels/benches oxidize-kernels/benches
-COPY oxidize-prune/src oxidize-prune/src
-COPY oxidize-merge/src oxidize-merge/src
-
-RUN cargo build --release --package oxidize-server
+FROM debian:bookworm-slim AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY oxidize-c oxidize-c
+WORKDIR /src/oxidize-c
+RUN make -j"$(nproc)" build
 
 FROM debian:bookworm-slim
-RUN useradd --create-home --shell /usr/sbin/nologin oxidize \
-    && mkdir -p /var/lib/oxidize/model-cache \
-    && chown -R oxidize:oxidize /var/lib/oxidize
-WORKDIR /app
-COPY --from=builder /workspace/target/release/oxidize-server /usr/local/bin/oxidize-server
+RUN useradd --create-home --shell /usr/sbin/nologin oxidize
+COPY --from=builder /src/oxidize-c/oxidize-c /usr/local/bin/oxidize-c
 USER oxidize
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/oxidize-server"]
+ENTRYPOINT ["/usr/local/bin/oxidize-c", "serve", "--host", "0.0.0.0", "--port", "8080"]
