@@ -165,19 +165,13 @@ preload_layer(layer_idx, &[
 ### 1. Convert your model to Q4_0
 
 ```bash
-sfw cargo run -p oxidize-quantize -- \
-  --input model-f32.gguf \
-  --output model-q4_0.gguf \
-  --source F32 --target Q4_0
+./oxidize-c/oxidize-c quantize --model model-f32.gguf --output model-q4_0.gguf --target Q4_0
 ```
 
 ### 2. Run with layer streaming
 
 ```bash
-sfw cargo run -p oxidize-cli --features oxidize-core/cuda -- \
-  --model model-q4_0.gguf \
-  --prompt "Hello, world!" \
-  --max-tokens 100
+./oxidize-c/oxidize-c --model model-q4_0.gguf --prompt "Hello, world!" --n-predict 100
 ```
 
 The inference engine will automatically:

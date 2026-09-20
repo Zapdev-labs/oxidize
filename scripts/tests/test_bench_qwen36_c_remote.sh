@@ -26,6 +26,19 @@ assert_contains "$tmp/dry-run.out" 'oxidize_binary=/tmp/oxidize-c-green2'
 [[ $(grep -c '^oxidize case=' "$tmp/dry-run.out") -eq 2 ]] || fail 'expected two oxidize cases'
 [[ $(grep -c '^llama case=' "$tmp/dry-run.out") -eq 2 ]] || fail 'expected two llama cases'
 
+cc -std=c11 -Wall -Wextra -Werror -O2 -o "$tmp/qwen36_record" "$root/oxidize-c/tools/qwen36_record.c"
+printf 'Elapsed (wall clock) time (h:mm:ss or m:ss): 1:02.50\nMaximum resident set size (kbytes): 3\n' >"$tmp/time.txt"
+printf '%s\n' '{"results":[{"prefill_tok_per_s":3.25,"decode_tok_per_s":1.75}]}' >"$tmp/oxidize.out"
+ox_row=$("$tmp/qwen36_record" row --engine oxidize-c --case pp64/tg32 --phase measure --run 1 --command cmd --timing "$tmp/time.txt" --stdout "$tmp/oxidize.out" --load-before 1 --load-after 2 --rss 3 --model /model.gguf --sha sha --size 4 --revision rev --llama commit --affinity cpus --numa 0 --threads 16 --label lab)
+[[ "$ox_row" == *'"prefill_tok_per_s":3.25'* ]] || fail "oxidize prefill: $ox_row"
+[[ "$ox_row" == *'"decode_tok_per_s":1.75'* ]] || fail "oxidize decode: $ox_row"
+[[ "$ox_row" == *'"elapsed_s":62.5'* ]] || fail "elapsed: $ox_row"
+printf '%s\n' '{"n_prompt":64,"n_gen":0,"avg_ts":20.5}' '{"n_prompt":0,"n_gen":32,"avg_ts":7.25}' >"$tmp/llama.out"
+llama_row=$("$tmp/qwen36_record" row --engine llama --case pp64/tg32 --phase measure --run 1 --command cmd --timing "$tmp/time.txt" --stdout "$tmp/llama.out" --load-before 1 --load-after 2 --rss 3 --model /model.gguf --sha sha --size 4 --revision rev --llama commit --affinity cpus --numa 0 --threads 16 --label lab)
+[[ "$llama_row" == *'"prefill_tok_per_s":20.5'* ]] || fail "llama prefill: $llama_row"
+[[ "$llama_row" == *'"decode_tok_per_s":7.25'* ]] || fail "llama decode: $llama_row"
+! grep -F python3 "$runner" >/dev/null || fail 'bench script still invokes python3'
+
 # Given a fake shared host reporting load 250, when the runner is invoked,
 # then it refuses with EX_TEMPFAIL before any benchmark/build command executes.
 mkdir -p "$tmp/bin"

@@ -207,73 +207,25 @@ fi
 model_sha=$(sha256sum "$model" | awk '{print $1}')
 model_size=$(stat -c '%s' "$model")
 oxidize_sha=$(sha256sum "$oxidize_bin" | awk '{print $1}')
-python3 - "$run_dir" "$revision" "$oxidize_bin" "$oxidize_sha" "$llama_commit" "$model" "$model_sha" "$model_size" "$cpus" "$numa_node" "$threads" "$warmup" "$repetitions" "$label" >"$manifest" <<'PY'
-import json
-import sys
-
-(run_dir, revision, oxidize_binary, oxidize_sha256, llama_commit, model_path,
- model_sha256, model_size_bytes, affinity, numa_node, threads, warmup,
- repetitions, label) = sys.argv[1:]
-print(json.dumps({
-    'schema': 'qwen36-cpu-benchmark-v1',
-    'run_dir': run_dir,
-    'revision': revision,
-    'oxidize_binary': oxidize_binary,
-    'oxidize_sha256': oxidize_sha256,
-    'llama_commit': llama_commit,
-    'model_path': model_path,
-    'model_sha256': model_sha256,
-    'model_size_bytes': int(model_size_bytes),
-    'affinity': affinity,
-    'numa_node': int(numa_node),
-    'threads': int(threads),
-    'warmup': int(warmup),
-    'repetitions': int(repetitions),
-    'label': label,
-}, sort_keys=True))
-PY
+src_root=$source_repo
+if [[ ! -f "$src_root/oxidize-c/tools/qwen36_record.c" ]]; then
+    src_root=$(cd "$(dirname "$oxidize_bin")/.." && pwd)
+fi
+cc -std=c11 -Wall -Wextra -Werror -O2 -o "$run_dir/qwen36_record" "$src_root/oxidize-c/tools/qwen36_record.c"
+"$run_dir/qwen36_record" manifest "$run_dir" "$revision" "$oxidize_bin" "$oxidize_sha" "$llama_commit" "$model" "$model_sha" "$model_size" "$cpus" "$numa_node" "$threads" "$warmup" "$repetitions" "$label" >"$manifest"
 
 record() {
     local engine=$1 case_name=$2 phase=$3 run=$4 command=$5 timing=$6 stdout=$7
     local load_after rss
     load_after=$(awk '{print $1}' /proc/loadavg)
     rss=$(awk '/Maximum resident set size/ {print $6}' "$timing")
-    python3 - "$engine" "$case_name" "$phase" "$run" "$command" "$timing" "$stdout" "$load_before" "$load_after" "$rss" "$model" "$model_sha" "$model_size" "$revision" "$llama_commit" "$cpus" "$numa_node" "$threads" "$label" >>"$out" <<'PY'
-import json, pathlib, sys
-engine, case_name, phase, run, command, timing, stdout, load_before, load_after, rss, model, sha, size, revision, llama, cpus, numa, threads, label = sys.argv[1:]
-
-def clock_seconds(value):
-    parts = [float(part) for part in value.split(':')]
-    total = 0.0
-    for part in parts:
-        total = total * 60.0 + part
-    return total
-
-elapsed_text = next(line.rsplit(': ', 1)[1].strip()
-                    for line in pathlib.Path(timing).read_text().splitlines()
-                    if 'Elapsed (wall clock) time' in line)
-records = []
-for line in pathlib.Path(stdout).read_text().splitlines():
-    try:
-        value = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if isinstance(value, dict):
-        records.append(value)
-
-if engine == 'oxidize-c':
-    result = records[-1]['results'][0]
-    prefill = float(result['prefill_tok_per_s'])
-    decode = float(result['decode_tok_per_s'])
-else:
-    prompt = next(value for value in records
-                  if int(value.get('n_prompt', 0)) > 0 and int(value.get('n_gen', 0)) == 0)
-    generation = next(value for value in records if int(value.get('n_gen', 0)) > 0)
-    prefill = float(prompt['avg_ts'])
-    decode = float(generation['avg_ts'])
-
-print(json.dumps({'schema':'qwen36-cpu-benchmark-v1','command':command,'engine':engine,'case':case_name,'phase':phase,'run':int(run),'model_path':model,'model_sha256':sha,'model_size_bytes':int(size),'revision':revision,'llama_commit':llama,'affinity':cpus,'numa_node':int(numa),'threads':int(threads),'mmap':True,'load_before':float(load_before),'load_after':float(load_after),'rss_kb':int(rss or 0),'prefill_tok_per_s':prefill,'decode_tok_per_s':decode,'timing':{'elapsed_s':clock_seconds(elapsed_text)},'label':label}, sort_keys=True))
-PY
+    "$run_dir/qwen36_record" row \
+        --engine "$engine" --case "$case_name" --phase "$phase" --run "$run" \
+        --command "$command" --timing "$timing" --stdout "$stdout" \
+        --load-before "$load_before" --load-after "$load_after" --rss "${rss:-0}" \
+        --model "$model" --sha "$model_sha" --size "$model_size" \
+        --revision "$revision" --llama "$llama_commit" --affinity "$cpus" \
+        --numa "$numa_node" --threads "$threads" --label "$label" >>"$out"
 }
 
 run_case() {
