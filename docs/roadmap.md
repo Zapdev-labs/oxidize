@@ -41,9 +41,7 @@ next obvious win.
 
 - `ModelArchitecture` only enumerates text-only architectures: Llama, Mistral,
   Mixtral, DeepSeek, Qwen, Gemma, Phi, Falcon, GPT‑2/J/NeoX.
-- Zero references anywhere in `oxidize-core`, `oxidize-server`, or
-  `oxidize-cli` to ViT, CLIP, LLaVA, Qwen-VL, Pixtral, Idefics, patch
-  embeddings, image preprocessing, or multimodal token handling.
+- `oxidize-c` ships a vision encoder module; the default CLI path is still text GGUF load + generate.
 - The model loader is GGUF-only with no image pipeline (no resize, normalize,
   patchify, projector module).
 
@@ -198,7 +196,7 @@ curl -fsSL https://<your-domain>/install.sh | bash
   defaults to a placeholder GitHub-releases URL — **set this before going
   live**).
 - Verifies the SHA-256 against `<tarball>.sha256` next to the artifact.
-- Installs `oxidize-server`, `oxidize-cli`, and `oxidize-bench` into
+- Installs `oxidize-c` into
   `INSTALL_DIR` (default: `$HOME/.local/bin`, falls back to `/usr/local/bin`
   if writable).
 - Prints a clear PATH-export hint if the install dir isn't already on `$PATH`.

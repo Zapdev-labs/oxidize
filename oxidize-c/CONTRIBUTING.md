@@ -159,12 +159,7 @@ relative for FP paths.
 
 ## Coding guidelines (mirrors AGENTS.md)
 
-- **No reference to old `oxidize-c/` git history.** Fresh implementation from
-  Rust sources + architecture doc + SOTA research only.
-- **Port, don't invent.** Rust `oxidize-core` is the source of truth for
-  behavior, numerics, and naming. Novel optimization is permitted only at
-  the kernel layer (SIMD/CUDA).
-- **Bit-exact parity.** Dequantization and forward-pass logits must match
-  Rust bit-exactly on tiny fixtures (integer: exact; FP: ≤1e-4 relative).
-- **Config + Error + Trait trinity** per subsystem (mirrors Rust convention).
+- **C is the runtime.** Behavior, numerics, and naming live in `oxidize-c`.
+  Novel optimization is permitted at the kernel layer (SIMD/CUDA).
+- **Bit-exact tests** on tiny fixtures (integer: exact; FP: ≤1e-4 relative).
 - **Flat module system** via `oc.h` umbrella header.

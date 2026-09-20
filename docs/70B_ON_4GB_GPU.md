@@ -151,14 +151,9 @@ preload_layer(layer_idx, &[
 | **Q4_0 layer-stream** | **4 GB** | **~2 tok/s** | **Fits RTX 3050, GTX 1650** |
 | CPU only | 0 GB | ~0.1 tok/s | Reference baseline |
 
-## Files Changed
+## Files
 
-| File | Purpose |
-|------|---------|
-| `oxidize-core/kernels/gemv_f32.cu` | New on-the-fly Q8_0 and Q4_0 GEMV kernels |
-| `oxidize-core/src/backends/cuda.rs` | Layer management API, LRU eviction, VRAM tracking |
-| `oxidize-core/src/compute/tensor.rs` | Dispatch to on-the-fly kernels |
-| `oxidize-core/build.rs` | nvcc PTX compilation at build time |
+CUDA layer streaming lives in `oxidize-c` (`src/backends/`, `src/compute/`). Build with `make -C oxidize-c cuda`.
 
 ## How to Use
 
