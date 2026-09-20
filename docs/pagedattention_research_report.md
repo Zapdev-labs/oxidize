@@ -1,4 +1,7 @@
-# PagedAttention Research Report — For Rust Implementation
+# PagedAttention Research Report
+
+The shipping oxidize runtime is C11 (`oxidize-c`), which already has a paged
+attention module. This note is background research, not a Rust rewrite plan.
 
 ## 1. How PagedAttention Works Conceptually
 

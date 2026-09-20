@@ -1,5 +1,7 @@
 # Research Report: exo (exo-explore/exo) Peer-to-Peer Distributed Inference Mesh Protocol
 
+This describes **exo**, not oxidize. Oxidize’s mesh lives in `oxidize-c`.
+
 ## Executive Summary
 
 exo is a distributed AI inference system that connects heterogeneous consumer devices (Macs, PCs, phones, SBCs) into a unified cluster for running large language models. It uses a **hybrid Rust+Python architecture** where the networking and peer discovery stack is implemented in Rust (via `rust-libp2p`), while the orchestration, model placement, and inference execution are in Python on top of Apple's **MLX distributed** framework.

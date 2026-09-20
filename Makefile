@@ -5,7 +5,7 @@ SHELL := /bin/bash
 help:
 	@echo "oxidize — C runtime + TypeScript TUI"
 	@echo "  make build     - Build oxidize-c (CPU)"
-	@echo "  make test      - C tests (ASan/UBSan) + TUI tests"
+	@echo "  make test      - C tests (ASan/UBSan)"
 	@echo "  make lint      - clang-tidy on oxidize-c (best-effort)"
 	@echo "  make tui       - bun install + typecheck the TUI"
 	@echo "  make tui-test  - bun test in oxidize-tui"
