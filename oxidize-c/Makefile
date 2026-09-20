@@ -31,7 +31,7 @@ LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c \
                        src/backends/backend.c \
                        src/vision/*.c src/mesh/*.c \
                        src/cluster/*.c src/validation/*.c src/video/*.c) \
-                       src/cli/args.c src/cli/commands.c
+                       src/cli/args.c src/cli/commands.c src/cli/tui.c
 LIB_OBJS := $(LIB_SRCS:.c=.o)
 
 # Binary source for the CLI entrypoint.

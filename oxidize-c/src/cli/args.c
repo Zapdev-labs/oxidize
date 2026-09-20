@@ -227,6 +227,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         /* Perplexity / tokenize. */
         else if (match(arg, "--max-tokens"))     { ctx->ppl_max_tokens = (size_t)strtoull(val, NULL, 10); i++; }
         else if (match(arg, "--ids"))            { ctx->token_ids_str = val; i++; }
+        else if (match(arg, "--api"))            { ctx->attach_url = val; i++; }
         else if (arg[0] != '-' && ctx->prompt == NULL) { ctx->prompt = arg; }
     }
     return true;

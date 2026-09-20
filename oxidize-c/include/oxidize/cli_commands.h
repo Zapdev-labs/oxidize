@@ -58,6 +58,7 @@ typedef enum {
     OC_CLI_CMD_PERPLEXITY      = 15, /* compute perplexity                 */
     OC_CLI_CMD_SERVE_REALTIME  = 16, /* start WebSocket realtime server    */
     OC_CLI_CMD_DFLASH2         = 17, /* DFlash2 draft propose benchmark    */
+    OC_CLI_CMD_TUI             = 18, /* full-screen chat/models/monitor    */
 } OcCliCommand;
 
 /* ─── Output format ────────────────────────────────────────────────────── */
@@ -165,6 +166,8 @@ typedef struct OcCliContext {
     /* Append-only: --prefill-chunk-size N (0 = unset). Kept last so the
      * Server / Benchmark / … offsets stay stable for older callers. */
     uint32_t           prefill_chunk_size;
+    /* TUI: attach to an existing OpenAI-compatible server (`--api URL`). */
+    const char        *attach_url;
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.
@@ -269,6 +272,9 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx);
  * and lm_head), and reports step latency + throughput. Synthetic harness
  * because the GLM-5.3-Flash target (321B) does not fit on the host. */
 OcError oc_cli_run_dflash2(OcCliContext *ctx);
+
+/* Full-screen TUI (chat / models / monitor / logs). */
+OcError oc_cli_run_tui(OcCliContext *ctx);
 
 #ifdef __cplusplus
 }

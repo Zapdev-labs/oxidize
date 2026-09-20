@@ -12,6 +12,20 @@ pub fn print_run_help() {
     );
 }
 
+pub fn print_tui_help() {
+    println!(
+        "Usage: oxidize tui [model.gguf] [options]\n\n\
+         Full-screen console: chat with streaming, GGUF browser, live /metrics, server logs.\n\
+         Spawns `oxidize serve` unless --api points at a running server.\n\n\
+         Examples:\n\
+           oxidize tui\n\
+           oxidize tui ./models/model.gguf --backend cuda\n\
+           oxidize tui --api http://127.0.0.1:8080\n\n\
+         Options: --api URL, --backend, --threads, --ctx-size, --max-tokens, --temperature, --top-p\n\
+         Keys: ctrl+k palette, ctrl+t next view, 1-4 jump, esc cancel, q quit (outside chat)."
+    );
+}
+
 pub fn print_serve_help() {
     println!(
         "Usage: oxidize serve [model] [options]\n\n\
@@ -34,7 +48,8 @@ pub fn print_ollama_help() {
            show <model>             Show model information\n\
            list                     List local GGUF models in ./models\n\
            inspect <model>          Print raw GGUF metadata and tensors\n\
-           serve [model]            Start the OpenAI-compatible server\n\n\
+           serve [model]            Start the OpenAI-compatible server\n\
+           tui [model]              Full-screen chat / models / monitor / logs\n\n\
          Examples:\n\
            oxidize run ./models/Qwen3-4B-Q4_K_M.gguf \"hello\"\n\
            oxidize pull Qwen/Qwen2.5-0.5B-Instruct-GGUF\n\

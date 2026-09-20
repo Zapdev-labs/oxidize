@@ -235,6 +235,7 @@ const char *oc_cli_command_name(OcCliCommand cmd)
     case OC_CLI_CMD_PERPLEXITY:     return "perplexity";
     case OC_CLI_CMD_SERVE_REALTIME: return "serve-realtime";
     case OC_CLI_CMD_DFLASH2:        return "dflash2";
+    case OC_CLI_CMD_TUI:            return "tui";
     case OC_CLI_CMD_NONE:           break;
     }
     return "none";
@@ -266,6 +267,7 @@ OcCliCommand oc_cli_command_parse(const char *name)
     if (ieq(name, "serve-realtime") || ieq(name, "realtime"))
                                       return OC_CLI_CMD_SERVE_REALTIME;
     if (ieq(name, "dflash2"))         return OC_CLI_CMD_DFLASH2;
+    if (ieq(name, "tui"))             return OC_CLI_CMD_TUI;
     return OC_CLI_CMD_NONE;
 }
 
@@ -330,6 +332,7 @@ OcError oc_cli_command_run(OcCliContext *ctx)
     case OC_CLI_CMD_SERVE:           return oc_cli_run_serve(ctx);
     case OC_CLI_CMD_SERVE_REALTIME:  return oc_cli_run_serve_realtime(ctx);
     case OC_CLI_CMD_DFLASH2:        return oc_cli_run_dflash2(ctx);
+    case OC_CLI_CMD_TUI:            return oc_cli_run_tui(ctx);
     /* PROMPT and CHAT are handled by the generation path in main.c. */
     case OC_CLI_CMD_PROMPT:
     case OC_CLI_CMD_CHAT:
@@ -357,6 +360,7 @@ void oc_cli_command_help(void)
 "  bench            Benchmark inference speed (tok/s)\n"
 "  inspect          Inspect a model's metadata and architecture\n"
 "  serve            Start the OpenAI-compatible HTTP server\n"
+"  tui              Full-screen chat / models / monitor / logs\n"
 "  serve-realtime   Start the WebSocket realtime server\n"
 "  quantize         Re-quantize a GGUF model to a different type\n"
 "  convert          Convert SafeTensors checkpoint to GGUF\n"
@@ -456,6 +460,18 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "                       per physical core)\n"
                "  --seed N              Deterministic input seed (default 42)\n"
                "  --json                Machine-readable results\n");
+        break;
+    case OC_CLI_CMD_TUI:
+        printf("full-screen chat console\n\n"
+               "USAGE: oxidize-c tui [--model path.gguf | --api URL] [OPTIONS]\n\n"
+               "Views: chat, models, monitor, logs. Keys: ctrl+k palette, ctrl+t next view,\n"
+               "1-4 jump, enter send/load, esc cancel, q quit (outside chat).\n"
+               "OPTIONS:\n"
+               "  --model PATH          Spawn oxidize-c serve with this GGUF\n"
+               "  --api URL             Attach to a running server instead\n"
+               "  --backend NAME        cpu | cuda\n"
+               "  --threads N           Worker threads for the spawned server\n"
+               "  --ctx N               Context length for the spawned server\n");
         break;
     case OC_CLI_CMD_QUANTIZE:
         printf("re-quantize a GGUF model\n\n"

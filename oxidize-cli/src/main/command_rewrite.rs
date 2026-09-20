@@ -20,6 +20,7 @@ where
             std::process::exit(0);
         }
         Some("serve") => return rewrite_serve_args(raw),
+        Some("tui") => return rewrite_tui_args(raw),
         Some("gpu-cluster") => {
             let rest: Vec<String> = raw
                 .iter()
@@ -273,6 +274,61 @@ pub(super) fn rewrite_serve_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>
     }
     if !has_flag(&rewritten, "--cpu-optimized") {
         rewritten.push("--cpu-optimized".into());
+    }
+    Ok(rewritten)
+}
+
+pub(super) fn rewrite_tui_args(raw: Vec<OsString>) -> io::Result<Vec<OsString>> {
+    if matches!(
+        raw.get(2).and_then(|arg| arg.to_str()),
+        Some("-h" | "--help")
+    ) {
+        print_tui_help();
+        std::process::exit(0);
+    }
+
+    let program = raw[0].clone();
+    let mut rewritten = vec![program, "--tui".into()];
+    let mut model: Option<String> = None;
+    let mut args = raw.into_iter().skip(2).peekable();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--api") => {
+                rewritten.push("--api".into());
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("--api requires a URL"));
+                };
+                rewritten.push(value);
+            }
+            Some(value) if value.starts_with("--api=") => {
+                rewritten.push("--api".into());
+                rewritten.push(value["--api=".len()..].into());
+            }
+            Some(value) if !value.starts_with('-') && model.is_none() => {
+                model = Some(value.to_owned());
+            }
+            Some(
+                "--model"
+                | "--backend"
+                | "--threads"
+                | "--ctx-size"
+                | "--max-tokens"
+                | "--temperature"
+                | "--top-p"
+                | "--top-k",
+            ) => {
+                rewritten.push(arg);
+                let Some(value) = args.next() else {
+                    return Err(io::Error::other("option requires a value"));
+                };
+                rewritten.push(value);
+            }
+            _ => rewritten.push(arg),
+        }
+    }
+    if let Some(model) = model {
+        rewritten.push("--model".into());
+        rewritten.push(model.into());
     }
     Ok(rewritten)
 }

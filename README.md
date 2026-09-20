@@ -89,7 +89,20 @@ cargo run -p oxidize-cli -- --chat
 cargo run -p oxidize-cli -- --model /path/to/model.gguf --n-gpu-layers 20 --gpus 2 --parallelism pipeline
 ```
 
-### C port
+### Terminal UI
+
+Full-screen console with chat streaming, a GGUF model browser, live `/metrics`, and server logs. Same feature set as the retired TypeScript TUI. It spawns `oxidize serve` (or `oxidize-c serve`) or attaches with `--api`.
+
+```bash
+oxidize tui
+oxidize tui /path/to/model.gguf --backend cuda
+oxidize tui --api http://127.0.0.1:8080
+
+oxidize-c tui --model /path/to/model.gguf
+oxidize-c tui --api http://127.0.0.1:8080
+```
+
+Keys: `ctrl+k` palette, `ctrl+t` next view, `1-4` jump, `enter` send/load, `esc` cancel, `q` quit outside chat.
 
 ```bash
 make c-build
@@ -258,7 +271,7 @@ Practical tuning priorities:
 `oxidize` is organized as a layered workspace:
 
 - **Core compute layer (`oxidize-core`)**: owns GGUF parsing, tensor + quantization primitives, model loading, token generation loop, and backend-specific execution paths (CPU, CUDA, Metal, WASM).
-- **Interface layer (`oxidize-cli`, `oxidize-server`, `oxidize-ffi`)**: exposes core capabilities through a CLI, OpenAI-compatible HTTP routes, and a C ABI without duplicating inference logic.
+- **Interface layer (`oxidize-cli`, `oxidize-server`, `oxidize-ffi`)**: exposes core capabilities through a CLI (including `oxidize tui`), OpenAI-compatible HTTP routes, and a C ABI without duplicating inference logic.
 - **Utility layer (`oxidize-quantize`)**: handles offline model weight conversion and quantization workflows.
 - **C port (`oxidize-c`)**: a standalone C11 engine for deployments that cannot link Rust.
 

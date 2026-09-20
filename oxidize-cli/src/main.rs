@@ -3,10 +3,13 @@
 mod backend;
 mod help;
 mod pipeline;
+mod tui;
 
 use backend::Backend;
 use clap::{Parser, ValueEnum};
-use help::{print_model_list, print_ollama_help, print_run_help, print_serve_help};
+use help::{
+    print_model_list, print_ollama_help, print_run_help, print_serve_help, print_tui_help,
+};
 use oxidize_core::generation::{
     Eagle3GenerationStream, GenerationConfig, GenerationStream, MtpGenerationStream,
     SpeculativeGenerationConfig, SpeculativeGenerationStream,
@@ -88,6 +91,12 @@ struct Args {
     lora_paths: Vec<PathBuf>,
     #[arg(long, default_value_t = false)]
     chat: bool,
+    /// Full-screen TUI: chat, model browser, metrics, logs (port of oxidize-tui).
+    #[arg(long, default_value_t = false)]
+    tui: bool,
+    /// Attach the TUI to an already-running OpenAI-compatible server.
+    #[arg(long)]
+    api: Option<String>,
     #[arg(long, value_enum)]
     profile: Option<Profiler>,
     #[arg(long)]
@@ -257,6 +266,25 @@ fn main() {
         Ok(args) => args,
         Err(error) => error.exit(),
     };
+
+    if args.tui {
+        let opts = tui::TuiOpts {
+            model: args.model.clone(),
+            api: args.api.clone(),
+            backend: args.backend.as_arg().to_string(),
+            threads: args.threads.unwrap_or(0),
+            ctx_size: args.ctx_size.unwrap_or(0),
+            max_tokens: args.max_tokens,
+            temperature: args.temperature,
+            top_p: args.top_p.unwrap_or(0.95),
+            top_k: args.top_k.unwrap_or(0),
+        };
+        if let Err(error) = tui::run(opts) {
+            eprintln!("tui failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Detect which non-Option flags the user explicitly set, so the
     // autotuner can avoid overriding them.
@@ -1518,6 +1546,42 @@ mod tests {
         assert!(args.contains(&OsString::from("3000")));
         assert!(args.contains(&OsString::from("--serve-api")));
         assert!(args.contains(&OsString::from("--api-only")));
+    }
+
+    #[test]
+    fn tui_rewrite_sets_tui_flag_and_model() {
+        let args = rewrite_run_args(
+            ["oxidize", "tui", "local.gguf", "--backend", "cuda"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("tui args should rewrite");
+        assert!(args.contains(&OsString::from("--tui")));
+        assert!(args.contains(&OsString::from("--model")));
+        assert!(args.contains(&OsString::from("local.gguf")));
+        assert!(args.contains(&OsString::from("--backend")));
+        assert!(args.contains(&OsString::from("cuda")));
+    }
+
+    #[test]
+    fn tui_rewrite_bare_command_sets_flag() {
+        let args = rewrite_run_args(["oxidize", "tui"].into_iter().map(OsString::from))
+            .expect("bare tui should rewrite");
+        assert!(args.contains(&OsString::from("--tui")));
+        assert!(!args.contains(&OsString::from("--model")));
+    }
+
+    #[test]
+    fn tui_rewrite_attaches_to_api() {
+        let args = rewrite_run_args(
+            ["oxidize", "tui", "--api", "http://127.0.0.1:8080"]
+                .into_iter()
+                .map(OsString::from),
+        )
+        .expect("tui attach should rewrite");
+        assert!(args.contains(&OsString::from("--tui")));
+        assert!(args.contains(&OsString::from("--api")));
+        assert!(args.contains(&OsString::from("http://127.0.0.1:8080")));
     }
 
     #[test]
