@@ -157,11 +157,11 @@ Test(llama, matvec_f32_zero_input)
 }
 
 /* ─── Load: parser fixture must be rejected ─────────────────────────────
- * oxidize-core/tests/fixtures/valid-v3.gguf has a valid GGUF header but no
+ * tests/fixtures/valid-v3.gguf has a valid GGUF header but no
  * tok_embeddings.weight → oc_llama_load must return OC_ERR_MODEL (not crash). */
 Test(llama, load_rejects_parser_fixture)
 {
-    const char *path = "../oxidize-core/tests/fixtures/valid-v3.gguf";
+    const char *path = "tests/fixtures/valid-v3.gguf";
     OcLlamaModel m;
     OcError e = oc_llama_load(path, &m);
     /* Either the fixture exists and we get OC_ERR_MODEL (no weights), or the

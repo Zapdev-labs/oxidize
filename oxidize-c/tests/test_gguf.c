@@ -8,9 +8,8 @@
  * VAL-FOUND-006 (mmap with MADV_HUGEPAGE), VAL-FOUND-015 (mmap/arena
  * lifecycle valgrind-clean — ASan substitutes locally).
  *
- * Fixtures live in oxidize-core/tests/fixtures/ (shared with the Rust
- * reference). The fixtures are tiny (132 bytes each) so they live in the
- * repo and need no network/model download.
+ * Fixtures live in tests/fixtures/. The fixtures are tiny (132 bytes each)
+ * so they live in the repo and need no network/model download.
  *
  * Parity reference: Rust `oxidize-core/src/format/gguf.rs::parse_gguf`
  * captured expectations in its `#[cfg(test)] mod tests` (see the
@@ -39,9 +38,8 @@
 #include <string.h>
 #include <unistd.h>   /* for mkdtemp, rmdir */
 
-/* Fixture path: oxidize-core/tests/fixtures/<name>.gguf, relative to the
- * oxidize-c/ directory where `make test` runs. */
-#define FIXTURE_DIR "../oxidize-core/tests/fixtures"
+/* Fixture path: tests/fixtures/<name>.gguf, relative to oxidize-c/. */
+#define FIXTURE_DIR "tests/fixtures"
 #define FIXTURE(name) FIXTURE_DIR "/" name
 
 /* ─── v3 header parse (VAL-FOUND-001, VAL-FOUND-014) ─────────────────────── */
