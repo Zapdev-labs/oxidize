@@ -162,6 +162,12 @@ typedef struct OcCliContext {
     /* Tokenize / detokenize. */
     const char        *token_ids_str;   /* --ids "1,2,3" (for detokenize)    */
     bool               tokens_no_special; /* --no-special (disallow special) */
+    bool               stream_experts;
+    uint32_t           expert_cache_mb;
+    const char        *prerouter_path;
+    const char        *lora_path;
+    uint32_t           experts_per_tok;
+    bool               prerouter_prefetch;
 
     /* Append-only: --prefill-chunk-size N (0 = unset). Kept last so the
      * Server / Benchmark / … offsets stay stable for older callers. */

@@ -72,6 +72,13 @@ typedef struct OcCliArgs {
     bool       cuda_selftest;     /* run CUDA kernel self-test and exit     */
     bool       show_help;
     bool       show_version;
+    /* Edge0-style SSD expert streaming + prerouter / Recover-LoRA. */
+    bool       stream_experts;        /* --stream-experts                     */
+    uint32_t   expert_cache_mb;       /* --expert-cache-mb (0 = 3072)         */
+    const char *prerouter_path;       /* --prerouter PATH.safetensors         */
+    const char *lora_path;            /* --lora PATH.safetensors              */
+    uint32_t   experts_per_tok;       /* --experts-per-tok K (0 = GGUF)       */
+    bool       prerouter_prefetch;    /* --prerouter-prefetch (native router) */
 } OcCliArgs;
 
 void oc_cli_args_defaults(OcCliArgs *a);

@@ -76,7 +76,7 @@ OcError oc_lora_save(const OcLoraModel *lm, const char *path)
     /* Write header: magic + n_layers + active flag. Every write is
      * checked so a failed/short save is reported, not silently kept. */
     bool ok = true;
-    uint32_t magic = 0x4C4F5241; /* "LORA" */
+    uint32_t magic = 0x4C4F5232; /* "LOR2" — includes shexp/ssm adapters */
     ok = ok && fwrite(&magic, 4, 1, f) == 1;
     ok = ok && fwrite(&lm->n_layers, sizeof(size_t), 1, f) == 1;
     ok = ok && fwrite(&lm->active, sizeof(bool), 1, f) == 1;
@@ -84,9 +84,13 @@ OcError oc_lora_save(const OcLoraModel *lm, const char *path)
     /* Write each adapter array. */
     const OcLoraAdapter *arrays[] = {
         lm->q_adapters, lm->k_adapters, lm->v_adapters, lm->o_adapters,
-        lm->gate_adapters, lm->up_adapters, lm->down_adapters
+        lm->gate_adapters, lm->up_adapters, lm->down_adapters,
+        lm->shexp_gate_adapters, lm->shexp_up_adapters, lm->shexp_down_adapters,
+        lm->ssm_qkv_adapters, lm->ssm_gate_adapters, lm->ssm_out_adapters,
+        lm->ssm_alpha_adapters, lm->ssm_beta_adapters
     };
-    for (size_t a = 0; ok && a < 7; a++) {
+    const size_t n_arrays = sizeof(arrays) / sizeof(arrays[0]);
+    for (size_t a = 0; ok && a < n_arrays; a++) {
         for (size_t l = 0; ok && l < lm->n_layers; l++) {
             const OcLoraAdapter *ad = &arrays[a][l];
             ok = ok && fwrite(&ad->rank, sizeof(uint32_t), 1, f) == 1;
@@ -117,10 +121,12 @@ OcError oc_lora_load(const char *path, OcLoraModel *lm)
     if (!f) return OC_ERR_IO;
 
     uint32_t magic = 0;
-    if (fread(&magic, 4, 1, f) != 1 || magic != 0x4C4F5241) {
+    if (fread(&magic, 4, 1, f) != 1 ||
+        (magic != 0x4C4F5241 && magic != 0x4C4F5232)) {
         fclose(f);
         return OC_ERR_FORMAT;
     }
+    size_t n_kinds = (magic == 0x4C4F5232) ? 15 : 7;
     size_t n_layers = 0;
     if (fread(&n_layers, sizeof(size_t), 1, f) != 1 ||
         n_layers == 0 || n_layers > 100000) { fclose(f); return OC_ERR_FORMAT; }
@@ -133,9 +139,12 @@ OcError oc_lora_load(const char *path, OcLoraModel *lm)
 
     OcLoraAdapter *arrays[] = {
         lm->q_adapters, lm->k_adapters, lm->v_adapters, lm->o_adapters,
-        lm->gate_adapters, lm->up_adapters, lm->down_adapters
+        lm->gate_adapters, lm->up_adapters, lm->down_adapters,
+        lm->shexp_gate_adapters, lm->shexp_up_adapters, lm->shexp_down_adapters,
+        lm->ssm_qkv_adapters, lm->ssm_gate_adapters, lm->ssm_out_adapters,
+        lm->ssm_alpha_adapters, lm->ssm_beta_adapters
     };
-    for (size_t a = 0; a < 7; a++) {
+    for (size_t a = 0; a < n_kinds; a++) {
         for (size_t l = 0; l < n_layers; l++) {
             OcLoraAdapter *ad = &arrays[a][l];
             if (fread(&ad->rank, sizeof(uint32_t), 1, f) != 1) goto fail;
