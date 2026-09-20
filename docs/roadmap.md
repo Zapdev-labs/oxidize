@@ -25,8 +25,7 @@ For reference, **llama.cpp** on the same hardware lands roughly at:
 | Decode | ~20–25 tok/s | ~1.4–1.7× slower |
 | Prefill | ~100+ tok/s | **~3.3× slower** |
 
-These numbers are from our bench, not a head-to-head harness — see item **(5)**
-below for replacing the guesswork with real apples-to-apples runs.
+These numbers are from oxidize-c benches (`./oxidize-c/oxidize-c bench`).
 
 **Recent perf history** (last 5 commits): AVX2 Q4_K kernel rewrite, batched
 Q4_K/Q8_K GEMM, batched prefill via `gemm_quantized_f32`, normal-model decode

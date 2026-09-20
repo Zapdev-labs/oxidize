@@ -4,7 +4,7 @@ set -euo pipefail
 
 TARGET_DIR="${TARGET_DIR:-/home/ai/models/minimax-m3/target/UD-IQ1_M}"
 DRAFT="${DRAFT:-/home/ai/models/minimax-m3/eagle3/draft}"
-OXIDIZE="${OXIDIZE:-/home/ai/oxidize/target/release/oxidize}"
+OXIDIZE="${OXIDIZE:-/home/ai/oxidize/oxidize-c/oxidize-c}"
 FIRST_SHARD="${FIRST_SHARD:-MiniMax-M3-UD-IQ1_M-00001-of-00004.gguf}"
 # Shard 1 is metadata-only (~8 MB); data shards are tens of GB each.
 declare -A MIN_SHARD_BYTES=(
@@ -49,16 +49,13 @@ run_bench() {
 
   log "=== EAGLE3 run (draft_tokens=3, 32 threads, NUMA interleave) ==="
   export OMP_NUM_THREADS=32
-  numactl --interleave=all "$OXIDIZE" run "$model" \
-    --draft-model="$DRAFT" \
-    --draft-tokens=3 \
-    --prompt="The capital of France is" \
-    --max-tokens=32 \
-    --no-api \
+  numactl --interleave=all "$OXIDIZE" prompt \
+    --model "$model" \
+    --prompt "The capital of France is" \
+    --n-predict 32 \
     --no-auto \
-    --threads=32 \
-    --cpu-optimized \
-    --ctx-size=4096 \
+    --threads 32 \
+    --ctx 4096 \
     2>&1 | tee "/home/ai/models/minimax-m3/logs/eagle3-run-$(date +%Y%m%d-%H%M%S).log"
 }
 

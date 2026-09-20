@@ -1,28 +1,15 @@
 #!/usr/bin/env bash
-# Prune GLM-5.2 UD-IQ1_M shards: magnitude 25% + requant Q4_K_M (text weights preserved).
+# Prune GLM-5.2 shards with oxidize-c (magnitude sparsity).
 set -euo pipefail
 
 INPUT_DIR="${INPUT_DIR:-$HOME/models/glm-5.2/target/UD-IQ1_M}"
-OUTPUT_DIR="${OUTPUT_DIR:-$HOME/models/glm-5.2/pruned/Q4_K_M-mag25}"
-PRUNE_BIN="${PRUNE_BIN:-$HOME/oxidize/target/release/oxidize-prune}"
+OUTPUT_DIR="${OUTPUT_DIR:-$HOME/models/glm-5.2/pruned/magnitude-25}"
+PRUNE_BIN="${PRUNE_BIN:-$HOME/oxidize/oxidize-c/oxidize-c}"
 SPARSITY="${SPARSITY:-0.25}"
 METHOD="${METHOD:-magnitude}"
-JOINT_QUANT="${JOINT_QUANT:-Q4_K_M}"
 DRY_RUN="${DRY_RUN:-0}"
-RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-2}"
-export RAYON_NUM_THREADS
 
 mkdir -p "$OUTPUT_DIR" "${OUTPUT_DIR}/logs"
-
-KEEP_FLAGS=(
-  --keep-name token_embd
-  --keep-name output
-  --keep-name norm
-  --keep-name rope
-  --keep-name attn
-  --keep-name shexp
-  --keep-name indexer
-)
 
 shopt -s nullglob
 if [[ -n "${SHARD_ONLY:-}" ]]; then
@@ -35,7 +22,7 @@ if ((${#shards[@]} == 0)); then
   exit 1
 fi
 
-echo "Pruning ${#shards[@]} shards -> $OUTPUT_DIR (${METHOD} sparsity=${SPARSITY} -> ${JOINT_QUANT})"
+echo "Pruning ${#shards[@]} shards -> $OUTPUT_DIR (${METHOD} sparsity=${SPARSITY})"
 
 for shard in "${shards[@]}"; do
   base=$(basename "$shard")
@@ -45,19 +32,12 @@ for shard in "${shards[@]}"; do
     echo "skip existing $base"
     continue
   fi
-  args=(
-    --input "$shard"
-    --output "$out"
-    --method "$METHOD"
-    --sparsity "$SPARSITY"
-    --joint-quantize "$JOINT_QUANT"
-    "${KEEP_FLAGS[@]}"
-  )
   if [[ "$DRY_RUN" == "1" ]]; then
-    args+=(--dry-run)
+    echo "dry-run: $PRUNE_BIN prune --model $shard --output $out --strategy $METHOD --sparsity $SPARSITY"
+    continue
   fi
   echo "==> $base"
-  "$PRUNE_BIN" "${args[@]}" 2>&1 | tee "$log"
+  "$PRUNE_BIN" prune --model "$shard" --output "$out" --strategy "$METHOD" --sparsity "$SPARSITY" 2>&1 | tee "$log"
 done
 
 echo "Done. Output: $OUTPUT_DIR"

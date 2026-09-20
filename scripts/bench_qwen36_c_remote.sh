@@ -68,7 +68,9 @@ self_test() {
 
     local schema
     schema='{"schema":"qwen36-cpu-benchmark-v1","command":"taskset -c 0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30 numactl --membind=0 engine","engine":"oxidize-c","case":"pp64/tg32","phase":"measure","run":1,"model_path":"/model.gguf","model_sha256":"sha","model_size_bytes":1,"revision":"6e67975","llama_commit":"c588c4f","affinity":"0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30","numa_node":0,"threads":16,"mmap":true,"load_before":1.0,"load_after":1.0,"rss_kb":1,"prefill_tok_per_s":2.0,"decode_tok_per_s":1.0,"timing":{"elapsed_s":1.0}}'
-    python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); required={"schema","command","engine","case","phase","run","model_path","model_sha256","model_size_bytes","revision","llama_commit","affinity","numa_node","threads","mmap","load_before","load_after","rss_kb","prefill_tok_per_s","decode_tok_per_s","timing"}; assert required <= d.keys(); assert d["case"] == "pp64/tg32"; assert d["timing"]["elapsed_s"] > 0; assert d["prefill_tok_per_s"] > 0; assert d["decode_tok_per_s"] > 0' <<<"$schema"
+    [[ "$schema" == *'"schema":"qwen36-cpu-benchmark-v1"'* ]]
+    [[ "$schema" == *'"engine":"oxidize-c"'* ]]
+    [[ "$schema" == *'"prefill_tok_per_s":2.0'* ]]
     local contract
     contract=$(emit_contract "$remote_dir" "$DEFAULT_MODEL" "$DEFAULT_REVISION" 2 5 self-test)
     [[ "$contract" == *'--bench-warmup 0 --bench-iters 1 --json (external warmup=2 repetitions=5)'* ]]

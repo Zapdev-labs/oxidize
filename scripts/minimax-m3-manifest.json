@@ -15,5 +15,5 @@
     "shards": 4,
     "first_shard": "MiniMax-M3-UD-IQ1_M-00001-of-00004.gguf"
   },
-  "oxidize_run": "numactl --interleave=all ~/oxidize/target/release/oxidize run /home/ai/models/minimax-m3/target/UD-IQ1_M/MiniMax-M3-UD-IQ1_M-00001-of-00004.gguf --draft-model=/home/ai/models/minimax-m3/eagle3/draft --draft-tokens=3 --prompt 'Hello' --max-tokens 32 --no-api --no-auto --threads 32"
+  "oxidize_run": "numactl --interleave=all ~/oxidize/oxidize-c/oxidize-c prompt --model /home/ai/models/minimax-m3/target/UD-IQ1_M/MiniMax-M3-UD-IQ1_M-00001-of-00004.gguf --prompt Hello --n-predict 32 --no-auto --threads 32"
 }
