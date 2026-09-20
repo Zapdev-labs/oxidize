@@ -58,7 +58,7 @@ function buildModel(): Buffer {
 }
 
 describe("gguf reader", () => {
-  test("parses the oxidize-core v3 fixture", async () => {
+  test("parses the oxidize-c v3 fixture", async () => {
     const header = await readGgufHeader("../oxidize-c/tests/fixtures/valid-v3.gguf")
     expect(header.version).toBe(3)
     expect(header.tensorCount).toBe(1)

@@ -1,0 +1,5 @@
+name: oxidize
+paths:
+  - oxidize-c
+  - oxidize-tui
+  - .github
