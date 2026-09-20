@@ -99,7 +99,7 @@ export async function startServer(
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? "info" },
+    env: { ...process.env, OX_LOG_LEVEL: process.env.OX_LOG_LEVEL ?? "INFO" },
   })
 
   pumpLines(proc.stdout as ReadableStream<Uint8Array>, (l) => log("out", l))

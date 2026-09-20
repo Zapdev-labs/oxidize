@@ -62,9 +62,6 @@ export function resolveLauncher(): Launcher {
   const foundC = onPath("oxidize-c")
   if (foundC) return { cmd: foundC, prefix: [], label: "PATH", cwd }
 
-  const found = onPath("oxidize")
-  if (found) return { cmd: found, prefix: [], label: "PATH", cwd }
-
   if (root) {
     return {
       cmd: join(root, "oxidize-c", "oxidize-c"),
