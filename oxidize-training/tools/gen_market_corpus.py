@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import os
 import random
@@ -205,9 +206,10 @@ def main() -> int:
                 for ln in lines:
                     f.write(ln + "\n")
             os.replace(tmp, out)
-        except BaseException:
-            os.unlink(tmp)
-            raise
+        finally:
+            # A successful replace consumed tmp; anything left is a failed attempt.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
     except OSError as e:
         print(f"{out}: {e}", file=sys.stderr)
         return 1

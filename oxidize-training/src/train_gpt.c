@@ -609,6 +609,12 @@ static uint16_t *load_tokens(const char *path, uint32_t *n) {
     FILE *f = fopen(path, "rb");
     if (!f) die("open tokens");
     if (fread(n, 4, 1, f) != 1) die("tokens header");
+    /* Check the claimed count against the file before allocating, so a crafted
+     * header cannot ask for gigabytes. */
+    if (fseek(f, 0, SEEK_END) != 0) die("tokens seek");
+    long sz = ftell(f);
+    if (sz < 4 || (uint64_t)(sz - 4) < (uint64_t)*n * 2) die("tokens truncated");
+    if (fseek(f, 4, SEEK_SET) != 0) die("tokens seek");
     uint16_t *t = (uint16_t *)xmalloc((size_t)*n * 2);
     if (fread(t, 2, *n, f) != *n) die("tokens body");
     fclose(f);
@@ -1303,6 +1309,13 @@ static void cmd_backtest(int argc, char **argv) {
     r.eq = mark(&r, last);
     flatten(&bh, last, fee);
     bh.eq = mark(&bh, last);
+    /* Close the trades file before reporting: buffered writes can fail as late
+     * as fclose, and the summary must not claim a run the file does not hold. */
+    if (tf) {
+        int bad = ferror(tf);
+        if (fclose(tf) != 0) bad = 1;
+        if (bad) die("write trades");
+    }
     double dt = wall_now() - t0;
     double mp = (m.eq - cash0) / cash0 * 100.0;
     double rp = (r.eq - cash0) / cash0 * 100.0;
@@ -1315,7 +1328,6 @@ static void cmd_backtest(int argc, char **argv) {
            r.ntr ? 100.0 * r.nw / r.ntr : 0, r.maxdd * 100.0, r.eq);
     printf("bh     ret %+.2f%%  maxdd %.1f%%  end %.0f\n", bp, bh.maxdd * 100.0, bh.eq);
     printf("agree_rsi %.1f%%\n", scored ? 100.0 * agree / scored : 0);
-    if (tf) fclose(tf);
     (void)vocab_sz;
 }
 
