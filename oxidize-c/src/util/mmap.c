@@ -139,7 +139,9 @@ OcError oc_mmap_open_readonly_flags(const char *path, unsigned flags,
 #else
     /* Non-Linux: fall back to read() into a malloc'd buffer so the API is
      * still usable (tests don't need true mmap). The "mapping" is freed via
-     * oc_mmap_close() -> free(). */
+     * oc_mmap_close() -> free(). There is no madvise here, so the readahead
+     * hint has nothing to act on. */
+    (void)flags;
     FILE *f = fopen(path, "rb");
     if (!f) {
         oc_log(OC_LOG_ERROR, "mmap: fopen(%s) failed: %s", path, strerror(errno));
