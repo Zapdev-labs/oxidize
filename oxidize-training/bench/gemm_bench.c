@@ -1,11 +1,25 @@
 /* Compare naive GEMV (oxidize-cpp-train style) vs CBLAS SGEMM.
  * Prints ms and GFLOP/s for Y[T,rows] = X[T,cols] * W^T.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <cblas.h>
+
+/* atoi reports neither malformed input nor overflow: a zero iters count would
+ * divide by zero in time_ms and a negative dimension is undefined in cblas. */
+static int parse_dim(const char *s, const char *what) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno == ERANGE || !end || end == s || *end || v < 1 || v > 1 << 20) {
+        fprintf(stderr, "bad %s: %s (want 1..%d)\n", what, s, 1 << 20);
+        exit(1);
+    }
+    return (int)v;
+}
 
 static double now(void) {
     struct timespec ts;
@@ -74,12 +88,16 @@ static void run_sgemm(void *p) {
 int main(int argc, char **argv) {
     int T = 256, rows = 1024, cols = 384;
     int iters = 8;
-    if (argc >= 4) {
-        T = atoi(argv[1]);
-        rows = atoi(argv[2]);
-        cols = atoi(argv[3]);
+    if (argc >= 2 && argc < 4) {
+        fprintf(stderr, "usage: %s [T rows cols [iters]]\n", argv[0]);
+        return 1;
     }
-    if (argc >= 5) iters = atoi(argv[4]);
+    if (argc >= 4) {
+        T = parse_dim(argv[1], "T");
+        rows = parse_dim(argv[2], "rows");
+        cols = parse_dim(argv[3], "cols");
+    }
+    if (argc >= 5) iters = parse_dim(argv[4], "iters");
 
     struct SgemmCtx c = {
         .Y = malloc_f((size_t)T * (size_t)rows),

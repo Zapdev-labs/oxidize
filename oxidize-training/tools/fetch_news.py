@@ -48,22 +48,22 @@ EVENTS = {
 }
 
 
+ATTEMPTS = 6
+
+
 def get(url: str) -> bytes:
     req = urllib.request.Request(url, headers=UA)
     delay = 1.0
-    last = None
-    for _ in range(6):
+    for _ in range(ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
-            last = e
-            if e.code in (429, 503):
-                time.sleep(delay)
-                delay = min(delay * 1.7, 12.0)
-                continue
-            raise
-    raise last  # type: ignore[misc]
+            if e.code not in (429, 503):
+                raise
+            time.sleep(delay)
+            delay = min(delay * 1.7, 12.0)
+    raise urllib.error.URLError(f"throttled after {ATTEMPTS} attempts: {url}")
 
 
 def clean_wiki(s: str) -> str:
@@ -145,6 +145,7 @@ def main() -> int:
         print("no dates", file=sys.stderr)
         return 1
     n = 0
+    failed = 0
     for i, day in enumerate(days):
         dest = out / f"{day}.txt"
         if dest.exists() and dest.stat().st_size > 8:
@@ -153,10 +154,12 @@ def main() -> int:
             text = fetch_day(day)
         except Exception as e:
             print(f"fail {day} {e}", file=sys.stderr)
+            failed += 1
             time.sleep(max(args.sleep, 1.0))
             continue
         if text.startswith("NEWS unavailable"):
             print(f"skip {day} {text[:80]}", file=sys.stderr)
+            failed += 1
             time.sleep(max(args.sleep, 1.0))
             continue
         dest.write_text(text + "\n", encoding="utf-8")
@@ -164,7 +167,12 @@ def main() -> int:
         if n % 25 == 0 or i == 0:
             print(f"{day} {n} fetched / {i + 1}/{len(days)}", file=sys.stderr)
         time.sleep(args.sleep)
-    print(f"news cache {out} days={len(days)} new={n}", file=sys.stderr)
+    print(f"news cache {out} days={len(days)} new={n} failed={failed}", file=sys.stderr)
+    # Silently caching nothing would let corpus generation label every day
+    # "Quiet political tape.", so surface an upstream outage as a failure.
+    if failed and not n:
+        print(f"fetched no news for {failed} uncached days", file=sys.stderr)
+        return 1
     return 0
 
 

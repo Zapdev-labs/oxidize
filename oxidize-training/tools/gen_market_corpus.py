@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
+import os
 import random
 import sys
+import tempfile
 from pathlib import Path
 
 UNIVERSE = [
@@ -128,6 +129,9 @@ def main() -> int:
     ap.add_argument("--out", default="data/corpus.txt")
     ap.add_argument("--thr", type=float, default=0.006)
     args = ap.parse_args()
+    # action_from_ret's BUY and SELL branches overlap for a negative threshold.
+    if args.thr < 0:
+        ap.error("--thr must be non-negative")
     data = Path(args.data_dir)
     news_dir = Path(args.news_dir)
     series: dict[str, dict[str, dict]] = {}
@@ -171,11 +175,14 @@ def main() -> int:
             )
             tickets[act].append(line)
             ranked.append((nxt_ret, sym, act, a))
-        if len(ranked) >= 4:
-            ranked.sort(key=lambda x: x[0], reverse=True)
-            buys = [x[1] for x in ranked[:2]]
-            sells = [x[1] for x in ranked[-2:]]
-            hold = ranked[len(ranked) // 2][1]
+        # Rank alone would label the least-negative names BUY on an all-down day,
+        # contradicting the single-name tickets, so honour the threshold action.
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        buys = [x[1] for x in ranked if x[2] == "BUY"][:2]
+        sells = [x[1] for x in ranked if x[2] == "SELL"][-2:]
+        holds = [x[1] for x in ranked if x[2] == "HOLD"]
+        if len(buys) == 2 and len(sells) == 2 and holds:
+            hold = holds[len(holds) // 2]
             picks_lines.append(
                 f"PICKS {day} {buys[0]} BUY {buys[1]} BUY {hold} HOLD {sells[0]} SELL {sells[1]} SELL. NEWS: {news}"
             )
@@ -187,10 +194,22 @@ def main() -> int:
     lines = tickets["BUY"] + tickets["SELL"] + hold + picks_lines
     rng.shuffle(lines)
     out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with out.open("w", encoding="utf-8") as f:
-        for ln in lines:
-            f.write(ln + "\n")
+    # Write beside the destination and rename, so a failed write cannot leave a
+    # truncated corpus in place of a good one.
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=out.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for ln in lines:
+                    f.write(ln + "\n")
+            os.replace(tmp, out)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+    except OSError as e:
+        print(f"{out}: {e}", file=sys.stderr)
+        return 1
     print(
         f"wrote {len(lines)} docs BUY={len(tickets['BUY'])} SELL={len(tickets['SELL'])} "
         f"HOLD={len(hold)} PICKS={len(picks_lines)} -> {out}",

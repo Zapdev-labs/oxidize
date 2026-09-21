@@ -1,9 +1,25 @@
 /* Emit a synthetic quant-trading corpus as UTF-8 lines.
  * Usage: gen_corpus [n_docs] [out_path]
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+/* Create every parent directory of `path`, like `mkdir -p $(dirname path)`. */
+static int mkdir_parents(const char *path) {
+    char buf[1024];
+    if (snprintf(buf, sizeof buf, "%s", path) >= (int)sizeof buf) return -1;
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        if (buf[0] && mkdir(buf, 0777) != 0 && errno != EEXIST) return -1;
+        *p = '/';
+    }
+    return 0;
+}
 
 static unsigned rng = 1u;
 static unsigned ru(void) {
@@ -141,9 +157,23 @@ static void line_lesson(FILE *f) {
 }
 
 int main(int argc, char **argv) {
-    int n = argc > 1 ? atoi(argv[1]) : 80000;
+    int n = 80000;
+    if (argc > 1) {
+        /* atoi turns malformed input into zero, which would silently become one doc. */
+        char *end = NULL;
+        errno = 0;
+        long v = strtol(argv[1], &end, 10);
+        if (errno == ERANGE || !end || end == argv[1] || *end || v < 1 || v > 100000000L) {
+            fprintf(stderr, "usage: gen_corpus [n_docs] [out_path]\nn_docs must be 1..100000000\n");
+            return 1;
+        }
+        n = (int)v;
+    }
     const char *path = argc > 2 ? argv[2] : "corpus.txt";
-    if (n < 1) n = 1;
+    if (mkdir_parents(path) != 0) {
+        perror(path);
+        return 1;
+    }
     FILE *f = fopen(path, "w");
     if (!f) {
         perror(path);
@@ -156,7 +186,13 @@ int main(int argc, char **argv) {
         else if (k < 9) line_macro(f);
         else line_lesson(f);
     }
-    fclose(f);
+    /* Buffered writes can fail as late as fclose, so check both. */
+    int failed = ferror(f);
+    if (fclose(f) != 0) failed = 1;
+    if (failed) {
+        perror(path);
+        return 1;
+    }
     fprintf(stderr, "wrote %d docs to %s\n", n, path);
     return 0;
 }

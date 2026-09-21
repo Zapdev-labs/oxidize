@@ -15,7 +15,12 @@ check() {
     out=$("$BIN" sample --ckpt "$CKPT" --vocab "$VOCAB" --prompt "$prompt" --tokens 40 --temp 0.2 --seed "$n")
     gen=$(printf '%s\n' "$out" | awk 'f{print} /^---$/{f=1}')
     printf 'WANT %s\nPROMPT %s\n%s\n' "$want" "$prompt" "$gen"
-    got=$(printf '%s\n' "$gen" | grep -oE 'ACTION=(BUY|SELL|HOLD)' | head -1 | sed 's/ACTION=//')
+    # gen replays the decoded prompt before the continuation. Anchor to what the
+    # model emitted right after ACTION=, or a later action in the 40-token tail
+    # would count as a hit.
+    cont=${gen#"$prompt"}
+    [ "$cont" != "$gen" ] || cont=${gen#*ACTION=}
+    got=$(printf '%s\n' "$cont" | head -1 | grep -oE '^(BUY|SELL|HOLD)' | head -1)
     if [ "$got" = "$want" ]; then
         ok=$((ok + 1))
         echo "OK $got $ok/$n"
