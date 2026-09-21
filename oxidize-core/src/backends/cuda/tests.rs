@@ -467,7 +467,7 @@ fn split_k_cuda_source_defines_decode_and_reduce_entries() {
 fn split_k_profile_surface_characterizes_current_phase_one_entries() {
     // Given the checked-in CUDA module and Modal GPU action surface.
     let cuda_module = include_str!("../cuda.rs");
-    let modal_app = include_str!("../../../../modal_app.py");
+    let modal_app = include_str!("../../../../scripts/modal_app.py");
 
     // When the completed Phase 1 split-K surface is inspected.
     let required_entries = [
@@ -489,7 +489,7 @@ fn split_k_profile_surface_characterizes_current_phase_one_entries() {
 #[test]
 fn profile_summary_requires_direct_ffn_and_cli_wall_totals() {
     // Given the real Modal runner used to choose the next GPU optimization.
-    let modal_app = include_str!("../../../../modal_app.py");
+    let modal_app = include_str!("../../../../scripts/modal_app.py");
 
     // When its next-speed profiling contract is inspected.
     let required_contract = [
@@ -513,7 +513,7 @@ fn profile_summary_requires_direct_ffn_and_cli_wall_totals() {
 
 #[test]
 fn gpu_next_profile_avoids_unstable_nsys_trace() {
-    let modal_app = include_str!("../../../../modal_app.py");
+    let modal_app = include_str!("../../../../scripts/modal_app.py");
     let gpu_next_profile = modal_app
         .split("def gpu_next_profile(")
         .nth(1)
@@ -529,7 +529,7 @@ fn gpu_next_profile_avoids_unstable_nsys_trace() {
 #[test]
 fn gpu_next_profile_falls_back_from_broken_nsys_to_direct_cuda_events() {
     // Given Nsight profiling proved unreliable on the target H100 image.
-    let modal_app = include_str!("../../../../modal_app.py");
+    let modal_app = include_str!("../../../../scripts/modal_app.py");
     let gpu_next_profile = modal_app
         .split("def gpu_next_profile(")
         .nth(1)
@@ -571,7 +571,7 @@ fn gpu_next_profile_falls_back_from_broken_nsys_to_direct_cuda_events() {
 fn gpu_next_profile_extracts_real_cli_generation_output() {
     // Given the real CLI streams generated text between its offload-plan and
     // generation-stats records rather than prefixing it with `oxidize:`.
-    let modal_app = include_str!("../../../../modal_app.py");
+    let modal_app = include_str!("../../../../scripts/modal_app.py");
     let gpu_next_profile = modal_app
         .split("def gpu_next_profile(")
         .nth(1)
@@ -600,7 +600,7 @@ fn gpu_next_profile_extracts_real_cli_generation_output() {
 fn gpu_next_profile_reuses_resolved_local_model_for_repeated_trials() {
     // Given repeated CLI measurements must not depend on a remote Hugging Face
     // request succeeding once per trial.
-    let modal_app = include_str!("../../../../modal_app.py");
+    let modal_app = include_str!("../../../../scripts/modal_app.py");
     let gpu_next_profile = modal_app
         .split("def gpu_next_profile(")
         .nth(1)
@@ -639,7 +639,7 @@ fn gpu_next_profile_reuses_resolved_local_model_for_repeated_trials() {
 
 #[test]
 fn modal_harness_exposes_real_dflash_cli_ab() {
-    let source = include_str!("../../../../modal_app.py");
+    let source = include_str!("../../../../scripts/modal_app.py");
     for marker in [
         "def gpu_dflash_ab(",
         "--draft-model",
