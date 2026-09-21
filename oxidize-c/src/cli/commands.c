@@ -22,8 +22,11 @@
  */
 #include "oxidize/cli_commands.h"
 
+#include "args.h"
+#include "oxidize/autotune.h"
 #include "oxidize/benchmark.h"
 #include "oxidize/error.h"
+#include "oxidize/expert_stream.h"
 #include "oxidize/finetune.h"
 #include "oxidize/gguf.h"
 #include "oxidize/hf_hub.h"
@@ -140,8 +143,54 @@ static void cli_error(const char *fmt, ...)
 static OcError cli_session_init(const OcCliContext *ctx, OcLlamaModel *model,
                                 OcLlamaSession *sess)
 {
-    OcKvCacheType kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
-    return oc_llama_session_init_kv(model, sess, kv);
+    OcKvCacheType kv;
+    OcError e;
+    if (oc_cli_cuda_conflicts_kv_compress(ctx->backend, ctx->kv_compress))
+        return OC_ERR_INVALID_ARG;
+    kv = oc_llama_select_kv_type(model->cfg.n_ctx, ctx->kv_type);
+    e = oc_llama_session_init_with_compress(model, sess, kv, ctx->kv_compress);
+    if (e != OC_OK) return e;
+    if (ctx->prerouter_path) {
+        e = oc_llama_session_load_prerouter(sess, ctx->prerouter_path,
+                                            !ctx->prerouter_prefetch);
+        if (e != OC_OK) {
+            oc_llama_session_free(sess);
+            return e;
+        }
+    }
+    if (ctx->lora_path) {
+        e = oc_llama_session_load_lora(sess, ctx->lora_path);
+        if (e != OC_OK) {
+            oc_llama_session_free(sess);
+            return e;
+        }
+    }
+    return OC_OK;
+}
+
+static OcError cli_load_llama(const OcCliContext *ctx, OcLlamaModel *model)
+{
+    unsigned flags = ctx->stream_experts ? OC_LLAMA_LOAD_STREAM : 0u;
+    OcError e = oc_llama_load_flags(ctx->model_path, flags, model);
+    if (e != OC_OK) return e;
+    oc_cli_apply_ctx(ctx, model);
+    if (ctx->experts_per_tok > 0 && model->cfg.num_experts > 0) {
+        uint32_t max = model->cfg.num_experts + model->cfg.zero_expert_count;
+        uint32_t k = ctx->experts_per_tok > max ? max : ctx->experts_per_tok;
+        model->cfg.num_experts_per_tok = k;
+    }
+    if (ctx->stream_experts) {
+        OcExpertStreamConfig scfg;
+        oc_expert_stream_config_init(&scfg);
+        if (ctx->expert_cache_mb > 0)
+            scfg.cache_bytes = (uint64_t)ctx->expert_cache_mb << 20;
+        e = oc_llama_enable_expert_stream(model, &scfg);
+        if (e != OC_OK) {
+            oc_llama_free(model);
+            return e;
+        }
+    }
+    return OC_OK;
 }
 
 void oc_cli_apply_ctx(const OcCliContext *ctx, struct OcLlamaModel *model)
@@ -373,6 +422,8 @@ void oc_cli_command_help(void)
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
 "  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+"  --kv-compress MODE    none|rotor|helix (default none)\n"
+"  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill)\n"
 "  --ctx N               KV context length (default cap 4096)\n"
 "  --verbose, -v         Verbose logging to stderr\n"
 "  --help, -h            Show help\n"
@@ -397,7 +448,14 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --temperature T       Sampling temperature (0 = greedy)\n"
                "  --top-k K             Top-K sampling\n"
                "  --top-p P             Top-P / nucleus sampling\n"
-               "  --seed N              RNG seed\n");
+               "  --seed N              RNG seed\n"
+               "  --kv-compress MODE    none|rotor|helix (default none)\n"
+               "  --stream-experts      SSD expert offload (no whole-file readahead)\n"
+               "  --expert-cache-mb N   Expert working-set budget in MiB (default 3072)\n"
+               "  --prerouter PATH      Edge0 prerouter safetensors\n"
+               "  --prerouter-prefetch  Prefetch only; keep native MoE router\n"
+               "  --lora PATH           Edge0 Recover-LoRA safetensors\n"
+               "  --experts-per-tok K   Override MoE top-k (Edge0 uses 4)\n");
         break;
     case OC_CLI_CMD_CHAT:
         printf("interactive chat session\n\n"
@@ -417,7 +475,13 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --bench-prompt-tokens N  Exact synthetic prompt-token count\n"
                "  --bench-decode-tokens N  Exact decode-token count\n"
                "  --bench-no-eos        Do not stop decode at EOS\n"
-               "  --prompt TEXT          Prompt to use for benchmarking\n");
+               "  --prompt TEXT          Prompt to use for benchmarking\n"
+               "  --kv-compress MODE    none|rotor|helix (default none)\n"
+               "  --stream-experts      SSD expert offload (no whole-file readahead)\n"
+               "  --expert-cache-mb N   Expert working-set budget in MiB (default 3072)\n"
+               "  --prerouter PATH      Edge0 prerouter safetensors\n"
+               "  --lora PATH           Edge0 Recover-LoRA safetensors\n"
+               "  --experts-per-tok K   Override MoE top-k (Edge0 uses 4)\n");
         break;
     case OC_CLI_CMD_INSPECT:
         printf("inspect model metadata and architecture\n\n"
@@ -430,7 +494,9 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "USAGE: oxidize-c serve --model <path> [OPTIONS]\n\n"
                "OPTIONS:\n"
                "  --host HOST           Bind host (default 127.0.0.1)\n"
-               "  --port PORT           Bind port (default 8080)\n");
+               "  --port PORT           Bind port (default 8080)\n"
+               "  --auto                Apply autotune plan to scheduler/KV\n"
+               "  --prefill-chunk-size N Prefill chunk (overrides plan)\n");
         break;
     case OC_CLI_CMD_SERVE_REALTIME:
         printf("start WebSocket realtime server\n\n"
@@ -562,12 +628,11 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
 
     progress(ctx, "loading model: %s", ctx->model_path);
     OcLlamaModel model;
-    OcError e = oc_llama_load(ctx->model_path, &model);
+    OcError e = cli_load_llama(ctx, &model);
     if (e != OC_OK) {
         cli_error("failed to load model (%s)", oc_error_msg(e));
         return e;
     }
-    oc_cli_apply_ctx(ctx, &model);
 
     OcTokenizer tok;
     e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
@@ -615,6 +680,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
     double best_tps = 0.0, sum_tps = 0.0;
     double best_pf = 0.0, sum_pf = 0.0;
     int completed = 0;
+    int setup_failed = 0;
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"bench\",\"model\":\"%s\",\"prompt_tokens\":%zu,"
@@ -629,7 +695,12 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         (uint64_t)ctx->bench_warmup + (uint64_t)ctx->bench_iterations;
     for (uint64_t iter = 0; iter < total_iterations; iter++) {
         OcLlamaSession sess;
-        if (cli_session_init(ctx, &model, &sess) != OC_OK) break;
+        OcError se = cli_session_init(ctx, &model, &sess);
+        if (se != OC_OK) {
+            cli_error("benchmark session init failed (%s)", oc_error_msg(se));
+            setup_failed = 1;
+            break;
+        }
         float *logits = sess.logits;
 
         double pf_start = wall_now();
@@ -638,6 +709,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         if (e != OC_OK) {
             cli_error("benchmark prefill failed (%s)", oc_error_msg(e));
             oc_llama_session_free(&sess);
+            setup_failed = 1;
             break;
         }
         double pf_tps = (pf_elapsed > 0)
@@ -694,7 +766,11 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
     oc_tokenizer_free(&tok);
     oc_llama_free(&model);
 
-    if (completed == 0) return OC_ERR_INTERNAL;
+    if (setup_failed || completed == 0) {
+        if (ctx->output_format == OC_CLI_OUTPUT_JSON)
+            printf("],\"error\":\"benchmark failed\"}\n");
+        return OC_ERR_INTERNAL;
+    }
 
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("],\"best_decode\":%.2f,\"avg_decode\":%.2f,"
@@ -1395,13 +1471,12 @@ OcError oc_cli_run_perplexity(OcCliContext *ctx)
 
     progress(ctx, "loading model: %s", ctx->model_path);
     OcLlamaModel model;
-    OcError e = oc_llama_load(ctx->model_path, &model);
+    OcError e = cli_load_llama(ctx, &model);
     if (e != OC_OK) {
         cli_error("failed to load model (%s)", oc_error_msg(e));
         free(file_text);
         return e;
     }
-    oc_cli_apply_ctx(ctx, &model);
 
     OcTokenizer tok;
     e = oc_tokenizer_load_from_gguf(&model.gguf.unified, &tok);
@@ -1458,13 +1533,12 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
             return OC_ERR_OOM;
         }
         progress(ctx, "loading model: %s", ctx->model_path);
-        e = oc_llama_load(ctx->model_path, model);
+        e = cli_load_llama(ctx, model);
         if (e != OC_OK) {
             cli_error("failed to load model (%s)", oc_error_msg(e));
             free(model); free(tok);
             return e;
         }
-        oc_cli_apply_ctx(ctx, model);
         e = oc_tokenizer_load_from_gguf(&model->gguf.unified, tok);
         if (e != OC_OK) {
             cli_error("tokenizer load failed (%s)", oc_error_msg(e));
@@ -1479,6 +1553,29 @@ OcError oc_cli_run_serve(OcCliContext *ctx)
         st.model_id = strdup(slash ? slash + 1 : ctx->model_path);
         progress(ctx, "serve: model loaded, starting server on %s:%d",
                  ctx->host, ctx->port);
+        if (ctx->auto_tune) {
+            OcCpuInfo cpu;
+            OcModelFingerprint fp;
+            if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+                oc_autotune_fingerprint_gguf(&model->gguf, &fp) == OC_OK) {
+                OcTuningPlan plan = oc_autotune_plan(&cpu, &fp);
+                /* Serve has no CUDA init; do not apply Hopper knobs
+                 * to CPU OpenAI sessions. */
+                oc_autotune_clear_gpu_runtime(&plan);
+                oc_autotune_apply(&plan, &model->gguf);
+                oc_autotune_apply_thread_numa(&plan, &cpu, &model->gguf,
+                                             ctx->threads, ctx->numa, true,
+                                             false);
+                oc_openai_apply_tuning_plan(&st, &plan, ctx->prefill_chunk_size,
+                                           ctx->kv_type);
+            } else if (ctx->prefill_chunk_size > 0 || ctx->kv_type != NULL) {
+                oc_openai_apply_tuning_plan(&st, NULL, ctx->prefill_chunk_size,
+                                             ctx->kv_type);
+            }
+        } else if (ctx->prefill_chunk_size > 0 || ctx->kv_type != NULL) {
+            oc_openai_apply_tuning_plan(&st, NULL, ctx->prefill_chunk_size,
+                                         ctx->kv_type);
+        }
     } else {
         progress(ctx, "serve: no model — starting placeholder server on %s:%d",
                  ctx->host, ctx->port);
@@ -1584,13 +1681,12 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
     }
 
     progress(ctx, "loading model: %s", ctx->model_path);
-    OcError e = oc_llama_load(ctx->model_path, model);
+    OcError e = cli_load_llama(ctx, model);
     if (e != OC_OK) {
         cli_error("failed to load model (%s)", oc_error_msg(e));
         free(model); free(tok);
         return e;
     }
-    oc_cli_apply_ctx(ctx, model);
     e = oc_tokenizer_load_from_gguf(&model->gguf.unified, tok);
     if (e != OC_OK) {
         cli_error("tokenizer load failed (%s)", oc_error_msg(e));

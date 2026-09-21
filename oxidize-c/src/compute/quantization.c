@@ -183,6 +183,18 @@ static LayoutInfo layout_for(OcGgufQuantizationType qtype)
     case OC_QUANT_Q5_0:   return (LayoutInfo){ OC_BLOCK_Q5_0_SIZE, OC_QK5_0 };
     case OC_QUANT_Q5_1:   return (LayoutInfo){ OC_BLOCK_Q5_1_SIZE, OC_QK5_1 };
     case OC_QUANT_Q8_0:   return (LayoutInfo){ OC_BLOCK_Q8_0_SIZE, OC_QK8_0 };
+    /* Q8_0_R8 interleaves eight Q8_0 rows into 272-byte superblocks. The
+     * byte budget is identical to Q8_0, but the bytes are NOT row-strided,
+     * and there is no runtime decoder for the interleaved form. Reporting the
+     * Q8_0 layout here would let `tensor_byte_size` accept a type-208 tensor
+     * and let `view_from_info` hand it to the matvec path as if it were
+     * ordinary row-major Q8_0 — silently producing garbage. A zero layout is
+     * the port's "refuse this tensor" signal: `oc_quantized_size` returns 0
+     * and the model loader fails the tensor with OC_ERR_QUANT. The type
+     * constant, its name, and its ggml-id mapping stay available so offline
+     * conversion tooling can still recognise and unpack it (see
+     * oxk_q8_0_r8.h). */
+    case OC_QUANT_Q8_0_R8: return (LayoutInfo){ 0, 0 };
     case OC_QUANT_Q2_K:   return (LayoutInfo){ OC_BLOCK_Q2_K_SIZE, OC_QK_K };
     case OC_QUANT_Q3_K_S:
     case OC_QUANT_Q3_K_M:
@@ -2757,6 +2769,15 @@ size_t oc_quantized_size(OcGgufQuantizationType qtype, size_t value_count)
     return (value_count / bs.elements_per_block) * bs.bytes_per_block;
 }
 
+bool oc_quant_is_runtime_supported(OcGgufQuantizationType qtype)
+{
+    /* A zero block layout already means "no runtime decoder" for every
+     * unknown id; OC_QUANT_Q8_0_R8 is deliberately given a zero layout
+     * (see layout_for) for the same reason, so this one test covers both. */
+    LayoutInfo l = layout_for(qtype);
+    return l.input_block_size != 0 && l.values_per_block != 0;
+}
+
 OcError oc_quant_dequant_row(OcGgufQuantizationType qtype,
                              const uint8_t *src, size_t src_len,
                              float *dst, size_t value_count)
@@ -2819,6 +2840,12 @@ OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
     case OC_QUANT_IQ4_NL:  return dequant_iq4_nl(src, src_len, dst, value_count);
     case OC_QUANT_IQ4_XS:  return dequant_iq4_xs(src, src_len, dst, value_count);
     case OC_QUANT_NVFP4:   return dequant_nvfp4(src, src_len, dst, value_count);
+    /* Q8_0_R8 is an offline interleaved repack layout, not a decodable row
+     * format: eight rows share a superblock, so there is no "row" to
+     * dequantize here. Rejected explicitly (rather than falling into
+     * `default`) so the omission reads as deliberate. Callers must unpack to
+     * row-major Q8_0 first — see oxk_q8_0_r8.h. */
+    case OC_QUANT_Q8_0_R8: return OC_ERR_QUANT;
     default:
         /* Unknown types return OC_ERR_QUANT (no crash). */
         return OC_ERR_QUANT;
@@ -2866,6 +2893,10 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
     case OC_QUANT_IQ4_NL: return pack_iq4_nl(src, value_count, dst, dst_len);
     case OC_QUANT_IQ4_XS: return pack_iq4_xs(src, value_count, dst, dst_len);
     case OC_QUANT_NVFP4:  return pack_nvfp4(src, value_count, dst, dst_len);
+    /* Q8_0_R8 is produced by repacking finished Q8_0 rows, not by a
+     * per-row encoder — pack as OC_QUANT_Q8_0, then call
+     * `oc_q8_0_r8_repack` on the whole tensor. */
+    case OC_QUANT_Q8_0_R8: return OC_ERR_QUANT;
     default:
         /* IQ1/IQ2/IQ3 encoders need a search over the E8 lattice grids in
          * quant_tables.h, which is not implemented — those types stay
@@ -2925,6 +2956,8 @@ static const struct {
     { OC_QUANT_IQ1_S,   "IQ1_S",   19 },
     { OC_QUANT_IQ1_M,   "IQ1_M",   29 },
     { OC_QUANT_IQ1_XXXS, "IQ1_XXXS", 66 },
+    /* ik_llama.cpp interleaved Q8_0. */
+    { OC_QUANT_Q8_0_R8, "Q8_0_R8", 208 },
     { OC_QUANT_NVFP4,   "NVFP4",   40 },
     { OC_QUANT_I8,      "I8",      24 },
     { OC_QUANT_I16,     "I16",     25 },

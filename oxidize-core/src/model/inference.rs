@@ -13,6 +13,7 @@ pub(super) use crate::tensor::{
     gemv_quantized_experts_gate_up_f32, gemv_quantized_f32, gemv_quantized_multi_f32, rms_norm_f32,
 };
 pub(super) use memmap2::Mmap;
+pub(super) use std::collections::VecDeque;
 pub(super) use std::sync::Arc;
 
 /// Cached `OXIDIZE_TRACE_FWD` gate. The trace checks sit inside per-layer
@@ -1379,6 +1380,17 @@ pub struct InferenceModel {
     /// Target layer indices whose hidden states are snapshotted for EAGLE3 draft fusion.
     pub(super) eagle3_capture_layers: Vec<usize>,
     pub(super) eagle3_layer_hiddens: Vec<Option<Vec<f32>>>,
+    /// Target layer indices snapshotted for DFlash2 fused-context drafting.
+    /// Unlike the EAGLE3 single-row capture, this keeps a per-position ring so
+    /// a block draft can attend to target context for every committed position.
+    ///
+    /// WIP: storage only. Nothing fills or reads the ring yet, and
+    /// `InferenceModel` still uses the default (unsupported) bodies of
+    /// [`Model::set_dflash_capture_layers`] / [`Model::dflash_captured_rows`].
+    /// The forward-pass capture hook lands in a follow-up.
+    pub(super) dflash_capture_layers: Vec<usize>,
+    pub(super) dflash_capture_row_len: usize,
+    pub(super) dflash_capture_ring: VecDeque<Vec<f32>>,
     /// Token pending GPU embedding lookup in the next `run_layer_range` call.
     #[cfg(feature = "cuda")]
     pub(super) pending_embed_token: Option<crate::model::Token>,
@@ -2507,6 +2519,9 @@ mod tests {
             last_output_hidden: vec![0.0_f32; config.hidden_size],
             eagle3_capture_layers: Vec::new(),
             eagle3_layer_hiddens: Vec::new(),
+            dflash_capture_layers: Vec::new(),
+            dflash_capture_row_len: 0,
+            dflash_capture_ring: VecDeque::new(),
             #[cfg(feature = "cuda")]
             pending_embed_token: None,
         }

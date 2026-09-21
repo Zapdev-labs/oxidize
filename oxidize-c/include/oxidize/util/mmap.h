@@ -55,7 +55,15 @@ typedef struct OcMmap OcMmap;
  * On success, writes a heap-allocated OcMmap* to `*out`. Returns OC_OK,
  * OC_ERR_IO (open/stat), OC_ERR_INVALID_ARG (NULL args), or OC_ERR_OOM
  * (mmap/malloc failure). On error, `*out` is set to NULL. */
+/* Skip MADV_SEQUENTIAL + MADV_WILLNEED at open. Use for SSD expert
+ * streaming so the kernel does not readahead the whole checkpoint. */
+#define OC_MMAP_F_NO_READAHEAD 1u
+
 OcError oc_mmap_open_readonly(const char *path, OcMmap **out);
+
+/* Same as oc_mmap_open_readonly with `flags` (OC_MMAP_F_*). */
+OcError oc_mmap_open_readonly_flags(const char *path, unsigned flags,
+                                    OcMmap **out);
 
 /* Map an already-open file descriptor for read-only access. Takes ownership
  * of `fd` (closes it on `oc_mmap_close`). Used by multi-shard GGUF loading
@@ -77,6 +85,25 @@ OcError oc_mmap_advise_random(OcMmap *m);
 
 /* Apply MADV_WILLNEED (best-effort, Linux only) — queues async readahead. */
 OcError oc_mmap_advise_willneed(OcMmap *m);
+
+typedef enum {
+    OC_MMAP_ADVICE_WILLNEED = 0,
+    OC_MMAP_ADVICE_DONTNEED = 1,
+    OC_MMAP_ADVICE_RANDOM = 2,
+    OC_MMAP_ADVICE_SEQUENTIAL = 3,
+    OC_MMAP_ADVICE_NORMAL = 4,
+} OcMmapAdvice;
+
+/* Page-align `offset`/`size` and apply `advice` to that span. Best-effort. */
+OcError oc_mmap_advise_range(OcMmap *m, size_t offset, size_t size,
+                             OcMmapAdvice advice);
+
+/* Fault every page of [offset, offset+size) with volatile reads so the
+ * current token's experts are resident before compute. Best-effort. */
+OcError oc_mmap_fault_range(OcMmap *m, size_t offset, size_t size);
+
+/* Underlying file descriptor, or -1 if the mapping does not own one. */
+int oc_mmap_fd(const OcMmap *m);
 
 /* Returns true if MADV_HUGEPAGE was applied successfully. */
 bool oc_mmap_hugepage(const OcMmap *m);

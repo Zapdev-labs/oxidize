@@ -1029,6 +1029,11 @@ static void oc_oxk_init_once(void)
     if (level >= OC_OXK_AVX2) {
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
+        /* Q6_K now has a real AVX2 body (not a scalar forwarder). It matters
+         * more than its tensor count suggests: K-quant mixes put ffn_down and
+         * attn_qkv in Q6_K, ~27% of the bytes of a Q4_K_M file, and running
+         * that share scalar left a 6.6x kernel-level gap on the table. */
+        g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_avx2;
     }
     /* The VNNI kernels use _mm*_dpbusd_epi32, so AVX-512 alone is not
      * enough — Skylake-SP has AVX-512F/BW but no VNNI. */

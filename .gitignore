@@ -26,6 +26,8 @@ __pycache__/
 deploy/
 /bench_results.json
 /results/
+# Local benchmark/audit run logs (output, not source)
+/.audit/
 /evidence/
 /plans/
 /specs/

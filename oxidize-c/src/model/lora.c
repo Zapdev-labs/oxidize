@@ -4,6 +4,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/lora.h"
 
+#include "oxidize/flash_attention.h"
+#include "oxidize/log.h"
+#include "oxidize/safetensors.h"
+
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,13 +24,26 @@ OcError oc_lora_model_init(OcLoraModel *lm, size_t n_layers)
     lm->gate_adapters = calloc(n_layers, sizeof(OcLoraAdapter));
     lm->up_adapters   = calloc(n_layers, sizeof(OcLoraAdapter));
     lm->down_adapters = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->shexp_gate_adapters = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->shexp_up_adapters   = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->shexp_down_adapters = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->ssm_qkv_adapters    = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->ssm_gate_adapters   = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->ssm_out_adapters    = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->ssm_alpha_adapters  = calloc(n_layers, sizeof(OcLoraAdapter));
+    lm->ssm_beta_adapters   = calloc(n_layers, sizeof(OcLoraAdapter));
     if (!lm->q_adapters || !lm->k_adapters || !lm->v_adapters ||
         !lm->o_adapters || !lm->gate_adapters || !lm->up_adapters ||
-        !lm->down_adapters) {
+        !lm->down_adapters || !lm->shexp_gate_adapters ||
+        !lm->shexp_up_adapters || !lm->shexp_down_adapters ||
+        !lm->ssm_qkv_adapters || !lm->ssm_gate_adapters ||
+        !lm->ssm_out_adapters || !lm->ssm_alpha_adapters ||
+        !lm->ssm_beta_adapters) {
         oc_lora_model_free(lm);
         return OC_ERR_OOM;
     }
     lm->active = false;
+    lm->scale = 2.0f;
     return OC_OK;
 }
 
@@ -53,6 +71,30 @@ OcError oc_lora_set_adapter(OcLoraModel *lm, size_t layer_idx,
         target = &lm->up_adapters[layer_idx];
     } else if (strcmp(weight_name, "down_proj") == 0 || strcmp(weight_name, "ffn_down") == 0) {
         target = &lm->down_adapters[layer_idx];
+    } else if (strcmp(weight_name, "shexp_gate") == 0 ||
+               strcmp(weight_name, "shared_expert.gate_proj") == 0) {
+        target = &lm->shexp_gate_adapters[layer_idx];
+    } else if (strcmp(weight_name, "shexp_up") == 0 ||
+               strcmp(weight_name, "shared_expert.up_proj") == 0) {
+        target = &lm->shexp_up_adapters[layer_idx];
+    } else if (strcmp(weight_name, "shexp_down") == 0 ||
+               strcmp(weight_name, "shared_expert.down_proj") == 0) {
+        target = &lm->shexp_down_adapters[layer_idx];
+    } else if (strcmp(weight_name, "ssm_qkv") == 0 ||
+               strcmp(weight_name, "in_proj_qkv") == 0) {
+        target = &lm->ssm_qkv_adapters[layer_idx];
+    } else if (strcmp(weight_name, "ssm_gate") == 0 ||
+               strcmp(weight_name, "in_proj_z") == 0) {
+        target = &lm->ssm_gate_adapters[layer_idx];
+    } else if (strcmp(weight_name, "ssm_out") == 0 ||
+               strcmp(weight_name, "out_proj") == 0) {
+        target = &lm->ssm_out_adapters[layer_idx];
+    } else if (strcmp(weight_name, "ssm_alpha") == 0 ||
+               strcmp(weight_name, "in_proj_a") == 0) {
+        target = &lm->ssm_alpha_adapters[layer_idx];
+    } else if (strcmp(weight_name, "ssm_beta") == 0 ||
+               strcmp(weight_name, "in_proj_b") == 0) {
+        target = &lm->ssm_beta_adapters[layer_idx];
     } else {
         return OC_ERR_INVALID_ARG;
     }
@@ -67,6 +109,7 @@ OcError oc_lora_set_adapter(OcLoraModel *lm, size_t layer_idx,
     target->rows  = rows;
     target->cols  = cols;
     target->alpha = alpha;
+    if (rank > lm->max_rank) lm->max_rank = rank;
     lm->active = true;
     return OC_OK;
 }
@@ -108,9 +151,12 @@ void oc_lora_model_free(OcLoraModel *lm)
     if (!lm) return;
     OcLoraAdapter *arrays[] = {
         lm->q_adapters, lm->k_adapters, lm->v_adapters, lm->o_adapters,
-        lm->gate_adapters, lm->up_adapters, lm->down_adapters
+        lm->gate_adapters, lm->up_adapters, lm->down_adapters,
+        lm->shexp_gate_adapters, lm->shexp_up_adapters, lm->shexp_down_adapters,
+        lm->ssm_qkv_adapters, lm->ssm_gate_adapters, lm->ssm_out_adapters,
+        lm->ssm_alpha_adapters, lm->ssm_beta_adapters
     };
-    for (size_t i = 0; i < 7; i++) {
+    for (size_t i = 0; i < sizeof(arrays) / sizeof(arrays[0]); i++) {
         if (arrays[i]) {
             for (size_t l = 0; l < lm->n_layers; l++) {
                 free(arrays[i][l].a);
@@ -125,6 +171,236 @@ void oc_lora_model_free(OcLoraModel *lm)
 bool oc_lora_is_active(const OcLoraModel *lm)
 {
     return lm ? lm->active : false;
+}
+
+enum {
+    OC_LORA_KIND_Q = 0,
+    OC_LORA_KIND_K,
+    OC_LORA_KIND_V,
+    OC_LORA_KIND_O,
+    OC_LORA_KIND_SHEXP_GATE,
+    OC_LORA_KIND_SHEXP_UP,
+    OC_LORA_KIND_SHEXP_DOWN,
+    OC_LORA_KIND_SSM_QKV,
+    OC_LORA_KIND_SSM_GATE,
+    OC_LORA_KIND_SSM_OUT,
+    OC_LORA_KIND_SSM_ALPHA,
+    OC_LORA_KIND_SSM_BETA,
+    OC_LORA_KIND_COUNT
+};
+
+static const char *lora_kind_name(int kind)
+{
+    switch (kind) {
+    case OC_LORA_KIND_Q: return "q_proj";
+    case OC_LORA_KIND_K: return "k_proj";
+    case OC_LORA_KIND_V: return "v_proj";
+    case OC_LORA_KIND_O: return "o_proj";
+    case OC_LORA_KIND_SHEXP_GATE: return "shexp_gate";
+    case OC_LORA_KIND_SHEXP_UP: return "shexp_up";
+    case OC_LORA_KIND_SHEXP_DOWN: return "shexp_down";
+    case OC_LORA_KIND_SSM_QKV: return "ssm_qkv";
+    case OC_LORA_KIND_SSM_GATE: return "ssm_gate";
+    case OC_LORA_KIND_SSM_OUT: return "ssm_out";
+    case OC_LORA_KIND_SSM_ALPHA: return "ssm_alpha";
+    case OC_LORA_KIND_SSM_BETA: return "ssm_beta";
+    default: return NULL;
+    }
+}
+
+static int lora_parse_kind(const char *rest)
+{
+    if (strstr(rest, "self_attn.q_proj")) return OC_LORA_KIND_Q;
+    if (strstr(rest, "self_attn.k_proj")) return OC_LORA_KIND_K;
+    if (strstr(rest, "self_attn.v_proj")) return OC_LORA_KIND_V;
+    if (strstr(rest, "self_attn.o_proj")) return OC_LORA_KIND_O;
+    if (strstr(rest, "shared_expert.gate_proj") || strstr(rest, "ffn_gate_shexp"))
+        return OC_LORA_KIND_SHEXP_GATE;
+    if (strstr(rest, "shared_expert.up_proj") || strstr(rest, "ffn_up_shexp"))
+        return OC_LORA_KIND_SHEXP_UP;
+    if (strstr(rest, "shared_expert.down_proj") || strstr(rest, "ffn_down_shexp"))
+        return OC_LORA_KIND_SHEXP_DOWN;
+    if (strstr(rest, "in_proj_qkv") || strstr(rest, "attn_qkv"))
+        return OC_LORA_KIND_SSM_QKV;
+    if (strstr(rest, "in_proj_z") || strstr(rest, "attn_gate"))
+        return OC_LORA_KIND_SSM_GATE;
+    if (strstr(rest, "out_proj") || strstr(rest, "ssm_out"))
+        return OC_LORA_KIND_SSM_OUT;
+    if (strstr(rest, "in_proj_a") || strstr(rest, "ssm_alpha"))
+        return OC_LORA_KIND_SSM_ALPHA;
+    if (strstr(rest, "in_proj_b") || strstr(rest, "ssm_beta"))
+        return OC_LORA_KIND_SSM_BETA;
+    return -1;
+}
+
+static bool lora_name_ends(const char *name, const char *suf)
+{
+    size_t n = strlen(name);
+    size_t m = strlen(suf);
+    return n >= m && strcmp(name + n - m, suf) == 0;
+}
+
+static bool lora_name_is_a(const char *name)
+{
+    return lora_name_ends(name, "lora_A") || lora_name_ends(name, "lora_a") ||
+           lora_name_ends(name, "lora_A.weight") ||
+           lora_name_ends(name, "lora_a.weight");
+}
+
+static bool lora_name_is_b(const char *name)
+{
+    return lora_name_ends(name, "lora_B") || lora_name_ends(name, "lora_b") ||
+           lora_name_ends(name, "lora_B.weight") ||
+           lora_name_ends(name, "lora_b.weight");
+}
+
+static OcError lora_copy_f32(const OcSafetensorsFile *st,
+                             const OcSafetensorsTensor *t, float **out,
+                             uint32_t *rows, uint32_t *cols)
+{
+    if (!t || t->n_dims != 2) return OC_ERR_FORMAT;
+    const void *raw = NULL;
+    OcError e = oc_safetensors_get_tensor_data(st, t, &raw);
+    if (e != OC_OK) return e;
+    uint32_t r = (uint32_t)t->shape[0];
+    uint32_t c = (uint32_t)t->shape[1];
+    size_t elem = 0;
+    if (strcmp(t->dtype, "F32") == 0) elem = 4;
+    else if (strcmp(t->dtype, "F16") == 0 || strcmp(t->dtype, "BF16") == 0)
+        elem = 2;
+    else return OC_ERR_FORMAT;
+    size_t n = (size_t)r * c;
+    if (c != 0 && n / c != r) return OC_ERR_TENSOR;
+    if (t->data_length < n * elem) return OC_ERR_FORMAT;
+    float *buf = malloc(n * sizeof(float));
+    if (!buf) return OC_ERR_OOM;
+        if (strcmp(t->dtype, "F32") == 0) {
+        memcpy(buf, raw, n * sizeof(float));
+    } else if (strcmp(t->dtype, "F16") == 0) {
+        const uint16_t *h = (const uint16_t *)raw;
+        for (size_t i = 0; i < n; i++) buf[i] = oc_f16_to_f32_bits(h[i]);
+    } else if (strcmp(t->dtype, "BF16") == 0) {
+        const uint16_t *h = (const uint16_t *)raw;
+        for (size_t i = 0; i < n; i++) {
+            uint32_t bits = ((uint32_t)h[i]) << 16;
+            memcpy(&buf[i], &bits, sizeof(float));
+        }
+    } else {
+        free(buf);
+        return OC_ERR_FORMAT;
+    }
+    *out = buf;
+    *rows = r;
+    *cols = c;
+    return OC_OK;
+}
+
+typedef struct {
+    float *a;
+    float *b;
+    uint32_t a_rows, a_cols, b_rows, b_cols;
+} OcLoraPending;
+
+static void lora_pending_free(OcLoraPending *pend, size_t nslot)
+{
+    if (!pend) return;
+    for (size_t i = 0; i < nslot; i++) {
+        free(pend[i].a);
+        free(pend[i].b);
+    }
+    free(pend);
+}
+
+OcError oc_lora_load_safetensors(OcLoraModel *lm, const char *path, float scale)
+{
+    if (!lm || !path) return OC_ERR_INVALID_ARG;
+    if (scale <= 0.0f) scale = 2.0f;
+    lm->scale = scale;
+
+    OcSafetensorsFile st;
+    OcError e = oc_safetensors_open(path, &st);
+    if (e != OC_OK) return e;
+
+    size_t nslot = lm->n_layers * (size_t)OC_LORA_KIND_COUNT;
+    OcLoraPending *pend = calloc(nslot, sizeof(*pend));
+    if (!pend) {
+        oc_safetensors_close(&st);
+        return OC_ERR_OOM;
+    }
+
+    uint32_t loaded = 0;
+    for (size_t i = 0; i < st.n_tensors; i++) {
+        const OcSafetensorsTensor *t = &st.tensors[i];
+        const char *name = t->name;
+        if (strncmp(name, "base_model.model.", 17) == 0) name += 17;
+        unsigned layer = 0;
+        char rest[96];
+        rest[0] = '\0';
+        if (sscanf(name, "language_model.model.layers.%u.%95s", &layer, rest) != 2 &&
+            sscanf(name, "model.layers.%u.%95s", &layer, rest) != 2 &&
+            sscanf(name, "layers.%u.%95s", &layer, rest) != 2) {
+            continue;
+        }
+        if ((size_t)layer >= lm->n_layers) continue;
+        int kind = lora_parse_kind(rest);
+        if (kind < 0) continue;
+        OcLoraPending *slot = &pend[(size_t)layer * OC_LORA_KIND_COUNT + (size_t)kind];
+        float *buf = NULL;
+        uint32_t rows = 0, cols = 0;
+        e = lora_copy_f32(&st, t, &buf, &rows, &cols);
+        if (e != OC_OK) {
+            lora_pending_free(pend, nslot);
+            oc_safetensors_close(&st);
+            return e;
+        }
+        if (lora_name_is_a(t->name)) {
+            free(slot->a);
+            slot->a = buf;
+            slot->a_rows = rows;
+            slot->a_cols = cols;
+        } else if (lora_name_is_b(t->name)) {
+            free(slot->b);
+            slot->b = buf;
+            slot->b_rows = rows;
+            slot->b_cols = cols;
+        } else {
+            free(buf);
+        }
+    }
+    oc_safetensors_close(&st);
+
+    for (size_t layer = 0; layer < lm->n_layers; layer++) {
+        for (int kind = 0; kind < OC_LORA_KIND_COUNT; kind++) {
+            OcLoraPending *slot = &pend[layer * OC_LORA_KIND_COUNT + (size_t)kind];
+            if (!slot->a || !slot->b) {
+                free(slot->a);
+                free(slot->b);
+                slot->a = NULL;
+                slot->b = NULL;
+                continue;
+            }
+            uint32_t rank = slot->a_rows;
+            if (slot->b_cols != rank) {
+                lora_pending_free(pend, nslot);
+                return OC_ERR_TENSOR;
+            }
+            e = oc_lora_set_adapter(lm, layer, lora_kind_name(kind),
+                                    slot->a, slot->b, rank,
+                                    slot->b_rows, slot->a_cols, scale);
+            if (e != OC_OK) {
+                lora_pending_free(pend, nslot);
+                return e;
+            }
+            slot->a = NULL;
+            slot->b = NULL;
+            loaded++;
+        }
+    }
+    lora_pending_free(pend, nslot);
+    if (loaded == 0) return OC_ERR_MODEL;
+    oc_log(OC_LOG_INFO, "lora: loaded %u adapters from %s (scale=%.3f, max_rank=%u)",
+           loaded, path, (double)scale, lm->max_rank);
+    return OC_OK;
 }
 
 /* ─── LoRA plan (auto-matching) ─────────────────────────────────────── */

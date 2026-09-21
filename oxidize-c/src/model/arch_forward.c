@@ -582,6 +582,9 @@ static OcError arch_final_norm_and_logits(OcLlamaSession *s, float *logits_out)
     OcLlamaModel *m = s->model;
     size_t n_embd = m->cfg.n_embd;
 
+    if (s->last_hidden != NULL)
+        memcpy(s->last_hidden, s->x, n_embd * sizeof(float));
+
     /* Final LayerNorm (GPT-2/NeoX/Falcon use LayerNorm, not RMSNorm). */
     arch_layer_norm(s->x, m->final_norm, m->final_norm_bias, s->normed,
                     n_embd, m->cfg.rms_norm_eps);
