@@ -184,7 +184,8 @@ def main() -> int:
         if len(buys) == 2 and len(sells) == 2 and holds:
             hold = holds[len(holds) // 2]
             picks_lines.append(
-                f"PICKS {day} {buys[0]} BUY {buys[1]} BUY {hold} HOLD {sells[0]} SELL {sells[1]} SELL. NEWS: {news}"
+                f"PICKS {day} {buys[0]} BUY {buys[1]} BUY {hold} HOLD "
+                f"{sells[0]} SELL {sells[1]} SELL. NEWS: {news}"
             )
     rng = random.Random(7)
     n_move = max(len(tickets["BUY"]), len(tickets["SELL"]))

@@ -7,6 +7,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+
 def main():
     if len(sys.argv) < 3:
         print("usage: fetch_ohlc.py SYMBOL out.csv [5y]", file=sys.stderr)
@@ -35,14 +36,14 @@ def main():
     except (KeyError, IndexError, TypeError) as e:
         print(f"{sym}: unexpected chart payload: {e}", file=sys.stderr)
         return 1
-    o, h, l, c, v = q["open"], q["high"], q["low"], q["close"], q["volume"]
+    op, hi, lo, cl, vol = q["open"], q["high"], q["low"], q["close"], q["volume"]
     rows = []
     for i, t in enumerate(ts):
-        if None in (o[i], h[i], l[i], c[i]):
+        if None in (op[i], hi[i], lo[i], cl[i]):
             continue
         d = datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d")
-        vol = 0 if v[i] is None else int(v[i])
-        rows.append((d, o[i], h[i], l[i], c[i], vol))
+        v = 0 if vol[i] is None else int(vol[i])
+        rows.append((d, op[i], hi[i], lo[i], cl[i], v))
     if len(rows) < 50:
         print("too few bars", file=sys.stderr)
         return 1

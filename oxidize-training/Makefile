@@ -2,9 +2,14 @@
 OPENBLAS ?= $(HOME)/opt/openblas
 CC ?= cc
 CFLAGS ?= -O3 -march=native -fopenmp -Wall -Wextra
+# Prefer a vendored static OpenBLAS, fall back to the system shared library.
+ifneq ($(wildcard $(OPENBLAS)/lib/libopenblas.a),)
 LDFLAGS_OB = -I$(OPENBLAS)/include $(OPENBLAS)/lib/libopenblas.a -lm -lpthread
+else
+LDFLAGS_OB = -lopenblas -lm -lpthread
+endif
 
-.PHONY: all bench corpus clean train-bin train eval backtest news market-corpus picks tokens
+.PHONY: all bench corpus clean train-bin train eval backtest news market-corpus picks tokens smoke
 
 all: bin/gen_corpus bin/gemm_bench bin/bpe bin/oxidize-training
 
@@ -30,6 +35,10 @@ bin/oxidize-training: src/train_gpt.c | bin
 
 bench: bin/gemm_bench
 	OMP_NUM_THREADS=8 ./bin/gemm_bench 256 1024 384 8
+
+smoke: all
+	chmod +x tools/smoke.sh
+	./tools/smoke.sh ./bin
 
 corpus: data/corpus.txt
 
