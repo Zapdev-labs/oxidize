@@ -136,6 +136,89 @@ float oc_oxk_dot_q4_1_q8_0_scalar(const uint8_t *row, size_t blocks,
     return sum;
 }
 
+float oc_oxk_dot_q5_0_q8_0_scalar(const uint8_t *row, size_t blocks,
+                                   const uint8_t *q8)
+{
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q5_0_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_0_SIZE;
+        float dw = oc_oxk_f16_le_to_f32(wb);
+        float dq = oc_oxk_f16_le_to_f32(qb);
+        uint32_t qh = (uint32_t)wb[2] | ((uint32_t)wb[3] << 8)
+                    | ((uint32_t)wb[4] << 16) | ((uint32_t)wb[5] << 24);
+        const uint8_t *qs = wb + 6;
+        const int8_t *qv = (const int8_t *)(qb + 2);
+        int32_t isum = 0;
+        for (int j = 0; j < 16; j++) {
+            int x0 = (int)(qs[j] & 0x0Fu) | (int)(((qh >> j) & 1u) << 4);
+            int x1 = (int)(qs[j] >> 4)
+                   | (int)(((qh >> (j + 16)) & 1u) << 4);
+            isum += (x0 - 16) * (int)qv[j];
+            isum += (x1 - 16) * (int)qv[j + 16];
+        }
+        sum += dw * dq * (float)isum;
+    }
+    return sum;
+}
+
+float oc_oxk_dot_q5_1_q8_0_scalar(const uint8_t *row, size_t blocks,
+                                   const uint8_t *q8)
+{
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_Q5_1_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_0_SIZE;
+        float dw = oc_oxk_f16_le_to_f32(wb);
+        float mw = oc_oxk_f16_le_to_f32(wb + 2);
+        float dq = oc_oxk_f16_le_to_f32(qb);
+        uint32_t qh = (uint32_t)wb[4] | ((uint32_t)wb[5] << 8)
+                    | ((uint32_t)wb[6] << 16) | ((uint32_t)wb[7] << 24);
+        const uint8_t *qs = wb + 8;
+        const int8_t *qv = (const int8_t *)(qb + 2);
+        int32_t dot_prod = 0;
+        int32_t q8_sum = 0;
+        for (int j = 0; j < 16; j++) {
+            int x0 = (int)(qs[j] & 0x0Fu) | (int)(((qh >> j) & 1u) << 4);
+            int x1 = (int)(qs[j] >> 4)
+                   | (int)(((qh >> (j + 16)) & 1u) << 4);
+            dot_prod += x0 * (int)qv[j] + x1 * (int)qv[j + 16];
+            q8_sum += (int)qv[j] + (int)qv[j + 16];
+        }
+        sum += dw * dq * (float)dot_prod + mw * dq * (float)q8_sum;
+    }
+    return sum;
+}
+
+float oc_oxk_dot_al5_xs_q8_0_scalar(const uint8_t *row, size_t blocks,
+                                    const uint8_t *q8)
+{
+    float sum = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_AL5_XS_SIZE;
+        const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_0_SIZE;
+        float dw = oc_oxk_f16_le_to_f32(wb);
+        float dq = oc_oxk_f16_le_to_f32(qb);
+        const uint8_t *packed = wb + 2;
+        const int8_t *qv = (const int8_t *)(qb + 2);
+        int32_t isum = 0;
+        uint32_t bitpos = 0u;
+        for (int i = 0; i < 32; i++) {
+            unsigned v = 0u;
+            for (int bb = 0; bb < 3; bb++) {
+                size_t byte_idx = bitpos / 8u;
+                size_t bit_idx = bitpos % 8u;
+                if ((packed[byte_idx] >> bit_idx) & 1u)
+                    v |= 1u << (unsigned)bb;
+                bitpos += 1u;
+            }
+            isum += ((int)v - 4) * (int)qv[i];
+        }
+        sum += dw * dq * (float)isum;
+    }
+    return sum;
+}
+
 float oc_oxk_dot_q8_0_q8_0_scalar(const uint8_t *row, size_t blocks,
                                    const uint8_t *q8)
 {
@@ -1022,11 +1105,11 @@ static void oc_oxk_init_once(void)
      * kernel available for Q4_K — which is the dominant weight type for
      * K-quant models, so the whole OXK fast path was silently off.
      *
-     * Only these two are installed because only these two are implemented;
-     * q4_0 / q4_1 / q5_k / q6_k still have scalar-forwarding _avx2 symbols,
+     * Only Q4_1 and Q5_K still have scalar-forwarding _avx2 symbols,
      * and routing through them would add a call for no gain. Check the body
      * before adding an entry here, not just the symbol name. */
     if (level >= OC_OXK_AVX2) {
+        g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_avx2;
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
         /* Q6_K now has a real AVX2 body (not a scalar forwarder). It matters
@@ -1103,6 +1186,15 @@ float oc_oxk_dot_q6_k_q8_k(const uint8_t *row, size_t blocks, const uint8_t *q8)
 
 float oc_oxk_dot_q8_0_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
 { oc_oxk_init(); return g_ctx.dot_q8_0_q8_0(row, blocks, q8); }
+
+float oc_oxk_dot_q5_0_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q5_0_q8_0_scalar(row, blocks, q8); }
+
+float oc_oxk_dot_q5_1_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_q5_1_q8_0_scalar(row, blocks, q8); }
+
+float oc_oxk_dot_al5_xs_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
+{ return oc_oxk_dot_al5_xs_q8_0_scalar(row, blocks, q8); }
 
 void oc_oxk_dot_q4_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
