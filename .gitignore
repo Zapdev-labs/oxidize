@@ -35,6 +35,9 @@ deploy/
 # Go build output
 oxidize-golang/oxidize
 
+# Agent audit dumps
+.audit/
+
 # IDE / agent session artifacts (never commit)
 .cursor/
 .claire/
@@ -42,5 +45,9 @@ oxidize-golang/oxidize
 .crew/
 .firecrawl/
 .omo/
-modal_app.py.tmp.*
 docs/superpowers/
+
+# One-off scripts belong in scripts/ or scripts/local/ (ignored). Never dump at repo root.
+/modal_*.py
+/modal_*.py.tmp.*
+scripts/local/

@@ -1,0 +1,70 @@
+name: oxidize-training CI
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - "oxidize-training/**"
+      - ".github/workflows/oxidize-training.yml"
+  pull_request:
+    paths:
+      - "oxidize-training/**"
+      - ".github/workflows/oxidize-training.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    name: Build + smoke (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    defaults:
+      run:
+        working-directory: oxidize-training
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential clang libomp-dev libopenblas-dev
+
+      - name: Build
+        run: make CC=${{ matrix.cc }}
+
+      - name: Pipeline smoke test
+        run: make CC=${{ matrix.cc }} smoke
+
+      - name: Makefile corpus pipeline
+        run: |
+          rm -rf data
+          make CC=${{ matrix.cc }} tokens
+          test -s data/corpus.txt
+          test -s data/vocab.bin
+          test -s data/tokens.bin
+
+  tools:
+    name: Python tools
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: oxidize-training
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      # Same ruleset as oxidize-python/pyproject.toml.
+      - name: Lint
+        run: ruff check --select E,F,I,W --line-length 100 tools
+      - name: Shell syntax
+        run: sh -n tools/eval_actions.sh && sh -n tools/smoke.sh && sh -n tools/fetch_ohlc.sh
+      - name: Market corpus labels agree with the ticket threshold
+        run: python3 tools/test_gen_market_corpus.py

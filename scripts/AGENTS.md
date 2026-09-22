@@ -15,6 +15,8 @@ Mixed Bash + Python helper scripts. No build target — these support CI regress
 | Model setup / run | `setup-glm-5.2.sh`, `glm-52-prune.sh`, `glm-vision-download.sh`, `gen-train-sequence.sh`, `run-minimax-m3-eagle3.sh`, `minimax-m3-eagle3-wait-and-run.sh` (+ `minimax-m3-manifest.json`) | Download/prune/run specific models |
 | Repo tooling / tests | `check-udeps.sh`, `test_cargo_deny_setup.sh`, `test_makefile_targets.sh` | Dependency + Makefile checks |
 | Sub-recipes | `glm-5.2-eagle3/`, `prime-gemma4-31b-int4/` | Model-specific recipe dirs |
+| Modal | `modal_app.py`, `modal_c_app.py`, `modal_bench.py`, `modal_oxidize.py`, `modal_gemma4_bench.py` | Cloud GPU build/test/bench. Run from repo root: `modal run scripts/modal_c_app.py --action test` |
+| Local scratch | `local/` | One-off scripts. Gitignored. Do not put scripts at the repo root. |
 
 ## WHERE TO LOOK
 | Task | Location | Notes |
@@ -33,3 +35,4 @@ bash scripts/bench-ai-box.sh                 # remote NUMA benchmark
 ## NOTES
 - Remote hosts: `ai@192.168.1.132` (primary NUMA bench), `ai@192.168.1.121` (~20 TB storage for large-model quant + HF publish), legacy `ai@192.168.1.68`.
 - Custom HF repos for quant/model publishing should be private unless the user explicitly requests public.
+- Put new scripts in this folder. One-off/local scripts go in `scripts/local/` and are gitignored. Do not add scripts at the repo root.
