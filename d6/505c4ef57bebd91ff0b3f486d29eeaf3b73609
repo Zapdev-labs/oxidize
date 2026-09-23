@@ -1,0 +1,125 @@
+oxidize-finetuning/src/main.rs
+  s_33e17088f3c2c3::t_bb3ebedfc73f4e 79,220
+oxidize-training/tools/run_weather.sh
+  s_86cc5f75cc3a67::t_438a60f10a4b57 1-35
+scripts/mold_sec_distill.py
+  s_33e17088f3c2c3::t_1a7cedcc341ee1 120
+  s_33e17088f3c2c3::t_a114f87e907e9c 1-100,102-119,121-132
+  s_33e17088f3c2c3::t_885d5f2e092298 101
+oxidize-training/tools/bpe.c
+  s_86cc5f75cc3a67::t_90a5572255df53 1-215
+oxidize-c/src/model/finetune.c
+  s_33e17088f3c2c3::t_5c3a6cd1d78941 31-46
+  s_33e17088f3c2c3::t_ebebe12d35a24e 10,15
+  s_33e17088f3c2c3::t_b2e1ca6efaf0a9 327-446
+  s_33e17088f3c2c3::t_4e3d5d2af35c36 24
+oxidize-training/tools/fetch_climate.py
+  s_86cc5f75cc3a67::t_bdd81af7879fdb 1-15,17-91
+  s_86cc5f75cc3a67::t_587ac6cf72825c 16
+oxidize-c/include/oxidize/finetune.h
+  s_33e17088f3c2c3::t_8ea241d4495122 70-75
+  s_33e17088f3c2c3::t_bdd53aa6dd457e 32
+oxidize-training/tools/gen_weather_corpus.py
+  s_86cc5f75cc3a67::t_50adc361949a8c 328
+  s_86cc5f75cc3a67::t_dabf1e63299c5f 304
+  s_86cc5f75cc3a67::t_6fa80cf8794316 512
+  s_86cc5f75cc3a67::t_9ec18e044c92c6 400-402,414
+  s_86cc5f75cc3a67::t_bc243f4b21efd0 423-430,432-433,443,450,452,458
+  s_86cc5f75cc3a67::t_4ddb8c05503757 1-87,102-111,114-303,306-327,329-343,345-399,403-413,415-422,431,434-442,444-449,451,453-457,459-469,471-485,488-505,516-539,546-563
+  s_86cc5f75cc3a67::t_47ed90764c006f 470,486-487
+  s_86cc5f75cc3a67::t_ae88e00d204032 507-511,513-515
+  s_86cc5f75cc3a67::t_c7647625662eed 540-545
+  s_86cc5f75cc3a67::t_e3e59d522de292 344
+  s_86cc5f75cc3a67::t_ef6416f6cbec8e 305
+  s_86cc5f75cc3a67::t_abb1fee5ccd889 88,98-101
+  s_86cc5f75cc3a67::t_8304b91602fb61 89-97
+  s_86cc5f75cc3a67::t_a4ed7db36079cd 506
+  s_86cc5f75cc3a67::t_903a080a9f525a 112-113
+oxidize-training/Makefile
+  s_86cc5f75cc3a67::t_90a5572255df53 1-6,8-45,50-51
+  s_86cc5f75cc3a67::t_61aa81a3dc9369 7
+  s_86cc5f75cc3a67::t_d47ce3fd9347a1 46-49
+oxidize-c/src/cli/commands.c
+  s_33e17088f3c2c3::t_504e7050ed5de7 1082
+  s_33e17088f3c2c3::t_a13557b324d0a1 1046-1050,1054
+  s_33e17088f3c2c3::t_0c29f00584fd75 1086-1087
+  s_33e17088f3c2c3::t_8e9d4cfe7d90ee 1038,1041
+  s_33e17088f3c2c3::t_201590305948bb 565
+notebooks/K2_Horizon_MoVA_36B_A4B_finetune.ipynb
+  s_096bec62fcd7a4::t_f5736f3ec5b8dd 1-13,16-25,27,30-47,77-104,106-116,118-158,160-167,182-188,190-206,221-270,274-285,289-303,305-332
+  s_096bec62fcd7a4::t_28d61527946e93 14-15,26,28-29,48-76,105,117,159,168-181,189,207-220,271-273,286-288
+  s_096bec62fcd7a4::t_00c61f778595c2 304
+oxidize-training/tools/eval_weather.py
+  s_86cc5f75cc3a67::t_5584abaf59693e 53-54
+  s_86cc5f75cc3a67::t_47c2060b3f23b2 15,25,32-33
+  s_86cc5f75cc3a67::t_c45475a519f92a 16-24,29-31
+  s_86cc5f75cc3a67::t_16d865eba715e8 114-115,121-122
+  s_86cc5f75cc3a67::t_05a04fc3e1efba 2,8,37-48,50,68-76,99,102,106,108-113,134-135,137-139,146-152,158-160,163,165-189,191,195-196,203,207-208,213,216-218,222-232
+  s_86cc5f75cc3a67::t_95d590c8cc216b 12
+  s_86cc5f75cc3a67::t_417915c72db21a 61-62
+  s_86cc5f75cc3a67::t_2bda0e84c8e2b2 49,51-52,55-60,63-67
+  s_86cc5f75cc3a67::t_49e3710279216c 1,3-7,9-11,13-14,26-28,34-36,77-98,100-101,103-105,107,116-120,123-133,136,140-145,153-157,161-162,164,190,192-194,197-202,204-206,209-212,214-215,219-221,233-238
+oxidize-training/src/train_gpt.c
+  s_86cc5f75cc3a67::t_3b24931e79efea 743,747-774
+  s_86cc5f75cc3a67::t_f991167e501dec 744-746
+  s_86cc5f75cc3a67::t_7bbfb4e65220f9 864
+  s_86cc5f75cc3a67::t_e727069489889a 1519,1529-1532
+  s_86cc5f75cc3a67::t_7d6af304a5c967 898-902
+  s_86cc5f75cc3a67::t_90a5572255df53 1-742,775-850,916-1518,1520-1528,1533-1548
+  s_86cc5f75cc3a67::t_629671d691acc0 860
+  s_86cc5f75cc3a67::t_2a7379edb361fd 851-859,867-897,903-915
+  s_86cc5f75cc3a67::t_76d5048620bde2 861-863,865-866
+AGENTS.md
+  s_ea3a17e2f8ec5d::t_31e33f551a6140 189,192,197,208
+  s_5eab269343d4b9::t_ee0029d70ed5d4 194,204-205
+oxidize-finetuning/src/config.rs
+  s_33e17088f3c2c3::t_96ec56299fd020 35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d6505c4ef57bebd91ff0b3f486d29eeaf3b73609",
+  "prompts": {},
+  "sessions": {
+    "s_096bec62fcd7a4": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "dd44b4e1-a01c-4a96-868b-42010908a9d4",
+        "model": "grok-4.7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_33e17088f3c2c3": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c6db50ed-fe4a-4c45-9ef7-187b145db168",
+        "model": "grok-4.7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_5eab269343d4b9": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "83202c48-043d-47f9-8b2f-0132639dd62f",
+        "model": "grok-4.7-low"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_86cc5f75cc3a67": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "b05e54ff-30f4-4a36-9b26-0a7b99d5bfe1",
+        "model": "grok-4.6"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_ea3a17e2f8ec5d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "9b875acd-2dbf-430a-acd4-37b1c55747cd",
+        "model": "grok-4.7-low"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
