@@ -35,6 +35,9 @@ impl ArchPlan {
     pub fn from_config(cfg: &InferenceConfig) -> Self {
         let name = arch_name(cfg.architecture);
         let fidelity = match cfg.architecture {
+            ModelArchitecture::Falcon | ModelArchitecture::Gpt2 => ForwardFidelity::Partial(
+                "architecture declares ALiBi; the CPU decoder and this trainer apply RoPE",
+            ),
             ModelArchitecture::Llama
             | ModelArchitecture::Mistral
             | ModelArchitecture::Mixtral
@@ -42,8 +45,6 @@ impl ArchPlan {
             | ModelArchitecture::Qwen
             | ModelArchitecture::Gemma
             | ModelArchitecture::Phi
-            | ModelArchitecture::Falcon
-            | ModelArchitecture::Gpt2
             | ModelArchitecture::GptJ
             | ModelArchitecture::GptNeoX
             | ModelArchitecture::MiniMax
@@ -59,10 +60,11 @@ impl ArchPlan {
             ffn: describe_ffn(cfg),
             position: describe_position(cfg),
             norm: describe_norm(cfg),
-            residual: if cfg.architecture.uses_parallel_attn_ffn() {
-                "parallel attention + FFN"
-            } else {
-                "sequential pre-norm residual"
+            residual: match cfg.architecture {
+                ModelArchitecture::Gemma | ModelArchitecture::Phi => {
+                    "sequential pre-norm residual (CPU decode ignores the parallel-attention flag)"
+                }
+                _ => "sequential pre-norm residual",
             },
             fidelity,
             trainable: "LM-head LoRA. The gradient is exact: logits = W h + scale·B A h, and only A and B are updated. Attention, FFN, router, and expert weights stay frozen because the quantized stack has no autograd.",
@@ -177,14 +179,6 @@ fn describe_ffn(cfg: &InferenceConfig) -> String {
 }
 
 fn describe_position(cfg: &InferenceConfig) -> String {
-    if cfg.architecture.uses_alibi() {
-        let heads = if cfg.alibi_num_heads > 0 {
-            cfg.alibi_num_heads
-        } else {
-            cfg.num_attention_heads
-        };
-        return format!("ALiBi, {heads} slopes, no RoPE");
-    }
     let mut text = format!("RoPE theta {}", cfg.rope_theta);
     if cfg.rope_dim > 0 {
         text.push_str(&format!(", partial dim {}", cfg.rope_dim));
@@ -194,6 +188,15 @@ fn describe_position(cfg: &InferenceConfig) -> String {
     }
     if cfg.yarn_factor > 0.0 {
         text.push_str(&format!(", YaRN factor {}", cfg.yarn_factor));
+    }
+    match cfg.architecture {
+        ModelArchitecture::Falcon | ModelArchitecture::Gpt2 => {
+            text.push_str("; architecture declares ALiBi, CPU decode still applies RoPE");
+        }
+        ModelArchitecture::GptJ | ModelArchitecture::GptNeoX => {
+            text.push_str("; enum flag is ALiBi, model and CPU decode use RoPE");
+        }
+        _ => {}
     }
     text
 }
@@ -278,8 +281,19 @@ mod tests {
             let plan = plan_for(arch);
             assert_eq!(plan.architecture, arch);
             assert!(!plan.render().is_empty());
-            assert!(plan.ensure_supported(false).is_ok(), "{arch:?}");
-            assert_eq!(plan.fidelity, ForwardFidelity::Full);
+            let alibi_on_rope_path =
+                matches!(arch, ModelArchitecture::Falcon | ModelArchitecture::Gpt2);
+            if alibi_on_rope_path {
+                assert!(
+                    matches!(plan.fidelity, ForwardFidelity::Partial(_)),
+                    "{arch:?}"
+                );
+                assert!(plan.ensure_supported(false).is_err(), "{arch:?}");
+                assert!(plan.ensure_supported(true).is_ok(), "{arch:?}");
+            } else {
+                assert!(plan.ensure_supported(false).is_ok(), "{arch:?}");
+                assert_eq!(plan.fidelity, ForwardFidelity::Full);
+            }
         }
     }
 
@@ -297,13 +311,19 @@ mod tests {
         let plan = plan_for(ModelArchitecture::Gemma);
         assert!(plan.ffn.contains("GeGLU"), "{}", plan.ffn);
         assert!(plan.norm.contains("sandwich"), "{}", plan.norm);
-        assert!(plan.residual.contains("parallel"));
+        assert!(plan.residual.contains("sequential"), "{}", plan.residual);
+        assert!(
+            plan.residual
+                .contains("ignores the parallel-attention flag"),
+            "{}",
+            plan.residual
+        );
         assert!(plan.attention.contains("sliding window 64"));
         assert!(plan.position.contains("local theta"));
     }
 
     #[test]
-    fn alibi_architectures_do_not_claim_rope() {
+    fn alibi_flagged_architectures_still_describe_rope() {
         for arch in [
             ModelArchitecture::Falcon,
             ModelArchitecture::Gpt2,
@@ -311,8 +331,17 @@ mod tests {
             ModelArchitecture::GptNeoX,
         ] {
             let plan = plan_for(arch);
+            assert!(plan.position.contains("RoPE"), "{}", plan.position);
             assert!(plan.position.contains("ALiBi"), "{}", plan.position);
         }
+        assert!(matches!(
+            plan_for(ModelArchitecture::GptJ).fidelity,
+            ForwardFidelity::Full
+        ));
+        assert!(matches!(
+            plan_for(ModelArchitecture::GptNeoX).fidelity,
+            ForwardFidelity::Full
+        ));
     }
 
     #[test]

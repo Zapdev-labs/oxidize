@@ -181,41 +181,39 @@ impl LayerWiseModel {
             );
         }
         let theta = cfg.layer_rope_theta(layer_idx);
-        if !cfg.architecture.uses_alibi() {
-            for head in 0..q_heads {
-                let off = head * q_head_dim;
-                if off + q_head_dim > q.len() {
-                    break;
-                }
-                let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
-                let mut rotated = vec![0.0_f32; q_rope_len];
-                cfg.apply_rope_head(
-                    &q[off..off + q_rope_len],
-                    pos,
-                    q_rope_len,
-                    theta,
-                    &mut rotated,
-                )
-                .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
-                q[off..off + q_rope_len].copy_from_slice(&rotated);
+        for head in 0..q_heads {
+            let off = head * q_head_dim;
+            if off + q_head_dim > q.len() {
+                break;
             }
-            for head in 0..kv_heads {
-                let off = head * kv_head_dim;
-                if off + kv_head_dim > k_vec.len() {
-                    break;
-                }
-                let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
-                let mut rotated = vec![0.0_f32; k_rope_len];
-                cfg.apply_rope_head(
-                    &k_vec[off..off + k_rope_len],
-                    pos,
-                    k_rope_len,
-                    theta,
-                    &mut rotated,
-                )
-                .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
-                k_vec[off..off + k_rope_len].copy_from_slice(&rotated);
+            let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
+            let mut rotated = vec![0.0_f32; q_rope_len];
+            cfg.apply_rope_head(
+                &q[off..off + q_rope_len],
+                pos,
+                q_rope_len,
+                theta,
+                &mut rotated,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
+            q[off..off + q_rope_len].copy_from_slice(&rotated);
+        }
+        for head in 0..kv_heads {
+            let off = head * kv_head_dim;
+            if off + kv_head_dim > k_vec.len() {
+                break;
             }
+            let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
+            let mut rotated = vec![0.0_f32; k_rope_len];
+            cfg.apply_rope_head(
+                &k_vec[off..off + k_rope_len],
+                pos,
+                k_rope_len,
+                theta,
+                &mut rotated,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
+            k_vec[off..off + k_rope_len].copy_from_slice(&rotated);
         }
         if layer_idx == 3 && pos == 0 && crate::inference::trace_vals_enabled() {
             eprintln!(
@@ -275,95 +273,53 @@ impl LayerWiseModel {
             .checked_div(kv_heads)
             .filter(|g| *g > 0)
             .unwrap_or(1);
-        if cfg.architecture.uses_alibi() {
-            for head in 0..q_heads {
-                let kv_head = head / actual_kv_group_size;
-                let q_head_start = head * q_head_dim;
-                let q_head_end = q_head_start + q_head_dim;
-                if q_head_end > q.len() {
-                    break;
-                }
-                let q_head = &q[q_head_start..q_head_end];
-                let q_head_for_attn = if q_head_dim > kv_head_dim {
-                    &q_head[..kv_head_dim]
-                } else {
-                    q_head
-                };
-                let write_start = head * kv_head_dim;
-                if write_start + kv_head_dim > attn_result.len() {
-                    break;
-                }
-                alibi_attend(
-                    q_head_for_attn,
-                    key_cache,
-                    value_cache,
-                    eff_seq_len,
-                    kv_head_dim,
-                    kv_len,
-                    kv_head,
-                    alibi_slope(
-                        head,
-                        if cfg.alibi_num_heads > 0 {
-                            cfg.alibi_num_heads
-                        } else {
-                            q_heads
-                        },
-                    ),
-                    &mut attn_result[write_start..write_start + kv_head_dim],
-                );
+        // Heads are independent; this loop grows linearly with context and
+        // serializes ~tens of ms/token at long sequences, so dispatch it
+        // through the spin pool. Per-head output slices are disjoint.
+        let attn_failed = std::sync::atomic::AtomicBool::new(false);
+        let out_base = attn_result.as_mut_ptr() as usize;
+        let attn_len = attn_result.len();
+        let q_ref = &q;
+        crate::spinpool::run_chunks(q_heads, |head| {
+            let kv_head = head / actual_kv_group_size;
+            let q_head_start = head * q_head_dim;
+            let q_head_end = q_head_start + q_head_dim;
+            if q_head_end > q_ref.len() {
+                return;
             }
-        } else {
-            // Heads are independent; this loop grows linearly with context and
-            // serializes ~tens of ms/token at long sequences, so dispatch it
-            // through the spin pool. Per-head output slices are disjoint.
-            let attn_failed = std::sync::atomic::AtomicBool::new(false);
-            let out_base = attn_result.as_mut_ptr() as usize;
-            let attn_len = attn_result.len();
-            let q_ref = &q;
-            crate::spinpool::run_chunks(q_heads, |head| {
-                let kv_head = head / actual_kv_group_size;
-                let q_head_start = head * q_head_dim;
-                let q_head_end = q_head_start + q_head_dim;
-                if q_head_end > q_ref.len() {
-                    return;
-                }
-                let q_head = &q_ref[q_head_start..q_head_end];
-                let q_head_for_attn = if q_head_dim > kv_head_dim {
-                    &q_head[..kv_head_dim]
-                } else {
-                    q_head
-                };
-                let write_start = head * kv_head_dim;
-                if write_start + kv_head_dim > attn_len {
-                    return;
-                }
-                // SAFETY: per-head output ranges are disjoint; attn_result outlives dispatch.
-                let out_head = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        (out_base as *mut f32).add(write_start),
-                        kv_head_dim,
-                    )
-                };
-                if flash_attention_decode_f32(
-                    q_head_for_attn,
-                    key_cache,
-                    value_cache,
-                    eff_seq_len,
-                    kv_head_dim,
-                    kv_len,
-                    kv_head,
-                    out_head,
-                )
-                .is_err()
-                {
-                    attn_failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-            if attn_failed.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(ModelError::InferenceFailed(
-                    "flash attention failed".to_owned(),
-                ));
+            let q_head = &q_ref[q_head_start..q_head_end];
+            let q_head_for_attn = if q_head_dim > kv_head_dim {
+                &q_head[..kv_head_dim]
+            } else {
+                q_head
+            };
+            let write_start = head * kv_head_dim;
+            if write_start + kv_head_dim > attn_len {
+                return;
             }
+            // SAFETY: per-head output ranges are disjoint; attn_result outlives dispatch.
+            let out_head = unsafe {
+                std::slice::from_raw_parts_mut((out_base as *mut f32).add(write_start), kv_head_dim)
+            };
+            if flash_attention_decode_f32(
+                q_head_for_attn,
+                key_cache,
+                value_cache,
+                eff_seq_len,
+                kv_head_dim,
+                kv_len,
+                kv_head,
+                out_head,
+            )
+            .is_err()
+            {
+                attn_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        if attn_failed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ModelError::InferenceFailed(
+                "flash attention failed".to_owned(),
+            ));
         }
 
         let mut attn_input =
@@ -402,72 +358,6 @@ impl LayerWiseModel {
         }
 
         Ok(attn_out)
-    }
-}
-
-fn alibi_attend(
-    query: &[f32],
-    key_layer: &[f32],
-    value_layer: &[f32],
-    seq_len: usize,
-    head_dim: usize,
-    kv_len: usize,
-    kv_head: usize,
-    slope: f32,
-    output: &mut [f32],
-) {
-    if head_dim == 0 || seq_len == 0 || kv_len == 0 || query.is_empty() {
-        output.fill(0.0);
-        return;
-    }
-    let scale = 1.0_f32 / (head_dim as f32).sqrt();
-    let mut max_s = f32::NEG_INFINITY;
-    let mut scores = vec![0.0_f32; seq_len];
-    let qn = head_dim.min(query.len());
-    for t in 0..seq_len {
-        let row = t * kv_len + kv_head * head_dim;
-        if row + head_dim > key_layer.len() {
-            scores[t] = f32::NEG_INFINITY;
-            continue;
-        }
-        let mut dot = 0.0_f32;
-        let k = &key_layer[row..row + qn];
-        for i in 0..qn {
-            dot += query[i] * k[i];
-        }
-        let dist = (seq_len - 1 - t) as f32;
-        let score = dot * scale + slope * dist;
-        scores[t] = score;
-        if score > max_s {
-            max_s = score;
-        }
-    }
-    if !max_s.is_finite() {
-        output.fill(0.0);
-        return;
-    }
-    let mut sum = 0.0_f32;
-    for score in &mut scores {
-        if !score.is_finite() {
-            *score = 0.0;
-            continue;
-        }
-        *score = (*score - max_s).exp();
-        sum += *score;
-    }
-    let inv = 1.0_f32 / sum.max(1e-12);
-    let out_n = output.len().min(head_dim);
-    output[..out_n].fill(0.0);
-    for t in 0..seq_len {
-        let row = t * kv_len + kv_head * head_dim;
-        if row + head_dim > value_layer.len() {
-            continue;
-        }
-        let w = scores[t] * inv;
-        let v = &value_layer[row..row + out_n];
-        for i in 0..out_n {
-            output[i] += w * v[i];
-        }
     }
 }
 

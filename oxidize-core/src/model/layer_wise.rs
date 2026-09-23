@@ -301,6 +301,7 @@ fn activate_ffn(
 }
 
 /// ALiBi slope for `head`, matching the MLX path: `-(2^(-8/n))^(head+1)`.
+/// CPU decode and the layer-wise trainer apply RoPE instead of this slope.
 pub(crate) fn alibi_slope(head: usize, n_heads: usize) -> f32 {
     let n = n_heads.max(1);
     let base = 2.0_f32.powf(-(8.0_f32 / n as f32));
