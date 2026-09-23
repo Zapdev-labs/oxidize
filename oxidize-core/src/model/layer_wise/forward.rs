@@ -40,8 +40,6 @@ impl LayerWiseModel {
                 let layer_ptr = self.layer_ref(layer_idx) as *const LayerWeights;
                 &*layer_ptr
             };
-            let parallel = cfg.architecture.uses_parallel_attn_ffn();
-            let pre_residual = if parallel { x.clone() } else { Vec::new() };
             let ffn_norm_weight = select_ffn_norm(&cfg, layer);
             let is_shortconv = !weight_is_empty(&layer.shortconv_in_proj);
             let is_mamba = !weight_is_empty(&layer.attn_qkv) && layer.attn_q.is_empty();
@@ -85,11 +83,10 @@ impl LayerWiseModel {
                 && !weight_is_empty(&layer.ffn_gate_inp)
                 && !ffn_norm_weight.is_empty();
             if has_dense_ffn || has_moe {
-                let ffn_in: &[f32] = if parallel { &pre_residual } else { &x };
                 let mut ffn_out = vec![0.0_f32; h];
                 {
                     let mut normed = vec![0.0_f32; h];
-                    rms_norm_model(ffn_in, ffn_norm_weight, cfg.rms_norm_eps, &mut normed, &cfg)?;
+                    rms_norm_model(&x, ffn_norm_weight, cfg.rms_norm_eps, &mut normed, &cfg)?;
                     if has_moe {
                         let moe_i = if cfg.expert_intermediate_size > 0 {
                             cfg.expert_intermediate_size
@@ -383,8 +380,6 @@ impl LayerWiseModel {
                 let layer_ptr = self.layer_ref(layer_idx) as *const LayerWeights;
                 &*layer_ptr
             };
-            let parallel = cfg.architecture.uses_parallel_attn_ffn();
-            let pre_residual = if parallel { xs.clone() } else { Vec::new() };
             let ffn_norm_weight = select_ffn_norm(&cfg, layer);
             let is_shortconv = !weight_is_empty(&layer.shortconv_in_proj);
             let is_mamba = !weight_is_empty(&layer.attn_qkv) && layer.attn_q.is_empty();
@@ -442,15 +437,10 @@ impl LayerWiseModel {
 
             let mut normed_all = vec![0.0_f32; kk * h];
             {
-                let ffn_src = if parallel {
-                    pre_residual.as_slice()
-                } else {
-                    xs.as_slice()
-                };
                 for t in 0..kk {
                     let mut normed = vec![0.0_f32; h];
                     rms_norm_model(
-                        &ffn_src[t * h..(t + 1) * h],
+                        &xs[t * h..(t + 1) * h],
                         ffn_norm_weight,
                         cfg.rms_norm_eps,
                         &mut normed,
