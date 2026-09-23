@@ -37,6 +37,17 @@ pub(super) struct LayerWeights {
     pub(super) ssm_out: WeightStorage,
     pub(super) attn_q_norm: Vec<f32>,
     pub(super) attn_k_norm: Vec<f32>,
+    pub(super) post_ffn_norm: Vec<f32>,
+    pub(super) shortconv_in_proj: WeightStorage,
+    pub(super) shortconv_conv: Vec<f32>,
+    pub(super) shortconv_out_proj: WeightStorage,
+    pub(super) mla_q_a: WeightStorage,
+    pub(super) mla_q_a_norm: Vec<f32>,
+    pub(super) mla_q_b: WeightStorage,
+    pub(super) mla_kv_a_mqa: WeightStorage,
+    pub(super) mla_kv_a_norm: Vec<f32>,
+    pub(super) mla_k_b: WeightStorage,
+    pub(super) mla_v_b: WeightStorage,
 }
 
 impl LayerWiseModel {
@@ -106,7 +117,10 @@ impl LayerWiseModel {
             let qtype = tensor_ref.qtype;
             let weight_key = key.as_str();
             let mmap_this = prefer_mmap(weight_key, tensor_ref.size);
-            let is_ssm_vec = matches!(weight_key, "ssm_a.weight" | "ssm_conv1d.weight");
+            let is_ssm_vec = matches!(
+                weight_key,
+                "ssm_a.weight" | "ssm_conv1d.weight" | "shortconv.conv.weight"
+            );
 
             if weight_key.ends_with(".weight")
                 && !weight_key.contains("norm")
@@ -143,6 +157,13 @@ impl LayerWiseModel {
                     "ssm_alpha.weight" => layer.ssm_alpha = ws,
                     "ssm_beta.weight" => layer.ssm_beta = ws,
                     "ssm_out.weight" => layer.ssm_out = ws,
+                    "shortconv.in_proj.weight" => layer.shortconv_in_proj = ws,
+                    "shortconv.out_proj.weight" => layer.shortconv_out_proj = ws,
+                    "attn_q_a.weight" => layer.mla_q_a = ws,
+                    "attn_q_b.weight" => layer.mla_q_b = ws,
+                    "attn_kv_a_mqa.weight" => layer.mla_kv_a_mqa = ws,
+                    "attn_k_b.weight" => layer.mla_k_b = ws,
+                    "attn_v_b.weight" => layer.mla_v_b = ws,
                     _ => {}
                 }
             } else {
@@ -185,6 +206,17 @@ impl LayerWiseModel {
                     "ssm_out.weight" => layer.ssm_out = WeightStorage::F32(v),
                     "attn_q_norm.weight" => layer.attn_q_norm = v,
                     "attn_k_norm.weight" => layer.attn_k_norm = v,
+                    "post_ffn_norm.weight" => layer.post_ffn_norm = v,
+                    "shortconv.in_proj.weight" => layer.shortconv_in_proj = WeightStorage::F32(v),
+                    "shortconv.out_proj.weight" => layer.shortconv_out_proj = WeightStorage::F32(v),
+                    "shortconv.conv.weight" => layer.shortconv_conv = v,
+                    "attn_q_a.weight" => layer.mla_q_a = WeightStorage::F32(v),
+                    "attn_q_a_norm.weight" => layer.mla_q_a_norm = v,
+                    "attn_q_b.weight" => layer.mla_q_b = WeightStorage::F32(v),
+                    "attn_kv_a_mqa.weight" => layer.mla_kv_a_mqa = WeightStorage::F32(v),
+                    "attn_kv_a_norm.weight" => layer.mla_kv_a_norm = v,
+                    "attn_k_b.weight" => layer.mla_k_b = WeightStorage::F32(v),
+                    "attn_v_b.weight" => layer.mla_v_b = WeightStorage::F32(v),
                     _ => {}
                 }
             }

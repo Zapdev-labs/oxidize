@@ -9,10 +9,10 @@ use crate::inference::{
 };
 use crate::kv_cache::KvCache;
 use crate::model::{Logits, Model, ModelError, Session, Token};
-use crate::quantization::{dequantize_scalar, quantized_size};
+use crate::quantization::{dequantize_scalar, quant_block_layout, quantized_size};
 use crate::tensor::{
-    apply_rope_f32, apply_swiglu_f32, gemm_quantized_f32, gemv_f32, gemv_quantized_f32,
-    rms_norm_f32,
+    apply_geglu_inplace_f32, apply_rope_f32, apply_swiglu_f32, gemm_quantized_f32, gemv_f32,
+    gemv_quantized_f32, rms_norm_f32,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -252,6 +252,80 @@ fn gated_rms_norm(x: &mut [f32], weight: &[f32], gate: &[f32], eps: f32) {
     }
 }
 
+/// Pre-FFN norm. Gemma sandwich mode keeps `post_attention_norm` for the
+/// attention output, so the FFN reads `ffn_norm` instead.
+fn select_ffn_norm<'a>(cfg: &InferenceConfig, layer: &'a LayerWeights) -> &'a [f32] {
+    if cfg.sandwich_norm {
+        &layer.ffn_norm
+    } else if !layer.post_attention_norm.is_empty() {
+        &layer.post_attention_norm
+    } else {
+        &layer.ffn_norm
+    }
+}
+
+fn apply_sandwich_norm(
+    cfg: &InferenceConfig,
+    weight: &[f32],
+    data: &mut [f32],
+) -> Result<(), ModelError> {
+    if !cfg.sandwich_norm || weight.is_empty() || data.is_empty() {
+        return Ok(());
+    }
+    let mut tmp = vec![0.0_f32; data.len()];
+    rms_norm_model(data, weight, cfg.rms_norm_eps, &mut tmp, cfg)?;
+    data.copy_from_slice(&tmp);
+    Ok(())
+}
+
+/// SwiGLU, or Gemma's tanh-GELU GeGLU when `gelu` is set.
+fn activate_ffn(
+    gate: &[f32],
+    up: &[f32],
+    gelu: bool,
+    output: &mut [f32],
+) -> Result<(), ModelError> {
+    if gelu {
+        if gate.len() != output.len() || up.len() < gate.len() {
+            return Err(ModelError::InferenceFailed(
+                "geglu: dimension mismatch".to_owned(),
+            ));
+        }
+        output.copy_from_slice(gate);
+        apply_geglu_inplace_f32(output, up);
+        Ok(())
+    } else {
+        apply_swiglu_f32(gate, up, output)
+            .map_err(|e| ModelError::InferenceFailed(format!("swiglu: {:?}", e)))
+    }
+}
+
+/// ALiBi slope for `head`, matching the MLX path: `-(2^(-8/n))^(head+1)`.
+pub(crate) fn alibi_slope(head: usize, n_heads: usize) -> f32 {
+    let n = n_heads.max(1);
+    let base = 2.0_f32.powf(-(8.0_f32 / n as f32));
+    -(base.powf(head as f32 + 1.0))
+}
+
+fn scale_hidden(xs: &mut [f32], scale: f32) {
+    if scale != 1.0 {
+        for v in xs.iter_mut() {
+            *v *= scale;
+        }
+    }
+}
+
+/// KV cache geometry. MLA stores the decompressed per-head K/V
+/// (`n_heads * kv_head_dim`), not the compressed latent.
+pub(super) fn kv_cache_geometry(config: &InferenceConfig) -> (usize, usize) {
+    let head_dim = config.kv_head_dim().max(1);
+    if config.architecture.uses_mla() {
+        (config.num_attention_heads.max(1), head_dim)
+    } else {
+        (config.num_key_value_heads.max(1), head_dim)
+    }
+}
+
 fn rms_norm_model(
     input: &[f32],
     weight: &[f32],
@@ -486,5 +560,59 @@ impl Model for LayerWiseModel {
     }
     fn layer_count(&self) -> usize {
         self.config.layer_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alibi_slopes_are_negative_and_decay() {
+        let first = alibi_slope(0, 8);
+        let second = alibi_slope(1, 8);
+        assert!((first - -0.5).abs() < 1e-6, "{first}");
+        assert!((second - -0.25).abs() < 1e-6, "{second}");
+        assert!(second > first);
+    }
+
+    #[test]
+    fn geglu_differs_from_swiglu() {
+        let gate = [1.0_f32];
+        let up = [2.0_f32];
+        let mut swi = [0.0_f32];
+        let mut ge = [0.0_f32];
+        activate_ffn(&gate, &up, false, &mut swi).unwrap();
+        activate_ffn(&gate, &up, true, &mut ge).unwrap();
+        let silu = 1.0_f32 / (1.0 + (-1.0_f32).exp());
+        assert!((swi[0] - silu * 2.0).abs() < 1e-5);
+        assert!((ge[0] - swi[0]).abs() > 1e-3);
+    }
+
+    #[test]
+    fn sandwich_norm_uses_ffn_norm_not_post_attention() {
+        let mut cfg = InferenceConfig::default();
+        cfg.sandwich_norm = true;
+        let mut layer = LayerWeights::default();
+        layer.ffn_norm = vec![1.0, 2.0];
+        layer.post_attention_norm = vec![3.0, 4.0];
+        assert_eq!(select_ffn_norm(&cfg, &layer), &[1.0, 2.0]);
+        cfg.sandwich_norm = false;
+        assert_eq!(select_ffn_norm(&cfg, &layer), &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn mla_cache_stores_decompressed_heads() {
+        let mut cfg = InferenceConfig::default();
+        cfg.architecture = crate::inference::ModelArchitecture::DeepSeek;
+        cfg.num_attention_heads = 8;
+        cfg.num_key_value_heads = 1;
+        cfg.hidden_size = 32;
+        cfg.key_value_head_dim = 4;
+        let (heads, dim) = kv_cache_geometry(&cfg);
+        assert_eq!((heads, dim), (8, 4));
+        cfg.architecture = crate::inference::ModelArchitecture::Llama;
+        let (heads, dim) = kv_cache_geometry(&cfg);
+        assert_eq!((heads, dim), (1, 4));
     }
 }

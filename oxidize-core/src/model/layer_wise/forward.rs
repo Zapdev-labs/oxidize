@@ -29,6 +29,7 @@ impl LayerWiseModel {
         }
 
         debug_hidden("embed", pos, &x);
+        scale_hidden(&mut x, cfg.embedding_scale);
 
         for layer_idx in 0..cfg.layer_count {
             self.ensure_layer_loaded(layer_idx)
@@ -39,23 +40,34 @@ impl LayerWiseModel {
                 let layer_ptr = self.layer_ref(layer_idx) as *const LayerWeights;
                 &*layer_ptr
             };
+            let parallel = cfg.architecture.uses_parallel_attn_ffn();
+            let pre_residual = if parallel { x.clone() } else { Vec::new() };
+            let ffn_norm_weight = select_ffn_norm(&cfg, layer);
+            let is_shortconv = !weight_is_empty(&layer.shortconv_in_proj);
             let is_mamba = !weight_is_empty(&layer.attn_qkv) && layer.attn_q.is_empty();
-            let ffn_norm_weight: &[f32] = if !layer.post_attention_norm.is_empty() {
-                &layer.post_attention_norm
-            } else if !layer.ffn_norm.is_empty() {
-                &layer.ffn_norm
-            } else {
-                &[]
-            };
+            let is_mla = !weight_is_empty(&layer.mla_kv_a_mqa);
 
-            if is_mamba {
+            if is_shortconv {
+                let mixed = self.run_shortconv_layer(layer_idx, layer, &x, &cfg)?;
+                for (xi, out) in x.iter_mut().zip(mixed.iter()).take(h) {
+                    *xi += out;
+                }
+            } else if is_mamba {
                 let mamba_out = self.run_mamba_layer(layer_idx, layer, &x, &cfg)?;
                 for (xi, out) in x.iter_mut().zip(mamba_out.iter()).take(h) {
                     *xi += out;
                 }
                 debug_hidden(&format!("layer {layer_idx} after gdn"), pos, &x);
+            } else if is_mla {
+                let mut attn_out = self.run_mla_layer(layer_idx, layer, &x, pos, &cfg)?;
+                apply_sandwich_norm(&cfg, &layer.post_attention_norm, &mut attn_out)?;
+                for (xi, out) in x.iter_mut().zip(attn_out.iter()).take(h) {
+                    *xi += out;
+                }
+                debug_hidden(&format!("layer {layer_idx} after mla"), pos, &x);
             } else if !weight_is_empty(&layer.attn_q) {
-                let attn_out = self.run_attention_layer(layer_idx, layer, &x, pos, &cfg)?;
+                let mut attn_out = self.run_attention_layer(layer_idx, layer, &x, pos, &cfg)?;
+                apply_sandwich_norm(&cfg, &layer.post_attention_norm, &mut attn_out)?;
                 for (xi, out) in x.iter_mut().zip(attn_out.iter()).take(h) {
                     *xi += out;
                 }
@@ -73,10 +85,11 @@ impl LayerWiseModel {
                 && !weight_is_empty(&layer.ffn_gate_inp)
                 && !ffn_norm_weight.is_empty();
             if has_dense_ffn || has_moe {
+                let ffn_in: &[f32] = if parallel { &pre_residual } else { &x };
                 let mut ffn_out = vec![0.0_f32; h];
                 {
                     let mut normed = vec![0.0_f32; h];
-                    rms_norm_model(&x, ffn_norm_weight, cfg.rms_norm_eps, &mut normed, &cfg)?;
+                    rms_norm_model(ffn_in, ffn_norm_weight, cfg.rms_norm_eps, &mut normed, &cfg)?;
                     if has_moe {
                         let moe_i = if cfg.expert_intermediate_size > 0 {
                             cfg.expert_intermediate_size
@@ -124,9 +137,7 @@ impl LayerWiseModel {
                                     ModelError::InferenceFailed(format!("shexp up: {:?}", e))
                                 })?;
                             let mut swiglu = vec![0.0_f32; shexp_i];
-                            apply_swiglu_f32(&gate, &up, &mut swiglu).map_err(|e| {
-                                ModelError::InferenceFailed(format!("shexp swiglu: {:?}", e))
-                            })?;
+                            activate_ffn(&gate, &up, cfg.gelu_ffn, &mut swiglu)?;
                             gemv_weight(&layer.ffn_down_shexp, h, shexp_i, &swiglu, &mut shexp_out)
                                 .map_err(|e| {
                                     ModelError::InferenceFailed(format!("shexp down: {:?}", e))
@@ -169,8 +180,7 @@ impl LayerWiseModel {
                         gemv_weight(&layer.ffn_up, cfg.intermediate_size, h, &normed, &mut up)
                             .map_err(|e| ModelError::InferenceFailed(format!("ffn_up: {:?}", e)))?;
                         let mut swiglu = vec![0.0_f32; cfg.intermediate_size];
-                        apply_swiglu_f32(&gate, &up, &mut swiglu)
-                            .map_err(|e| ModelError::InferenceFailed(format!("swiglu: {:?}", e)))?;
+                        activate_ffn(&gate, &up, cfg.gelu_ffn, &mut swiglu)?;
                         gemv_weight(
                             &layer.ffn_down,
                             h,
@@ -186,6 +196,7 @@ impl LayerWiseModel {
                         }
                     }
                 }
+                apply_sandwich_norm(&cfg, &layer.post_ffn_norm, &mut ffn_out)?;
                 for (xi, out) in x.iter_mut().zip(ffn_out.iter()).take(h) {
                     *xi += out;
                 }
@@ -363,6 +374,7 @@ impl LayerWiseModel {
         for t in 0..kk {
             trace_fwd("embd", start_pos + t, usize::MAX, &xs[t * h..(t + 1) * h]);
         }
+        scale_hidden(&mut xs, cfg.embedding_scale);
         for layer_idx in 0..cfg.layer_count {
             self.ensure_layer_loaded(layer_idx)
                 .map_err(|e| ModelError::InferenceFailed(format!("layer load: {}", e)))?;
@@ -371,26 +383,43 @@ impl LayerWiseModel {
                 let layer_ptr = self.layer_ref(layer_idx) as *const LayerWeights;
                 &*layer_ptr
             };
+            let parallel = cfg.architecture.uses_parallel_attn_ffn();
+            let pre_residual = if parallel { xs.clone() } else { Vec::new() };
+            let ffn_norm_weight = select_ffn_norm(&cfg, layer);
+            let is_shortconv = !weight_is_empty(&layer.shortconv_in_proj);
             let is_mamba = !weight_is_empty(&layer.attn_qkv) && layer.attn_q.is_empty();
-            let ffn_norm_weight: &[f32] = if !layer.post_attention_norm.is_empty() {
-                &layer.post_attention_norm
-            } else if !layer.ffn_norm.is_empty() {
-                &layer.ffn_norm
-            } else {
-                &[]
-            };
+            let is_mla = !weight_is_empty(&layer.mla_kv_a_mqa);
 
-            if is_mamba {
+            if is_shortconv {
+                for t in 0..kk {
+                    let x_t = xs[t * h..(t + 1) * h].to_vec();
+                    let mixed = self.run_shortconv_layer(layer_idx, layer, &x_t, &cfg)?;
+                    for (xi, out) in xs[t * h..(t + 1) * h].iter_mut().zip(mixed.iter()) {
+                        *xi += out;
+                    }
+                }
+            } else if is_mamba {
                 let residual = self.run_mamba_layer_batch(layer_idx, layer, &xs, kk, &cfg)?;
                 for (xi, out) in xs.iter_mut().zip(residual.iter()) {
                     *xi += out;
+                }
+            } else if is_mla {
+                for t in 0..kk {
+                    let x_t = xs[t * h..(t + 1) * h].to_vec();
+                    let mut attn_out =
+                        self.run_mla_layer(layer_idx, layer, &x_t, start_pos + t, &cfg)?;
+                    apply_sandwich_norm(&cfg, &layer.post_attention_norm, &mut attn_out)?;
+                    for (xi, out) in xs[t * h..(t + 1) * h].iter_mut().zip(attn_out.iter()) {
+                        *xi += out;
+                    }
                 }
             } else if !weight_is_empty(&layer.attn_q) {
                 // Full-attention layers stay per token: KV append order matters.
                 for t in 0..kk {
                     let x_t = xs[t * h..(t + 1) * h].to_vec();
-                    let attn_out =
+                    let mut attn_out =
                         self.run_attention_layer(layer_idx, layer, &x_t, start_pos + t, &cfg)?;
+                    apply_sandwich_norm(&cfg, &layer.post_attention_norm, &mut attn_out)?;
                     for (xi, out) in xs[t * h..(t + 1) * h].iter_mut().zip(attn_out.iter()) {
                         *xi += out;
                     }
@@ -412,16 +441,23 @@ impl LayerWiseModel {
             }
 
             let mut normed_all = vec![0.0_f32; kk * h];
-            for t in 0..kk {
-                let mut normed = vec![0.0_f32; h];
-                rms_norm_model(
-                    &xs[t * h..(t + 1) * h],
-                    ffn_norm_weight,
-                    cfg.rms_norm_eps,
-                    &mut normed,
-                    &cfg,
-                )?;
-                normed_all[t * h..(t + 1) * h].copy_from_slice(&normed);
+            {
+                let ffn_src = if parallel {
+                    pre_residual.as_slice()
+                } else {
+                    xs.as_slice()
+                };
+                for t in 0..kk {
+                    let mut normed = vec![0.0_f32; h];
+                    rms_norm_model(
+                        &ffn_src[t * h..(t + 1) * h],
+                        ffn_norm_weight,
+                        cfg.rms_norm_eps,
+                        &mut normed,
+                        &cfg,
+                    )?;
+                    normed_all[t * h..(t + 1) * h].copy_from_slice(&normed);
+                }
             }
             let mut ffn_all = vec![0.0_f32; kk * h];
 
@@ -485,14 +521,12 @@ impl LayerWiseModel {
                     let mut swiglu_all = vec![0.0_f32; kk * shexp_i];
                     for t in 0..kk {
                         let mut swiglu = vec![0.0_f32; shexp_i];
-                        apply_swiglu_f32(
+                        activate_ffn(
                             &gate_all[t * shexp_i..(t + 1) * shexp_i],
                             &up_all[t * shexp_i..(t + 1) * shexp_i],
+                            cfg.gelu_ffn,
                             &mut swiglu,
-                        )
-                        .map_err(|e| {
-                            ModelError::InferenceFailed(format!("shexp swiglu: {:?}", e))
-                        })?;
+                        )?;
                         swiglu_all[t * shexp_i..(t + 1) * shexp_i].copy_from_slice(&swiglu);
                     }
                     let mut shexp_out_all = vec![0.0_f32; kk * h];
@@ -540,12 +574,12 @@ impl LayerWiseModel {
                 let mut swiglu_all = vec![0.0_f32; kk * i_size];
                 for t in 0..kk {
                     let mut swiglu = vec![0.0_f32; i_size];
-                    apply_swiglu_f32(
+                    activate_ffn(
                         &gate_all[t * i_size..(t + 1) * i_size],
                         &up_all[t * i_size..(t + 1) * i_size],
+                        cfg.gelu_ffn,
                         &mut swiglu,
-                    )
-                    .map_err(|e| ModelError::InferenceFailed(format!("swiglu: {:?}", e)))?;
+                    )?;
                     swiglu_all[t * i_size..(t + 1) * i_size].copy_from_slice(&swiglu);
                 }
                 gemm_weight(&layer.ffn_down, h, i_size, &swiglu_all, &mut ffn_all, kk)
@@ -559,6 +593,9 @@ impl LayerWiseModel {
                 }
             }
 
+            for t in 0..kk {
+                apply_sandwich_norm(&cfg, &layer.post_ffn_norm, &mut ffn_all[t * h..(t + 1) * h])?;
+            }
             for (xi, out) in xs.iter_mut().zip(ffn_all.iter()) {
                 *xi += out;
             }
@@ -569,5 +606,69 @@ impl LayerWiseModel {
 
         self.ssm_pos = start_pos + kk;
         Ok(xs)
+    }
+
+    /// LFM2 short-convolution mixer. Returns the residual to add (not applied).
+    pub(super) fn run_shortconv_layer(
+        &mut self,
+        layer_idx: usize,
+        layer: &LayerWeights,
+        x: &[f32],
+        cfg: &InferenceConfig,
+    ) -> Result<Vec<f32>, ModelError> {
+        let h = cfg.hidden_size;
+        let l_cache = cfg.shortconv_l_cache.max(1);
+        let out_dim = layer.shortconv_in_proj.output_dim(h);
+        if out_dim == 0 || !out_dim.is_multiple_of(3) {
+            return Err(ModelError::InferenceFailed(format!(
+                "shortconv in_proj width {out_dim} is not divisible by 3"
+            )));
+        }
+        let d = out_dim / 3;
+        let mut normed = vec![0.0_f32; h];
+        rms_norm_model(x, &layer.attn_norm, cfg.rms_norm_eps, &mut normed, cfg)?;
+        let mut bcx = vec![0.0_f32; 3 * d];
+        gemv_weight(&layer.shortconv_in_proj, 3 * d, h, &normed, &mut bcx)
+            .map_err(|e| ModelError::InferenceFailed(format!("shortconv_in_proj: {e}")))?;
+        let mut bx = vec![0.0_f32; d];
+        for i in 0..d {
+            bx[i] = bcx[i] * bcx[2 * d + i];
+        }
+        let mut conv_out = vec![0.0_f32; d];
+        let have_conv = layer.shortconv_conv.len() == l_cache * d;
+        self.prepare_conv_ring(layer_idx, l_cache, d);
+        if have_conv {
+            let buf = &self.ssm_conv_buffers[layer_idx];
+            for c in 0..d {
+                let base = c * l_cache;
+                let mut sum = layer.shortconv_conv[base + (l_cache - 1)] * bx[c];
+                for j in 1..l_cache {
+                    if let Some(prev) = buf.past_frame(j) {
+                        sum += layer.shortconv_conv[base + (l_cache - 1 - j)] * prev[c];
+                    }
+                }
+                conv_out[c] = sum;
+            }
+        } else {
+            conv_out.copy_from_slice(&bx);
+        }
+        for i in 0..d {
+            conv_out[i] *= bcx[d + i];
+        }
+        let mut mixed = vec![0.0_f32; h];
+        gemv_weight(&layer.shortconv_out_proj, h, d, &conv_out, &mut mixed)
+            .map_err(|e| ModelError::InferenceFailed(format!("shortconv_out_proj: {e}")))?;
+        self.ssm_conv_buffers[layer_idx].push(&bx);
+        Ok(mixed)
+    }
+
+    fn prepare_conv_ring(&mut self, layer_idx: usize, capacity: usize, dim: usize) {
+        let ready = self
+            .ssm_conv_buffers
+            .get(layer_idx)
+            .is_some_and(|buf| buf.dim == dim && buf.capacity >= capacity && dim > 0);
+        if !ready {
+            self.ssm_conv_buffers[layer_idx] = ConvHistoryRing::new(capacity.max(1), dim);
+        }
     }
 }

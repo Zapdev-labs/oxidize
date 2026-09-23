@@ -2,14 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use oxidize_core::gguf::load_mapped_gguf;
-use oxidize_core::inference::InferenceConfig;
-use oxidize_core::layer_wise::LayerWiseModel;
-use oxidize_core::tokenizer::load_tokenizer_from_gguf_metadata;
 use oxidize_finetuning::{
-    AdapterMerger, FinetuneConfig, FinetuneError, LoRAAdapter, MergeStrategy, SelfTrainConfig,
-    SelfTrainLoop, SftTrainer, export_lora_gguf, load_adapter_manifest, load_jsonl_dpo,
-    load_jsonl_sft, manifest_to_lora_adapters, pack_chunks,
+    AdapterMerger, DpoConfig, FinetuneConfig, FinetuneError, LoRAAdapter, MergeStrategy, PpoConfig,
+    SelfTrainConfig, SelfTrainLoop, SftTrainer, export_lora_gguf, load_adapter_manifest,
+    load_causal_model, load_jsonl_dpo, load_jsonl_sft, load_prompts_file,
+    manifest_to_lora_adapters, pack_chunks, train_dpo_on_model, train_ppo_on_model,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -31,9 +28,9 @@ struct Cli {
 enum Command {
     /// Supervised fine-tuning with LoRA.
     Sft(SftArgs),
-    /// Direct Preference Optimisation (DPO) with LoRA.
+    /// Direct Preference Optimisation (DPO) with LM-head LoRA.
     Dpo(DpoArgs),
-    /// Proximal Policy Optimisation (PPO / RLHF) stub.
+    /// Proximal Policy Optimisation against the frozen model's own likelihood.
     Ppo(PpoArgs),
     /// Iterative self-regressing SFT: train, checkpoint, self-dialogue, repeat.
     SelfTrain(SelfTrainArgs),
@@ -100,6 +97,11 @@ struct SftArgs {
     /// Save adapter every N optimizer steps (0 = only at end).
     #[arg(long, default_value_t = 0)]
     checkpoint_every: usize,
+
+    /// Train even when the architecture's attention block is not in the
+    /// layer-wise forward (DeepSeek and GLM-DSA MLA).
+    #[arg(long, default_value_t = false)]
+    allow_partial_arch: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +141,14 @@ struct DpoArgs {
 
     #[arg(long, default_value_t = 42)]
     seed: u64,
+
+    /// Positions per frozen forward window.
+    #[arg(long, default_value_t = 64)]
+    window: usize,
+
+    /// Train even when MLA attention is not executed by this trainer.
+    #[arg(long, default_value_t = false)]
+    allow_partial_arch: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +180,22 @@ struct PpoArgs {
 
     #[arg(long, default_value_t = 42)]
     seed: u64,
+
+    /// One prompt per line. Each line is rolled out on the frozen model.
+    #[arg(long)]
+    prompts: PathBuf,
+
+    /// New tokens sampled per prompt (greedy under the current LoRA policy).
+    #[arg(long, default_value_t = 8)]
+    max_new_tokens: usize,
+
+    /// Prompt context kept before rollout.
+    #[arg(long, default_value_t = 256)]
+    max_seq_len: usize,
+
+    /// Train even when MLA attention is not executed by this trainer.
+    #[arg(long, default_value_t = false)]
+    allow_partial_arch: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +257,10 @@ struct SelfTrainArgs {
 
     #[arg(long)]
     resume_from: Option<PathBuf>,
+
+    /// Train even when MLA attention is not executed by this trainer.
+    #[arg(long, default_value_t = false)]
+    allow_partial_arch: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -306,18 +336,18 @@ fn run_sft(args: SftArgs) -> Result<()> {
         ..FinetuneConfig::default()
     };
 
-    let mapped = load_mapped_gguf(&args.model).context("load GGUF")?;
-    let mut inference_config = InferenceConfig::from_gguf(&mapped);
-    inference_config.context_size = inference_config
-        .context_size
-        .min(args.max_seq_len.max(args.window) + 8);
-    let mut model = LayerWiseModel::load_from_gguf(&mapped, inference_config, 0)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    model
-        .warm_layer_cache()
-        .map_err(|e| anyhow::anyhow!("warm layer cache: {e}"))?;
-    let tokenizer = load_tokenizer_from_gguf_metadata(&mapped.parsed().metadata)
-        .map_err(|e| anyhow::anyhow!("load tokenizer: {e:?}"))?;
+    let loaded = load_causal_model(
+        &args.model,
+        args.max_seq_len.max(args.window) + 8,
+        args.allow_partial_arch,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("{}", loaded.plan.render());
+    let oxidize_finetuning::CausalModel {
+        mut model,
+        tokenizer,
+        ..
+    } = loaded;
     let eos = tokenizer.special_tokens().eos.unwrap_or(0);
 
     let mut examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -409,56 +439,128 @@ fn run_sft(args: SftArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_dpo(args: DpoArgs) -> Result<()> {
-    let examples = load_jsonl_dpo(&args.data).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut examples = load_jsonl_dpo(&args.data).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let loaded = load_causal_model(&args.model, args.max_seq_len + 8, args.allow_partial_arch)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("{}", loaded.plan.render());
+    let oxidize_finetuning::CausalModel {
+        mut model,
+        tokenizer,
+        ..
+    } = loaded;
+    let finetune = FinetuneConfig {
+        rank: args.rank,
+        learning_rate: args.lr,
+        epochs: args.epochs,
+        max_seq_len: args.max_seq_len,
+        window: args.window,
+        seed: args.seed,
+        ..FinetuneConfig::default()
+    };
+    let dpo = DpoConfig {
+        beta: args.beta,
+        reference_free: false,
+    };
     println!(
-        "oxidize-finetuning dpo: model={} data={} examples={} beta={} rank={} lr={} epochs={}",
+        "oxidize-finetuning dpo: model={} examples={} beta={} rank={} — reference is the frozen LM head",
         args.model.display(),
-        args.data.display(),
         examples.len(),
         args.beta,
         args.rank,
-        args.lr,
-        args.epochs,
     );
-    println!(
-        "oxidize-finetuning dpo: output will be written to {}",
-        args.output.display()
-    );
-    // Full DPO training requires a running LayerWiseModel forward pass with
-    // reference-model log-prob tracking. Wire DpoTrainer here once the
-    // model-side gradient API stabilises.
-    eprintln!("oxidize-finetuning dpo: full training loop not yet wired — coming soon");
-    anyhow::bail!(
-        "DPO training is not implemented yet; no adapter was written to {}",
-        args.output.display()
+    let run = train_dpo_on_model(
+        &mut model,
+        &mut examples,
+        |text| tokenizer.encode(text),
+        &finetune,
+        dpo,
     )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "oxidize-finetuning dpo: steps={} mean_loss={:.4} ({:.1}s)",
+        run.report.steps, run.report.mean_loss, run.report.elapsed_seconds,
+    );
+    export_lora_gguf(
+        &args.output,
+        std::slice::from_ref(&run.trainer.lora),
+        finetune.rank,
+        finetune.lora_scale(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "oxidize-finetuning dpo: wrote adapter to {}",
+        args.output.display()
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// PPO stub
+// PPO
 // ---------------------------------------------------------------------------
 
 fn run_ppo(args: PpoArgs) -> Result<()> {
-    println!(
-        "oxidize-finetuning ppo: model={} clip_eps={} epochs={} rank={} lr={} seed={}",
-        args.model.display(),
-        args.clip_eps,
-        args.epochs,
-        args.rank,
-        args.lr,
-        args.seed,
-    );
-    println!(
-        "oxidize-finetuning ppo: output will be written to {}",
-        args.output.display()
-    );
-    // Full PPO requires a reward model and rollout collection loop.
-    // Wire PpoTrainer + RewardModel here once the reward-model API stabilises.
-    eprintln!("oxidize-finetuning ppo: full training loop not yet wired — coming soon");
-    anyhow::bail!(
-        "PPO training is not implemented yet; no adapter was written to {}",
-        args.output.display()
+    let prompts = load_prompts_file(&args.prompts).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if prompts.is_empty() {
+        anyhow::bail!("prompts file {} is empty", args.prompts.display());
+    }
+    let loaded = load_causal_model(
+        &args.model,
+        args.max_seq_len + args.max_new_tokens + 8,
+        args.allow_partial_arch,
     )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("{}", loaded.plan.render());
+    println!(
+        "oxidize-finetuning ppo: reward is the frozen model's log-probability of each greedy token (no separate reward checkpoint)"
+    );
+    let oxidize_finetuning::CausalModel {
+        mut model,
+        tokenizer,
+        ..
+    } = loaded;
+    let finetune = FinetuneConfig {
+        rank: args.rank,
+        learning_rate: args.lr,
+        epochs: args.epochs,
+        max_seq_len: args.max_seq_len,
+        seed: args.seed,
+        ..FinetuneConfig::default()
+    };
+    let ppo = PpoConfig {
+        clip_eps: args.clip_eps,
+        ..PpoConfig::default()
+    };
+    let run = train_ppo_on_model(
+        &mut model,
+        &prompts,
+        |text| tokenizer.encode(text),
+        &finetune,
+        ppo,
+        args.max_new_tokens,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "oxidize-finetuning ppo: steps={} transitions={} policy={:.4} value={:.4} entropy={:.4} kl={:.4} ({:.1}s)",
+        run.report.steps,
+        run.report.transitions,
+        run.report.mean_policy_loss,
+        run.report.mean_value_loss,
+        run.report.mean_entropy,
+        run.report.mean_kl,
+        run.report.elapsed_seconds,
+    );
+    export_lora_gguf(
+        &args.output,
+        std::slice::from_ref(&run.trainer.lora),
+        finetune.rank,
+        finetune.lora_scale(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "oxidize-finetuning ppo: wrote adapter to {}",
+        args.output.display()
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -487,18 +589,18 @@ fn run_self_train(args: SelfTrainArgs) -> Result<()> {
         ..SelfTrainConfig::default()
     };
 
-    let mapped = load_mapped_gguf(&args.model).context("load GGUF")?;
-    let mut inference_config = InferenceConfig::from_gguf(&mapped);
-    inference_config.context_size = inference_config
-        .context_size
-        .min(args.max_seq_len.max(args.window) + args.max_new_tokens + 8);
-    let mut model = LayerWiseModel::load_from_gguf(&mapped, inference_config, 0)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    model
-        .warm_layer_cache()
-        .map_err(|e| anyhow::anyhow!("warm layer cache: {e}"))?;
-    let tokenizer = load_tokenizer_from_gguf_metadata(&mapped.parsed().metadata)
-        .map_err(|e| anyhow::anyhow!("load tokenizer: {e:?}"))?;
+    let loaded = load_causal_model(
+        &args.model,
+        args.max_seq_len.max(args.window) + args.max_new_tokens + 8,
+        args.allow_partial_arch,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("{}", loaded.plan.render());
+    let oxidize_finetuning::CausalModel {
+        mut model,
+        tokenizer,
+        ..
+    } = loaded;
     let eos = tokenizer.special_tokens().eos.unwrap_or(0);
 
     let examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow::anyhow!("{e}"))?;

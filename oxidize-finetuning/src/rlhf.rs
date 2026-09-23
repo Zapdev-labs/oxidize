@@ -89,6 +89,19 @@ impl RewardModel {
             .map(|row| dot(&self.weights, row) + self.bias)
             .collect()
     }
+
+    /// One linear-regression step toward `target` so the critic tracks the
+    /// rollout reward instead of staying at its random initialization.
+    pub fn sgd(&mut self, hidden: &[f32], target: f32, lr: f32) {
+        if hidden.len() != self.in_dim || !lr.is_finite() {
+            return;
+        }
+        let err = self.score(hidden) - target;
+        for (w, h) in self.weights.iter_mut().zip(hidden.iter()) {
+            *w -= lr * err * h;
+        }
+        self.bias -= lr * err;
+    }
 }
 
 // ---------------------------------------------------------------------------
