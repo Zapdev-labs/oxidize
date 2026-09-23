@@ -1,0 +1,15 @@
+[project]
+name = "k2-horizon-vllm"
+version = "0.1.0"
+description = "vLLM plugin for K2HorizonForCausalLM (MoVA attention + sigmoid MoE)"
+requires-python = ">=3.10"
+
+[project.entry-points."vllm.general_plugins"]
+k2_horizon = "k2_horizon_vllm:register"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["k2_horizon_vllm"]

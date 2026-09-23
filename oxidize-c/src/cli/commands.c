@@ -562,7 +562,7 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "USAGE: oxidize-c finetune --model <base.gguf> --dataset data.jsonl \\\n"
                "       --output-dir ./adapters --strategy sft\n\n"
                "OPTIONS:\n"
-               "  --strategy S         sft|self-train|dpo|ppo (default: sft)\n"
+               "  --strategy S         sft|self-train|dpo|ppo|distill (default: sft)\n"
                "  --dataset PATH       JSONL training data\n"
                "  --output-dir PATH    Output directory for adapters\n"
                "  --lora-rank N        LoRA rank (default 8)\n"
@@ -1024,10 +1024,6 @@ OcError oc_cli_run_prune(OcCliContext *ctx)
 
 OcError oc_cli_run_finetune(OcCliContext *ctx)
 {
-    if (!ctx->model_path) {
-        cli_error("--model is required for finetune");
-        return OC_ERR_INVALID_ARG;
-    }
     if (!ctx->dataset_path) {
         cli_error("--dataset is required for finetune");
         return OC_ERR_INVALID_ARG;
@@ -1039,17 +1035,23 @@ OcError oc_cli_run_finetune(OcCliContext *ctx)
         else if (ieq(ctx->ft_strategy, "self-train"))      strategy = OC_FT_SELF_TRAIN;
         else if (ieq(ctx->ft_strategy, "dpo"))              strategy = OC_FT_DPO;
         else if (ieq(ctx->ft_strategy, "ppo"))             strategy = OC_FT_PPO;
+        else if (ieq(ctx->ft_strategy, "distill"))         strategy = OC_FT_DISTILL;
         else {
             cli_error("unknown finetune strategy: %s "
-                      "(expected sft|self-train|dpo|ppo)", ctx->ft_strategy);
+                      "(expected sft|self-train|dpo|ppo|distill)", ctx->ft_strategy);
             return OC_ERR_INVALID_ARG;
         }
+    }
+
+    if (strategy != OC_FT_DISTILL && !ctx->model_path) {
+        cli_error("--model is required for finetune");
+        return OC_ERR_INVALID_ARG;
     }
 
     const char *out_dir = ctx->output_dir ? ctx->output_dir : "./adapters";
 
     progress(ctx, "finetuning: model=%s dataset=%s strategy=%s out=%s",
-             ctx->model_path, ctx->dataset_path,
+             ctx->model_path ? ctx->model_path : "(none)", ctx->dataset_path,
              oc_ft_strategy_name(strategy), out_dir);
 
     OcFtConfig fcfg = {
@@ -1077,11 +1079,12 @@ OcError oc_cli_run_finetune(OcCliContext *ctx)
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"finetune\",\"model\":\"%s\",\"dataset\":\"%s\","
                "\"strategy\":\"%s\",\"output_dir\":\"%s\",\"status\":\"ok\"}\n",
-               ctx->model_path, ctx->dataset_path,
+               ctx->model_path ? ctx->model_path : "", ctx->dataset_path,
                oc_ft_strategy_name(strategy), out_dir);
     } else {
         printf("finetune complete: model=%s strategy=%s output=%s\n",
-               ctx->model_path, oc_ft_strategy_name(strategy), out_dir);
+               ctx->model_path ? ctx->model_path : "(none)",
+               oc_ft_strategy_name(strategy), out_dir);
     }
     return OC_OK;
 }

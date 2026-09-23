@@ -32,7 +32,7 @@ impl Default for FinetuneConfig {
             weight_decay: 0.0,
             epochs: 1,
             max_seq_len: 512,
-            window: 64,
+            window: 128,
             tokens_per_step: 256,
             pack: true,
             warmup_steps: 10,

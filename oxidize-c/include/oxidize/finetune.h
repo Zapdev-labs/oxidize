@@ -29,6 +29,7 @@ typedef enum {
     OC_FT_SELF_TRAIN = 1, /* self-training with synthetic data         */
     OC_FT_DPO       = 2,  /* direct preference optimization (stub)    */
     OC_FT_PPO       = 3,  /* proximal policy optimization (stub)      */
+    OC_FT_DISTILL   = 4,  /* mold teacher traces into student JSONL   */
 } OcFtStrategy;
 
 typedef struct OcFtConfig {
@@ -65,6 +66,12 @@ OcError oc_finetune_generate_synthetic(OcLlamaModel *model, OcTokenizer *tok,
 /* Format a conversation as SFT input (prompt + response pairs). */
 OcError oc_finetune_format_sft(const char *system, const char *user,
                                const char *assistant, char *out, size_t out_cap);
+
+/* Rewrite mixed JSONL (chat or alpaca keys) into messages JSONL.
+ * Drops requests that ask for exploit or malware construction.
+ * `kept` and `dropped` may be NULL. */
+OcError oc_finetune_mold_dataset(const char *input_path, const char *output_path,
+                                 uint32_t *kept, uint32_t *dropped);
 
 /* Get the name of a fine-tuning strategy. */
 const char *oc_ft_strategy_name(OcFtStrategy s);

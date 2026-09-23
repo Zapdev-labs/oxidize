@@ -76,7 +76,7 @@ struct SftArgs {
     max_seq_len: usize,
 
     /// Positions per batched forward window (GEMM batch dimension).
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 128)]
     window: usize,
 
     /// Optimizer step cadence, in supervised tokens.
@@ -217,7 +217,7 @@ struct SelfTrainArgs {
     #[arg(long, default_value_t = 512)]
     max_seq_len: usize,
 
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 128)]
     window: usize,
 
     #[arg(long, default_value_t = 256)]

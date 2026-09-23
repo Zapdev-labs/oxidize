@@ -44,3 +44,10 @@ oxidize-golang/oxidize
 .omo/
 modal_app.py.tmp.*
 docs/superpowers/
+
+# oxidize-training generated data / checkpoints / binaries
+oxidize-training/data/
+oxidize-training/out/
+oxidize-training/bin/
+# Kaggle TPU build output (contains secrets.json)
+scripts/kaggle_tpu_k2/build/

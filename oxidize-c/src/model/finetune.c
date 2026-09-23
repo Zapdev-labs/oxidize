@@ -7,10 +7,12 @@
 #include "oxidize/chat.h"
 #include "oxidize/sampling.h"
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 const char *oc_ft_strategy_name(OcFtStrategy s)
 {
@@ -19,13 +21,29 @@ const char *oc_ft_strategy_name(OcFtStrategy s)
     case OC_FT_SELF_TRAIN: return "self-train";
     case OC_FT_DPO:        return "dpo";
     case OC_FT_PPO:        return "ppo";
+    case OC_FT_DISTILL:    return "distill";
     default: return "unknown";
     }
 }
 
 OcError oc_finetune_run(const OcFtConfig *cfg)
 {
-    if (!cfg || !cfg->model_path || !cfg->dataset_path) return OC_ERR_INVALID_ARG;
+    if (!cfg || !cfg->dataset_path) return OC_ERR_INVALID_ARG;
+
+    if (cfg->strategy == OC_FT_DISTILL) {
+        const char *dir = cfg->output_dir ? cfg->output_dir : "./adapters";
+        if (mkdir(dir, 0755) != 0 && errno != EEXIST) return OC_ERR_IO;
+        char out_path[1024];
+        int nw = snprintf(out_path, sizeof(out_path), "%s/distill.jsonl", dir);
+        if (nw < 0 || (size_t)nw >= sizeof(out_path)) return OC_ERR_INVALID_ARG;
+        uint32_t kept = 0, dropped = 0;
+        OcError me = oc_finetune_mold_dataset(cfg->dataset_path, out_path, &kept, &dropped);
+        if (me != OC_OK) return me;
+        fprintf(stderr, "distill: kept=%u dropped=%u output=%s\n", kept, dropped, out_path);
+        return OC_OK;
+    }
+
+    if (!cfg->model_path) return OC_ERR_INVALID_ARG;
 
     if (cfg->verbose) {
         fprintf(stderr, "finetune: strategy=%s model=%s dataset=%s\n",
@@ -304,5 +322,125 @@ OcError oc_finetune_format_sft(const char *system, const char *user,
         if (w < 0 || (size_t)w >= out_cap - n) return OC_ERR_OOM;
         n += (size_t)w;
     }
+    return OC_OK;
+}
+
+static int json_find_string(const char *line, const char *key, char *out, size_t cap)
+{
+    char pat[64];
+    int n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if (n < 0 || (size_t)n >= sizeof(pat)) return 0;
+    const char *p = strstr(line, pat);
+    if (!p) return 0;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != ':') return 0;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return 0;
+    p++;
+    size_t o = 0;
+    while (*p && *p != '"') {
+        char c = *p++;
+        if (c == '\\' && *p) {
+            char e = *p++;
+            if (e == 'n') c = '\n';
+            else if (e == 't') c = '\t';
+            else if (e == 'r') c = '\r';
+            else c = e;
+        }
+        if (o + 1 >= cap) return 0;
+        out[o++] = c;
+    }
+    out[o] = '\0';
+    return o > 0;
+}
+
+static int asks_for_weaponized(const char *user)
+{
+    char buf[4096];
+    size_t n = strlen(user);
+    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+    for (size_t i = 0; i < n; i++) {
+        char c = user[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        buf[i] = c;
+    }
+    buf[n] = '\0';
+    const char *bad[] = {
+        "reverse shell", "meterpreter", "write an exploit", "exploit poc",
+        "ransomware", "webshell", "malware sample",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (strstr(buf, bad[i])) return 1;
+    }
+    return 0;
+}
+
+OcError oc_finetune_mold_dataset(const char *input_path, const char *output_path,
+                                 uint32_t *kept, uint32_t *dropped)
+{
+    if (!input_path || !output_path) return OC_ERR_INVALID_ARG;
+    FILE *in = fopen(input_path, "r");
+    if (!in) return OC_ERR_IO;
+    FILE *out = fopen(output_path, "w");
+    if (!out) {
+        fclose(in);
+        return OC_ERR_IO;
+    }
+
+    uint32_t k = 0, d = 0;
+    char *line = NULL;
+    size_t cap = 0;
+    while (getline(&line, &cap, in) != -1) {
+        char system[2048] = {0};
+        char user[8192] = {0};
+        char assistant[16384] = {0};
+        char source[256] = {0};
+        json_find_string(line, "system", system, sizeof(system));
+        int has_user = json_find_string(line, "user", user, sizeof(user));
+        int has_asst = json_find_string(line, "assistant", assistant, sizeof(assistant));
+        if (!has_user) {
+            json_find_string(line, "instruction", user, sizeof(user));
+            char input[2048] = {0};
+            if (json_find_string(line, "input", input, sizeof(input)) && input[0]) {
+                size_t ul = strlen(user);
+                if (ul + 2 < sizeof(user)) {
+                    user[ul] = '\n';
+                    strncat(user, input, sizeof(user) - ul - 2);
+                }
+            }
+        }
+        if (!has_asst)
+            json_find_string(line, "output", assistant, sizeof(assistant));
+        json_find_string(line, "source", source, sizeof(source));
+        if (!user[0] || !assistant[0] || asks_for_weaponized(user)) {
+            d++;
+            continue;
+        }
+        fputs("{\"messages\":[", out);
+        if (system[0]) {
+            fputs("{\"role\":\"system\",\"content\":\"", out);
+            fput_json_escaped(out, system);
+            fputs("\"},", out);
+        }
+        fputs("{\"role\":\"user\",\"content\":\"", out);
+        fput_json_escaped(out, user);
+        fputs("\"},{\"role\":\"assistant\",\"content\":\"", out);
+        fput_json_escaped(out, assistant);
+        fputs("\"}]", out);
+        if (source[0]) {
+            fputs(",\"source\":\"", out);
+            fput_json_escaped(out, source);
+            fputc('"', out);
+        }
+        fputs("}\n", out);
+        k++;
+    }
+    free(line);
+    fclose(in);
+    if (fclose(out) != 0) return OC_ERR_IO;
+    if (kept) *kept = k;
+    if (dropped) *dropped = d;
     return OC_OK;
 }
