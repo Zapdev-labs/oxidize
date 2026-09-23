@@ -9,10 +9,12 @@ use oxidize_train::video::{
 };
 use oxidize_train::{TrainingConfig, load_csv_dataset, train_classifier};
 
+mod llm;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "oxidize-train",
-    about = "Train classifiers and generative video models on CPU"
+    about = "Train classifiers, video models, and architecture-aware causal LMs on CPU"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -29,6 +31,8 @@ enum Command {
     GenTrain(GenTrainArgs),
     /// Generate a new video from a trained generator checkpoint.
     Generate(GenerateArgs),
+    /// Causal LM training on a GGUF. Prints the architecture plan, then runs SFT or DPO.
+    Llm(llm::LlmArgs),
 }
 
 #[derive(Debug, Args)]
@@ -200,6 +204,7 @@ fn main() -> Result<()> {
         Command::Video(args) => run_video(args),
         Command::GenTrain(args) => run_gen_train(args),
         Command::Generate(args) => run_generate(args),
+        Command::Llm(args) => llm::run(args),
     }
 }
 

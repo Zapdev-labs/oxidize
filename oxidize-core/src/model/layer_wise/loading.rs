@@ -127,11 +127,12 @@ impl LayerWiseModel {
         let norm_weight = norm_weight.ok_or("missing norm.weight")?;
         let output_weight = output_weight.unwrap_or_else(|| tok_embeddings.clone());
 
+        let (kv_heads, kv_dim) = kv_cache_geometry(&config);
         let kv_cache_config = crate::kv_cache::KvCacheConfig {
             layer_count: config.layer_count,
             context_size: config.context_size,
-            head_count: config.num_key_value_heads,
-            head_dim: config.kv_head_dim(),
+            head_count: kv_heads,
+            head_dim: kv_dim,
             dtype: config.kv_cache_dtype,
             quantization: config.kv_quantization,
         };
