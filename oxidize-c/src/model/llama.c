@@ -1869,6 +1869,7 @@ OcError oc_llama_session_fake_fill(OcLlamaSession *sess, int64_t depth)
     for (size_t l = 0; l < layers; l++) {
         if (sess->kv_type == OC_KV_RQ) {
             OcKvRqCache *q = sess->kv_rq;
+            oc_kvrq_flush(q, l);
             for (size_t h = 0; h < q->n_kv; h++) {
                 uint8_t *kb = (uint8_t *)oc_kvrq_kblocks(q, l, h);
                 uint8_t *vb = (uint8_t *)oc_kvrq_vblocks(q, l, h);
@@ -1891,11 +1892,7 @@ OcError oc_llama_session_fake_fill(OcLlamaSession *sess, int64_t depth)
                     const size_t slot = q->p.n_sink + (size_t)(t % q->p.window);
                     for (size_t h = 0; h < q->n_kv; h++) {
                         for (size_t kind = 0; kind < 2; kind++) {
-                            const OcKvRqCodec *cd = kind ? &q->vc : &q->kc;
-                            const uint8_t *blk = (kind ? oc_kvrq_vblocks(q, l, h)
-                                                       : oc_kvrq_kblocks(q, l, h))
-                                                 + (size_t)t * cd->block_bytes;
-                            oc_kvrq_decode(cd, blk, tmp);
+                            oc_kvrq_decode_pos(q, l, kind, h, t, tmp);
                             oc_kvq8_encode_row(tmp, q->d,
                                 (int8_t *)oc_kvrq_xq(q, l, kind, h) + slot * q->d,
                                 (float *)oc_kvrq_xs(q, l, kind, h) + slot);

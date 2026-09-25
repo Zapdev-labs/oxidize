@@ -216,6 +216,8 @@ typedef struct {
     int8_t  q8[FL_Q8_GMAX * OC_KVRQ_DIM_MAX];
     float   qscale[FL_Q8_GMAX];
     int32_t qsum[FL_Q8_GMAX];
+    int     center;               /* RQ blocks are centered (mu != 0)  */
+    float   qmu[FL_Q8_GMAX];      /* q_g . mu_k, added to RQ scores    */
 } FlQ8;
 
 static void seg_score(const OcKvView *v, const Seg *sg, const float *q,
@@ -239,14 +241,19 @@ static void seg_score(const OcKvView *v, const Seg *sg, const float *q,
                           (size_t)sg->slot * d, d,
                           oc_kvrq_xs(c, v->layer, 0, v->head) + sg->slot, 1,
                           d, sg->n, q, G, S, ss);
-        } else if (qi != NULL && qi->on) {
-            oc_kvrq_score_i8(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head) +
-                             (size_t)sg->t * c->kc.block_bytes, sg->n,
-                             qi->q8, qi->qscale, qi->qsum, G, S, ss);
         } else {
-            oc_kvrq_score(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head) +
-                          (size_t)sg->t * c->kc.block_bytes, sg->n, q, G, S,
-                          ss);
+            if (qi != NULL && qi->on)
+                oc_kvrq_score_i8(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head)
+                                 + (size_t)sg->t * c->kc.block_bytes, sg->n,
+                                 qi->q8, qi->qscale, qi->qsum, G, S, ss);
+            else
+                oc_kvrq_score(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head) +
+                              (size_t)sg->t * c->kc.block_bytes, sg->n, q, G,
+                              S, ss);
+            if (qi != NULL && qi->center)
+                for (size_t g = 0; g < G; g++)
+                    for (size_t t = 0; t < sg->n; t++)
+                        S[g * ss + t] += qi->qmu[g];
         }
         return;
     }
@@ -278,6 +285,16 @@ static void seg_accum(const OcKvView *v, const Seg *sg, const float *w,
             oc_kvrq_accum(&c->vc, oc_kvrq_vblocks(c, v->layer, v->head) +
                           (size_t)sg->t * c->vc.block_bytes, sg->n, w, ws, G,
                           acc);
+            if (c->mu_valid != NULL && c->mu_valid[v->layer] &&
+                c->p.window > 0) {
+                const float *mu = oc_kvrq_mu(c, v->layer, 1, v->head);
+                for (size_t g = 0; g < G; g++) {
+                    float ws_ = 0.0f;
+                    for (size_t t = 0; t < sg->n; t++) ws_ += w[g * ws + t];
+                    float *a = acc + g * d;
+                    for (size_t i = 0; i < d; i++) a[i] += ws_ * mu[i];
+                }
+            }
         }
         return;
     }
@@ -308,14 +325,22 @@ static void seg_rows(const OcKvView *v, const Seg *sg, int kind, float *rows)
                                 + (size_t)sg->slot * d, d,
                                 oc_kvrq_xs(c, v->layer, (size_t)kind, v->head)
                                 + sg->slot, 1, d, sg->n, rows);
-        } else if (kind == 0) {
-            oc_kvrq_decode_rows(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head)
-                                + (size_t)sg->t * c->kc.block_bytes, sg->n,
-                                rows);
         } else {
-            oc_kvrq_decode_rows(&c->vc, oc_kvrq_vblocks(c, v->layer, v->head)
-                                + (size_t)sg->t * c->vc.block_bytes, sg->n,
-                                rows);
+            if (kind == 0)
+                oc_kvrq_decode_rows(&c->kc, oc_kvrq_kblocks(c, v->layer,
+                                    v->head) + (size_t)sg->t *
+                                    c->kc.block_bytes, sg->n, rows);
+            else
+                oc_kvrq_decode_rows(&c->vc, oc_kvrq_vblocks(c, v->layer,
+                                    v->head) + (size_t)sg->t *
+                                    c->vc.block_bytes, sg->n, rows);
+            if (c->mu_valid != NULL && c->mu_valid[v->layer] &&
+                c->p.window > 0) {
+                const float *mu = oc_kvrq_mu(c, v->layer, (size_t)kind,
+                                             v->head);
+                for (size_t t = 0; t < sg->n; t++)
+                    for (size_t i = 0; i < d; i++) rows[t * d + i] += mu[i];
+            }
         }
         return;
     }
@@ -427,6 +452,16 @@ void oc_attn_flash_decode_range(const OcKvView *v, const float *q, size_t G,
     qi.on = !dense && G <= FL_Q8_GMAX && d <= OC_KVRQ_DIM_MAX &&
             (fl_isa(), g_fl_i8);
     if (qi.on) oc_kvrq_prep_q(q, G, d, qi.q8, qi.qscale, qi.qsum);
+    qi.center = !dense && G <= FL_Q8_GMAX && v->rq->mu_valid != NULL &&
+                v->rq->mu_valid[v->layer] && v->rq->p.window > 0;
+    if (qi.center) {
+        const float *mu = oc_kvrq_mu(v->rq, v->layer, 0, v->head);
+        for (size_t g = 0; g < G; g++) {
+            float a = 0.0f;
+            for (size_t i = 0; i < d; i++) a += q[g * d + i] * mu[i];
+            qi.qmu[g] = a;
+        }
+    }
     if (dense)
         dense_prefetch(v, t0, (size_t)(t1 - t0 < (int64_t)T_ ? t1 - t0
                                                               : (int64_t)T_));

@@ -152,6 +152,15 @@ typedef struct OcKvRqCache {
     float        *xs;                /* [layer][2][head][slot]          */
     int64_t      *tag;               /* [layer][slot] position or -1    */
     size_t        xq_bytes, xs_bytes, tag_bytes;
+    /* Per-(layer, K|V, head) mean vector in the rotated domain. RQ blocks
+     * hold x - mu: softmax is invariant to the per-head constant q.mu_k
+     * and sum_t w_t = 1 gives back mu_v exactly, so centering only removes
+     * the shared component from what the 2-4 bit codes must represent
+     * (on K2 most of the key energy). mu is the mean of the first `window`
+     * non-sink positions, taken when the exact ring first fills; until
+     * then every position lives in an exact slot and no RQ block exists. */
+    float        *mu;                /* [layer][2][head][d]             */
+    uint8_t      *mu_valid;          /* [layer]                         */
 } OcKvRqCache;
 
 OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
@@ -163,6 +172,19 @@ void oc_kvrq_cache_clear(OcKvRqCache *c);
 void oc_kvrq_cache_rewind(OcKvRqCache *c, int64_t pos);
 /* Bytes one position costs across all layers/heads (RQ blocks only). */
 size_t oc_kvrq_bytes_per_token(const OcKvRqCache *c);
+
+/* Fix mu for `layer` from the exact ring now (if not fixed yet) and encode
+ * the RQ blocks the ring positions were waiting for. Called by store when
+ * the ring first fills; call it before touching RQ blocks directly. */
+void oc_kvrq_flush(OcKvRqCache *c, size_t layer);
+static inline const float *oc_kvrq_mu(const OcKvRqCache *c, size_t layer,
+                                      size_t kind, size_t head)
+{
+    return c->mu + ((layer * 2u + kind) * c->n_kv + head) * c->d;
+}
+/* Decode position t's RQ block (plus mu) into out[d]. */
+void oc_kvrq_decode_pos(const OcKvRqCache *c, size_t layer, size_t kind,
+                        size_t head, int64_t t, float *out);
 
 /* Store K and V of one position for every kv head. k/v are [n_kv][d] in the
  * ORIGINAL (unrotated) domain; `scratch` must hold 2*d floats. */

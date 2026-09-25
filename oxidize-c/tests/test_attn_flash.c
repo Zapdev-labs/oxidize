@@ -109,11 +109,9 @@ static void tcache_make(TCache *tc, OcKvViewKind kind, size_t n, size_t d,
                     const float xs = oc_kvrq_xs(&tc->rq, 0, kind2, 1)[s];
                     for (size_t i = 0; i < d; i++) dst[i] = xs * xq[i];
                 } else {
-                    const OcKvRqCodec *c = kind2 ? &tc->rq.vc : &tc->rq.kc;
-                    const uint8_t *b = (kind2 ? oc_kvrq_vblocks(&tc->rq, 0, 1)
-                                              : oc_kvrq_kblocks(&tc->rq, 0, 1))
-                                       + t * c->block_bytes;
-                    oc_kvrq_decode(c, b, dst);
+                    /* RQ block + the per-head mean (centered cache). */
+                    oc_kvrq_decode_pos(&tc->rq, 0, (size_t)kind2, 1,
+                                       (int64_t)t, dst);
                 }
             }
         }

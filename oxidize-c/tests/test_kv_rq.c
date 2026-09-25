@@ -412,3 +412,40 @@ Test(kv_rq, cache_slots_tags_and_rewind)
     cr_assert_eq(oc_kvrq_slot(&c, 1, 2), -1);
     oc_kvrq_cache_free(&c);
 }
+
+/* Keys with a large shared (per-head) component: the centered cache codes
+ * only the residual, so the error scales with the residual, not |k|. */
+Test(kv_rq, centering_removes_shared_component)
+{
+    const size_t d = 128, n = 300;
+    OcKvRqParams p = { .k_bits = 3, .v_bits = 2, .n_sink = 4, .window = 64,
+                       .rot = OC_KVRQ_ROT_HADAMARD, .seed = 1 };
+    OcKvRqCache c;
+    cr_assert_eq(oc_kvrq_cache_init(&c, 1, 1, d, n, &p), OC_OK);
+    float shared[128], k[300][128], v[128], scr[256];
+    rs(55);
+    for (size_t i = 0; i < d; i++) shared[i] = rg() * 8.0f;
+    for (size_t t = 0; t < n; t++) {
+        for (size_t i = 0; i < d; i++) { k[t][i] = shared[i] + rg(); v[i] = rg(); }
+        oc_kvrq_store(&c, 0, (int64_t)t, k[t], v, scr);
+        if (t + 1 < 4 + 64) cr_assert_eq(c.mu_valid[0], 0);
+    }
+    cr_assert_eq(c.mu_valid[0], 1);
+    double err = 0, res = 0;
+    float kr[128], dec[128];
+    for (size_t t = 4; t < n - 64; t++) {
+        cr_assert_lt(oc_kvrq_slot(&c, 0, (int64_t)t), 0);
+        oc_kvrq_rotate(&c.rot, k[t], kr);
+        oc_kvrq_decode_pos(&c, 0, 0, 0, (int64_t)t, dec);
+        for (size_t i = 0; i < d; i++) {
+            err += ((double)dec[i] - kr[i]) * ((double)dec[i] - kr[i]);
+            res += 1.0;   /* residual variance per coordinate */
+        }
+    }
+    /* 3-bit Lloyd-Max on the unit-variance residual: rel err ~0.19;
+     * without centering it would be ~0.19 * |k| / |residual| ~ 1.5. */
+    cr_expect(sqrt(err / res) < 0.3, "centered rel err %.3f", sqrt(err / res));
+    oc_kvrq_cache_rewind(&c, 10);
+    cr_assert_eq(c.mu_valid[0], 0);
+    oc_kvrq_cache_free(&c);
+}

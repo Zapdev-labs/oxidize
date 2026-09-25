@@ -197,6 +197,69 @@ static int run_bench(OcLlamaModel *model, const OcKvOptions *kvo, uint32_t pp,
     return 0;
 }
 
+/* --kvstats IDS_FILE N: prefill N ids with an f32 cache and print, per
+ * layer, how much of the K / V energy is a per-head shared (mean) vector
+ * over positions [4, N): frac = |mean|^2 / mean |x|^2, and the ratio of
+ * the largest to the median per-position norm. */
+static int run_kvstats(OcLlamaModel *model, const char *path, uint32_t n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    uint32_t *ids = malloc(n * sizeof(uint32_t));
+    unsigned long v;
+    uint32_t k = 0;
+    while (k < n && fscanf(f, "%lu", &v) == 1) ids[k++] = (uint32_t)v;
+    fclose(f);
+    n = k;
+    OcKvOptions kvo = {0};
+    kvo.type = OC_KV_F32;
+    OcLlamaSession sess;
+    if (oc_llama_session_init_kv_opts(model, &sess, &kvo) != OC_OK) return 1;
+    float *lg = malloc(model->cfg.vocab_size * sizeof(float));
+    if (oc_llama_prefill(&sess, ids, n, 0, lg) != OC_OK) return 1;
+    const size_t L = model->cfg.n_layer, H = model->cfg.n_head_kv,
+                 d = model->cfg.kv_head_dim, row = sess.kv_row_floats,
+                 C = model->cfg.n_ctx;
+    double *mu = malloc(d * sizeof(double)), *nrm = malloc(n * sizeof(double));
+    for (size_t l = 0; l < L; l++) {
+        printf("{\"layer\":%zu", l);
+        for (int kind = 0; kind < 2; kind++) {
+            const float *base = (kind ? sess.kv_v : sess.kv_k) + l * C * row;
+            double fr_sum = 0, fr_max = 0, pk_max = 0, n0_max = 0;
+            for (size_t h = 0; h < H; h++) {
+                double e = 0;
+                memset(mu, 0, d * sizeof(double));
+                for (uint32_t t = 4; t < n; t++) {
+                    const float *x = base + (size_t)t * row + h * d;
+                    double q = 0;
+                    for (size_t i = 0; i < d; i++) { mu[i] += x[i]; q += (double)x[i] * x[i]; }
+                    e += q;
+                    nrm[t] = sqrt(q);
+                }
+                double m2 = 0;
+                for (size_t i = 0; i < d; i++) { mu[i] /= (n - 4); m2 += mu[i] * mu[i]; }
+                const double fr = m2 / (e / (n - 4));
+                fr_sum += fr / H;
+                if (fr > fr_max) fr_max = fr;
+                double mx = 0, s = 0;
+                for (uint32_t t = 4; t < n; t++) { if (nrm[t] > mx) mx = nrm[t]; s += nrm[t]; }
+                if (mx / (s / (n - 4)) > pk_max) pk_max = mx / (s / (n - 4));
+                double q0 = 0;
+                const float *x0 = base + h * d;
+                for (size_t i = 0; i < d; i++) q0 += (double)x0[i] * x0[i];
+                if (sqrt(q0) / (s / (n - 4)) > n0_max) n0_max = sqrt(q0) / (s / (n - 4));
+            }
+            printf(",\"%s\":{\"mean_frac\":%.3f,\"mean_frac_max\":%.3f,"
+                   "\"peak_over_avg\":%.2f,\"pos0_over_avg\":%.2f}",
+                   kind ? "v" : "k", fr_sum, fr_max, pk_max, n0_max);
+        }
+        printf("}\n");
+    }
+    free(mu); free(nrm); free(lg); free(ids);
+    oc_llama_session_free(&sess);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -209,7 +272,8 @@ int main(int argc, char **argv)
     int reps = 3, chunks = 0;
     long long depth = 0;
     bool bench = false, no_prefill = false;
-    const char *kv_name = "f32", *ppl_path = NULL;
+    const char *kv_name = "f32", *ppl_path = NULL, *stats_path = NULL;
+    uint32_t stats_n = 0;
     OcKvOptions kvo = {0};
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) threads = (size_t)atoi(argv[++i]);
@@ -221,6 +285,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--rq-rot") == 0 && i + 1 < argc) kvo.rq_rot = strcmp(argv[++i], "iso") == 0;
         else if (strcmp(argv[i], "--depth") == 0 && i + 1 < argc) depth = atoll(argv[++i]);
         else if (strcmp(argv[i], "--ppl") == 0 && i + 1 < argc) ppl_path = argv[++i];
+        else if (strcmp(argv[i], "--kvstats") == 0 && i + 2 < argc) { stats_path = argv[++i]; stats_n = (uint32_t)atoi(argv[++i]); }
         else if (strcmp(argv[i], "--chunks") == 0 && i + 1 < argc) chunks = atoi(argv[++i]);
         else if (strcmp(argv[i], "--bos") == 0 && i + 1 < argc) bos = (uint32_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--reps") == 0 && i + 1 < argc) reps = atoi(argv[++i]);
@@ -248,6 +313,11 @@ int main(int argc, char **argv)
     }
     fprintf(stderr, "loaded in %.2fs, threads=%zu\n", now_s() - t0,
             oc_parallel_n_threads());
+    if (stats_path != NULL) {
+        int rc = run_kvstats(&model, stats_path, stats_n);
+        oc_llama_free(&model);
+        return rc;
+    }
     if (ppl_path != NULL) {
         int rc = run_ppl(&model, &kvo, ppl_path, ctx, chunks, bos);
         oc_llama_free(&model);
