@@ -288,6 +288,51 @@ static void seg_score(const OcKvView *v, const Seg *sg, const float *q,
     }
 }
 
+/* acc_g += (sum_t w[g*ws + t]) * mu for g < G: the centered-V term. */
+static void mu_axpy_scalar(float *acc, const float *w, size_t ws, size_t n,
+                           size_t G, size_t d, const float *mu)
+{
+    for (size_t g = 0; g < G; g++) {
+        float s = 0.0f;
+        for (size_t t = 0; t < n; t++) s += w[g * ws + t];
+        float *a = acc + g * d;
+        for (size_t i = 0; i < d; i++) a[i] += s * mu[i];
+    }
+}
+
+#if FL_HAVE_AVX2
+FL_TGT static void mu_axpy_avx2(float *acc, const float *w, size_t ws,
+                                size_t n, size_t G, size_t d, const float *mu)
+{
+    for (size_t g = 0; g < G; g++) {
+        const float *wg = w + g * ws;
+        __m256 sv = _mm256_setzero_ps();
+        size_t t = 0;
+        for (; t + 8 <= n; t += 8) sv = _mm256_add_ps(sv, _mm256_loadu_ps(wg + t));
+        __m128 h = _mm_add_ps(_mm256_castps256_ps128(sv),
+                              _mm256_extractf128_ps(sv, 1));
+        h = _mm_add_ps(h, _mm_movehl_ps(h, h));
+        h = _mm_add_ss(h, _mm_movehdup_ps(h));
+        float s = _mm_cvtss_f32(h);
+        for (; t < n; t++) s += wg[t];
+        const __m256 b = _mm256_set1_ps(s);
+        float *a = acc + g * d;
+        for (size_t i = 0; i < d; i += 8)
+            _mm256_storeu_ps(a + i, _mm256_fmadd_ps(b, _mm256_loadu_ps(mu + i),
+                                                    _mm256_loadu_ps(a + i)));
+    }
+}
+#endif
+
+static void mu_axpy(float *acc, const float *w, size_t ws, size_t n, size_t G,
+                    size_t d, const float *mu)
+{
+#if FL_HAVE_AVX2
+    if (d % 8 == 0 && fl_isa()) { mu_axpy_avx2(acc, w, ws, n, G, d, mu); return; }
+#endif
+    mu_axpy_scalar(acc, w, ws, n, G, d, mu);
+}
+
 static void seg_accum(const OcKvView *v, const Seg *sg, const float *w,
                       size_t ws, size_t G, float *acc)
 {
@@ -314,14 +359,7 @@ static void seg_accum(const OcKvView *v, const Seg *sg, const float *w,
                           (size_t)sg->t * c->vc.block_bytes, sg->n, w, ws, G,
                           acc);
             const float *mu = seg_mu(v, sg, 1);
-            if (mu != NULL) {
-                for (size_t g = 0; g < G; g++) {
-                    float ws_ = 0.0f;
-                    for (size_t t = 0; t < sg->n; t++) ws_ += w[g * ws + t];
-                    float *a = acc + g * d;
-                    for (size_t i = 0; i < d; i++) a[i] += ws_ * mu[i];
-                }
-            }
+            if (mu != NULL) mu_axpy(acc, w, ws, sg->n, G, d, mu);
         }
         return;
     }
