@@ -34,6 +34,14 @@ extern "C" {
 typedef struct OcPrerouter OcPrerouter;
 typedef struct OcLoraModel OcLoraModel;
 
+/* Attention-output gate function. SIGMOID is Muse Glimmer's
+ * sigmoid(W_gate·x); SOFTPLUS_LN2 is K2-Horizon's softplus with beta = ln 2,
+ * i.e. log2(1 + 2^g), which is exactly 1 at g = 0. */
+typedef enum OcAttnGateKind {
+    OC_ATTN_GATE_SIGMOID      = 0,
+    OC_ATTN_GATE_SOFTPLUS_LN2 = 1,
+} OcAttnGateKind;
+
 /* ─── Config (port of InferenceConfig, Llama-relevant subset) ──────────── */
 typedef struct OcLlamaConfig {
     uint32_t vocab_size;
@@ -184,6 +192,30 @@ typedef struct OcLlamaConfig {
      * with the wrong one the model stays locally fluent and drifts within a
      * couple of dozen tokens. */
     bool     rope_norm_pairs;
+    /* Which function the attention-output gate applies (only consulted when
+     * attn_out_gate is set). Zero is SIGMOID so hand-built configs and Muse
+     * Glimmer keep their behaviour. */
+    OcAttnGateKind attn_gate_kind;
+    /* ── K2-Horizon (GGUF arch "k2-horizon") ─────────────────────────────
+     *
+     * Grouped RMSNorm at every norm site, MoVA routed values on the MoE
+     * layers (V is a sigmoid-routed mixture of value experts instead of one
+     * projection), a per-element softplus(beta=ln2) attention-output gate,
+     * NEOX RoPE computed from a double-precision angle table, and a
+     * DeepSeek-style sigmoid MoE FFN with a shared expert. See k2_arch.h. */
+    bool     is_k2;
+    /* RMSNorm groups (attention.group_norm_groups): the hidden vector is cut
+     * into this many contiguous slices that are normalized independently.
+     * 0 or 1 = ordinary RMSNorm. */
+    uint32_t norm_groups;
+    /* MoVA value experts (attention.value_expert_count / _used_count). 0 =
+     * no routed values. */
+    uint32_t value_expert_count;
+    uint32_t value_expert_used;
+    /* Normalize the selected expert weights to sum 1 before scaling. */
+    bool     expert_weights_norm;
+    /* First N blocks use a dense FFN + a plain attn_v projection. */
+    uint32_t leading_dense_block_count;
 } OcLlamaConfig;
 
 /* Upper bound on LongCat n-gram tables. LongCat-2.0 has
@@ -238,6 +270,15 @@ typedef struct OcLlamaLayer {
     float *exp_probs_b;
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
+    /* K2-Horizon MoVA (routed values). attn_v_exps is the stacked 3-D
+     * [n_embd, kv_row, value_expert_count] tensor: `rows` is ONE expert's
+     * row count (kv_row) and expert e starts at data + e*rows*row_bytes.
+     * attn_v_gate is the [value_expert_count, n_embd] router (F32 in
+     * practice); attn_v_gate_b is its selection-only bias (owned f32, length
+     * value_expert_count). All empty on dense layers. */
+    OcWeightView attn_v_exps;
+    OcWeightView attn_v_gate;
+    float *attn_v_gate_b;
     /* LayerNorm biases (beta) for GPT-2/NeoX/Falcon; NULL for RMSNorm
      * architectures (Llama-family has no norm bias). Owned f32, n_embd. */
     float *attn_norm_bias;
@@ -409,6 +450,13 @@ typedef struct OcLlamaSession {
     OcExpertStreamPool *expert_stream; /* borrowed from model              */
     OcPrerouter        *prerouter;     /* owned                            */
     OcLoraModel        *lora;          /* owned                            */
+    /* K2-Horizon scratch (NULL for every other architecture). */
+    float    *mova_probs;    /* value_expert_count router probabilities   */
+    uint32_t *mova_sel;      /* value_expert_count selection scratch      */
+    float    *mova_w;        /* value_expert_used applied weights         */
+    float    *mova_out_all;  /* value_expert_used * kv_row expert outputs */
+    float    *rope_cos;      /* rope_dim/2, current position (K2)          */
+    float    *rope_sin;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -484,6 +532,11 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out);
 /* Skip kernel readahead of the whole GGUF so routed experts can stream
  * from SSD (Edge0-style). Combine with oc_llama_enable_expert_stream(). */
 #define OC_LLAMA_LOAD_STREAM 1u
+/* Map the GGUF with the kernel's default (MADV_NORMAL) advice instead of
+ * MADV_SEQUENTIAL + MADV_WILLNEED. Sequential advice drops pages soon after
+ * they are read, which evicts hot routed experts on a large MoE that does not
+ * comfortably fit in RAM. Applied automatically to K2-Horizon files. */
+#define OC_LLAMA_LOAD_NORMAL_ADVICE 2u
 
 OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out);
 

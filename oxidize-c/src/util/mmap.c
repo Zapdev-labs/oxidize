@@ -130,6 +130,11 @@ OcError oc_mmap_open_readonly_flags(const char *path, unsigned flags,
 
     if (flags & OC_MMAP_F_NO_READAHEAD) {
         oc_mmap_advise_random(m);
+    } else if (flags & OC_MMAP_F_NORMAL_ADVICE) {
+        if (madvise(m->addr, m->len, MADV_NORMAL) != 0) {
+            oc_log(OC_LOG_WARN, "mmap: MADV_NORMAL failed: %s",
+                   strerror(errno));
+        }
     } else {
         oc_mmap_advise_sequential(m);
         oc_mmap_advise_willneed(m);

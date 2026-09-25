@@ -22,6 +22,7 @@
 #include "oxidize/attn_kernels.h"
 #include "oxidize/expert_stream.h"
 #include "oxidize/gguf.h"
+#include "oxidize/k2_arch.h"
 #include "oxidize/log.h"
 #include "oxidize/lora.h"
 #include "oxidize/matvec.h"
@@ -256,6 +257,13 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->post_norm_eps = 0.0f;
     cfg->logit_scale = 0.0f;
     cfg->rope_norm_pairs = false;
+    cfg->attn_gate_kind = OC_ATTN_GATE_SIGMOID;
+    cfg->is_k2 = false;
+    cfg->norm_groups = 1;
+    cfg->value_expert_count = 0;
+    cfg->value_expert_used = 0;
+    cfg->expert_weights_norm = true;
+    cfg->leading_dense_block_count = 0;
     if (arch_str) {
         /* Checked before the generic "gemma" prefix below, which would
          * otherwise match "gemma4" and apply the Gemma-2 single-geometry
@@ -363,6 +371,12 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             for (uint32_t l = 0; l < cfg->n_layer; l++)
                 cfg->layer_is_swa[l] = (uint8_t)((l % period) < (period - 1));
 
+        } else if (oc_k2_arch_match(arch_str)) {
+            /* K2-Horizon: grouped norms, MoVA values, softplus gate. The MoE
+             * FFN keys (sigmoid gating, x2.5, shared expert) were read
+             * above. */
+            OcError ke = oc_k2_parse_config(f, prefix, cfg);
+            if (ke != OC_OK) return ke;
         } else if (strncmp(arch_str, "gemma", 5) == 0) {
             cfg->uses_geglu = true;
             cfg->norm_scale = sqrtf((float)cfg->n_embd);
@@ -726,6 +740,15 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->attn_output = view_from_info(mm, info);
         } else if (strcmp(suf, "attn_gate.weight") == 0) {
             L->attn_gate = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_v_exps.weight") == 0) {
+            /* K2 MoVA: 3-D [n_embd, kv_row, n_value_experts]; the view's
+             * rows are one expert's. */
+            L->attn_v_exps = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_v_gate.weight") == 0) {
+            L->attn_v_gate = view_from_info(mm, info);
+        } else if (strcmp(suf, "attn_v_gate.bias") == 0) {
+            free(L->attn_v_gate_b);
+            L->attn_v_gate_b = load_norm(mm, info, (size_t)info->dims[0]);
         } else if (strcmp(suf, "attn_qkv.weight") == 0) {
             L->attn_qkv = view_from_info(mm, info);
         } else if (strcmp(suf, "ssm_a") == 0) {
@@ -825,6 +848,17 @@ static OcError resolve_weights(OcLlamaModel *m)
              infos[i].dims[2] != m->cfg.num_experts)) {
             oc_log(OC_LOG_ERROR, "llama: qwen35 expert tensor shape mismatch: %s",
                    cname);
+            oc_arena_free(arena);
+            return OC_ERR_TENSOR;
+        }
+        if (m->cfg.is_k2 &&
+            ((strstr(cname, "attn_v_exps.weight") != NULL &&
+              (infos[i].n_dims != 3 ||
+               infos[i].dims[2] != m->cfg.value_expert_count)) ||
+             (strstr(cname, "attn_v_gate.bias") != NULL &&
+              infos[i].dims[0] != m->cfg.value_expert_count))) {
+            oc_log(OC_LOG_ERROR, "llama: k2 value-expert tensor shape "
+                   "mismatch: %s", cname);
             oc_arena_free(arena);
             return OC_ERR_TENSOR;
         }
@@ -1052,6 +1086,10 @@ static OcError resolve_weights(OcLlamaModel *m)
             }
         }
     }
+    if (m->cfg.is_k2) {
+        OcError ke = oc_k2_validate_layers(m);
+        if (ke != OC_OK) return ke;
+    }
     if (m->tok_embeddings.rows == 0 || m->tok_embeddings.rows > UINT32_MAX ||
         m->tok_embeddings.cols != m->cfg.n_embd ||
         m->output.rows != m->tok_embeddings.rows ||
@@ -1074,7 +1112,15 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
     memset(out, 0, sizeof(*out));
     out->load_flags = flags;
 
+    /* K2-Horizon is a large MoE that is usually close to the RAM limit:
+     * MADV_SEQUENTIAL's drop-behind evicts hot experts and WILLNEED pulls the
+     * whole file in at once, so map it with the default advice instead. The
+     * arch is peeked from the header because the advice is set at open. */
+    if (!(flags & OC_LLAMA_LOAD_STREAM) && oc_k2_gguf_path_is_k2(path))
+        flags |= OC_LLAMA_LOAD_NORMAL_ADVICE;
+    out->load_flags = flags;
     unsigned mmap_flags = (flags & OC_LLAMA_LOAD_STREAM) ? OC_MMAP_F_NO_READAHEAD : 0u;
+    if (flags & OC_LLAMA_LOAD_NORMAL_ADVICE) mmap_flags |= OC_MMAP_F_NORMAL_ADVICE;
     OcError e = oc_gguf_map_open_flags(path, mmap_flags, &out->gguf);
     if (e != OC_OK) return e;
 
@@ -1098,6 +1144,7 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
         strcmp(arch_str, "qwen3moe") != 0 &&
         strcmp(arch_str, "muse-glimmer") != 0 &&
         strcmp(arch_str, "muse_glimmer") != 0 &&
+        !oc_k2_arch_match(arch_str) &&
         !is_qwen35_arch(arch_str)) {
         oc_gguf_map_free(&out->gguf);
         oc_log(OC_LOG_ERROR, "llama: unsupported architecture \"%s\"", arch_str);
@@ -1500,6 +1547,29 @@ static OcError session_init_kv_impl(OcLlamaModel *model, OcLlamaSession *out,
             return OC_ERR_OOM;
         }
     }
+    if (model->cfg.value_expert_count > 0) {
+        const size_t ne = model->cfg.value_expert_count;
+        const size_t nk = model->cfg.value_expert_used ?
+                          model->cfg.value_expert_used : 1u;
+        out->mova_probs = xcalloc(ne, sizeof(float));
+        out->mova_sel = xcalloc(ne, sizeof(uint32_t));
+        out->mova_w = xcalloc(nk, sizeof(float));
+        out->mova_out_all = xcalloc(nk * out->kv_row_floats, sizeof(float));
+        if (!out->mova_probs || !out->mova_sel || !out->mova_w ||
+            !out->mova_out_all) {
+            oc_llama_session_free(out);
+            return OC_ERR_OOM;
+        }
+    }
+    if (model->cfg.is_k2) {
+        const size_t half = model->cfg.rope_dim / 2u + 1u;
+        out->rope_cos = xcalloc(half, sizeof(float));
+        out->rope_sin = xcalloc(half, sizeof(float));
+        if (!out->rope_cos || !out->rope_sin) {
+            oc_llama_session_free(out);
+            return OC_ERR_OOM;
+        }
+    }
 
     /* MLA temporaries. */
     if (model->cfg.uses_mla) {
@@ -1812,6 +1882,12 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->qwen35_conv_output);
     free(sess->qwen35_delta_output);
     free(sess->muse_gate);
+    free(sess->mova_probs);
+    free(sess->mova_sel);
+    free(sess->mova_w);
+    free(sess->mova_out_all);
+    free(sess->rope_cos);
+    free(sess->rope_sin);
     if (sess->kv_compress) {
         oc_compressed_kv_free(sess->kv_compress);
         free(sess->kv_compress);
@@ -1841,6 +1917,7 @@ void oc_llama_free(OcLlamaModel *model)
             free(model->layers[i].mla_q_a_norm);
             free(model->layers[i].mla_kv_a_norm);
             free(model->layers[i].exp_probs_b);
+            free(model->layers[i].attn_v_gate_b);
             free(model->layers[i].attn_q_norm);
             free(model->layers[i].attn_k_norm);
             free(model->layers[i].post_attention_norm);
@@ -1916,6 +1993,18 @@ static void matvec(const OcWeightView *w, const float *in, float *out,
         oc_matvec_quantized(w->qtype, w->data, w->rows, w->cols, w->row_bytes,
                             in, out, temp);
     }
+}
+
+/* The model's hidden-state RMSNorm: grouped on K2-Horizon, plain everywhere
+ * else (norm_groups <= 1 is exactly oc_rms_norm_f32). */
+static inline void model_rms_norm(const OcLlamaConfig *c, const float *x,
+                                  const float *w, float *out)
+{
+    if (c->norm_groups > 1)
+        oc_k2_grouped_rms_norm(x, w, out, c->n_embd, c->norm_groups,
+                               c->rms_norm_eps);
+    else
+        oc_rms_norm_f32(x, w, out, c->n_embd, c->rms_norm_eps);
 }
 
 /* out[0..cols) = W^T @ in, i.e. sum over rows of in[r] * W[r][:].
@@ -2941,6 +3030,61 @@ static void forward_qwen35_full_attention(OcLlamaSession *s, uint32_t layer)
                                     s->pos);
 }
 
+/* K2-Horizon attention projections for one token: Q, K, the output gate and
+ * (on the leading dense blocks) V share one normed input, so they go through
+ * one fused call — a single activation quantization and a single parallel
+ * region when the qtypes line up. MoVA layers then build V from the routed
+ * value experts. */
+static void k2_project_attn(OcLlamaSession *s, const OcLlamaLayer *L)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const OcWeightView *views[4];
+    float *outs[4];
+    size_t n = 0;
+    views[n] = &L->attn_q; outs[n++] = s->q;
+    views[n] = &L->attn_k; outs[n++] = s->k;
+    if (L->attn_gate.data != NULL && s->muse_gate != NULL) {
+        views[n] = &L->attn_gate; outs[n++] = s->muse_gate;
+    }
+    const bool mova = L->attn_v_exps.data != NULL && s->mova_probs != NULL;
+    if (!mova) { views[n] = &L->attn_v; outs[n++] = s->v; }
+
+    bool fused = true;
+    for (size_t i = 0; i < n; i++)
+        if (views[i]->qtype == OC_QUANT_F32) fused = false;
+    if (fused) {
+        /* Group by qtype: the fused kernel shares one activation
+         * quantization only across matrices of the same type (the dense
+         * blocks' attn_v is Q4_K next to IQ3_S Q/K/gate). */
+        bool done[4] = { false, false, false, false };
+        for (size_t i = 0; i < n; i++) {
+            if (done[i]) continue;
+            OcGgufQuantizationType qt[4];
+            const uint8_t *data[4];
+            size_t rows[4], rb[4];
+            float *grp_outs[4];
+            size_t g = 0;
+            for (size_t j = i; j < n; j++) {
+                if (done[j] || views[j]->qtype != views[i]->qtype) continue;
+                qt[g] = views[j]->qtype;
+                data[g] = views[j]->data;
+                rows[g] = views[j]->rows;
+                rb[g] = views[j]->row_bytes;
+                grp_outs[g++] = outs[j];
+                done[j] = true;
+            }
+            oc_matvec_quantized_fused(qt, data, rows, c->n_embd, rb, g,
+                                      s->normed, grp_outs, s->dequant_temp);
+        }
+    } else {
+        for (size_t i = 0; i < n; i++)
+            matvec(views[i], s->normed, outs[i], s->dequant_temp);
+    }
+    if (mova)
+        oc_k2_mova_value(c, L, s->normed, s->v, s->mova_probs, s->mova_sel,
+                         s->mova_w, s->mova_out_all, s->dequant_temp);
+}
+
 static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
 {
     const OcLlamaConfig *c = &s->model->cfg;
@@ -2954,7 +3098,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
     /* Pre-attention RMSNorm (+ Gemma scaling).
      * Gemma 4 folds its sqrt(n_embd) factor into the embedding instead (see
      * embed_token), so norm_scale must not be applied again per layer. */
-    oc_rms_norm_f32(s->x, L->attn_norm, s->normed, c->n_embd, c->rms_norm_eps);
+    model_rms_norm(c, s->x, L->attn_norm, s->normed);
     if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
         for (size_t i = 0; i < c->n_embd; i++) s->normed[i] *= c->norm_scale;
     }
@@ -2970,9 +3114,13 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         /* Q/K/V projections, plus the optional projection biases that
          * Qwen2-family models carry. The bias is added before RoPE, as in
          * llama.cpp's build_qkv / HF's q_proj(x) + b_q. */
-        matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-        matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-        matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+        if (c->is_k2) {
+            k2_project_attn(s, L);
+        } else {
+            matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+            matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+            matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+        }
         if (s->lora) {
             apply_lora_at(s, s->lora->q_adapters, layer, s->normed, s->q);
             apply_lora_at(s, s->lora->k_adapters, layer, s->normed, s->k);
@@ -2981,7 +3129,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         /* Muse Glimmer's attention-output gate is projected from the same
          * pre-attention normed hidden state as Q/K/V, so it has to be taken
          * before `normed` is reused as the output-projection buffer below. */
-        if (c->attn_out_gate && L->attn_gate.data != NULL) {
+        if (c->attn_out_gate && L->attn_gate.data != NULL && !c->is_k2) {
             matvec(&L->attn_gate, s->normed, s->muse_gate, s->dequant_temp);
         }
         if (L->attn_q_bias != NULL) {
@@ -3039,6 +3187,15 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
                 rewind_compressed_to(s, (size_t)s->pos);
                 return se;
             }
+        } else if (L->use_rope && c->is_k2) {
+            /* NEOX over rope_dim from the per-position double-precision
+             * table built in oc_llama_forward. */
+            for (uint32_t h = 0; h < c->n_head; h++)
+                oc_k2_rope_apply(s->q + h * hd, rope_dim, s->rope_cos,
+                                 s->rope_sin);
+            for (uint32_t h = 0; h < n_kv; h++)
+                oc_k2_rope_apply(s->k + h * hd, rope_dim, s->rope_cos,
+                                 s->rope_sin);
         } else if (L->use_rope) {
         for (uint32_t h = 0; h < c->n_head; h++) {
             if (c->yarn_factor > 0.0f) {
@@ -3099,8 +3256,12 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
          * whole n_head*head_dim vector, before the output projection. */
         if (c->attn_out_gate && L->attn_gate.data != NULL) {
             const size_t nq = (size_t)c->n_head * hd;
-            for (size_t i = 0; i < nq; i++)
-                s->attn_out[i] *= qwen35_sigmoid(s->muse_gate[i]);
+            if (c->attn_gate_kind == OC_ATTN_GATE_SOFTPLUS_LN2) {
+                oc_k2_softplus_gate_apply(s->attn_out, s->muse_gate, nq);
+            } else {
+                for (size_t i = 0; i < nq; i++)
+                    s->attn_out[i] *= qwen35_sigmoid(s->muse_gate[i]);
+            }
         }
 
         /* Output projection. */
@@ -3121,7 +3282,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
 
     /* Pre-FFN RMSNorm (+ Gemma scaling; see the pre-attention norm above). */
     const float *ffn_norm = c->is_qwen35 ? L->post_attention_norm : L->ffn_norm;
-    oc_rms_norm_f32(s->x, ffn_norm, s->normed, c->n_embd, c->rms_norm_eps);
+    model_rms_norm(c, s->x, ffn_norm, s->normed);
     if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
         for (size_t i = 0; i < c->n_embd; i++) s->normed[i] *= c->norm_scale;
     }
@@ -3173,6 +3334,10 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     }
 
     embed_token(sess, token);
+    if (sess->model->cfg.is_k2 && sess->rope_cos != NULL)
+        oc_k2_rope_table(sess->pos, sess->model->cfg.rope_theta,
+                         sess->model->cfg.rope_dim, sess->rope_cos,
+                         sess->rope_sin);
     for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++) {
         OcError error = forward_layer(sess, l);
         if (error != OC_OK) return error;
@@ -3181,8 +3346,7 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     OcLlamaModel *m = sess->model;
     if (sess->last_hidden != NULL)
         memcpy(sess->last_hidden, sess->x, m->cfg.n_embd * sizeof(float));
-    oc_rms_norm_f32(sess->x, m->final_norm, sess->normed, m->cfg.n_embd,
-                    m->cfg.rms_norm_eps);
+    model_rms_norm(&m->cfg, sess->x, m->final_norm, sess->normed);
     if (!m->cfg.uses_gemma4 && m->cfg.norm_scale != 1.0f) {
         for (size_t i = 0; i < m->cfg.n_embd; i++) sess->normed[i] *= m->cfg.norm_scale;
     }
@@ -3437,6 +3601,10 @@ typedef struct {
     float    *ex_w;         /* [cap*k] matching gate weights             */
     uint32_t *ex_off;       /* [n_slots+1] group offsets                 */
     uint32_t *ex_fill;      /* [n_slots] cursor while filling            */
+    OcK2MovaBatch mova;     /* K2 routed-value scratch (empty otherwise) */
+    float    *rope_cos;     /* [cap][rope_dim/2] K2 angle table          */
+    float    *rope_sin;
+    size_t    rope_half;
 } PrefillBuf;
 
 static void prefill_buf_free(PrefillBuf *b)
@@ -3450,6 +3618,8 @@ static void prefill_buf_free(PrefillBuf *b)
     free(b->mgate);
     free(b->sel); free(b->sel_w); free(b->ex_tok); free(b->ex_w);
     free(b->ex_off); free(b->ex_fill);
+    oc_k2_mova_batch_free(&b->mova);
+    free(b->rope_cos); free(b->rope_sin);
     memset(b, 0, sizeof(*b));
 }
 
@@ -3497,6 +3667,20 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
     if (c->attn_out_gate) {
         b->mgate = xcalloc(cap * b->n_qo, sizeof(float));
         if (b->mgate == NULL) { prefill_buf_free(b); return OC_ERR_OOM; }
+    }
+    if (c->value_expert_count > 0 &&
+        oc_k2_mova_batch_init(&b->mova, c, cap) != OC_OK) {
+        prefill_buf_free(b);
+        return OC_ERR_OOM;
+    }
+    if (c->is_k2) {
+        b->rope_half = c->rope_dim / 2u;
+        b->rope_cos = xcalloc(cap * (b->rope_half + 1u), sizeof(float));
+        b->rope_sin = xcalloc(cap * (b->rope_half + 1u), sizeof(float));
+        if (!b->rope_cos || !b->rope_sin) {
+            prefill_buf_free(b);
+            return OC_ERR_OOM;
+        }
     }
 
     if (c->is_qwen35) {
@@ -3847,10 +4031,11 @@ typedef struct {
     /* qwen35 only: the fused attn_q output, whose odd half per head is the
      * sigmoid output gate. NULL on every other architecture. */
     const float    *qgate;
-    /* Muse Glimmer: a separate n_qo-wide gate per token, laid out exactly
-     * like `q`. NULL on every other architecture. */
+    /* Muse Glimmer / K2: a separate n_qo-wide gate per token, laid out
+     * exactly like `q`. NULL on every other architecture. */
     const float    *mgate;
     _Atomic int     error;
+    OcAttnGateKind  gate_kind;   /* function applied through mgate      */
 } AttnJob;
 
 static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
@@ -3892,8 +4077,12 @@ static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
                 out[d] *= qwen35_sigmoid(gate[d]);
         } else if (j->mgate != NULL) {
             const float *gate = j->mgate + tok * j->b->n_qo + h * j->hd;
-            for (size_t d = 0; d < j->hd; d++)
-                out[d] *= qwen35_sigmoid(gate[d]);
+            if (j->gate_kind == OC_ATTN_GATE_SOFTPLUS_LN2) {
+                oc_k2_softplus_gate_apply(out, gate, j->hd);
+            } else {
+                for (size_t d = 0; d < j->hd; d++)
+                    out[d] *= qwen35_sigmoid(gate[d]);
+            }
         }
     }
 }
@@ -4125,7 +4314,8 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
 
     /* attention_slice applies the sigmoid output gate per head, so the gating
      * rides along on the same parallel region instead of a serial sweep. */
-    AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, b->q35_qgate, NULL, OC_OK };
+    AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, b->q35_qgate, NULL, OC_OK,
+                     OC_ATTN_GATE_SIGMOID };
     oc_parallel_for(n * c->n_head, attention_slice, &ajob);
     mm_batch(&L->attn_output, b->attn_out, b->n_qo,
              b->proj, b->n_embd, n, b);
@@ -4165,8 +4355,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
 
     /* Pre-attention RMSNorm. */
     for (size_t j = 0; j < n; j++) {
-        oc_rms_norm_f32(b->x + j * b->n_embd, L->attn_norm,
-                        b->normed + j * b->n_embd, c->n_embd, c->rms_norm_eps);
+        model_rms_norm(c, b->x + j * b->n_embd, L->attn_norm,
+                       b->normed + j * b->n_embd);
         if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
             float *nm = b->normed + j * b->n_embd;
             for (size_t i = 0; i < c->n_embd; i++) nm[i] *= c->norm_scale;
@@ -4177,7 +4367,14 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     double t_qkv0 = pf_now();
     mm_batch(&L->attn_q, b->normed, b->n_embd, b->q,     b->n_qo,   n, b);
     mm_batch(&L->attn_k, b->normed, b->n_embd, b->k_buf, b->kv_row, n, b);
-    mm_batch(&L->attn_v, b->normed, b->n_embd, b->v_buf, b->kv_row, n, b);
+    if (L->attn_v_exps.data != NULL && b->mova.n_exp > 0) {
+        /* K2 MoVA: V is a routed mixture of value experts. */
+        oc_k2_mova_value_batch(&b->mova, c, L, b->normed, b->n_embd,
+                               b->v_buf, b->kv_row, n, b->dequant_temp,
+                               b->act, b->act_bytes);
+    } else {
+        mm_batch(&L->attn_v, b->normed, b->n_embd, b->v_buf, b->kv_row, n, b);
+    }
     /* Muse Glimmer's attention-output gate is a fourth projection of the same
      * normed input; attention_slice applies the sigmoid per head. */
     if (c->attn_out_gate && L->attn_gate.data != NULL) {
@@ -4237,7 +4434,14 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
             continue;
         }
 
-        if (L->use_rope) {
+        if (L->use_rope && c->is_k2 && b->rope_cos != NULL) {
+            const float *rc = b->rope_cos + j * (b->rope_half + 1u);
+            const float *rs = b->rope_sin + j * (b->rope_half + 1u);
+            for (uint32_t h = 0; h < c->n_head; h++)
+                oc_k2_rope_apply(qj + h * hd, rope_dim, rc, rs);
+            for (uint32_t h = 0; h < n_kv; h++)
+                oc_k2_rope_apply(kj + h * hd, rope_dim, rc, rs);
+        } else if (L->use_rope) {
         for (uint32_t h = 0; h < c->n_head; h++) {
             if (c->yarn_factor > 0.0f)
                 oc_apply_rope_yarn_f32(qj + h * hd, qj + h * hd, hd, rope_dim,
@@ -4297,7 +4501,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
      * attn_out, so there is nothing to synchronize. */
     double t0 = pf_now();
     AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, NULL,
-                     c->attn_out_gate ? b->mgate : NULL, OC_OK };
+                     c->attn_out_gate ? b->mgate : NULL, OC_OK,
+                     c->attn_gate_kind };
     oc_parallel_for(n * c->n_head, attention_slice, &ajob);
     g_pf_t.attn += pf_now() - t0;
     if (atomic_load(&ajob.error) != OC_OK) {
@@ -4324,8 +4529,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
 
     /* Pre-FFN RMSNorm. */
     for (size_t j = 0; j < n; j++) {
-        oc_rms_norm_f32(b->x + j * b->n_embd, L->ffn_norm,
-                        b->normed + j * b->n_embd, c->n_embd, c->rms_norm_eps);
+        model_rms_norm(c, b->x + j * b->n_embd, L->ffn_norm,
+                       b->normed + j * b->n_embd);
         if (!c->uses_gemma4 && c->norm_scale != 1.0f) {
             float *nm = b->normed + j * b->n_embd;
             for (size_t i = 0; i < c->n_embd; i++) nm[i] *= c->norm_scale;
@@ -4407,6 +4612,13 @@ OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
 
         for (size_t j = 0; j < n; j++)
             embed_token_into(sess, tokens[base + j], buf.x + j * buf.n_embd);
+        if (m->cfg.is_k2 && buf.rope_cos != NULL) {
+            for (size_t j = 0; j < n; j++)
+                oc_k2_rope_table(pos0 + (int64_t)j, m->cfg.rope_theta,
+                                 m->cfg.rope_dim,
+                                 buf.rope_cos + j * (buf.rope_half + 1u),
+                                 buf.rope_sin + j * (buf.rope_half + 1u));
+        }
 
         for (uint32_t l = 0; l < m->cfg.n_layer; l++) {
             e = prefill_layer(sess, l, &buf, n, pos0);
@@ -4427,8 +4639,7 @@ OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
                 memcpy(sess->last_hidden, xl, m->cfg.n_embd * sizeof(float));
             sess->last_token = tokens[n_tokens - 1];
             if (logits_out != NULL) {
-            oc_rms_norm_f32(xl, m->final_norm, sess->normed, m->cfg.n_embd,
-                            m->cfg.rms_norm_eps);
+            model_rms_norm(&m->cfg, xl, m->final_norm, sess->normed);
             if (!m->cfg.uses_gemma4 && m->cfg.norm_scale != 1.0f) {
                 for (size_t i = 0; i < m->cfg.n_embd; i++)
                     sess->normed[i] *= m->cfg.norm_scale;
@@ -4542,6 +4753,9 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
         model->arch == OC_ARCH_GPTNEOX ||
         model->arch == OC_ARCH_FALCON)
         return OC_ERR_MODEL;
+    /* K2-Horizon needs per-session MoVA / RoPE-table / gate scratch that the
+     * shared batch workspace does not carry. */
+    if (model->cfg.is_k2) return OC_ERR_MODEL;
     if (model->cfg.num_experts > 0 && model->cfg.expert_intermediate_size == 0) {
         if (model->cfg.n_ff == 0) return OC_ERR_MODEL;
         model->cfg.expert_intermediate_size = model->cfg.n_ff;
