@@ -4385,7 +4385,10 @@ static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
  * pair, instead of once per pair as attention_slice does. At long context
  * the per-pair sweep reads the cache n_rows * group times. Arithmetic per
  * query is the decode kernel's (same online-softmax order), so results are
- * bit-identical to attention_head_at. */
+ * bit-identical to attention_head_at: the rescale is skipped only when the
+ * running max is unchanged, where the decode kernel scales by expf(0) = 1
+ * exactly, and a new max contributes expf(0) = 1 exactly. That halves the
+ * expf calls and drops almost every full-vector rescale. */
 #define OC_FEW_ROWS_MAX 8u
 #define OC_FEW_Q_MAX    64u
 
@@ -4446,26 +4449,34 @@ static void attention_few_rows_slice(size_t begin, size_t end, size_t tid,
                 const float vs = s->kv_v_scale[sc_base + (size_t)t * sc_stride];
                 for (size_t q = first; q < nq; q++) {
                     float score = oc_attn_dot_q8(qs[q], kq, hd) * ks * j->scale;
-                    float nm = score > run_max[q] ? score : run_max[q];
-                    float ef = expf(run_max[q] - nm);
-                    float es = expf(score - nm);
-                    oc_attn_scale_f32(outs[q], ef, hd);
-                    oc_attn_axpy_q8(outs[q], vq, es * vs, hd);
-                    run_sum[q] = run_sum[q] * ef + es;
-                    run_max[q] = nm;
+                    if (score > run_max[q]) {
+                        float ef = expf(run_max[q] - score);
+                        oc_attn_scale_f32(outs[q], ef, hd);
+                        oc_attn_axpy_q8(outs[q], vq, vs, hd);
+                        run_sum[q] = run_sum[q] * ef + 1.0f;
+                        run_max[q] = score;
+                    } else {
+                        float es = expf(score - run_max[q]);
+                        oc_attn_axpy_q8(outs[q], vq, es * vs, hd);
+                        run_sum[q] += es;
+                    }
                 }
             } else {
                 const float *kt = s->kv_k + kv_off + (size_t)t * kv_row;
                 const float *vt = s->kv_v + kv_off + (size_t)t * kv_row;
                 for (size_t q = first; q < nq; q++) {
                     float score = oc_attn_dot_f32(qs[q], kt, hd) * j->scale;
-                    float nm = score > run_max[q] ? score : run_max[q];
-                    float ef = expf(run_max[q] - nm);
-                    float es = expf(score - nm);
-                    oc_attn_scale_f32(outs[q], ef, hd);
-                    oc_attn_axpy_f32(outs[q], vt, es, hd);
-                    run_sum[q] = run_sum[q] * ef + es;
-                    run_max[q] = nm;
+                    if (score > run_max[q]) {
+                        float ef = expf(run_max[q] - score);
+                        oc_attn_scale_f32(outs[q], ef, hd);
+                        oc_attn_axpy_f32(outs[q], vt, 1.0f, hd);
+                        run_sum[q] = run_sum[q] * ef + 1.0f;
+                        run_max[q] = score;
+                    } else {
+                        float es = expf(score - run_max[q]);
+                        oc_attn_axpy_f32(outs[q], vt, es, hd);
+                        run_sum[q] += es;
+                    }
                 }
             }
         }
