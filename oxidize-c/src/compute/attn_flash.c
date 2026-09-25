@@ -10,9 +10,11 @@
 #define T_ OC_FLASH_TILE
 
 static int g_fl_isa = -1;
+static int g_fl_i8 = 1;    /* integer RQ score unless OC_KVRQ_F32SCORE is set */
 static pthread_once_t g_fl_once = PTHREAD_ONCE_INIT;
 static void fl_detect_once(void)
 {
+    g_fl_i8 = getenv("OC_KVRQ_F32SCORE") == NULL;
 #if defined(__x86_64__) || defined(__i386__)
     g_fl_isa = (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")
                 && getenv("OC_KVRQ_SCALAR") == NULL) ? 1 : 0;
@@ -207,8 +209,17 @@ static size_t make_segs(const OcKvView *v, int64_t t0, size_t n, Seg *seg)
     return ns;
 }
 
+/* Query group prepared for the integer RQ score kernel (decode only). */
+#define FL_Q8_GMAX 16u
+typedef struct {
+    int     on;
+    int8_t  q8[FL_Q8_GMAX * OC_KVRQ_DIM_MAX];
+    float   qscale[FL_Q8_GMAX];
+    int32_t qsum[FL_Q8_GMAX];
+} FlQ8;
+
 static void seg_score(const OcKvView *v, const Seg *sg, const float *q,
-                      size_t G, float *S, size_t ss)
+                      const FlQ8 *qi, size_t G, float *S, size_t ss)
 {
     const size_t d = v->d;
     switch (v->kind) {
@@ -228,6 +239,10 @@ static void seg_score(const OcKvView *v, const Seg *sg, const float *q,
                           (size_t)sg->slot * d, d,
                           oc_kvrq_xs(c, v->layer, 0, v->head) + sg->slot, 1,
                           d, sg->n, q, G, S, ss);
+        } else if (qi != NULL && qi->on) {
+            oc_kvrq_score_i8(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head) +
+                             (size_t)sg->t * c->kc.block_bytes, sg->n,
+                             qi->q8, qi->qscale, qi->qsum, G, S, ss);
         } else {
             oc_kvrq_score(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head) +
                           (size_t)sg->t * c->kc.block_bytes, sg->n, q, G, S,
@@ -341,6 +356,58 @@ static void dense_prefetch(const OcKvView *v, int64_t t0, size_t n)
 
 /* ─── Decode ──────────────────────────────────────────────────────────── */
 
+/* One online-softmax step over a score block: *mnew = max(mold, max sg),
+ * sg[i] = exp(sg[i] - *mnew); returns sum sg. */
+static float block_softmax_scalar(float *sg, size_t n, float mold,
+                                  float *mnew)
+{
+    float bm = sg[0];
+    for (size_t i = 1; i < n; i++) if (sg[i] > bm) bm = sg[i];
+    const float mn = bm > mold ? bm : mold;
+    for (size_t i = 0; i < n; i++) sg[i] -= mn;
+    oc_attn_flash_exp(sg, n);
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; i++) sum += sg[i];
+    *mnew = mn;
+    return sum;
+}
+
+#if FL_HAVE_AVX2
+FL_TGT static float block_softmax_avx2(float *sg, size_t n, float mold,
+                                       float *mnew)
+{
+    __m256 mx = _mm256_set1_ps(mold);
+    for (size_t i = 0; i < n; i += 8)
+        mx = _mm256_max_ps(mx, _mm256_loadu_ps(sg + i));
+    __m128 h = _mm_max_ps(_mm256_castps256_ps128(mx),
+                          _mm256_extractf128_ps(mx, 1));
+    h = _mm_max_ps(h, _mm_movehl_ps(h, h));
+    h = _mm_max_ss(h, _mm_movehdup_ps(h));
+    const float mn = _mm_cvtss_f32(h);
+    const __m256 vm = _mm256_set1_ps(mn);
+    __m256 acc = _mm256_setzero_ps();
+    for (size_t i = 0; i < n; i += 8) {
+        const __m256 e = exp256(_mm256_sub_ps(_mm256_loadu_ps(sg + i), vm));
+        _mm256_storeu_ps(sg + i, e);
+        acc = _mm256_add_ps(acc, e);
+    }
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc),
+                          _mm256_extractf128_ps(acc, 1));
+    s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    s = _mm_add_ss(s, _mm_movehdup_ps(s));
+    *mnew = mn;
+    return _mm_cvtss_f32(s);
+}
+#endif
+
+static float block_softmax(float *sg, size_t n, float mold, float *mnew)
+{
+#if FL_HAVE_AVX2
+    if (n % 8 == 0 && fl_isa()) return block_softmax_avx2(sg, n, mold, mnew);
+#endif
+    return block_softmax_scalar(sg, n, mold, mnew);
+}
+
 size_t oc_attn_flash_decode_scratch(size_t G)
 {
     return G * T_ + T_;
@@ -356,6 +423,10 @@ void oc_attn_flash_decode_range(const OcKvView *v, const float *q, size_t G,
     for (size_t g = 0; g < G; g++) { m[g] = -INFINITY; l[g] = 0.0f; }
     memset(acc, 0, G * d * sizeof(float));
     const int dense = v->kind != OC_KVV_RQ;
+    FlQ8 qi;
+    qi.on = !dense && G <= FL_Q8_GMAX && d <= OC_KVRQ_DIM_MAX &&
+            (fl_isa(), g_fl_i8);
+    if (qi.on) oc_kvrq_prep_q(q, G, d, qi.q8, qi.qscale, qi.qsum);
     if (dense)
         dense_prefetch(v, t0, (size_t)(t1 - t0 < (int64_t)T_ ? t1 - t0
                                                               : (int64_t)T_));
@@ -368,16 +439,11 @@ void oc_attn_flash_decode_range(const OcKvView *v, const float *q, size_t G,
         }
         const size_t ns = make_segs(v, tb, n, seg);
         for (size_t s = 0; s < ns; s++)
-            seg_score(v, &seg[s], q, G, S + (size_t)(seg[s].t - tb), T_);
+            seg_score(v, &seg[s], q, &qi, G, S + (size_t)(seg[s].t - tb), T_);
         for (size_t g = 0; g < G; g++) {
             float *sg = S + g * T_;
-            float bm = sg[0];
-            for (size_t i = 1; i < n; i++) if (sg[i] > bm) bm = sg[i];
-            const float mn = bm > m[g] ? bm : m[g];
-            for (size_t i = 0; i < n; i++) sg[i] -= mn;
-            oc_attn_flash_exp(sg, n);
-            float sum = 0.0f;
-            for (size_t i = 0; i < n; i++) sum += sg[i];
+            float mn;
+            const float sum = block_softmax(sg, n, m[g], &mn);
             if (m[g] != -INFINITY && mn != m[g]) {
                 const float alpha = expf(m[g] - mn);
                 float *a = acc + g * d;

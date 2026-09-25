@@ -1,6 +1,7 @@
 /* test_kv_rq.c — OC_KV_RQ codec, fused kernels and lazily-committed cache. */
 #include <criterion/criterion.h>
 #include "oxidize/kv_rq.h"
+#include "oxidize/flash_attention.h"   /* oc_f16_to_f32_bits */
 
 #include <math.h>
 #include <stdio.h>
@@ -204,6 +205,93 @@ Test(kv_rq, fused_kernels_match_scalar_reference)
                 free(q); free(sc); free(w); free(acc); free(acc_ref);
             }
             free(blocks); free(rows); free(ref_rows);
+        }
+    }
+}
+
+Test(kv_rq, centroids_sit_on_int8_grid)
+{
+    for (unsigned bits = 2; bits <= 4; bits++) {
+        OcKvRqCodec c;
+        cr_assert_eq(oc_kvrq_codec_init(&c, 128, bits), OC_OK);
+        for (unsigned k = 0; k < c.n_levels; k++) {
+            cr_assert_eq(c.centroids[k], (float)c.ci[k] * c.cscale);
+            cr_assert(c.ci[k] >= -63 && c.ci[k] <= 63);
+            cr_assert_eq((int)c.ciu[k], (int)c.ci[k] + 64);
+            if (k > 0) cr_assert(c.ci[k] > c.ci[k - 1], "levels must stay distinct");
+        }
+    }
+}
+
+/* Integer score kernel: bit-exact against an integer reference built from
+ * decoded codes, and close to the f32 score (only q is rounded). */
+Test(kv_rq, int8_score_matches_integer_reference)
+{
+    const size_t ds[3] = { 64, 128, 256 };
+    const size_t Gs[4] = { 1, 3, 4, 6 };
+    rs(4321);
+    for (int di = 0; di < 3; di++) {
+        const size_t d = ds[di];
+        for (unsigned bits = 2; bits <= 4; bits++) {
+            OcKvRqCodec c;
+            cr_assert_eq(oc_kvrq_codec_init(&c, d, bits), OC_OK);
+            const size_t n = 70;
+            uint8_t *blocks = malloc(n * c.block_bytes);
+            int *ci = malloc(n * d * sizeof(int));
+            float *rows = malloc(n * d * sizeof(float));
+            float x[256];
+            uint8_t one[2 + 128];
+            for (size_t t = 0; t < n; t++) {
+                for (size_t i = 0; i < d; i++) x[i] = rg() * (t % 5 + 1);
+                if (t == 9) fill_outlier(x, d);
+                uint8_t *b = blocks + t * c.block_bytes;
+                oc_kvrq_encode(&c, x, b);
+                oc_kvrq_decode(&c, b, rows + t * d);
+                memcpy(one, b, c.block_bytes);
+                one[0] = 0x00; one[1] = 0x3c;           /* f16 1.0 */
+                oc_kvrq_decode(&c, one, x);
+                for (size_t i = 0; i < d; i++)
+                    ci[t * d + i] = (int)lrintf(x[i] / c.cscale);
+            }
+            for (int gi = 0; gi < 4; gi++) {
+                const size_t G = Gs[gi];
+                float q[6 * 256], qs[6], sc[6 * 70], ref[6 * 70];
+                int8_t q8[6 * 256];
+                int32_t qsum[6];
+                for (size_t i = 0; i < G * d; i++) q[i] = rg() * 0.3f;
+                q[1] = 4.0f;                                 /* outlier */
+                oc_kvrq_prep_q(q, G, d, q8, qs, qsum);
+                oc_kvrq_score_i8(&c, blocks, n, q8, qs, qsum, G, sc, n);
+                oc_kvrq_score(&c, blocks, n, q, G, ref, n);
+                for (size_t g = 0; g < G; g++) {
+                    int32_t s8 = 0;
+                    for (size_t i = 0; i < d; i++) s8 += q8[g * d + i];
+                    cr_assert_eq(s8, qsum[g]);
+                    double qn = 0;
+                    for (size_t i = 0; i < d; i++) qn += (double)q[g * d + i] * q[g * d + i];
+                    for (size_t t = 0; t < n; t++) {
+                        int32_t I = 0;
+                        for (size_t i = 0; i < d; i++)
+                            I += (ci[t * d + i] + 64) * q8[g * d + i];
+                        I -= 64 * qsum[g];
+                        uint16_t h;
+                        memcpy(&h, blocks + t * c.block_bytes, 2);
+                        const float s = oc_f16_to_f32_bits(h);
+                        const float want = ((float)I * (qs[g] * c.cscale)) * s;
+                        cr_assert_eq(sc[g * n + t], want,
+                                     "d %zu bits %u G %zu g %zu t %zu: %.9g vs %.9g",
+                                     d, bits, G, g, t, sc[g * n + t], want);
+                        double kn = 0;
+                        for (size_t i = 0; i < d; i++)
+                            kn += (double)rows[t * d + i] * rows[t * d + i];
+                        cr_assert(fabs(sc[g * n + t] - ref[g * n + t]) <=
+                                  0.01 * sqrt(qn * kn) + 1e-6,
+                                  "int8 score drifts from f32: %f vs %f",
+                                  sc[g * n + t], ref[g * n + t]);
+                    }
+                }
+            }
+            free(blocks); free(ci); free(rows);
         }
     }
 }

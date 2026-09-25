@@ -129,15 +129,19 @@ static void tcache_free(TCache *tc)
     if (tc->v.kind == OC_KVV_RQ) oc_kvrq_cache_free(&tc->rq);
 }
 
-static void ref_attn(const TCache *tc, const float *q, int64_t lo, int64_t hi,
-                     double *out)
+/* qb (when not NULL) scores positions without an RQ exact slot: decode
+ * scores RQ blocks with the int8-rounded query (oc_kvrq_prep_q). */
+static void ref_attn2(const TCache *tc, const float *q, const float *qb,
+                      int64_t lo, int64_t hi, double *out)
 {
     const size_t d = tc->d;
     double m = -INFINITY, l = 0;
     double *s = malloc((size_t)(hi - lo + 1) * sizeof(double));
     for (int64_t t = lo; t <= hi; t++) {
         double a = 0;
-        for (size_t i = 0; i < d; i++) a += (double)q[i] * tc->K[t * d + i];
+        const float *qq = q;
+        if (qb != NULL && oc_kvrq_slot(&tc->rq, 0, t) < 0) qq = qb;
+        for (size_t i = 0; i < d; i++) a += (double)qq[i] * tc->K[t * d + i];
         s[t - lo] = a;
         if (a > m) m = a;
     }
@@ -149,6 +153,12 @@ static void ref_attn(const TCache *tc, const float *q, int64_t lo, int64_t hi,
     }
     for (size_t i = 0; i < d; i++) out[i] /= l;
     free(s);
+}
+
+static void ref_attn(const TCache *tc, const float *q, int64_t lo, int64_t hi,
+                     double *out)
+{
+    ref_attn2(tc, q, NULL, lo, hi, out);
 }
 
 static void check_decode(OcKvViewKind kind, unsigned kb, unsigned vb,
@@ -176,9 +186,17 @@ static void check_decode(OcKvViewKind kind, unsigned kb, unsigned vb,
     /* Single range = the single-thread reference. */
     oc_attn_flash_decode_range(&tc.v, q, G, 0, (int64_t)n, m, l, acc, scr);
     oc_attn_flash_merge(G, d, 1, m, l, acc, one);
+    /* RQ blocks are scored with the int8-rounded query. */
+    float qd[4 * 128];
+    int8_t q8[4 * 128];
+    float qsc[4];
+    int32_t qsum[4];
+    oc_kvrq_prep_q(q, G, d, q8, qsc, qsum);
+    for (size_t i = 0; i < G * d; i++) qd[i] = (float)q8[i] * qsc[i / d];
     for (size_t g = 0; g < G; g++) {
         double ref[128];
-        ref_attn(&tc, q + g * d, 0, (int64_t)n - 1, ref);
+        ref_attn2(&tc, q + g * d, kind == OC_KVV_RQ ? qd + g * d : NULL, 0,
+                  (int64_t)n - 1, ref);
         for (size_t i = 0; i < d; i++) {
             cr_assert(fabs(out[g * d + i] - ref[i]) < 2e-4 * (1 + fabs(ref[i])),
                       "kind %d g %zu i %zu: split %f ref %f", kind, g, i,

@@ -72,6 +72,12 @@ typedef struct {
     size_t   block_bytes;       /* 2 + d*bits/8 */
     float    centroids[16];     /* ascending, unit-vector coordinates */
     float    bounds[16];        /* n_levels-1 decision thresholds     */
+    /* The centroids are snapped to an int8 grid, centroids[k] ==
+     * ci[k] * cscale exactly, |ci| <= 63, so the kernels can score and
+     * decode in the integer domain without changing a single value. */
+    int8_t   ci[16];
+    uint8_t  ciu[16];           /* ci + 64 (1..127), maddubs operand  */
+    float    cscale;
 } OcKvRqCodec;
 
 OcError oc_kvrq_codec_init(OcKvRqCodec *c, size_t d, unsigned bits);
@@ -89,6 +95,18 @@ void oc_kvrq_score(const OcKvRqCodec *c, const uint8_t *blocks, size_t n,
 /* acc_g += sum_t w[g*ws + t] * dec(block_t) */
 void oc_kvrq_accum(const OcKvRqCodec *c, const uint8_t *blocks, size_t n,
                    const float *w, size_t ws, size_t G, float *acc);
+/* Integer score path. oc_kvrq_prep_q() quantizes G query rows (already
+ * rotated and softmax-scaled) to per-row symmetric int8 (scale qscale[g],
+ * qsum[g] = sum of the row's int8 values). oc_kvrq_score_i8() then scores
+ *     scores[g*ss + t] = ((float)I_gt * (qscale[g] * cscale)) * s_t
+ *     I_gt = sum_i (ci[idx_ti] + 64) * q8[g][i] - 64 * qsum[g]
+ * exactly (integer dot product), i.e. <q8_g, dec(block_t)> up to the int8
+ * rounding of q; the AVX2 kernel is bit-identical to the scalar one. */
+void oc_kvrq_prep_q(const float *q, size_t G, size_t d, int8_t *q8,
+                    float *qscale, int32_t *qsum);
+void oc_kvrq_score_i8(const OcKvRqCodec *c, const uint8_t *blocks, size_t n,
+                      const int8_t *q8, const float *qscale,
+                      const int32_t *qsum, size_t G, float *scores, size_t ss);
 /* rows[t*d ..] = dec(block_t) */
 void oc_kvrq_decode_rows(const OcKvRqCodec *c, const uint8_t *blocks,
                          size_t n, float *rows);

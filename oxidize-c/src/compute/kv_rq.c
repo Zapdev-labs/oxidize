@@ -176,6 +176,22 @@ OcError oc_kvrq_codec_init(OcKvRqCodec *c, size_t d, unsigned bits)
     c->block_bytes = 2u + d * bits / 8u;
     OcError e = oc_rotorquant_lloyd_max(d, bits, c->centroids);
     if (e != OC_OK) return e;
+    float mx = 0.0f;
+    for (unsigned i = 0; i < c->n_levels; i++)
+        if (fabsf(c->centroids[i]) > mx) mx = fabsf(c->centroids[i]);
+    if (!(mx > 0.0f)) return OC_ERR_INVALID_ARG;
+    c->cscale = mx / 63.0f;
+    for (unsigned i = 0; i < 16; i++) {
+        long v = 0;
+        if (i < c->n_levels) {
+            v = lrintf(c->centroids[i] / c->cscale);
+            if (v > 63) v = 63;
+            if (v < -63) v = -63;
+            c->centroids[i] = (float)v * c->cscale;
+        }
+        c->ci[i] = (int8_t)v;
+        c->ciu[i] = (uint8_t)(v + 64);
+    }
     for (unsigned i = 0; i + 1 < c->n_levels; i++)
         c->bounds[i] = 0.5f * (c->centroids[i] + c->centroids[i + 1]);
     return OC_OK;
@@ -320,6 +336,54 @@ static void rq_accum_scalar(const OcKvRqCodec *c, const uint8_t *blocks,
             const float wt = w[g * ws + t];
             if (wt == 0.0f) continue;
             for (size_t i = 0; i < c->d; i++) acc[g * c->d + i] += wt * row[i];
+        }
+    }
+}
+
+void oc_kvrq_prep_q(const float *q, size_t G, size_t d, int8_t *q8,
+                    float *qscale, int32_t *qsum)
+{
+    for (size_t g = 0; g < G; g++) {
+        const float *x = q + g * d;
+        int8_t *o = q8 + g * d;
+        float amax = 0.0f;
+        for (size_t i = 0; i < d; i++)
+            if (fabsf(x[i]) > amax) amax = fabsf(x[i]);
+        int32_t sum = 0;
+        if (!(amax > 0.0f) || !isfinite(amax)) {
+            memset(o, 0, d);
+            qscale[g] = 0.0f;
+        } else {
+            const float inv = 127.0f / amax;
+            for (size_t i = 0; i < d; i++) {
+                long v = lrintf(x[i] * inv);
+                if (v > 127) v = 127;
+                if (v < -127) v = -127;
+                o[i] = (int8_t)v;
+                sum += (int32_t)v;
+            }
+            qscale[g] = amax / 127.0f;
+        }
+        qsum[g] = sum;
+    }
+}
+
+static void rq_score_i8_scalar(const OcKvRqCodec *c, const uint8_t *blocks,
+                               size_t n, const int8_t *q8,
+                               const float *qscale, const int32_t *qsum,
+                               size_t G, float *scores, size_t ss)
+{
+    const size_t d = c->d;
+    for (size_t t = 0; t < n; t++) {
+        const uint8_t *blk = blocks + t * c->block_bytes;
+        const float s = oc_f16_to_f32_bits(load_u16(blk));
+        for (size_t g = 0; g < G; g++) {
+            int32_t a = 0;
+            for (size_t i = 0; i < d; i++)
+                a += (int32_t)c->ciu[code_get(c, blk + 2, i)] *
+                     (int32_t)q8[g * d + i];
+            a -= 64 * qsum[g];
+            scores[g * ss + t] = ((float)a * (qscale[g] * c->cscale)) * s;
         }
     }
 }
@@ -608,6 +672,195 @@ static KVRQ_TGT void rq_decode_rows_avx2_b(const OcKvRqCodec *c,
     }
 }
 
+static KVRQ_TGT __m256 load8_i8f(const int8_t *p)
+{
+    return _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(
+        _mm_loadl_epi64((const __m128i *)(const void *)p)));
+}
+
+/* 32 code indices (one per byte) for coordinates 32v..32v+31, d >= 128.
+ * Every plane is laid out so these are 32 consecutive bytes (or, for the
+ * 3-bit high plane at d = 128, one 16-byte row seen by both lanes). */
+static KVRQ_TGT __m256i rq_idx32(const uint8_t *codes, size_t d,
+                                 unsigned bits, size_t v)
+{
+    const size_t e = 32 * v;
+    if (bits == 4) {
+        const size_t h = d / 2;
+        const __m256i x = _mm256_loadu_si256((const __m256i *)(const void *)
+                                             (codes + e % h));
+        return _mm256_and_si256(
+            _mm256_srli_epi16(x, (int)(4 * (e / h))), _mm256_set1_epi8(15));
+    }
+    const size_t q = d / 4;
+    const __m256i x = _mm256_loadu_si256((const __m256i *)(const void *)
+                                         (codes + e % q));
+    const __m256i lo = _mm256_and_si256(
+        _mm256_srli_epi16(x, (int)(2 * (e / q))), _mm256_set1_epi8(3));
+    if (bits == 2) return lo;
+    const size_t o = d / 8;
+    __m256i hb;
+    if (o >= 32) {
+        const __m256i y = _mm256_loadu_si256((const __m256i *)(const void *)
+                                             (codes + q + e % o));
+        hb = _mm256_srli_epi16(y, (int)(e / o));
+    } else {
+        /* o == 16: byte j bit k holds coordinate j + 16k; this vector
+         * needs bit 2v in the low lane and bit 2v+1 in the high lane. */
+        const __m256i y = _mm256_broadcastsi128_si256(
+            _mm_loadu_si128((const __m128i *)(const void *)(codes + q)));
+        hb = _mm256_srlv_epi32(y, _mm256_setr_epi32(
+            (int)(2 * v), (int)(2 * v), (int)(2 * v), (int)(2 * v),
+            (int)(2 * v + 1), (int)(2 * v + 1), (int)(2 * v + 1),
+            (int)(2 * v + 1)));
+    }
+    hb = _mm256_and_si256(hb, _mm256_set1_epi8(1));
+    return _mm256_or_si256(lo, _mm256_slli_epi16(hb, 2));
+}
+
+/* Integer scores for G heads (groups of 4) against n blocks. The centroid
+ * lookup is one pshufb per 32 coordinates; the dot product runs on
+ * maddubs (u8 ci+64 x s8 q) -> madd -> int32, twice the MAC rate of f32
+ * FMA and exact. */
+static KVRQ_TGT void rq_score_i8_avx2_b(const OcKvRqCodec *c,
+                                        const uint8_t *blocks, size_t n,
+                                        const int8_t *q8, const float *qscale,
+                                        const int32_t *qsum, size_t G,
+                                        float *scores, size_t ss,
+                                        const unsigned bits, const size_t d)
+{
+    const size_t bb = 2 + d * bits / 8, nv = d / 32;
+    const __m256i lut = _mm256_broadcastsi128_si256(
+        _mm_loadu_si128((const __m128i *)(const void *)c->ciu));
+    const __m256i ones = _mm256_set1_epi16(1);
+    for (size_t g0 = 0; g0 < G; g0 += 4) {
+        const size_t gc = G - g0 < 4 ? G - g0 : 4;
+        size_t gi[4];
+        for (size_t g = 0; g < 4; g++) gi[g] = g0 + (g < gc ? g : 0);
+        const int8_t *q0 = q8 + gi[0] * d, *q1 = q8 + gi[1] * d;
+        const int8_t *q2 = q8 + gi[2] * d, *q3 = q8 + gi[3] * d;
+        const __m128 qs = _mm_setr_ps(qscale[gi[0]] * c->cscale,
+                                      qscale[gi[1]] * c->cscale,
+                                      qscale[gi[2]] * c->cscale,
+                                      qscale[gi[3]] * c->cscale);
+        const __m128i qb = _mm_setr_epi32(64 * qsum[gi[0]], 64 * qsum[gi[1]],
+                                          64 * qsum[gi[2]], 64 * qsum[gi[3]]);
+        for (size_t t = 0; t < n; t++) {
+            const uint8_t *blk = blocks + t * bb;
+            __m256i a0 = _mm256_setzero_si256(), a1 = _mm256_setzero_si256();
+            __m256i a2 = _mm256_setzero_si256(), a3 = _mm256_setzero_si256();
+            for (size_t v = 0; v < nv; v++) {
+                const __m256i u = _mm256_shuffle_epi8(
+                    lut, rq_idx32(blk + 2, d, bits, v));
+#define RQ_DOT_(A, Q)                                                         \
+    A = _mm256_add_epi32(A, _mm256_madd_epi16(_mm256_maddubs_epi16(          \
+            u, _mm256_loadu_si256((const __m256i *)(const void *)            \
+                                  ((Q) + 32 * v))), ones))
+                RQ_DOT_(a0, q0); RQ_DOT_(a1, q1); RQ_DOT_(a2, q2); RQ_DOT_(a3, q3);
+#undef RQ_DOT_
+            }
+            const __m256i h = _mm256_hadd_epi32(_mm256_hadd_epi32(a0, a1),
+                                                _mm256_hadd_epi32(a2, a3));
+            const __m128i sum = _mm_sub_epi32(
+                _mm_add_epi32(_mm256_castsi256_si128(h),
+                              _mm256_extracti128_si256(h, 1)), qb);
+            float r[4];
+            _mm_storeu_ps(r, _mm_mul_ps(_mm_mul_ps(_mm_cvtepi32_ps(sum), qs),
+                                        _mm_set1_ps(_cvtsh_ss(load_u16(blk)))));
+            for (size_t g = 0; g < gc; g++) scores[(g0 + g) * ss + t] = r[g];
+        }
+    }
+}
+
+/* ci values of n blocks as int8 rows (row t at out + t*d). */
+static KVRQ_TGT void rq_unpack_i8_b(const OcKvRqCodec *c,
+                                    const uint8_t *blocks, size_t n,
+                                    int8_t *out, const unsigned bits,
+                                    const size_t d)
+{
+    const size_t bb = 2 + d * bits / 8, nv = d / 32;
+    const __m256i lut = _mm256_broadcastsi128_si256(
+        _mm_loadu_si128((const __m128i *)(const void *)c->ci));
+    for (size_t t = 0; t < n; t++)
+        for (size_t v = 0; v < nv; v++)
+            _mm256_storeu_si256(
+                (__m256i *)(void *)(out + t * d + 32 * v),
+                _mm256_shuffle_epi8(lut, rq_idx32(blocks + t * bb + 2, d,
+                                                  bits, v)));
+}
+
+/* o_g += sum_{t<n} W[g][t] * rows[t], g < 4 (rows of d int8, stride rs;
+ * rows of unused heads have W == 0 and are not stored). n <= KVRQ_CHUNK.
+ * Weights come from memory as broadcasts, so the FP pipes only see the
+ * int8->f32 conversion and the FMAs. */
+static KVRQ_TGT void accum4_i8(const int8_t *rows, size_t rs, size_t d,
+                               size_t n, const float *W, size_t wst,
+                               size_t gc, float *o0)
+{
+    const size_t nm = d / 8;
+    const float *w0 = W, *w1 = W + wst, *w2 = W + 2 * wst, *w3 = W + 3 * wst;
+    for (size_t m = 0; m < nm; m++) {
+        __m256 a0 = _mm256_loadu_ps(o0 + 8 * m);
+        __m256 a1 = gc > 1 ? _mm256_loadu_ps(o0 + d + 8 * m) : _mm256_setzero_ps();
+        __m256 a2 = gc > 2 ? _mm256_loadu_ps(o0 + 2 * d + 8 * m) : _mm256_setzero_ps();
+        __m256 a3 = gc > 3 ? _mm256_loadu_ps(o0 + 3 * d + 8 * m) : _mm256_setzero_ps();
+        __m256 e0 = _mm256_setzero_ps(), e1 = _mm256_setzero_ps();
+        __m256 e2 = _mm256_setzero_ps(), e3 = _mm256_setzero_ps();
+        size_t t = 0;
+        for (; t + 2 <= n; t += 2) {
+            const __m256 v0 = load8_i8f(rows + t * rs + 8 * m);
+            const __m256 v1 = load8_i8f(rows + (t + 1) * rs + 8 * m);
+            a0 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w0 + t), a0);
+            e0 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(w0 + t + 1), e0);
+            a1 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w1 + t), a1);
+            e1 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(w1 + t + 1), e1);
+            a2 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w2 + t), a2);
+            e2 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(w2 + t + 1), e2);
+            a3 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w3 + t), a3);
+            e3 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(w3 + t + 1), e3);
+        }
+        if (t < n) {
+            const __m256 v0 = load8_i8f(rows + t * rs + 8 * m);
+            a0 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w0 + t), a0);
+            a1 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w1 + t), a1);
+            a2 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w2 + t), a2);
+            a3 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(w3 + t), a3);
+        }
+        _mm256_storeu_ps(o0 + 8 * m, _mm256_add_ps(a0, e0));
+        if (gc > 1) _mm256_storeu_ps(o0 + d + 8 * m, _mm256_add_ps(a1, e1));
+        if (gc > 2) _mm256_storeu_ps(o0 + 2 * d + 8 * m, _mm256_add_ps(a2, e2));
+        if (gc > 3) _mm256_storeu_ps(o0 + 3 * d + 8 * m, _mm256_add_ps(a3, e3));
+    }
+}
+
+/* V accumulate: unpack a chunk of blocks to int8 ci rows once, fold the
+ * per-block scale and cscale into the weights, then accum4_i8. */
+static KVRQ_TGT void rq_accum_i8_avx2_b(const OcKvRqCodec *c,
+                                        const uint8_t *blocks, size_t n,
+                                        const float *w, size_t ws, size_t G,
+                                        float *acc, const unsigned bits,
+                                        const size_t d)
+{
+    const size_t bb = 2 + d * bits / 8;
+    int8_t rows[KVRQ_CHUNK * OC_KVRQ_DIM_MAX] __attribute__((aligned(32)));
+    float sc[KVRQ_CHUNK];
+    float W[4][KVRQ_CHUNK];
+    for (size_t t0 = 0; t0 < n; t0 += KVRQ_CHUNK) {
+        const size_t tn = n - t0 < KVRQ_CHUNK ? n - t0 : KVRQ_CHUNK;
+        const uint8_t *bl = blocks + t0 * bb;
+        rq_unpack_i8_b(c, bl, tn, rows, bits, d);
+        for (size_t t = 0; t < tn; t++)
+            sc[t] = _cvtsh_ss(load_u16(bl + t * bb)) * c->cscale;
+        for (size_t g0 = 0; g0 < G; g0 += 4) {
+            const size_t gc = G - g0 < 4 ? G - g0 : 4;
+            for (size_t g = 0; g < 4; g++)
+                for (size_t t = 0; t < tn; t++)
+                    W[g][t] = g < gc ? w[(g0 + g) * ws + t0 + t] * sc[t] : 0.0f;
+            accum4_i8(rows, d, d, tn, &W[0][0], KVRQ_CHUNK, gc, acc + g0 * d);
+        }
+    }
+}
+
 /* Specialize on (bits, d) so every offset/shift in rq_idx8 folds to a
  * constant: a runtime d turns them into integer divisions per group. */
 #define KVRQ_SPECIALIZE(CALL)                                              \
@@ -641,6 +894,36 @@ static void rq_accum_avx2(const OcKvRqCodec *c, const uint8_t *b, size_t n,
 #undef C_
 }
 
+#define KVRQ_SPECIALIZE_WIDE(CALL)                                         \
+    switch (c->d * 8 + c->bits) {                                          \
+    case 128 * 8 + 2: CALL(2, 128); break;                                 \
+    case 128 * 8 + 3: CALL(3, 128); break;                                 \
+    case 128 * 8 + 4: CALL(4, 128); break;                                 \
+    case 256 * 8 + 2: CALL(2, 256); break;                                 \
+    case 256 * 8 + 3: CALL(3, 256); break;                                 \
+    default: CALL(4, 256); break;                                          \
+    }
+
+__attribute__((target("avx2,fma,f16c")))
+static void rq_score_i8_avx2(const OcKvRqCodec *c, const uint8_t *b, size_t n,
+                             const int8_t *q8, const float *qscale,
+                             const int32_t *qsum, size_t G, float *s,
+                             size_t ss)
+{
+#define C_(B, D) rq_score_i8_avx2_b(c, b, n, q8, qscale, qsum, G, s, ss, B, D)
+    KVRQ_SPECIALIZE_WIDE(C_)
+#undef C_
+}
+
+__attribute__((target("avx2,fma,f16c")))
+static void rq_accum_i8_avx2(const OcKvRqCodec *c, const uint8_t *b, size_t n,
+                             const float *w, size_t ws, size_t G, float *acc)
+{
+#define C_(B, D) rq_accum_i8_avx2_b(c, b, n, w, ws, G, acc, B, D)
+    KVRQ_SPECIALIZE_WIDE(C_)
+#undef C_
+}
+
 __attribute__((target("avx2,fma,f16c")))
 static void rq_decode_rows_avx2(const OcKvRqCodec *c, const uint8_t *b,
                                 size_t n, float *rows)
@@ -650,11 +933,6 @@ static void rq_decode_rows_avx2(const OcKvRqCodec *c, const uint8_t *b,
 #undef C_
 }
 
-static KVRQ_TGT __m256 load8_i8f(const int8_t *p)
-{
-    return _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(
-        _mm_loadl_epi64((const __m128i *)(const void *)p)));
-}
 
 /* Generic two-position score / parity-split accumulate for rows that
  * load as eight floats per 8-dim group (int8 codes or f32). ROW(t, m)
@@ -758,7 +1036,6 @@ static KVRQ_TGT __m256 load8_i8f(const int8_t *p)
 
 #define Q8_ROW(t, m) load8_i8f(codes + (t) * cs + 8 * (m))
 #define Q8_SCALE(t) scales[(t) * sst]
-#define Q8_WT(wp, t) ((wp)[t] * scales[(t) * sst])
 #define F32_ROW(t, m) _mm256_loadu_ps(x + (t) * xs + 8 * (m))
 #define F32_SCALE(t) 1.0f
 #define F32_WT(wp, t) ((wp)[t])
@@ -776,7 +1053,19 @@ static void q8_accum_avx2(const int8_t *codes, size_t cs, const float *scales,
                           size_t sst, size_t d, size_t n, const float *w,
                           size_t ws, size_t G, float *acc)
 {
-    DENSE_ACCUM_BODY(Q8_ROW, Q8_WT)
+    float W[4][KVRQ_CHUNK];
+    for (size_t t0 = 0; t0 < n; t0 += KVRQ_CHUNK) {
+        const size_t tn = n - t0 < KVRQ_CHUNK ? n - t0 : KVRQ_CHUNK;
+        for (size_t g0 = 0; g0 < G; g0 += 4) {
+            const size_t gc = G - g0 < 4 ? G - g0 : 4;
+            for (size_t g = 0; g < 4; g++)
+                for (size_t t = 0; t < tn; t++)
+                    W[g][t] = g < gc ? w[(g0 + g) * ws + t0 + t] *
+                                       scales[(t0 + t) * sst] : 0.0f;
+            accum4_i8(codes + t0 * cs, cs, d, tn, &W[0][0], KVRQ_CHUNK, gc,
+                      acc + g0 * d);
+        }
+    }
 }
 
 __attribute__((target("avx2,fma,f16c")))
@@ -809,11 +1098,28 @@ void oc_kvrq_score(const OcKvRqCodec *c, const uint8_t *blocks, size_t n,
     rq_score_scalar(c, blocks, n, q, G, scores, ss);
 }
 
+void oc_kvrq_score_i8(const OcKvRqCodec *c, const uint8_t *blocks, size_t n,
+                      const int8_t *q8, const float *qscale,
+                      const int32_t *qsum, size_t G, float *scores, size_t ss)
+{
+#if KVRQ_HAVE_AVX2
+    if (kvrq_isa() && c->d >= 128) {
+        rq_score_i8_avx2(c, blocks, n, q8, qscale, qsum, G, scores, ss);
+        return;
+    }
+#endif
+    rq_score_i8_scalar(c, blocks, n, q8, qscale, qsum, G, scores, ss);
+}
+
 void oc_kvrq_accum(const OcKvRqCodec *c, const uint8_t *blocks, size_t n,
                    const float *w, size_t ws, size_t G, float *acc)
 {
 #if KVRQ_HAVE_AVX2
-    if (kvrq_isa()) { rq_accum_avx2(c, blocks, n, w, ws, G, acc); return; }
+    if (kvrq_isa()) {
+        if (c->d >= 128) rq_accum_i8_avx2(c, blocks, n, w, ws, G, acc);
+        else rq_accum_avx2(c, blocks, n, w, ws, G, acc);
+        return;
+    }
 #endif
     rq_accum_scalar(c, blocks, n, w, ws, G, acc);
 }
@@ -896,7 +1202,15 @@ static void *map_lazy(size_t bytes)
     if (bytes == 0) return NULL;
     void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    return p == MAP_FAILED ? NULL : p;
+    if (p == MAP_FAILED) return NULL;
+#ifdef MADV_NOHUGEPAGE
+    /* With THP "always", every one of the 2 x n_kv per-head streams of a
+     * layer would fault in 2 MB at a time (1.5 GB for K2 before the first
+     * token). Opt out so the cache grows 4 KB at a time with the context;
+     * the streams are read sequentially, so small pages cost little. */
+    if (getenv("OC_KVRQ_THP") == NULL) madvise(p, bytes, MADV_NOHUGEPAGE);
+#endif
+    return p;
 }
 
 static void unmap_lazy(void *p, size_t bytes)
