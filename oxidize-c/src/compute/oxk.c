@@ -984,10 +984,28 @@ static void iq3_s_decode_ib32(const uint8_t *qs, uint8_t qh,
     }
 }
 
+/* IQ3_S float accumulation, shared by every form of the dot (scalar, AVX2,
+ * prepared): eight float lanes, lane j of a block being the int32
+ * sum_ib32 ls * (w*q summed over sub-block positions 4j..4j+3) — exactly an
+ * AVX2 madd(maddubs(..), ls) lane — accumulated as acc[j] = acc[j] +
+ * d * (float)lane[j] (multiply, then add; never fused), and reduced once at
+ * the end in the order the AVX2 horizontal sum uses. Keeping the float work
+ * in lanes instead of a horizontal integer sum per block is what lets the
+ * AVX2 kernel skip that reduction, and spelling it out here keeps every form
+ * bit-identical. */
+static float iq3_s_lanes_reduce(const float acc[8])
+{
+    const float s0 = acc[0] + acc[4];
+    const float s1 = acc[1] + acc[5];
+    const float s2 = acc[2] + acc[6];
+    const float s3 = acc[3] + acc[7];
+    return (s0 + s2) + (s1 + s3);
+}
+
 float oc_oxk_dot_iq3_s_q8_k_scalar(const uint8_t *row, size_t blocks,
                                    const uint8_t *q8)
 {
-    float sumf = 0.0f;
+    float acc[8] = { 0 };
     for (size_t b = 0; b < blocks; b++) {
         const uint8_t *xb = row + b * OC_OXK_BLOCK_IQ3_S_SIZE;
         const uint8_t *yb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
@@ -995,21 +1013,23 @@ float oc_oxk_dot_iq3_s_q8_k_scalar(const uint8_t *row, size_t blocks,
         memcpy(&yd, yb, 4);
         const float d = oc_oxk_f16_le_to_f32(xb) * yd;
         const int8_t *qa = (const int8_t *)(yb + 4);
-        int32_t bsum = 0;
+        int32_t lane[8] = { 0 };
         for (int ib32 = 0; ib32 < 8; ib32++) {
             int8_t w[32];
             iq3_s_decode_ib32(xb + 2 + 8 * ib32, xb[66 + ib32],
                               xb + 74 + 4 * ib32, w);
-            int32_t sumi = 0;
-            for (int k = 0; k < 32; k++)
-                sumi += (int32_t)w[k] * (int32_t)qa[32 * ib32 + k];
             const uint8_t sc = xb[106 + ib32 / 2];
-            const int32_t ls = (ib32 & 1) ? (sc >> 4) : (sc & 0x0F);
-            bsum += sumi * (2 * ls + 1);
+            const int32_t ls = 2 * ((ib32 & 1) ? (sc >> 4) : (sc & 0x0F)) + 1;
+            for (int j = 0; j < 8; j++) {
+                int32_t p = 0;
+                for (int k = 4 * j; k < 4 * j + 4; k++)
+                    p += (int32_t)w[k] * (int32_t)qa[32 * ib32 + k];
+                lane[j] += p * ls;
+            }
         }
-        sumf += d * (float)bsum;
+        for (int j = 0; j < 8; j++) acc[j] = acc[j] + d * (float)lane[j];
     }
-    return sumf;
+    return iq3_s_lanes_reduce(acc);
 }
 
 size_t oc_oxk_iq3_s_prep_bytes(size_t blocks)
@@ -1048,7 +1068,7 @@ void oc_oxk_dot_iq3_s_prepped_multi_scalar(const void *scratch, size_t blocks,
     const uint8_t *prep = (const uint8_t *)scratch;
     for (size_t a = 0; a < n_act; a++) {
         const uint8_t *act = acts + a * act_stride;
-        float sumf = 0.0f;
+        float acc[8] = { 0 };
         for (size_t b = 0; b < blocks; b++) {
             const uint8_t *pb = prep + b * OC_OXK_IQ3_S_PREP_BLOCK;
             const uint8_t *yb = act  + b * OC_OXK_BLOCK_Q8_K_SIZE;
@@ -1057,20 +1077,22 @@ void oc_oxk_dot_iq3_s_prepped_multi_scalar(const void *scratch, size_t blocks,
             memcpy(&yd, yb, 4);
             const int8_t *w  = (const int8_t *)(pb + 32);
             const int8_t *qa = (const int8_t *)(yb + 4);
-            int32_t bsum = 0;
+            int32_t lane[8] = { 0 };
             for (int ib32 = 0; ib32 < 8; ib32++) {
                 int16_t ls;
                 memcpy(&ls, pb + 16 + 2 * ib32, 2);
-                int32_t sumi = 0;
-                for (int k = 0; k < 32; k++)
-                    sumi += (int32_t)w[32 * ib32 + k] *
-                            (int32_t)qa[32 * ib32 + k];
-                bsum += sumi * (int32_t)ls;
+                for (int j = 0; j < 8; j++) {
+                    int32_t p = 0;
+                    for (int k = 4 * j; k < 4 * j + 4; k++)
+                        p += (int32_t)w[32 * ib32 + k] *
+                             (int32_t)qa[32 * ib32 + k];
+                    lane[j] += p * (int32_t)ls;
+                }
             }
             const float d = wd * yd;
-            sumf += d * (float)bsum;
+            for (int j = 0; j < 8; j++) acc[j] = acc[j] + d * (float)lane[j];
         }
-        out[a] = sumf;
+        out[a] = iq3_s_lanes_reduce(acc);
     }
 }
 
@@ -1285,6 +1307,28 @@ void oc_oxk_matvec_q8_0_f32(const uint8_t *w, size_t n_rows, size_t row_bytes, c
 float oc_oxk_dot_iq3_s_q8_k(const uint8_t *row, size_t blocks,
                             const uint8_t *q8)
 { oc_oxk_init(); return g_ctx.dot_iq3_s_q8_k(row, blocks, q8); }
+
+/* Rows forms: take the AVX2 rows kernel exactly when the single-row
+ * dispatch would pick the AVX2 kernel, so the per-row results are identical
+ * to calling oc_oxk_dot_*_q8_k row by row. */
+#define OXK_ROWS_DISPATCH(NAME, FIELD)                                         \
+void oc_oxk_dot_rows_##NAME##_q8_k(const uint8_t *rows, size_t row_bytes,      \
+                                   size_t n_rows, size_t blocks,               \
+                                   const uint8_t *q8, float *out)              \
+{                                                                              \
+    oc_oxk_init();                                                             \
+    if (g_ctx.FIELD == oc_oxk_dot_##NAME##_q8_k_avx2) {                        \
+        oc_oxk_dot_rows_##NAME##_q8_k_avx2(rows, row_bytes, n_rows, blocks,    \
+                                           q8, out);                           \
+        return;                                                                \
+    }                                                                          \
+    for (size_t r = 0; r < n_rows; r++)                                        \
+        out[r] = g_ctx.FIELD(rows + r * row_bytes, blocks, q8);                \
+}
+OXK_ROWS_DISPATCH(q4_k, dot_q4_k_q8_k)
+OXK_ROWS_DISPATCH(q6_k, dot_q6_k_q8_k)
+OXK_ROWS_DISPATCH(iq3_s, dot_iq3_s_q8_k)
+#undef OXK_ROWS_DISPATCH
 
 void oc_oxk_iq3_s_prep_row(const uint8_t *row, size_t blocks, void *scratch)
 { oc_oxk_init(); g_ctx.iq3_s_prep_row(row, blocks, scratch); }

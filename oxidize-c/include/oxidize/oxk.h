@@ -300,12 +300,39 @@ void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
                                    size_t n_act, float *out);
 
+/* ─── Rows form (one activation, many consecutive rows) ─────────────────
+ *
+ * out[r] = oc_oxk_dot_<type>_q8_k(rows + r*row_bytes, blocks, q8) for
+ * r < n_rows, bit-identical to the single-row call (the AVX2 variants share
+ * one inlined body with it). A matvec slice makes one call instead of one per
+ * row: MoE expert rows are as short as 3 blocks, and there the per-row call
+ * (dispatch, prologue, vzeroupper, constant setup) cost as much as the dot. */
+void oc_oxk_dot_rows_q4_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q6_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_iq3_s_q8_k(const uint8_t *rows, size_t row_bytes,
+                                size_t n_rows, size_t blocks,
+                                const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q4_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q6_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_iq3_s_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
+                                     size_t n_rows, size_t blocks,
+                                     const uint8_t *q8, float *out);
+
 /* ─── IQ3_S × Q8_K ────────────────────────────────────────────────────────
  *
- * Port of ggml's ggml_vec_dot_iq3_s_q8_K. Each block's integer sum
- * Σ_ib32 (2*ls+1) * Σ grid*sign*q8 is exact in int32, and the float
- * accumulation is `sumf += (d_w * d_a) * (float)bsum` in block order in every
- * variant, so the scalar, AVX2 and prepared forms are bit-identical.
+ * Port of ggml's ggml_vec_dot_iq3_s_q8_K. Each block's integer sums are
+ * exact in int32 and are accumulated in eight float lanes (lane j covering
+ * sub-block positions 4j..4j+3, acc[j] += (d_w * d_a) * (float)lane[j]) with
+ * one fixed final reduction, in every variant — see iq3_s_lanes_reduce in
+ * oxk.c — so the scalar, AVX2 and prepared forms are bit-identical.
  * Activations must stay within [-127, 127] (what the Q8_K quantizer emits);
  * a -128 would flip sign differently in the SIMD sign trick. */
 float oc_oxk_dot_iq3_s_q8_k(const uint8_t *row, size_t blocks,

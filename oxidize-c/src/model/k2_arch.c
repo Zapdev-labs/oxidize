@@ -16,6 +16,7 @@
 #include "oxidize/gguf.h"
 #include "oxidize/log.h"
 #include "oxidize/matvec.h"
+#include "oxidize/parallel.h"
 
 bool oc_k2_arch_match(const char *arch_str)
 {
@@ -281,6 +282,29 @@ static void k2_router(const OcWeightView *r, const float *in, float *out,
                             in, out, temp);
 }
 
+/* v_out[d] = sum_i w[i] * silu(out_i[d]), summed in expert order — split
+ * over d across the pool (bit-identical to the serial loop; the 4 x 1024
+ * expf per layer were ~1% of decode on the calling thread). */
+typedef struct {
+    float       *v_out;
+    const float *out_all;
+    const float *w;
+    uint32_t     k;
+    size_t       kv_row;
+} K2MixJob;
+
+static void k2_mix_slice(size_t begin, size_t end, size_t tid, void *ud)
+{
+    (void)tid;
+    const K2MixJob *j = (const K2MixJob *)ud;
+    for (size_t d = begin; d < end; d++) j->v_out[d] = 0.0f;
+    for (uint32_t i = 0; i < j->k; i++) {
+        const float *o = j->out_all + (size_t)i * j->kv_row;
+        const float wi = j->w[i];
+        for (size_t d = begin; d < end; d++) j->v_out[d] += wi * k2_silu(o[d]);
+    }
+}
+
 void oc_k2_mova_value(const OcLlamaConfig *c, const OcLlamaLayer *L,
                       const float *normed, float *v_out, float *probs,
                       uint32_t *idx, float *w, float *out_all, float *temp)
@@ -323,12 +347,8 @@ void oc_k2_mova_value(const OcLlamaConfig *c, const OcLlamaLayer *L,
                           out_all + (size_t)i * kv_row);
     }
 
-    memset(v_out, 0, kv_row * sizeof(float));
-    for (uint32_t i = 0; i < k; i++) {
-        const float *o = out_all + (size_t)i * kv_row;
-        const float wi = w[i];
-        for (size_t d = 0; d < kv_row; d++) v_out[d] += wi * k2_silu(o[d]);
-    }
+    K2MixJob job = { v_out, out_all, w, k, kv_row };
+    oc_parallel_for(kv_row, k2_mix_slice, &job);
 }
 
 void oc_k2_mova_batch_free(OcK2MovaBatch *mb)

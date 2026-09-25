@@ -1146,8 +1146,9 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
         strcmp(arch_str, "muse_glimmer") != 0 &&
         !oc_k2_arch_match(arch_str) &&
         !is_qwen35_arch(arch_str)) {
-        oc_gguf_map_free(&out->gguf);
+        /* Log before unmapping: arch_str points into the mapped header. */
         oc_log(OC_LOG_ERROR, "llama: unsupported architecture \"%s\"", arch_str);
+        oc_gguf_map_free(&out->gguf);
         return OC_ERR_MODEL;
     }
 
@@ -1493,14 +1494,17 @@ static OcError session_init_kv_impl(OcLlamaModel *model, OcLlamaSession *out,
         out->expert_gate = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_up   = xcalloc(model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_out  = xcalloc(model->cfg.n_embd, sizeof(float));
+        /* One slot past num_experts_per_tok: forward_moe_ffn runs a
+         * same-shaped shared expert through the routed experts' fused calls
+         * and needs somewhere to put it. */
         out->expert_gate_all = xcalloc(
-            (size_t)model->cfg.num_experts_per_tok *
+            ((size_t)model->cfg.num_experts_per_tok + 1u) *
             model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_up_all = xcalloc(
-            (size_t)model->cfg.num_experts_per_tok *
+            ((size_t)model->cfg.num_experts_per_tok + 1u) *
             model->cfg.expert_intermediate_size, sizeof(float));
         out->expert_down_all = xcalloc(
-            (size_t)model->cfg.num_experts_per_tok * model->cfg.n_embd,
+            ((size_t)model->cfg.num_experts_per_tok + 1u) * model->cfg.n_embd,
             sizeof(float));
         out->selected_experts = xcalloc(
             (size_t)model->cfg.num_experts + model->cfg.zero_expert_count,
@@ -2146,6 +2150,10 @@ typedef struct {
     uint32_t n_kv;
     float scale;
     bool q8;
+    /* K2-Horizon: softplus(beta = ln2) output gate, applied to each head's
+     * output inside the parallel region (it is ~200k transcendental calls
+     * per token, which serially cost ~2% of decode). NULL otherwise. */
+    const float *softplus_gate;
 } AttnDecodeJob;
 
 /* Position-outer GQA attention: each KV head's rows are read once and
@@ -2173,9 +2181,13 @@ static void attn_decode_kv_slice(size_t begin, size_t end, size_t tid, void *ud)
         float run_sum[64];
         const uint32_t nq = h1 - h0;
         if (nq > 64) {
-            for (uint32_t h = h0; h < h1; h++)
+            for (uint32_t h = h0; h < h1; h++) {
                 attention_head_at(s, h, j->layer, s->pos,
                                   s->q + h * hd, s->attn_out + h * hd);
+                if (j->softplus_gate != NULL)
+                    oc_k2_softplus_gate_apply(s->attn_out + h * hd,
+                                              j->softplus_gate + h * hd, hd);
+            }
             continue;
         }
         for (uint32_t g = 0; g < nq; g++) {
@@ -2223,6 +2235,9 @@ static void attn_decode_kv_slice(size_t begin, size_t end, size_t tid, void *ud)
         for (uint32_t g = 0; g < nq; g++) {
             if (run_sum[g] > 0.0f)
                 oc_attn_scale_f32(outs[g], 1.0f / run_sum[g], hd);
+            if (j->softplus_gate != NULL)
+                oc_k2_softplus_gate_apply(outs[g],
+                                          j->softplus_gate + (h0 + g) * hd, hd);
         }
     }
 }
@@ -2260,6 +2275,12 @@ static OcError attention_decode_layer(OcLlamaSession *s, uint32_t layer)
     size_t hd = GL->head_dim ? (size_t)GL->head_dim : (size_t)c->head_dim;
     uint32_t n_kv = GL->n_head_kv ? GL->n_head_kv : c->n_head_kv;
     uint32_t group = c->n_head / n_kv;
+    /* K2's softplus output gate is applied here, per head, rather than by
+     * the caller (see AttnDecodeJob.softplus_gate). */
+    const float *softplus_gate =
+        (c->attn_out_gate && c->attn_gate_kind == OC_ATTN_GATE_SOFTPLUS_LN2 &&
+         GL->attn_gate.data != NULL)
+        ? s->muse_gate : NULL;
     if (use_compressed_attn(s, layer)) {
         uint32_t kh, g, h;
         for (kh = 0; kh < n_kv; kh++) {
@@ -2276,6 +2297,9 @@ static OcError attention_decode_layer(OcLlamaSession *s, uint32_t layer)
                 }
             }
         }
+        if (softplus_gate != NULL)
+            oc_k2_softplus_gate_apply(s->attn_out, softplus_gate,
+                                      (size_t)c->n_head * hd);
         return OC_OK;
     }
     float scale = (c->attn_scale > 0.0f) ? c->attn_scale
@@ -2302,6 +2326,7 @@ static OcError attention_decode_layer(OcLlamaSession *s, uint32_t layer)
         .n_kv = n_kv,
         .scale = scale,
         .q8 = (s->kv_type == OC_KV_Q8),
+        .softplus_gate = softplus_gate,
     };
     /* The pool refuses to split below 8 items (matvec dispatch overhead).
      * Qwen3.5/3.8 often have 4 KV heads, which would otherwise stay serial
@@ -2389,6 +2414,32 @@ static void apply_lora_at(OcLlamaSession *s, const OcLoraAdapter *arr,
  * Each expert's down-projection output goes into s->shexp_out as a temp
  * (n_embd-sized), then is scaled by w and accumulated into s->expert_out.
  */
+typedef struct {
+    float       *gate;
+    const float *up;
+} SwigluJob;
+
+static void swiglu_slice(size_t begin, size_t end, size_t tid, void *ud)
+{
+    (void)tid;
+    const SwigluJob *j = (const SwigluJob *)ud;
+    oc_swiglu_inplace_f32(j->gate + begin, j->up + begin, end - begin);
+}
+
+/* oc_swiglu_inplace_f32 split across the pool. Elementwise, so the result is
+ * bit-identical to the serial call; it matters on MoE decode, where the
+ * ~7k expf per layer (8 routed experts + shared, 768 wide) otherwise run on
+ * the calling thread between two parallel matvecs. */
+static void swiglu_parallel(float *gate, const float *up, size_t n)
+{
+    if (n < 2048) {
+        oc_swiglu_inplace_f32(gate, up, n);
+        return;
+    }
+    SwigluJob job = { gate, up };
+    oc_parallel_for(n, swiglu_slice, &job);
+}
+
 static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
 {
     const OcLlamaConfig *c = &s->model->cfg;
@@ -2495,19 +2546,40 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     for (uint32_t ei = 0; ei < k; ei++)
         if (sel[ei] < n_exp) n_routed++;
 
+    /* A shared expert with the routed experts' shape and types rides along
+     * in their fused calls: its gate/up rows join the gate/up region and its
+     * down rows the down region, instead of three more small parallel
+     * regions. Same kernels and the same single activation quantization, so
+     * its output is bit-identical to the separate path below. LoRA adapters
+     * hook the separate path, so they keep it. */
+    const bool shexp_fused = grouped && n_routed > 0 && s->lora == NULL &&
+        L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
+        L->ffn_down_shexp.data != NULL &&
+        c->shared_expert_intermediate_size == i_size &&
+        L->ffn_gate_shexp.rows == i_size && L->ffn_up_shexp.rows == i_size &&
+        L->ffn_gate_shexp.cols == c->n_embd && L->ffn_up_shexp.cols == c->n_embd &&
+        L->ffn_down_shexp.rows == c->n_embd && L->ffn_down_shexp.cols == i_size &&
+        L->ffn_gate_shexp.qtype == L->ffn_gate_exps.qtype &&
+        L->ffn_up_shexp.qtype == L->ffn_up_exps.qtype &&
+        L->ffn_down_shexp.qtype == L->ffn_down_exps.qtype &&
+        L->ffn_gate_shexp.row_bytes == gate_row_bytes &&
+        L->ffn_up_shexp.row_bytes == up_row_bytes &&
+        L->ffn_down_shexp.row_bytes == down_row_bytes;
+    const uint32_t n_mm = n_routed + (shexp_fused ? 1u : 0u);
+
     if (grouped && n_routed > 0) {
-        const size_t n_gate_up = (size_t)n_routed * 2;
+        const size_t n_gate_up = (size_t)n_mm * 2;
         OcGgufQuantizationType gate_up_qtypes[n_gate_up];
         const uint8_t *gate_up_data[n_gate_up];
         size_t gate_up_rows[n_gate_up];
         size_t gate_up_strides[n_gate_up];
         float *gate_up_outputs[n_gate_up];
-        OcGgufQuantizationType down_qtypes[n_routed];
-        const uint8_t *down_data[n_routed];
-        const float *down_inputs[n_routed];
-        float *down_outputs[n_routed];
-        size_t down_rows[n_routed];
-        size_t down_strides[n_routed];
+        OcGgufQuantizationType down_qtypes[n_mm];
+        const uint8_t *down_data[n_mm];
+        const float *down_inputs[n_mm];
+        float *down_outputs[n_mm];
+        size_t down_rows[n_mm];
+        size_t down_strides[n_mm];
 
         uint32_t routed = 0;
         for (uint32_t ei = 0; ei < k; ei++) {
@@ -2530,16 +2602,28 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
                 (size_t)routed * i_size;
             routed++;
         }
+        if (shexp_fused) {
+            const size_t gs = (size_t)n_routed * 2;
+            gate_up_qtypes[gs] = L->ffn_gate_shexp.qtype;
+            gate_up_qtypes[gs + 1] = L->ffn_up_shexp.qtype;
+            gate_up_data[gs] = L->ffn_gate_shexp.data;
+            gate_up_data[gs + 1] = L->ffn_up_shexp.data;
+            gate_up_rows[gs] = i_size;
+            gate_up_rows[gs + 1] = i_size;
+            gate_up_strides[gs] = gate_row_bytes;
+            gate_up_strides[gs + 1] = up_row_bytes;
+            gate_up_outputs[gs] = s->expert_gate_all + (size_t)n_routed * i_size;
+            gate_up_outputs[gs + 1] = s->expert_up_all + (size_t)n_routed * i_size;
+        }
         oc_matvec_quantized_fused(
             gate_up_qtypes, gate_up_data, gate_up_rows, c->n_embd,
             gate_up_strides, n_gate_up, s->normed, gate_up_outputs,
             s->dequant_temp);
 
-        for (uint32_t r = 0; r < n_routed; r++) {
-            float *gate = s->expert_gate_all + (size_t)r * i_size;
-            float *up = s->expert_up_all + (size_t)r * i_size;
-            oc_swiglu_inplace_f32(gate, up, i_size);
-        }
+        /* The n_mm gate/up outputs are contiguous, so one elementwise pass
+         * covers them all. */
+        swiglu_parallel(s->expert_gate_all, s->expert_up_all,
+                        (size_t)n_mm * i_size);
 
         routed = 0;
         for (uint32_t ei = 0; ei < k; ei++) {
@@ -2556,9 +2640,18 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
             down_strides[routed] = down_row_bytes;
             routed++;
         }
+        if (shexp_fused) {
+            down_qtypes[n_routed] = L->ffn_down_shexp.qtype;
+            down_data[n_routed] = L->ffn_down_shexp.data;
+            down_inputs[n_routed] = s->expert_gate_all + (size_t)n_routed * i_size;
+            down_outputs[n_routed] = s->expert_down_all +
+                (size_t)n_routed * c->n_embd;
+            down_rows[n_routed] = c->n_embd;
+            down_strides[n_routed] = down_row_bytes;
+        }
         oc_matvec_quantized_multi_input(
             down_qtypes, down_data, down_rows, i_size, down_strides,
-            n_routed, down_inputs, down_outputs, s->dequant_temp);
+            n_mm, down_inputs, down_outputs, s->dequant_temp);
 
         routed = 0;
         for (uint32_t ei = 0; ei < k; ei++) {
@@ -2610,7 +2703,18 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
 
     /* 6. Shared expert (always active, added with weight 1.0). Optional
      *    sigmoid gate via ffn_gate_inp_shexp (Qwen2-MoE shared_expert_gate). */
-    if (L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
+    if (shexp_fused) {
+        /* Computed alongside the routed experts above. */
+        memcpy(s->shexp_out, s->expert_down_all + (size_t)n_routed * c->n_embd,
+               c->n_embd * sizeof(float));
+        if (L->ffn_gate_inp_shexp.data != NULL) {
+            float gate_logit = 0.0f;
+            matvec(&L->ffn_gate_inp_shexp, s->normed, &gate_logit, s->dequant_temp);
+            float scale = 1.0f / (1.0f + expf(-gate_logit));
+            for (size_t i = 0; i < c->n_embd; i++) s->shexp_out[i] *= scale;
+        }
+        for (size_t i = 0; i < c->n_embd; i++) s->expert_out[i] += s->shexp_out[i];
+    } else if (L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
         L->ffn_down_shexp.data != NULL) {
         matvec(&L->ffn_gate_shexp, s->normed, s->shexp_gate, s->dequant_temp);
         matvec(&L->ffn_up_shexp,   s->normed, s->shexp_up,   s->dequant_temp);
@@ -3257,7 +3361,8 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
         if (c->attn_out_gate && L->attn_gate.data != NULL) {
             const size_t nq = (size_t)c->n_head * hd;
             if (c->attn_gate_kind == OC_ATTN_GATE_SOFTPLUS_LN2) {
-                oc_k2_softplus_gate_apply(s->attn_out, s->muse_gate, nq);
+                /* Already applied per head by attention_decode_layer. */
+                (void)nq;
             } else {
                 for (size_t i = 0; i < nq; i++)
                     s->attn_out[i] *= qwen35_sigmoid(s->muse_gate[i]);

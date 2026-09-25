@@ -284,6 +284,23 @@ static float (*fused_dot_fn(OcGgufQuantizationType qtype))(const uint8_t *,
 
 static bool fused_stride_ok(OcGgufQuantizationType qtype, size_t blocks,
                             size_t row_bytes);
+
+/* Rows kernel for a fused qtype, or NULL: one call per slice segment rather
+ * than one per row, with bit-identical per-row results. */
+typedef void (*FusedRowsFn)(const uint8_t *rows, size_t row_bytes,
+                            size_t n_rows, size_t blocks, const uint8_t *act,
+                            float *out);
+
+static FusedRowsFn fused_rows_fn(OcGgufQuantizationType qtype)
+{
+    switch (qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M: return oc_oxk_dot_rows_q4_k_q8_k;
+    case OC_QUANT_Q6_K:   return oc_oxk_dot_rows_q6_k_q8_k;
+    case OC_QUANT_IQ3_S:  return oc_oxk_dot_rows_iq3_s_q8_k;
+    default:              return NULL;
+    }
+}
 static size_t act_block_bytes(ActKind kind);
 static size_t act_blocks_for(ActKind kind, size_t cols);
 
@@ -461,6 +478,12 @@ static void matvec_fused_slice(size_t begin, size_t end, size_t tid, void *ud)
 {
     (void)tid;
     const QuantJob *j = (const QuantJob *)ud;
+    const FusedRowsFn rows_fn = fused_rows_fn(j->qtype);
+    if (rows_fn != NULL && end > begin) {
+        rows_fn(j->data + begin * j->row_bytes, j->row_bytes, end - begin,
+                j->blocks, j->act, j->output + begin);
+        return;
+    }
     for (size_t r = begin; r < end; r++) {
 #if defined(__x86_64__) || defined(__i386__)
         if (r + 2 < end) {
@@ -529,8 +552,18 @@ static void matvec_fused_multi_slice(size_t begin, size_t end, size_t tid,
         row -= j->rows[part];
         part++;
     }
+    const FusedRowsFn rows_fn = fused_rows_fn(j->qtype);
     for (size_t global = begin; global < end; ) {
         const size_t part_end = j->rows[part];
+        if (rows_fn != NULL && row < part_end) {
+            size_t n = part_end - row;
+            if (n > end - global) n = end - global;
+            rows_fn(j->datas[part] + row * j->row_bytes[part],
+                    j->row_bytes[part], n, j->blocks, j->act,
+                    j->outs[part] + row);
+            row += n;
+            global += n;
+        }
         while (row < part_end && global < end) {
             j->outs[part][row] = fused_row_dot(
                 j->qtype, j->datas[part] + row * j->row_bytes[part],
@@ -555,8 +588,18 @@ static void matvec_fused_multi_input_slice(size_t begin, size_t end,
         row -= j->rows[part];
         part++;
     }
+    const FusedRowsFn rows_fn = fused_rows_fn(j->qtype);
     for (size_t global = begin; global < end; ) {
         const size_t part_end = j->rows[part];
+        if (rows_fn != NULL && row < part_end) {
+            size_t n = part_end - row;
+            if (n > end - global) n = end - global;
+            rows_fn(j->datas[part] + row * j->row_bytes[part],
+                    j->row_bytes[part], n, j->blocks,
+                    j->acts + j->act_offsets[part], j->outs[part] + row);
+            row += n;
+            global += n;
+        }
         while (row < part_end && global < end) {
             j->outs[part][row] = fused_row_dot(
                 j->qtype, j->datas[part] + row * j->row_bytes[part],

@@ -28,6 +28,14 @@
 
 #include "quant_tables.h"
 
+/* Software prefetch distance for the streaming dot kernels. Eight threads
+ * reading separate weight streams leave the hardware prefetcher short of
+ * lookahead on the compute-bound IQ3_S kernel: prefetching ~1 KB ahead took
+ * an 8-thread IQ3_S matvec from 27.9 to 30.7 GB/s on a Ryzen 6850H (512 B
+ * and 2 KB were within 2%). Prefetches past the end of a matrix are
+ * harmless hints. */
+#define OXK_PREFETCH_AHEAD 1024
+
 /* ─── AVX2 Q8_0 × Q8_0 dot product ─────────────────────────────────────── */
 
 __attribute__((target("avx2,fma,f16c")))
@@ -129,74 +137,98 @@ static inline int32_t hsum_i32_8(__m256i v)
 }
 
 /* Q4_K is the format most models ship in, so this is the kernel that decides
- * throughput in practice. It was forwarding to scalar, which is why Q4_K_M ran
- * slower than the larger Q8_0 model.
+ * throughput in practice.
  *
- * The nibble products are computed with _mm256_maddubs_epi16: unsigned first
- * operand (nibbles are 0..15), signed second (the int8 activation), giving
- * int16 pairwise sums, which _mm256_madd_epi16 against ones widens to int32.
- * Everything stays integer until one multiply-add per block, exactly as the
- * scalar reference does since it was restructured to accumulate pos/min_acc —
- * so this is bit-exact against it, not merely close. */
-__attribute__((target("avx2,f16c")))
-float oc_oxk_dot_q4_k_q8_k_avx2(const uint8_t *row, size_t blocks,
+ * The nibble products are computed with _mm256_maddubs_epi16 (unsigned
+ * nibble 0..15 times signed int8 activation -> int16 pair sums) and scaled
+ * with _mm256_madd_epi16 against the broadcast 6-bit sub-block scale, which
+ * both widens to int32 and applies the scale in one instruction. The mins
+ * term is one madd of the eight 6-bit mins against the pairwise-added
+ * activation block sums. Everything stays integer until one multiply-add per
+ * block, exactly as the scalar reference does, so this is bit-exact against
+ * it, not merely close.
+ *
+ * No out-of-line helper is called inside the block loop: each call forced a
+ * vzeroupper and a reload of every vector constant, and the eighteen per
+ * block (f16 scales, scale/min unpack, bsum reads) made this kernel ~5x
+ * slower than ggml's on a Ryzen 6850H. */
+#define OXK_KMASK1 0x3f3f3f3fu
+#define OXK_KMASK2 0x0f0f0f0fu
+#define OXK_KMASK3 0x03030303u
+
+__attribute__((target("avx2,fma,f16c")))
+static inline float oxk_f16(const uint8_t *p)
+{
+    uint16_t h;
+    memcpy(&h, p, 2);
+    return _cvtsh_ss(h);
+}
+
+__attribute__((target("avx2,fma,f16c"), always_inline))
+static inline float q4_k_dot_body(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {
     const __m256i lownib = _mm256_set1_epi8(0x0F);
-    const __m256i ones16 = _mm256_set1_epi16(1);
     float sum = 0.0f;
 
     for (size_t b = 0; b < blocks; b++) {
         const uint8_t *wb = row + b * OC_OXK_BLOCK_Q4_K_SIZE;
         const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
-        const float dw   = oc_oxk_f16_le_to_f32(wb);
-        const float dmin = oc_oxk_f16_le_to_f32(wb + 2);
-        const uint8_t *scales = wb + 4;
-        const uint8_t *qs     = wb + 16;
+        _mm_prefetch((const char *)(wb + OXK_PREFETCH_AHEAD), _MM_HINT_T0);
+        const float dw   = oxk_f16(wb);
+        const float dmin = oxk_f16(wb + 2);
+        const uint8_t *qs = wb + 16;
         float dq;
         memcpy(&dq, qb, 4);
         const int8_t  *q8v   = (const int8_t *)(qb + 4);
         const uint8_t *bsums = qb + 4 + 256;
 
-        /* Scale each group's lane-wise products in vector form and reduce ONCE
-         * per block. Reducing per group instead costs eight horizontal sums
-         * per block, and a horizontal sum is a serial dependency chain that
-         * stalls the pipeline — it was the dominant cost in the first version
-         * of this kernel.
-         *
-         * Summation order still matches the scalar reference exactly: the
-         * lane totals are integers, so regrouping them cannot change the
-         * result the way it would in floating point. That is what keeps this
-         * bit-exact while being reassociated. */
-        __m256i pos_v = _mm256_setzero_si256();
-        int32_t min_acc = 0;
-        for (int gp = 0; gp < 4; gp++) {
-            uint8_t sc1, m1, sc2, m2;
-            oc_oxk_get_scale_min_k4((unsigned)(gp * 2),     scales, &sc1, &m1);
-            oc_oxk_get_scale_min_k4((unsigned)(gp * 2 + 1), scales, &sc2, &m2);
+        /* Unpack the twelve scale bytes into sc[0..7] (lanes 0..7) and
+         * m[0..7] (lanes 8..15): the same values oc_oxk_get_scale_min_k4
+         * yields for j = 0..7 (ggml's utmp shuffle). Kept in registers: a
+         * byte array here costs two store-forwarding stalls per block. */
+        uint32_t u0, u1, u2;
+        memcpy(&u0, wb + 4, 4);
+        memcpy(&u1, wb + 8, 4);
+        memcpy(&u2, wb + 12, 4);
+        const uint32_t s0 = u0 & OXK_KMASK1;
+        const uint32_t s1 = (u2 & OXK_KMASK2) | (((u0 >> 6) & OXK_KMASK3) << 4);
+        const uint32_t m0 = u1 & OXK_KMASK1;
+        const uint32_t m1 = ((u2 >> 4) & OXK_KMASK2) | (((u1 >> 6) & OXK_KMASK3) << 4);
+        const __m256i sm16 = _mm256_cvtepu8_epi16(
+            _mm_set_epi32((int)m1, (int)m0, (int)s1, (int)s0));
 
-            /* 32 packed bytes = 64 nibbles = both halves of this group. */
+        /* min_acc = sum_j m_j * (bsum[2j] + bsum[2j+1]): each min is
+         * duplicated onto its two int16 bsums so madd forms the products and
+         * their pair sums directly in int32, where nothing can wrap. */
+        const __m128i mhi = _mm256_extracti128_si256(sm16, 1);
+        const __m256i mdup = _mm256_set_m128i(_mm_unpackhi_epi16(mhi, mhi),
+                                              _mm_unpacklo_epi16(mhi, mhi));
+        const int32_t min_acc = hsum_i32_8(_mm256_madd_epi16(
+            mdup, _mm256_loadu_si256((const __m256i *)bsums)));
+
+        /* Broadcast each sub-block scale to all 16 int16 lanes. */
+        const __m128i sc128 = _mm256_castsi256_si128(sm16);
+        const __m256i scales = _mm256_set_m128i(sc128, sc128);
+
+        __m256i pos_v = _mm256_setzero_si256();
+        for (int gp = 0; gp < 4; gp++) {
+            /* 32 packed bytes = 64 nibbles = sub-blocks 2gp (low) and
+             * 2gp+1 (high). */
             const __m256i packed = _mm256_loadu_si256((const __m256i *)(qs + gp * 32));
             const __m256i nib_lo = _mm256_and_si256(packed, lownib);
             const __m256i nib_hi = _mm256_and_si256(_mm256_srli_epi16(packed, 4), lownib);
-
             const __m256i a_lo = _mm256_loadu_si256((const __m256i *)(q8v + gp * 64));
             const __m256i a_hi = _mm256_loadu_si256((const __m256i *)(q8v + gp * 64 + 32));
-
-            const __m256i p1 = _mm256_madd_epi16(_mm256_maddubs_epi16(nib_lo, a_lo), ones16);
-            const __m256i p2 = _mm256_madd_epi16(_mm256_maddubs_epi16(nib_hi, a_hi), ones16);
-
-            pos_v = _mm256_add_epi32(pos_v,
-                        _mm256_mullo_epi32(p1, _mm256_set1_epi32((int32_t)sc1)));
-            pos_v = _mm256_add_epi32(pos_v,
-                        _mm256_mullo_epi32(p2, _mm256_set1_epi32((int32_t)sc2)));
-
-            const int32_t bs1 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4)) +
-                                oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 1));
-            const int32_t bs2 = oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 2)) +
-                                oc_oxk_read_q8_k_bsum(bsums, (size_t)(gp * 4 + 3));
-
-            min_acc += (int32_t)m1 * bs1 + (int32_t)m2 * bs2;
+            const __m256i sc_lo = _mm256_shuffle_epi8(scales,
+                _mm256_set1_epi16((short)(0x0100 * (4 * gp + 1) + 4 * gp)));
+            const __m256i sc_hi = _mm256_shuffle_epi8(scales,
+                _mm256_set1_epi16((short)(0x0100 * (4 * gp + 3) + 4 * gp + 2)));
+            /* 15*128*2 = 3840 per int16 pair; times a 6-bit scale and paired
+             * again it is < 2^19, far from int32 overflow. */
+            const __m256i p1 = _mm256_madd_epi16(_mm256_maddubs_epi16(nib_lo, a_lo), sc_lo);
+            const __m256i p2 = _mm256_madd_epi16(_mm256_maddubs_epi16(nib_hi, a_hi), sc_hi);
+            pos_v = _mm256_add_epi32(pos_v, _mm256_add_epi32(p1, p2));
         }
         sum += dw * dq * (float)hsum_i32_8(pos_v) - dmin * dq * (float)min_acc;
     }
@@ -228,13 +260,25 @@ float oc_oxk_dot_q5_k_q8_k_avx2(const uint8_t *row, size_t blocks,
  * group boundary in the reference falls on l = 0 and l = 16, so one 16-byte
  * chunk of l maps to exactly one group per q-slot. That makes each of the
  * four unpacked slots a single 16-element dot, which is one maddubs. */
-__attribute__((target("avx2,fma,f16c")))
-float oc_oxk_dot_q6_k_q8_k_avx2(const uint8_t *row, size_t blocks,
+__attribute__((target("avx2,fma,f16c"), always_inline))
+static inline float q6_k_dot_body(const uint8_t *row, size_t blocks,
                                 const uint8_t *q8)
 {
-    const __m128i m4 = _mm_set1_epi8(0x0F);
-    const __m128i m3 = _mm_set1_epi8(0x03);
-    const __m128i one16 = _mm_set1_epi16(1);
+    const __m256i m4 = _mm256_set1_epi8(0x0F);
+    const __m256i m2 = _mm256_set1_epi8(0x03);
+    /* shuf[i]: bytes [2i x8, 2i+1 x8] — broadcasts scale group 2i to the
+     * first eight int16 lanes of a maddubs result and 2i+1 to the last
+     * eight, i.e. to elements 0..15 and 16..31 of one 32-value slot. */
+    static const uint8_t shuf[8][16] = {
+        { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1 },
+        { 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3 },
+        { 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5 },
+        { 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7 },
+        { 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9 },
+        { 10, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11 },
+        { 12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13 },
+        { 14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15 },
+    };
 
     float sum = 0.0f;
     for (size_t b = 0; b < blocks; b++) {
@@ -242,85 +286,54 @@ float oc_oxk_dot_q6_k_q8_k_avx2(const uint8_t *row, size_t blocks,
         const uint8_t *qb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
         const uint8_t *ql = wb;
         const uint8_t *qh = wb + 128;
-        const int8_t  *sc = (const int8_t *)(wb + 192);
-        const float dw = oc_oxk_f16_le_to_f32(wb + 208);
-
+        const float dw = oxk_f16(wb + 208);
         float dq;
         memcpy(&dq, qb, 4);
-        const int8_t  *q8v  = (const int8_t *)(qb + 4);
+        const int8_t  *q8v   = (const int8_t *)(qb + 4);
         const uint8_t *bsums = qb + 4 + 256;
 
-        int32_t grp[16];
+        const __m128i sc8 = _mm_loadu_si128((const __m128i *)(wb + 192));
 
+        /* minc = sum_g sc[g] * bsum[g]: one madd over the 16 groups. */
+        const __m256i minv = _mm256_madd_epi16(
+            _mm256_cvtepi8_epi16(sc8),
+            _mm256_loadu_si256((const __m256i *)bsums));
+
+        __m256i pos_v = _mm256_setzero_si256();
         for (int n = 0; n < 2; n++) {
-            const uint8_t *qlc = ql + n * 64;
-            const uint8_t *qhc = qh + n * 32;
-            for (int lc = 0; lc < 2; lc++) {
-                const int l0 = lc * 16;
-                const int8_t *av = q8v + n * 128 + l0;
-
-                const __m128i lo =
-                    _mm_loadu_si128((const __m128i *)(qlc + l0));
-                const __m128i hi =
-                    _mm_loadu_si128((const __m128i *)(qlc + l0 + 32));
-                const __m128i hb =
-                    _mm_loadu_si128((const __m128i *)(qhc + l0));
-
-                /* Per-byte shifts: srli_epi16 then mask leaves exactly the
-                 * bits the scalar code selects, because the mask discards
-                 * whatever bled in from the neighbouring byte. */
-                const __m128i q1 = _mm_or_si128(
-                    _mm_and_si128(lo, m4),
-                    _mm_slli_epi16(_mm_and_si128(hb, m3), 4));
-                const __m128i q2 = _mm_or_si128(
-                    _mm_and_si128(hi, m4),
-                    _mm_slli_epi16(
-                        _mm_and_si128(_mm_srli_epi16(hb, 2), m3), 4));
-                const __m128i q3 = _mm_or_si128(
-                    _mm_and_si128(_mm_srli_epi16(lo, 4), m4),
-                    _mm_slli_epi16(
-                        _mm_and_si128(_mm_srli_epi16(hb, 4), m3), 4));
-                const __m128i q4 = _mm_or_si128(
-                    _mm_and_si128(_mm_srli_epi16(hi, 4), m4),
-                    _mm_slli_epi16(
-                        _mm_and_si128(_mm_srli_epi16(hb, 6), m3), 4));
-
-                /* q is unsigned 0..63 and a is signed, which is the operand
-                 * order maddubs wants. 63*127*2 = 16002 < 32767, so the
-                 * int16 pair sums cannot saturate. */
-                const __m128i p1 = _mm_madd_epi16(
-                    _mm_maddubs_epi16(q1,
-                        _mm_loadu_si128((const __m128i *)(av))), one16);
-                const __m128i p2 = _mm_madd_epi16(
-                    _mm_maddubs_epi16(q2,
-                        _mm_loadu_si128((const __m128i *)(av + 32))), one16);
-                const __m128i p3 = _mm_madd_epi16(
-                    _mm_maddubs_epi16(q3,
-                        _mm_loadu_si128((const __m128i *)(av + 64))), one16);
-                const __m128i p4 = _mm_madd_epi16(
-                    _mm_maddubs_epi16(q4,
-                        _mm_loadu_si128((const __m128i *)(av + 96))), one16);
-
-                /* Fold the four 4-lane partials down to one lane each. */
-                const __m128i s12 = _mm_hadd_epi32(p1, p2);
-                const __m128i s34 = _mm_hadd_epi32(p3, p4);
-                const __m128i s   = _mm_hadd_epi32(s12, s34);
-
-                int32_t out[4];
-                _mm_storeu_si128((__m128i *)out, s);
-                grp[8 * n + 0 + lc] = out[0];
-                grp[8 * n + 2 + lc] = out[1];
-                grp[8 * n + 4 + lc] = out[2];
-                grp[8 * n + 6 + lc] = out[3];
-            }
+            const __m256i lo = _mm256_loadu_si256((const __m256i *)(ql + 64 * n));
+            const __m256i hi = _mm256_loadu_si256((const __m256i *)(ql + 64 * n + 32));
+            const __m256i hb = _mm256_loadu_si256((const __m256i *)(qh + 32 * n));
+            /* The same bit selection as the scalar reference: slot k takes
+             * its high two bits from qh >> 2k. Masks are applied after the
+             * 16-bit shifts so bits bled from the neighbouring byte drop. */
+            const __m256i q1 = _mm256_or_si256(_mm256_and_si256(lo, m4),
+                _mm256_slli_epi16(_mm256_and_si256(hb, m2), 4));
+            const __m256i q2 = _mm256_or_si256(_mm256_and_si256(hi, m4),
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hb, 2), m2), 4));
+            const __m256i q3 = _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi16(lo, 4), m4),
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hb, 4), m2), 4));
+            const __m256i q4 = _mm256_or_si256(
+                _mm256_and_si256(_mm256_srli_epi16(hi, 4), m4),
+                _mm256_slli_epi16(_mm256_and_si256(_mm256_srli_epi16(hb, 6), m2), 4));
+            const int8_t *av = q8v + 128 * n;
+            /* q is 0..63 unsigned, a signed: 63*128*2 = 16128 < 32767 per
+             * int16 pair, and times an int8 scale it stays well in int32. */
+#define OXK_Q6K_SLOT(Q, K)                                                     \
+    pos_v = _mm256_add_epi32(pos_v, _mm256_madd_epi16(                         \
+        _mm256_cvtepi8_epi16(_mm_shuffle_epi8(sc8,                             \
+            _mm_loadu_si128((const __m128i *)shuf[4 * n + (K)]))),             \
+        _mm256_maddubs_epi16((Q),                                              \
+            _mm256_loadu_si256((const __m256i *)(av + 32 * (K))))))
+            OXK_Q6K_SLOT(q1, 0);
+            OXK_Q6K_SLOT(q2, 1);
+            OXK_Q6K_SLOT(q3, 2);
+            OXK_Q6K_SLOT(q4, 3);
+#undef OXK_Q6K_SLOT
         }
-
-        int32_t pos = 0, minc = 0;
-        for (int g = 0; g < 16; g++) {
-            pos  += (int32_t)sc[g] * grp[g];
-            minc += (int32_t)sc[g] *
-                    (int32_t)oc_oxk_read_q8_k_bsum(bsums, (size_t)g);
-        }
+        const int32_t pos  = hsum_i32_8(pos_v);
+        const int32_t minc = hsum_i32_8(minv);
         sum += dw * dq * (float)(pos - 32 * minc);
     }
     return sum;
@@ -479,6 +492,26 @@ static inline float iq3_s_f16(const uint8_t *p)
     return _cvtsh_ss(h);
 }
 
+/* The IQ3_S lane reduction (see iq3_s_lanes_reduce in oxk.c):
+ * ((a0+a4)+(a2+a6)) + ((a1+a5)+(a3+a7)). */
+__attribute__((target("avx2,fma,f16c")))
+static inline float iq3_s_hsum_f32_8(__m256 v)
+{
+    __m128 s = _mm_add_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+    s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+    s = _mm_add_ss(s, _mm_movehdup_ps(s));
+    return _mm_cvtss_f32(s);
+}
+
+/* acc + d * (float)lanes, as a separate multiply and add (bit-identical to
+ * the scalar reference, which is compiled with -ffp-contract=off). */
+__attribute__((target("avx2,fma,f16c")))
+static inline __m256 iq3_s_lane_acc(__m256 acc, float d, __m256i lanes)
+{
+    return _mm256_add_ps(acc, _mm256_mul_ps(_mm256_set1_ps(d),
+                                            _mm256_cvtepi32_ps(lanes)));
+}
+
 /* Grid bytes (unsigned) and sign byte-masks (0xFF = negative) for the 64
  * weights of sub-blocks ib32 and ib32+1. */
 __attribute__((target("avx2")))
@@ -506,14 +539,15 @@ static inline void iq3_s_load_pair(const uint8_t *qs, const uint8_t *qh,
     *s2 = _mm256_cmpeq_epi8(a, mask2);
 }
 
-__attribute__((target("avx2,fma,f16c")))
-float oc_oxk_dot_iq3_s_q8_k_avx2(const uint8_t *row, size_t blocks,
-                                 const uint8_t *q8)
+__attribute__((target("avx2,fma,f16c"), always_inline))
+static inline float iq3_s_dot_body(const uint8_t *row, size_t blocks,
+                                const uint8_t *q8)
 {
-    float sumf = 0.0f;
+    __m256 accf = _mm256_setzero_ps();
     for (size_t b = 0; b < blocks; b++) {
         const uint8_t *xb = row + b * OC_OXK_BLOCK_IQ3_S_SIZE;
         const uint8_t *yb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        _mm_prefetch((const char *)(xb + OXK_PREFETCH_AHEAD), _MM_HINT_T0);
         float yd;
         memcpy(&yd, yb, 4);
         const float d = iq3_s_f16(xb) * yd;
@@ -543,11 +577,35 @@ float oc_oxk_dot_iq3_s_q8_k_avx2(const uint8_t *row, size_t blocks,
             sumi2 = _mm256_add_epi32(sumi2,
                         _mm256_madd_epi16(dot2, _mm256_set1_epi16(ls2)));
         }
-        const int32_t bsum = hsum_i32_8(_mm256_add_epi32(sumi1, sumi2));
-        sumf += d * (float)bsum;
+        accf = iq3_s_lane_acc(accf, d, _mm256_add_epi32(sumi1, sumi2));
     }
-    return sumf;
+    return iq3_s_hsum_f32_8(accf);
 }
+
+
+/* ─── Exported single-row and rows forms (shared inlined bodies) ───────── */
+
+#define OXK_ROWS_WRAPPERS(NAME, BODY)                                          \
+__attribute__((target("avx2,fma,f16c")))                                       \
+float oc_oxk_dot_##NAME##_q8_k_avx2(const uint8_t *row, size_t blocks,         \
+                                    const uint8_t *q8)                         \
+{                                                                              \
+    return BODY(row, blocks, q8);                                              \
+}                                                                              \
+__attribute__((target("avx2,fma,f16c")))                                       \
+void oc_oxk_dot_rows_##NAME##_q8_k_avx2(const uint8_t *rows, size_t row_bytes, \
+                                        size_t n_rows, size_t blocks,          \
+                                        const uint8_t *q8, float *out)         \
+{                                                                              \
+    for (size_t r = 0; r < n_rows; r++)                                        \
+        out[r] = BODY(rows + r * row_bytes, blocks, q8);                       \
+}
+
+OXK_ROWS_WRAPPERS(q4_k, q4_k_dot_body)
+OXK_ROWS_WRAPPERS(q6_k, q6_k_dot_body)
+OXK_ROWS_WRAPPERS(iq3_s, iq3_s_dot_body)
+
+#undef OXK_ROWS_WRAPPERS
 
 __attribute__((target("avx2,fma,f16c")))
 void oc_oxk_iq3_s_prep_row_avx2(const uint8_t *row, size_t blocks,
@@ -595,7 +653,7 @@ void oc_oxk_dot_iq3_s_prepped_multi_avx2(const void *scratch, size_t blocks,
         const uint8_t *act1 = acts + (a + 1) * act_stride;
         const uint8_t *act2 = acts + (a + 2) * act_stride;
         const uint8_t *act3 = acts + (a + 3) * act_stride;
-        float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+        __m256 f0 = _mm256_setzero_ps(), f1 = f0, f2 = f0, f3 = f0;
         for (size_t b = 0; b < blocks; b++) {
             const uint8_t *pb = prep + b * OC_OXK_IQ3_S_PREP_BLOCK;
             const size_t yo = b * OC_OXK_BLOCK_Q8_K_SIZE;
@@ -625,19 +683,19 @@ void oc_oxk_dot_iq3_s_prepped_multi_avx2(const void *scratch, size_t blocks,
                 OC_IQ3S_MULTI_STEP(acc3, act3);
             }
             float yd;
-            memcpy(&yd, act0 + yo, 4); s0 += (wd * yd) * (float)hsum_i32_8(acc0);
-            memcpy(&yd, act1 + yo, 4); s1 += (wd * yd) * (float)hsum_i32_8(acc1);
-            memcpy(&yd, act2 + yo, 4); s2 += (wd * yd) * (float)hsum_i32_8(acc2);
-            memcpy(&yd, act3 + yo, 4); s3 += (wd * yd) * (float)hsum_i32_8(acc3);
+            memcpy(&yd, act0 + yo, 4); f0 = iq3_s_lane_acc(f0, wd * yd, acc0);
+            memcpy(&yd, act1 + yo, 4); f1 = iq3_s_lane_acc(f1, wd * yd, acc1);
+            memcpy(&yd, act2 + yo, 4); f2 = iq3_s_lane_acc(f2, wd * yd, acc2);
+            memcpy(&yd, act3 + yo, 4); f3 = iq3_s_lane_acc(f3, wd * yd, acc3);
         }
-        out[a + 0] = s0;
-        out[a + 1] = s1;
-        out[a + 2] = s2;
-        out[a + 3] = s3;
+        out[a + 0] = iq3_s_hsum_f32_8(f0);
+        out[a + 1] = iq3_s_hsum_f32_8(f1);
+        out[a + 2] = iq3_s_hsum_f32_8(f2);
+        out[a + 3] = iq3_s_hsum_f32_8(f3);
     }
     for (; a < n_act; a++) {
         const uint8_t *act = acts + a * act_stride;
-        float s = 0.0f;
+        __m256 f = _mm256_setzero_ps();
         for (size_t b = 0; b < blocks; b++) {
             const uint8_t *pb = prep + b * OC_OXK_IQ3_S_PREP_BLOCK;
             const size_t yo = b * OC_OXK_BLOCK_Q8_K_SIZE;
@@ -655,9 +713,9 @@ void oc_oxk_dot_iq3_s_prepped_multi_avx2(const void *scratch, size_t blocks,
                 OC_IQ3S_MULTI_STEP(acc, act);
             }
             memcpy(&yd, act + yo, 4);
-            s += (wd * yd) * (float)hsum_i32_8(acc);
+            f = iq3_s_lane_acc(f, wd * yd, acc);
         }
-        out[a] = s;
+        out[a] = iq3_s_hsum_f32_8(f);
     }
 #undef OC_IQ3S_MULTI_STEP
 }
@@ -710,5 +768,12 @@ void oc_oxk_dot_iq3_s_prepped_multi_avx2(const void *scratch, size_t blocks,
                                          const uint8_t *acts, size_t act_stride,
                                          size_t n_act, float *out)
 { oc_oxk_dot_iq3_s_prepped_multi_scalar(scratch, blocks, acts, act_stride, n_act, out); }
+
+void oc_oxk_dot_rows_q4_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes, size_t n_rows, size_t blocks, const uint8_t *q8, float *out)
+{ for (size_t r = 0; r < n_rows; r++) out[r] = oc_oxk_dot_q4_k_q8_k_scalar(rows + r * row_bytes, blocks, q8); }
+void oc_oxk_dot_rows_q6_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes, size_t n_rows, size_t blocks, const uint8_t *q8, float *out)
+{ for (size_t r = 0; r < n_rows; r++) out[r] = oc_oxk_dot_q6_k_q8_k_scalar(rows + r * row_bytes, blocks, q8); }
+void oc_oxk_dot_rows_iq3_s_q8_k_avx2(const uint8_t *rows, size_t row_bytes, size_t n_rows, size_t blocks, const uint8_t *q8, float *out)
+{ for (size_t r = 0; r < n_rows; r++) out[r] = oc_oxk_dot_iq3_s_q8_k_scalar(rows + r * row_bytes, blocks, q8); }
 
 #endif  /* __x86_64__ || __i386__ */
