@@ -5090,7 +5090,25 @@ struct OcK2Mtp {
     uint32_t draft;          /* pending d_1 (valid when have_draft)       */
     bool     have_draft;
     int64_t  synced_pos;     /* sess->pos that mtp_hidden belongs to      */
+#ifdef OC_TESTING
+    OcMtpDraftHook hook;     /* test-only draft override                  */
+    void    *hook_ud;
+#endif
 };
+
+#ifdef OC_TESTING
+void oc_llama_mtp_test_set_draft_hook(OcLlamaSession *sess, OcMtpDraftHook fn,
+                                      void *ud)
+{
+    if (sess == NULL || sess->k2mtp == NULL) return;
+    sess->k2mtp->hook = fn;
+    sess->k2mtp->hook_ud = ud;
+}
+#define K2_MTP_HOOK(K, pos, d) \
+    ((K)->hook ? (K)->hook((K)->hook_ud, (pos), (d)) : (d))
+#else
+#define K2_MTP_HOOK(K, pos, d) (d)
+#endif
 
 static void k2_mtp_resync(struct OcK2Mtp *k, int64_t synced_pos)
 {
@@ -5374,7 +5392,7 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
     double t1 = k2m_now();
     if (st) st->t_mtp += t1 - t0;
     if (k > 0) {
-        d[0] = K->draft;
+        d[0] = K2_MTP_HOOK(K, P + 1, K->draft);
         for (uint32_t i = 1; i < k; i++) {
             /* Chained: hidden = previous s, token = previous draft, at P+i. */
             OcError e = k2_mtp_rows(sess, &K->buf, K->cat, &d[i - 1], K->s_prev,
@@ -5382,6 +5400,7 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
             if (e != OC_OK) return e;
             memcpy(K->s_prev, K->s, D * sizeof(float));
             d[i] = k2_mtp_head_argmax(sess, K->s_prev, K->lg_draft);
+            d[i] = K2_MTP_HOOK(K, P + 1 + (int64_t)i, d[i]);
         }
     }
     double t2 = k2m_now();

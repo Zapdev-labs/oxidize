@@ -659,6 +659,14 @@ OcError oc_llama_mtp_forward_rows(OcLlamaSession *sess, const uint32_t *tokens,
                                   const float *hidden, size_t n, int64_t pos0,
                                   float *s_out);
 
+#ifdef OC_TESTING
+/* Test-only: replace each draft before verification. Called with the
+ * position the draft would occupy and the head's proposal. */
+typedef uint32_t (*OcMtpDraftHook)(void *ud, int64_t pos, uint32_t proposed);
+void oc_llama_mtp_test_set_draft_hook(OcLlamaSession *sess, OcMtpDraftHook fn,
+                                      void *ud);
+#endif
+
 /* Read one MTP KV row (after RoPE) at position pos into k/v (n_head_kv *
  * head_dim floats each). F32 KV only. */
 OcError oc_llama_mtp_kv_row(const OcLlamaSession *sess, int64_t pos,
