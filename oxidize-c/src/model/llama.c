@@ -1322,7 +1322,20 @@ static OcKvCacheType kv_type_from_env(void)
     const char *v = getenv("OX_KV_TYPE");
     if (v == NULL) return OC_KV_F32;
     if (strcmp(v, "q8") == 0 || strcmp(v, "Q8") == 0) return OC_KV_Q8;
+    if (strncmp(v, "rq", 2) == 0) return OC_KV_RQ;
     return OC_KV_F32;
+}
+
+/* Process-wide RQ defaults set by CLI flags (0 = keep, -1 = disable for
+ * sinks/window). Consulted after the environment, before per-session opts. */
+static int g_rq_k_bits, g_rq_v_bits, g_rq_sinks, g_rq_window;
+
+void oc_llama_set_rq_defaults(int k_bits, int v_bits, int sinks, int window)
+{
+    if (k_bits) g_rq_k_bits = k_bits;
+    if (v_bits) g_rq_v_bits = v_bits;
+    if (sinks) g_rq_sinks = sinks;
+    if (window) g_rq_window = window;
 }
 
 OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx, const char *explicit)
@@ -1330,10 +1343,22 @@ OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx, const char *explicit)
     if (explicit != NULL) {
         if (strcmp(explicit, "q8") == 0 || strcmp(explicit, "Q8") == 0)
             return OC_KV_Q8;
-        if (strcmp(explicit, "f32") == 0 || strcmp(explicit, "F32") == 0)
+        if (strcmp(explicit, "f32") == 0 || strcmp(explicit, "F32") == 0 ||
+            strcmp(explicit, "f16") == 0)
             return OC_KV_F32;
+        OcKvOptions o = {0};
+        if (strncmp(explicit, "rq", 2) == 0 &&
+            oc_llama_parse_kv_type(explicit, &o)) {
+            if (o.rq_k_bits) oc_llama_set_rq_defaults((int)o.rq_k_bits,
+                                                      (int)o.rq_v_bits, 0, 0);
+            return OC_KV_RQ;
+        }
     }
     if (getenv("OX_KV_TYPE") != NULL) return kv_type_from_env();
+    /* Past 128K an int8 cache no longer fits next to the weights on the
+     * machines this targets (K2: 26.6 GB at 262K); RQ falls back to Q8 by
+     * itself where the geometry is unsupported. */
+    if (n_ctx >= 131072u) return OC_KV_RQ;
     return n_ctx >= 8192u ? OC_KV_Q8 : OC_KV_F32;
 }
 
@@ -1438,6 +1463,10 @@ static void rq_params_resolve(const OcKvOptions *o, OcKvRqParams *p)
                : OC_KVRQ_ROT_HADAMARD;
     if ((e = getenv("OC_KV_RQ_WINDOW")) != NULL) p->window = (uint32_t)atoi(e);
     if ((e = getenv("OC_KV_RQ_SINKS")) != NULL) p->n_sink = (uint32_t)atoi(e);
+    if (g_rq_k_bits) p->k_bits = (unsigned)g_rq_k_bits;
+    if (g_rq_v_bits) p->v_bits = (unsigned)g_rq_v_bits;
+    if (g_rq_sinks) p->n_sink = g_rq_sinks < 0 ? 0u : (uint32_t)g_rq_sinks;
+    if (g_rq_window) p->window = g_rq_window < 0 ? 0u : (uint32_t)g_rq_window;
     if (o != NULL) {
         if (o->rq_k_bits) p->k_bits = o->rq_k_bits;
         if (o->rq_v_bits) p->v_bits = o->rq_v_bits;

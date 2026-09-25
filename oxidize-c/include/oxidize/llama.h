@@ -635,13 +635,18 @@ OcError oc_llama_session_init_with_compress(OcLlamaModel *model,
                                             const char *name);
 
 /* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
- * explicit: "q8", "f32", or NULL. Contexts >= 8192 default to Q8. */
+ * explicit: "q8", "f32" ("f16" is an alias), "rq", "rq:K,V", or NULL.
+ * Contexts >= 8192 default to Q8, >= 131072 to RQ. */
 OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx,
                                       const char *explicit_value);
 
 /* Bytes the KV cache occupies for `model` under `kv_type`. Useful for
  * reporting and for deciding whether a context length is affordable. */
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
+
+/* Process-wide RQ defaults from the CLI (--kv-k-bits/--kv-v-bits/--kv-sinks/
+ * --kv-window). 0 keeps the current value; -1 disables sinks / window. */
+void oc_llama_set_rq_defaults(int k_bits, int v_bits, int sinks, int window);
 
 /* Run one forward step: embed `token`, advance position, write logits_out
  * (length model->cfg.vocab_size). Returns OC_OK or OC_ERR_INVALID_ARG.
