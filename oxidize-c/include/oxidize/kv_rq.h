@@ -152,15 +152,20 @@ typedef struct OcKvRqCache {
     float        *xs;                /* [layer][2][head][slot]          */
     int64_t      *tag;               /* [layer][slot] position or -1    */
     size_t        xq_bytes, xs_bytes, tag_bytes;
-    /* Per-(layer, K|V, head) mean vector in the rotated domain. RQ blocks
-     * hold x - mu: softmax is invariant to the per-head constant q.mu_k
-     * and sum_t w_t = 1 gives back mu_v exactly, so centering only removes
-     * the shared component from what the 2-4 bit codes must represent
-     * (on K2 most of the key energy). mu is the mean of the first `window`
-     * non-sink positions, taken when the exact ring first fills; until
-     * then every position lives in an exact slot and no RQ block exists. */
-    float        *mu;                /* [layer][2][head][d]             */
-    uint8_t      *mu_valid;          /* [layer]                         */
+    /* Centering (window > 0): positions are grouped in pages of `page`
+     * (= window) positions and each (layer, page, K|V, head) gets the mean
+     * of its page, in the rotated domain; RQ blocks hold x - mu. Softmax is
+     * invariant to the per-segment constant q.mu_k (added back to the
+     * scores) and V gets (sum w) mu_v back, so attention only sees the
+     * smaller quantization error. On K2 60-96% of the key energy is such a
+     * shared component; per-page means follow its slow RoPE drift. A page
+     * is encoded when it completes (all its positions are still in the
+     * exact ring then), so the current page always lives in the ring. */
+    size_t        page;              /* positions per page, 0 = off     */
+    size_t        n_pages;
+    float        *mu;                /* [layer][page][2][head][d]       */
+    size_t        mu_bytes;
+    uint8_t      *mu_fixed;          /* [layer][page]                   */
 } OcKvRqCache;
 
 OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
@@ -173,16 +178,24 @@ void oc_kvrq_cache_rewind(OcKvRqCache *c, int64_t pos);
 /* Bytes one position costs across all layers/heads (RQ blocks only). */
 size_t oc_kvrq_bytes_per_token(const OcKvRqCache *c);
 
-/* Fix mu for `layer` from the exact ring now (if not fixed yet) and encode
- * the RQ blocks the ring positions were waiting for. Called by store when
- * the ring first fills; call it before touching RQ blocks directly. */
+/* Encode the current (incomplete) page of `layer` now, fixing its mean
+ * from what the ring holds; later positions of that page reuse it. Needed
+ * before reading or copying RQ blocks of positions still in the ring. */
 void oc_kvrq_flush(OcKvRqCache *c, size_t layer);
-static inline const float *oc_kvrq_mu(const OcKvRqCache *c, size_t layer,
-                                      size_t kind, size_t head)
+static inline int oc_kvrq_centered(const OcKvRqCache *c) { return c->page != 0; }
+static inline size_t oc_kvrq_page_of(const OcKvRqCache *c, int64_t t)
 {
-    return c->mu + ((layer * 2u + kind) * c->n_kv + head) * c->d;
+    return (size_t)t / c->page;
 }
-/* Decode position t's RQ block (plus mu) into out[d]. */
+/* Mean of (layer, page, kind, head); NULL when centering is off. */
+static inline const float *oc_kvrq_mu(const OcKvRqCache *c, size_t layer,
+                                      size_t page, size_t kind, size_t head)
+{
+    if (c->page == 0) return NULL;
+    return c->mu + (((layer * c->n_pages + page) * 2u + kind) * c->n_kv +
+                    head) * c->d;
+}
+/* Decode position t's RQ block (plus its page mean) into out[d]. */
 void oc_kvrq_decode_pos(const OcKvRqCache *c, size_t layer, size_t kind,
                         size_t head, int64_t t, float *out);
 

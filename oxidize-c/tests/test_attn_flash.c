@@ -46,6 +46,7 @@ typedef struct {
     OcKvView v;
     size_t n, d;
     float *K, *V;          /* decoded rows the kernels must reproduce */
+    float *MUK;            /* RQ: page mean of K for positions coded as RQ */
     float *kf, *vf;
     int8_t *kq, *vq;
     float *ks, *vsc;
@@ -59,6 +60,7 @@ static void tcache_make(TCache *tc, OcKvViewKind kind, size_t n, size_t d,
     memset(tc, 0, sizeof(*tc));
     tc->n = n; tc->d = d;
     tc->K = malloc(n * d * sizeof(float));
+    tc->MUK = calloc(n * d, sizeof(float));
     tc->V = malloc(n * d * sizeof(float));
     const size_t stride = 2 * d;  /* two heads per row, test head 1 */
     tc->v.kind = kind;
@@ -112,6 +114,14 @@ static void tcache_make(TCache *tc, OcKvViewKind kind, size_t n, size_t d,
                     /* RQ block + the per-head mean (centered cache). */
                     oc_kvrq_decode_pos(&tc->rq, 0, (size_t)kind2, 1,
                                        (int64_t)t, dst);
+                    const float *mu = NULL;
+                    if (oc_kvrq_centered(&tc->rq)) {
+                        const size_t pg = oc_kvrq_page_of(&tc->rq, (int64_t)t);
+                        if (tc->rq.mu_fixed[pg])
+                            mu = oc_kvrq_mu(&tc->rq, 0, pg, 0, 1);
+                    }
+                    if (kind2 == 0 && mu != NULL)
+                        memcpy(tc->MUK + t * d, mu, d * sizeof(float));
                 }
             }
         }
@@ -122,7 +132,7 @@ static void tcache_make(TCache *tc, OcKvViewKind kind, size_t n, size_t d,
 
 static void tcache_free(TCache *tc)
 {
-    free(tc->K); free(tc->V); free(tc->kf); free(tc->vf);
+    free(tc->K); free(tc->V); free(tc->MUK); free(tc->kf); free(tc->vf);
     free(tc->kq); free(tc->vq); free(tc->ks); free(tc->vsc);
     if (tc->v.kind == OC_KVV_RQ) oc_kvrq_cache_free(&tc->rq);
 }
@@ -140,6 +150,11 @@ static void ref_attn2(const TCache *tc, const float *q, const float *qb,
         const float *qq = q;
         if (qb != NULL && oc_kvrq_slot(&tc->rq, 0, t) < 0) qq = qb;
         for (size_t i = 0; i < d; i++) a += (double)qq[i] * tc->K[t * d + i];
+        /* Centered RQ: the kernel scores the residual with the rounded q
+         * and adds the page mean term with the exact q. */
+        if (qq == qb)
+            for (size_t i = 0; i < d; i++)
+                a += ((double)q[i] - qb[i]) * tc->MUK[t * d + i];
         s[t - lo] = a;
         if (a > m) m = a;
     }

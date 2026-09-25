@@ -1257,11 +1257,16 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
             return OC_ERR_OOM;
         }
     }
-    c->mu = calloc(n_layers * 2u * n_kv * d, sizeof(float));
-    c->mu_valid = calloc(n_layers, 1);
-    if (c->mu == NULL || c->mu_valid == NULL) {
-        oc_kvrq_cache_free(c);
-        return OC_ERR_OOM;
+    if (p->window > 0 && getenv("OC_KVRQ_NO_CENTER") == NULL) {
+        c->page = p->window;
+        c->n_pages = (n_ctx + c->page - 1) / c->page;
+        c->mu_bytes = n_layers * c->n_pages * 2u * n_kv * d * sizeof(float);
+        c->mu = map_lazy(c->mu_bytes);
+        c->mu_fixed = calloc(n_layers * c->n_pages, 1);
+        if (c->mu == NULL || c->mu_fixed == NULL) {
+            oc_kvrq_cache_free(c);
+            return OC_ERR_OOM;
+        }
     }
     oc_kvrq_cache_clear(c);
     return OC_OK;
@@ -1278,25 +1283,10 @@ void oc_kvrq_cache_free(OcKvRqCache *c)
     unmap_lazy(c->xq, c->xq_bytes);
     unmap_lazy(c->xs, c->xs_bytes);
     free(c->tag);
-    free(c->mu);
-    free(c->mu_valid);
+    unmap_lazy(c->mu, c->mu_bytes);
+    free(c->mu_fixed);
     oc_kvrq_rot_free(&c->rot);
     memset(c, 0, sizeof(*c));
-}
-
-static int kvrq_centered(const OcKvRqCache *c)
-{
-    static int off = -1;
-    if (off < 0) off = getenv("OC_KVRQ_NO_CENTER") != NULL;
-    return c->p.window > 0 && !off;
-}
-
-static void mu_reset(OcKvRqCache *c, size_t l)
-{
-    if (c->mu == NULL) return;
-    memset(c->mu + l * 2u * c->n_kv * c->d, 0,
-           2u * c->n_kv * c->d * sizeof(float));
-    c->mu_valid[l] = kvrq_centered(c) ? 0 : 1;
 }
 
 void oc_kvrq_cache_clear(OcKvRqCache *c)
@@ -1304,7 +1294,7 @@ void oc_kvrq_cache_clear(OcKvRqCache *c)
     if (c == NULL) return;
     if (c->tag != NULL)
         for (size_t i = 0; i < c->n_layers * c->n_slots; i++) c->tag[i] = -1;
-    for (size_t l = 0; l < c->n_layers; l++) mu_reset(c, l);
+    if (c->mu_fixed != NULL) memset(c->mu_fixed, 0, c->n_layers * c->n_pages);
 }
 
 void oc_kvrq_cache_rewind(OcKvRqCache *c, int64_t pos)
@@ -1313,10 +1303,14 @@ void oc_kvrq_cache_rewind(OcKvRqCache *c, int64_t pos)
     if (c->tag != NULL)
         for (size_t i = 0; i < c->n_layers * c->n_slots; i++)
             if (c->tag[i] >= pos) c->tag[i] = -1;
-    /* mu came from positions [n_sink, n_sink + window): refit if any of
-     * them is gone (their RQ blocks are re-encoded at the next flush). */
-    if (pos < (int64_t)c->p.n_sink + (int64_t)c->p.window)
-        for (size_t l = 0; l < c->n_layers; l++) mu_reset(c, l);
+    /* Pages that start at or after pos are gone; the page holding pos
+     * keeps its mean (its older positions are encoded with it or still in
+     * the ring, and the page re-encodes the ring with it when it fills). */
+    if (c->mu_fixed != NULL && pos >= 0)
+        for (size_t l = 0; l < c->n_layers; l++)
+            for (size_t pg = 0; pg < c->n_pages; pg++)
+                if ((int64_t)(pg * c->page) >= pos)
+                    c->mu_fixed[l * c->n_pages + pg] = 0;
 }
 
 static uint8_t *rq_blk(OcKvRqCache *c, size_t layer, size_t kind, size_t h,
@@ -1329,31 +1323,34 @@ static uint8_t *rq_blk(OcKvRqCache *c, size_t layer, size_t kind, size_t h,
            (h * c->n_ctx + (size_t)pos) * c->vc.block_bytes;
 }
 
-void oc_kvrq_flush(OcKvRqCache *c, size_t layer)
+/* Encode page pg of `layer` from the ring (positions [lo, hi) of the page
+ * that have an exact slot), fixing the page mean first if needed. */
+static void page_encode(OcKvRqCache *c, size_t layer, size_t pg)
 {
-    if (c == NULL || c->mu_valid == NULL || c->mu_valid[layer]) return;
     const size_t d = c->d;
-    const int64_t lo = (int64_t)c->p.n_sink;
-    const int64_t hi = lo + (int64_t)c->p.window;   /* exclusive */
-    size_t m = 0;
-    for (int64_t t = lo; t < hi; t++)
-        if (oc_kvrq_slot(c, layer, t) >= 0) m++;
+    int64_t lo = (int64_t)(pg * c->page);
+    const int64_t hi = lo + (int64_t)c->page;
+    if (lo < (int64_t)c->p.n_sink) lo = (int64_t)c->p.n_sink;
+    uint8_t *fixed = &c->mu_fixed[layer * c->n_pages + pg];
     float x[OC_KVRQ_DIM_MAX];
     for (size_t kind = 0; kind < 2; kind++) {
         for (size_t h = 0; h < c->n_kv; h++) {
-            float *mu = (float *)oc_kvrq_mu(c, layer, kind, h);
-            double acc[OC_KVRQ_DIM_MAX] = {0};
-            for (int64_t t = lo; t < hi && m > 0; t++) {
-                const int64_t s = oc_kvrq_slot(c, layer, t);
-                if (s < 0) continue;
-                const int8_t *q = oc_kvrq_xq(c, layer, kind, h) + (size_t)s * d;
-                const float sc = oc_kvrq_xs(c, layer, kind, h)[s];
-                for (size_t i = 0; i < d; i++) acc[i] += (double)sc * q[i];
+            float *mu = (float *)oc_kvrq_mu(c, layer, pg, kind, h);
+            if (!*fixed) {
+                double acc[OC_KVRQ_DIM_MAX] = {0};
+                size_t m = 0;
+                for (int64_t t = lo; t < hi; t++) {
+                    const int64_t s = oc_kvrq_slot(c, layer, t);
+                    if (s < 0) continue;
+                    const int8_t *q = oc_kvrq_xq(c, layer, kind, h) + (size_t)s * d;
+                    const float sc = oc_kvrq_xs(c, layer, kind, h)[s];
+                    for (size_t i = 0; i < d; i++) acc[i] += (double)sc * q[i];
+                    m++;
+                }
+                for (size_t i = 0; i < d; i++)
+                    mu[i] = m > 0 ? (float)(acc[i] / (double)m) : 0.0f;
             }
-            for (size_t i = 0; i < d; i++)
-                mu[i] = m > 0 ? (float)(acc[i] / (double)m) : 0.0f;
-            /* The waiting ring positions get their (centered) blocks. */
-            for (int64_t t = lo; t < hi && m > 0; t++) {
+            for (int64_t t = lo; t < hi; t++) {
                 const int64_t s = oc_kvrq_slot(c, layer, t);
                 if (s < 0) continue;
                 const int8_t *q = oc_kvrq_xq(c, layer, kind, h) + (size_t)s * d;
@@ -1364,7 +1361,19 @@ void oc_kvrq_flush(OcKvRqCache *c, size_t layer)
             }
         }
     }
-    c->mu_valid[layer] = 1;
+    *fixed = 1;
+}
+
+void oc_kvrq_flush(OcKvRqCache *c, size_t layer)
+{
+    if (c == NULL || c->page == 0) return;
+    /* The newest tagged position decides the current page. */
+    int64_t hi = -1;
+    for (size_t s = 0; s < c->n_slots; s++)
+        if (c->tag[layer * c->n_slots + s] > hi)
+            hi = c->tag[layer * c->n_slots + s];
+    if (hi < (int64_t)c->p.n_sink) return;
+    page_encode(c, layer, oc_kvrq_page_of(c, hi));
 }
 
 void oc_kvrq_decode_pos(const OcKvRqCache *c, size_t layer, size_t kind,
@@ -1375,7 +1384,10 @@ void oc_kvrq_decode_pos(const OcKvRqCache *c, size_t layer, size_t kind,
                              : oc_kvrq_kblocks(c, layer, head)) +
                        (size_t)t * cd->block_bytes;
     oc_kvrq_decode(cd, b, out);
-    const float *mu = oc_kvrq_mu(c, layer, kind, head);
+    if (c->page == 0) return;
+    const size_t pg = oc_kvrq_page_of(c, t);
+    if (!c->mu_fixed[layer * c->n_pages + pg]) return;
+    const float *mu = oc_kvrq_mu(c, layer, pg, kind, head);
     for (size_t i = 0; i < c->d; i++) out[i] += mu[i];
 }
 
@@ -1393,23 +1405,15 @@ void oc_kvrq_store(OcKvRqCache *c, size_t layer, int64_t pos, const float *k,
     if ((uint64_t)pos < c->p.n_sink) slot = pos;
     else if (c->p.window > 0)
         slot = (int64_t)c->p.n_sink + pos % (int64_t)c->p.window;
-    /* Until mu is fixed, positions only go to the exact ring (which then
-     * still holds every non-sink position); the RQ blocks follow at flush. */
-    const int64_t pend_hi = (int64_t)c->p.n_sink + (int64_t)c->p.window;
-    if (!c->mu_valid[layer] && pos >= pend_hi) oc_kvrq_flush(c, layer);
-    const int defer = !c->mu_valid[layer];
-    float xc[OC_KVRQ_DIM_MAX];
+    /* Centered: the ring holds the current page; its RQ blocks are
+     * written when the page completes (page_encode). */
+    const int direct = c->page == 0 && (uint64_t)pos >= c->p.n_sink;
     for (size_t h = 0; h < c->n_kv; h++) {
         oc_kvrq_rotate(&c->rot, k + h * d, kr);
         oc_kvrq_rotate(&c->rot, v + h * d, vr);
-        if (!defer && (uint64_t)pos >= c->p.n_sink) {
-            for (size_t kind = 0; kind < 2; kind++) {
-                const float *x = kind ? vr : kr;
-                const float *mu = oc_kvrq_mu(c, layer, kind, h);
-                for (size_t i = 0; i < d; i++) xc[i] = x[i] - mu[i];
-                oc_kvrq_encode(kind ? &c->vc : &c->kc, xc,
-                               rq_blk(c, layer, kind, h, pos));
-            }
+        if (direct) {
+            oc_kvrq_encode(&c->kc, kr, rq_blk(c, layer, 0, h, pos));
+            oc_kvrq_encode(&c->vc, vr, rq_blk(c, layer, 1, h, pos));
         }
         if (slot >= 0) {
             for (size_t kind = 0; kind < 2; kind++) {
@@ -1421,5 +1425,6 @@ void oc_kvrq_store(OcKvRqCache *c, size_t layer, int64_t pos, const float *k,
         }
     }
     if (slot >= 0) c->tag[layer * c->n_slots + (size_t)slot] = pos;
-    if (defer && pos == pend_hi - 1) oc_kvrq_flush(c, layer);
+    if (c->page != 0 && ((size_t)pos + 1) % c->page == 0)
+        page_encode(c, layer, oc_kvrq_page_of(c, pos));
 }
