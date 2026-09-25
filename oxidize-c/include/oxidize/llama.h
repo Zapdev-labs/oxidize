@@ -354,6 +354,10 @@ typedef struct OcLlamaModel {
     unsigned         load_flags;
     OcExpertStreamPool *expert_stream; /* owned; SSD expert offload        */
     uint32_t         live_sessions;
+    /* MTP sidecar (oc_llama_load_mtp_sidecar): a second mapping whose blk.N
+     * tensors back m->mtp. Owned; unmapped by oc_llama_free. */
+    OcGgufMmappedFile mtp_gguf;
+    bool             mtp_gguf_open;
 } OcLlamaModel;
 
 /* KV cache element type.
@@ -457,6 +461,9 @@ typedef struct OcLlamaSession {
     float    *mova_out_all;  /* value_expert_used * kv_row expert outputs */
     float    *rope_cos;      /* rope_dim/2, current position (K2)          */
     float    *rope_sin;
+    /* K2 MTP speculative state (oc_llama_mtp_enable). NULL when off. While
+     * on, mtp_hidden holds h_{pos-1} after output_norm. */
+    struct OcK2Mtp *k2mtp;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -599,6 +606,63 @@ size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out);
 
 bool oc_llama_mtp_present(const OcLlamaModel *model);
+
+/* Overlay a K2-Horizon MTP sidecar (`mtp-*.gguf`: block_count = base + 1,
+ * nextn_predict_layers = 1, only blk.{base}.* tensors) onto a loaded base
+ * model. Must be called before any session is created. Refused when the
+ * model already has an MTP head, when the architecture or base block count
+ * differ, or when the head's tensors are missing or mis-shaped. */
+OcError oc_llama_load_mtp_sidecar(OcLlamaModel *model, const char *path);
+
+/* ─── K2-Horizon MTP speculative decoding (greedy) ───────────────────────
+ *
+ * DeepSeek-style nextn pairing (SPEC.md): the MTP entry at position p is
+ * built from (emb(t_p), h_{p-1}), with h the post-output_norm hidden state,
+ * and predicts t_{p+1}. The head has its own KV layer (index n_layer).
+ *
+ * Usage: oc_llama_mtp_enable(sess, true) before the prompt, then
+ * oc_llama_prefill() (which also fills the MTP KV), then repeated
+ * oc_llama_mtp_step(). Each step emits the greedy token of `logits` plus
+ * every accepted draft, verifying [t, d_1..d_k] in one batched forward and
+ * rolling rejected rows back. `logits` is updated to the distribution after
+ * the last emitted token, exactly as a plain greedy loop would leave it. */
+typedef struct OcMtpStats {
+    uint64_t steps;          /* oc_llama_mtp_step calls                   */
+    uint64_t drafted;        /* draft tokens proposed                     */
+    uint64_t accepted;       /* draft tokens accepted                     */
+    uint64_t emitted;        /* tokens returned                           */
+    uint64_t accept_hist[9]; /* steps that accepted exactly i drafts      */
+    uint64_t draft_at[8];    /* drafts proposed at depth i                */
+    uint64_t accept_at[8];   /* drafts accepted at depth i                */
+    double   t_draft;        /* seconds in MTP drafting (chain steps)     */
+    double   t_verify;       /* seconds in the batched main forward       */
+    double   t_mtp;          /* seconds in MTP catch-up + first draft     */
+} OcMtpStats;
+
+OcError oc_llama_mtp_enable(OcLlamaSession *sess, bool on);
+
+OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
+                          uint32_t *out_tokens, size_t max_out, size_t *n_out,
+                          OcMtpStats *stats);
+
+/* Greedy acceptance: the number of leading drafts that equal the target's
+ * argmax at the same row (draft[i] is checked against target[i]). */
+uint32_t oc_mtp_accept_prefix(const uint32_t *draft, const uint32_t *target,
+                              uint32_t k);
+
+/* Test/parity hook: run the K2 MTP head over `n` rows at MTP positions
+ * pos0 .. pos0+n-1 (pos0 >= 1) with explicit tokens and hidden states
+ * (n x n_embd, post-output_norm), writing each row's shared_head_norm
+ * output to s_out (n x n_embd) and filling the MTP KV. Requires
+ * oc_llama_mtp_enable(). */
+OcError oc_llama_mtp_forward_rows(OcLlamaSession *sess, const uint32_t *tokens,
+                                  const float *hidden, size_t n, int64_t pos0,
+                                  float *s_out);
+
+/* Read one MTP KV row (after RoPE) at position pos into k/v (n_head_kv *
+ * head_dim floats each). F32 KV only. */
+OcError oc_llama_mtp_kv_row(const OcLlamaSession *sess, int64_t pos,
+                            float *k, float *v);
 
 /* Greedy MTP: emit 1 + accepted drafts. Updates session and logits. */
 OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
