@@ -376,8 +376,8 @@ typedef enum {
 } OcKvCacheType;
 
 /* Full KV cache selection. Zero-initialised fields take the defaults:
- * rq_k_bits/rq_v_bits 3/2 (or OC_KV_RQ_BITS env "K,V"), rq_sinks 4,
- * rq_window 256, Hadamard rotation (OC_KV_RQ_ROT=iso for the 4-D rotor). Use
+ * rq_k_bits/rq_v_bits 3/3 (or OC_KV_RQ_BITS env "K,V"), rq_sinks 4,
+ * rq_window 1024, Hadamard rotation (OC_KV_RQ_ROT=iso for the 4-D rotor). Use
  * rq_window = -1 / rq_sinks = -1 to disable the exact window / sinks. */
 typedef struct OcKvOptions {
     OcKvCacheType type;

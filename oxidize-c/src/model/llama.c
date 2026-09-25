@@ -1448,8 +1448,12 @@ static bool rq_supported(const OcLlamaModel *m)
 static void rq_params_resolve(const OcKvOptions *o, OcKvRqParams *p)
 {
     memset(p, 0, sizeof(*p));
-    p->k_bits = 3; p->v_bits = 2;
-    p->n_sink = 4; p->window = 256;
+    /* K3/V3 + 1024 exact recent positions (also the centering page): on
+     * K2-Horizon wikitext-2 (ctx 4096) K3V3 costs +8% ppl vs f32 at 38 KB
+     * per token (10 GB at 262K); K4V4 is within 0.5% at 51 KB; V is the
+     * more sensitive half (K4V2 +13%, K2V2 +23%). */
+    p->k_bits = 3; p->v_bits = 3;
+    p->n_sink = 4; p->window = 1024;
     p->rot = OC_KVRQ_ROT_HADAMARD;
     p->seed = 0x4B32u;
     const char *e = getenv("OC_KV_RQ_BITS");
