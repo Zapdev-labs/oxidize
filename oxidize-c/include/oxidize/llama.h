@@ -369,7 +369,25 @@ typedef struct OcLlamaModel {
 typedef enum {
     OC_KV_F32 = 0,
     OC_KV_Q8  = 1,
+    /* RotorQuant: rotated Lloyd-Max codes, separate K/V bit widths, lazily
+     * committed per-layer mmap regions (see kv_rq.h). kv_k/kv_v/kv_k_q/...
+     * are all NULL; the cache lives in `kv_rq`. */
+    OC_KV_RQ  = 2,
 } OcKvCacheType;
+
+/* Full KV cache selection. Zero-initialised fields take the defaults:
+ * rq_k_bits/rq_v_bits 3/2 (or OC_KV_RQ_BITS env "K,V"), rq_sinks 4,
+ * rq_window 256, Hadamard rotation (OC_KV_RQ_ROT=iso for the 4-D rotor). Use
+ * rq_window = -1 / rq_sinks = -1 to disable the exact window / sinks. */
+typedef struct OcKvOptions {
+    OcKvCacheType type;
+    unsigned rq_k_bits, rq_v_bits;
+    int      rq_sinks;
+    int      rq_window;
+    int      rq_rot;        /* 0 Hadamard, 1 iso */
+} OcKvOptions;
+
+struct OcKvRqCache;
 
 /* Per-sequence KV cache + scratch workspace. One session = one sequence. */
 typedef struct OcLlamaSession {
@@ -447,6 +465,11 @@ typedef struct OcLlamaSession {
      * path. When set, dense decode stores pre-RoPE K/V and attends through
      * the facade. */
     OcCompressedKvCache *kv_compress;
+    /* OC_KV_RQ cache (owned), NULL otherwise. */
+    struct OcKvRqCache *kv_rq;
+    /* Flash-decoding partials: [n_kv][n_chunks][group] of (m, l, acc[hd]). */
+    float  *flash_part;
+    size_t  flash_part_cap;   /* floats */
     OcExpertStreamPool *expert_stream; /* borrowed from model              */
     OcPrerouter        *prerouter;     /* owned                            */
     OcLoraModel        *lora;          /* owned                            */
@@ -559,6 +582,34 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out);
  * the attention read stride must agree. */
 OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
                                  OcKvCacheType kv_type);
+
+/* Initialize a session from full KV options (the only way to get OC_KV_RQ
+ * with explicit bit widths). */
+OcError oc_llama_session_init_kv_opts(OcLlamaModel *model, OcLlamaSession *out,
+                                      const OcKvOptions *opts);
+
+/* Parse "f32" | "q8" | "rq" | "rq:K,V" into opts->type (+ bits). Returns
+ * false on an unknown name. */
+bool oc_llama_parse_kv_type(const char *name, OcKvOptions *opts);
+
+/* Bytes of KV one cached token costs for the session's cache type. */
+size_t oc_llama_kv_bytes_per_token(const OcLlamaSession *sess);
+
+/* Pretend the first `depth` positions are filled by tiling the KV entries
+ * of positions [0, sess->pos) (at least 1) over [sess->pos, depth), then set
+ * pos = depth. For decode-speed measurements at a given depth without paying
+ * for a real prefill: attention cost does not depend on the cache contents.
+ * Touches (commits) the memory like a real fill would. */
+OcError oc_llama_session_fake_fill(OcLlamaSession *sess, int64_t depth);
+
+/* Prefill that also returns logits for every token j >= first_logit (in
+ * this call's numbering): cb(ud, j, logits) is called in order of j with a
+ * vocab_size buffer valid only during the call. Used for perplexity. */
+typedef void (*OcLogitsFn)(void *ud, size_t j, const float *logits);
+OcError oc_llama_prefill_all_logits(OcLlamaSession *sess,
+                                    const uint32_t *tokens, size_t n_tokens,
+                                    size_t first_logit, OcLogitsFn cb,
+                                    void *ud);
 
 /* Attach a compressed KV cache. Decode stays on the f32/q8 path until this
  * is called. `name` is "none" | "rotor" | "helix". Refused while
