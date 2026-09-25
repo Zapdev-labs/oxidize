@@ -17,6 +17,7 @@
  *   --mtp K                   decode with oc_llama_mtp_step, K drafts/step
  *                             (0 = batched-verify path with no drafts; the
  *                             exact-equality reference for K >= 1)
+ *   --mtp-top5                with --mtp 0: top-5 of every step's logits
  *   --mtp-golden FILE.bin     head parity vs golden_mtp.npz (converted by
  *                             scripts/mtp_golden_to_bin.py), then exit
  * With --mtp, parity mode also prints per-case acceptance statistics.
@@ -246,12 +247,14 @@ int main(int argc, char **argv)
     const char *kv_name = "f32";
     const char *mtp_model = NULL, *mtp_golden = NULL;
     int mtp_k = -1;
+    bool mtp_top5 = false;
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) threads = (size_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = (uint32_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--kv") == 0 && i + 1 < argc) kv_name = argv[++i];
         else if (strcmp(argv[i], "--no-prefill") == 0) no_prefill = true;
         else if (strcmp(argv[i], "--mtp-model") == 0 && i + 1 < argc) mtp_model = argv[++i];
+        else if (strcmp(argv[i], "--mtp-top5") == 0) mtp_top5 = true;
         else if (strcmp(argv[i], "--mtp-golden") == 0 && i + 1 < argc) mtp_golden = argv[++i];
         else if (strcmp(argv[i], "--mtp") == 0 && i + 1 < argc) mtp_k = atoi(argv[++i]);
         else if (strcmp(argv[i], "--reps") == 0 && i + 1 < argc) reps = atoi(argv[++i]);
@@ -333,9 +336,23 @@ int main(int argc, char **argv)
             memset(&st, 0, sizeof st);
             uint32_t *gen = malloc(((size_t)ngen + 8) * sizeof(uint32_t));
             size_t ng = 0;
+            /* --mtp-top5 (k = 0 only: one token per step): the top-5 of the
+             * logits each emitted token was chosen from, to measure how far
+             * the batched verify path's logits sit from plain decode's. */
+            double *t5 = (mtp_top5 && mtp_k == 0)
+                       ? malloc(((size_t)ngen + 1) * 10 * sizeof(double)) : NULL;
             ts = now_s();
             while ((int)ng < ngen) {
                 size_t got = 0;
+                if (t5 != NULL) {
+                    uint32_t tid[5];
+                    double lp[5];
+                    top5(logits, vocab, tid, lp);
+                    for (int q = 0; q < 5; ++q) {
+                        t5[ng * 10 + 2 * q] = tid[q];
+                        t5[ng * 10 + 2 * q + 1] = lp[q];
+                    }
+                }
                 e = oc_llama_mtp_step(&sess, (uint32_t)mtp_k, logits, gen + ng,
                                       (size_t)ngen - ng, &got, &st);
                 if (e != OC_OK || got == 0) break;
@@ -347,6 +364,18 @@ int main(int argc, char **argv)
                    name, n, tp, td, ng, td > 0 ? (double)ng / td : 0.0);
             for (size_t i = 0; i < ng; ++i) printf("%s%u", i ? "," : "", gen[i]);
             printf("]");
+            if (t5 != NULL) {
+                printf(",\"top5\":[");
+                for (size_t i = 0; i < ng; ++i) {
+                    printf("%s[", i ? "," : "");
+                    for (int q = 0; q < 5; ++q)
+                        printf("%s[%u,%.5f]", q ? "," : "",
+                               (unsigned)t5[i * 10 + 2 * q], t5[i * 10 + 2 * q + 1]);
+                    printf("]");
+                }
+                printf("]");
+                free(t5);
+            }
             print_mtp_stats(&st);
             printf("}\n");
             fflush(stdout);
