@@ -57,6 +57,10 @@ extern "C" {
 #define OC_OXK_BLOCK_Q5_K_SIZE  176u  /* f16 d + f16 dmin + 12 scales + 128 nibbles + 32qh */
 #define OC_OXK_BLOCK_Q6_K_SIZE  210u  /* f16 d + 16 ql_scales + 192 packed (4+4-bit) */
 #define OC_OXK_BLOCK_Q8_K_SIZE  292u  /* f32 d + 256 int8 + 16 i16 bsums     */
+#define OC_OXK_BLOCK_IQ3_S_SIZE 110u  /* f16 d + 64 qs + 8 qh + 32 signs + 4 scales */
+/* Prepared IQ3_S block: f32 d, 12 pad bytes, 8 x i16 (2*ls+1), 256 signed
+ * int8 weights (grid value with its sign applied). */
+#define OC_OXK_IQ3_S_PREP_BLOCK 288u
 
 /* ─── Capability detection + kernel table ────────────────────────────────
  *
@@ -127,6 +131,11 @@ typedef void (*OcOxkDotQ4_KPreppedMulti_fn)(const void *prep, size_t blocks,
                                             size_t act_stride, size_t n_act,
                                             float *out);
 
+typedef float (*OcOxkDotIq3SQ8K_fn)(const uint8_t *row, size_t blocks,
+                                    const uint8_t *q8);
+typedef void (*OcOxkIq3SPrepRow_fn)(const uint8_t *row, size_t blocks,
+                                    void *scratch);
+
 typedef struct OcOxkContext {
     OcOxkCaps caps;
     /* Dot-product dispatch table — one slot per quant pair. */
@@ -150,6 +159,11 @@ typedef struct OcOxkContext {
     /* Single-activation form of the two above, for decode. */
     OcOxkDotPrepped1_fn dot_q2_k_prepped_1;
     OcOxkDotPrepped1_fn dot_q3_k_prepped_1;
+    /* IQ3_S x Q8_K: packed single-activation dot, row prep, and the
+     * prepared multi-activation dot used by batched prefill. */
+    OcOxkDotIq3SQ8K_fn          dot_iq3_s_q8_k;
+    OcOxkIq3SPrepRow_fn         iq3_s_prep_row;
+    OcOxkDotQ4_KPreppedMulti_fn dot_iq3_s_prepped_multi;
     /* Matvec dispatch table — one slot per quant type. */
     OcOxkMatvecQ4_0F32_fn matvec_q4_0_f32;
     OcOxkMatvecQ4_KF32_fn matvec_q4_k_f32;
@@ -285,6 +299,38 @@ float oc_oxk_dot_q6_k_prepped(const void *scratch, size_t blocks,
 void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
                                    size_t n_act, float *out);
+
+/* ─── IQ3_S × Q8_K ────────────────────────────────────────────────────────
+ *
+ * Port of ggml's ggml_vec_dot_iq3_s_q8_K. Each block's integer sum
+ * Σ_ib32 (2*ls+1) * Σ grid*sign*q8 is exact in int32, and the float
+ * accumulation is `sumf += (d_w * d_a) * (float)bsum` in block order in every
+ * variant, so the scalar, AVX2 and prepared forms are bit-identical.
+ * Activations must stay within [-127, 127] (what the Q8_K quantizer emits);
+ * a -128 would flip sign differently in the SIMD sign trick. */
+float oc_oxk_dot_iq3_s_q8_k(const uint8_t *row, size_t blocks,
+                            const uint8_t *q8);
+float oc_oxk_dot_iq3_s_q8_k_scalar(const uint8_t *row, size_t blocks,
+                                   const uint8_t *q8);
+float oc_oxk_dot_iq3_s_q8_k_avx2(const uint8_t *row, size_t blocks,
+                                 const uint8_t *q8);
+size_t oc_oxk_iq3_s_prep_bytes(size_t blocks);
+void oc_oxk_iq3_s_prep_row(const uint8_t *row, size_t blocks, void *scratch);
+void oc_oxk_iq3_s_prep_row_scalar(const uint8_t *row, size_t blocks,
+                                  void *scratch);
+void oc_oxk_iq3_s_prep_row_avx2(const uint8_t *row, size_t blocks,
+                                void *scratch);
+void oc_oxk_dot_iq3_s_prepped_multi(const void *scratch, size_t blocks,
+                                    const uint8_t *acts, size_t act_stride,
+                                    size_t n_act, float *out);
+void oc_oxk_dot_iq3_s_prepped_multi_scalar(const void *scratch, size_t blocks,
+                                           const uint8_t *acts,
+                                           size_t act_stride, size_t n_act,
+                                           float *out);
+void oc_oxk_dot_iq3_s_prepped_multi_avx2(const void *scratch, size_t blocks,
+                                         const uint8_t *acts,
+                                         size_t act_stride, size_t n_act,
+                                         float *out);
 
 /* Quantized weight × f32-input matvec. `w` is `n_rows` rows of `row_bytes`
  * each, laid out back-to-back; `x` is the f32 activation vector of length

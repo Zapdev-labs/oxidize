@@ -13,7 +13,9 @@
 #include "oxidize/oxk_avx512.h"
 #include "oxidize/oxk_neon.h"
 #include "oxidize/simd.h"
+#include "quant_tables.h"
 
+#include <stdint.h>
 #include <string.h>
 /* pthread_once, not C11 <threads.h>: Apple's libc does not ship <threads.h>,
  * so call_once/once_flag break the macOS build. pthread is already linked. */
@@ -953,6 +955,125 @@ void oc_oxk_matvec_q8_0_f32_scalar(const uint8_t *w, size_t n_rows,
     }
 }
 
+/* ─── IQ3_S × Q8_K (scalar reference) ────────────────────────────────────
+ *
+ * Block layout (110 bytes): f16 d | qs[64] | qh[8] | signs[32] | scales[4].
+ * Element k (0..7) of a group of 8 in 32-wide sub-block ib32 takes grid
+ * index qs[..] | bit k-of-group of qh[ib32] << 8, so the two 4-byte grid
+ * entries of each group of 8 use qh bits 2l and 2l+1. Mirrors
+ * quantization.c::dequant_iq3_s and ggml's ggml_vec_dot_iq3_s_q8_K_generic,
+ * keeping the whole block sum in int32 so the SIMD variants can match it
+ * exactly. */
+
+/* Decode one 32-wide sub-block into signed int8 weights (|w| <= 15). */
+static void iq3_s_decode_ib32(const uint8_t *qs, uint8_t qh,
+                              const uint8_t *signs, int8_t *w)
+{
+    for (int l = 0; l < 4; l++) {
+        const uint32_t g1 = IQ3S_GRID[qs[2 * l] |
+                                      (((uint32_t)qh << (8 - 2 * l)) & 256u)];
+        const uint32_t g2 = IQ3S_GRID[qs[2 * l + 1] |
+                                      (((uint32_t)qh << (7 - 2 * l)) & 256u)];
+        const uint8_t s = signs[l];
+        for (int j = 0; j < 4; j++) {
+            const int v1 = (int)((g1 >> (8u * (uint32_t)j)) & 0xFFu);
+            const int v2 = (int)((g2 >> (8u * (uint32_t)j)) & 0xFFu);
+            w[8 * l + j]     = (int8_t)((s & KMASK_IQ2XS[j])     ? -v1 : v1);
+            w[8 * l + j + 4] = (int8_t)((s & KMASK_IQ2XS[j + 4]) ? -v2 : v2);
+        }
+    }
+}
+
+float oc_oxk_dot_iq3_s_q8_k_scalar(const uint8_t *row, size_t blocks,
+                                   const uint8_t *q8)
+{
+    float sumf = 0.0f;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *xb = row + b * OC_OXK_BLOCK_IQ3_S_SIZE;
+        const uint8_t *yb = q8  + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        float yd;
+        memcpy(&yd, yb, 4);
+        const float d = oc_oxk_f16_le_to_f32(xb) * yd;
+        const int8_t *qa = (const int8_t *)(yb + 4);
+        int32_t bsum = 0;
+        for (int ib32 = 0; ib32 < 8; ib32++) {
+            int8_t w[32];
+            iq3_s_decode_ib32(xb + 2 + 8 * ib32, xb[66 + ib32],
+                              xb + 74 + 4 * ib32, w);
+            int32_t sumi = 0;
+            for (int k = 0; k < 32; k++)
+                sumi += (int32_t)w[k] * (int32_t)qa[32 * ib32 + k];
+            const uint8_t sc = xb[106 + ib32 / 2];
+            const int32_t ls = (ib32 & 1) ? (sc >> 4) : (sc & 0x0F);
+            bsum += sumi * (2 * ls + 1);
+        }
+        sumf += d * (float)bsum;
+    }
+    return sumf;
+}
+
+size_t oc_oxk_iq3_s_prep_bytes(size_t blocks)
+{
+    if (blocks > SIZE_MAX / OC_OXK_IQ3_S_PREP_BLOCK) return SIZE_MAX;
+    return blocks * OC_OXK_IQ3_S_PREP_BLOCK;
+}
+
+void oc_oxk_iq3_s_prep_row_scalar(const uint8_t *row, size_t blocks,
+                                  void *scratch)
+{
+    uint8_t *out = (uint8_t *)scratch;
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *xb = row + b * OC_OXK_BLOCK_IQ3_S_SIZE;
+        uint8_t *pb = out + b * OC_OXK_IQ3_S_PREP_BLOCK;
+        const float d = oc_oxk_f16_le_to_f32(xb);
+        memset(pb, 0, 16);
+        memcpy(pb, &d, 4);
+        for (int ib32 = 0; ib32 < 8; ib32++) {
+            const uint8_t sc = xb[106 + ib32 / 2];
+            const int16_t ls = (int16_t)(2 * ((ib32 & 1) ? (sc >> 4)
+                                                         : (sc & 0x0F)) + 1);
+            memcpy(pb + 16 + 2 * ib32, &ls, 2);
+            iq3_s_decode_ib32(xb + 2 + 8 * ib32, xb[66 + ib32],
+                              xb + 74 + 4 * ib32,
+                              (int8_t *)(pb + 32 + 32 * ib32));
+        }
+    }
+}
+
+void oc_oxk_dot_iq3_s_prepped_multi_scalar(const void *scratch, size_t blocks,
+                                           const uint8_t *acts,
+                                           size_t act_stride, size_t n_act,
+                                           float *out)
+{
+    const uint8_t *prep = (const uint8_t *)scratch;
+    for (size_t a = 0; a < n_act; a++) {
+        const uint8_t *act = acts + a * act_stride;
+        float sumf = 0.0f;
+        for (size_t b = 0; b < blocks; b++) {
+            const uint8_t *pb = prep + b * OC_OXK_IQ3_S_PREP_BLOCK;
+            const uint8_t *yb = act  + b * OC_OXK_BLOCK_Q8_K_SIZE;
+            float wd, yd;
+            memcpy(&wd, pb, 4);
+            memcpy(&yd, yb, 4);
+            const int8_t *w  = (const int8_t *)(pb + 32);
+            const int8_t *qa = (const int8_t *)(yb + 4);
+            int32_t bsum = 0;
+            for (int ib32 = 0; ib32 < 8; ib32++) {
+                int16_t ls;
+                memcpy(&ls, pb + 16 + 2 * ib32, 2);
+                int32_t sumi = 0;
+                for (int k = 0; k < 32; k++)
+                    sumi += (int32_t)w[32 * ib32 + k] *
+                            (int32_t)qa[32 * ib32 + k];
+                bsum += sumi * (int32_t)ls;
+            }
+            const float d = wd * yd;
+            sumf += d * (float)bsum;
+        }
+        out[a] = sumf;
+    }
+}
+
 /* AVX2 / AVX-512 implementations are in oxk_avx2.c */
 
 /* ─── Capability detection + dispatcher ──────────────────────────────────── */
@@ -1013,6 +1134,9 @@ static void oc_oxk_init_once(void)
     g_ctx.dot_q3_k_prepped_multi = dot_q3_k_prepped_multi_scalar;
     g_ctx.dot_q2_k_prepped_1 = oc_oxk_dot_q2_k_prepped;
     g_ctx.dot_q3_k_prepped_1 = oc_oxk_dot_q3_k_prepped;
+    g_ctx.dot_iq3_s_q8_k = oc_oxk_dot_iq3_s_q8_k_scalar;
+    g_ctx.iq3_s_prep_row = oc_oxk_iq3_s_prep_row_scalar;
+    g_ctx.dot_iq3_s_prepped_multi = oc_oxk_dot_iq3_s_prepped_multi_scalar;
 
 #if defined(__x86_64__) || defined(__i386__)
     /* oxk_avx2.c carries real AVX2 implementations of the Q4_K and Q8_0
@@ -1034,6 +1158,11 @@ static void oc_oxk_init_once(void)
          * attn_qkv in Q6_K, ~27% of the bytes of a Q4_K_M file, and running
          * that share scalar left a 6.6x kernel-level gap on the table. */
         g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_avx2;
+        /* IQ3_S: real AVX2 bodies, bit-exact against the scalar reference
+         * (test_oxk_iq3_s.c). Also used on AVX-512 hosts. */
+        g_ctx.dot_iq3_s_q8_k = oc_oxk_dot_iq3_s_q8_k_avx2;
+        g_ctx.iq3_s_prep_row = oc_oxk_iq3_s_prep_row_avx2;
+        g_ctx.dot_iq3_s_prepped_multi = oc_oxk_dot_iq3_s_prepped_multi_avx2;
     }
     /* The VNNI kernels use _mm*_dpbusd_epi32, so AVX-512 alone is not
      * enough — Skylake-SP has AVX-512F/BW but no VNNI. */
@@ -1152,3 +1281,16 @@ void oc_oxk_matvec_q4_k_f32(const uint8_t *w, size_t n_rows, size_t row_bytes, c
 
 void oc_oxk_matvec_q8_0_f32(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
 { oc_oxk_init(); g_ctx.matvec_q8_0_f32(w, n_rows, row_bytes, x, out); }
+
+float oc_oxk_dot_iq3_s_q8_k(const uint8_t *row, size_t blocks,
+                            const uint8_t *q8)
+{ oc_oxk_init(); return g_ctx.dot_iq3_s_q8_k(row, blocks, q8); }
+
+void oc_oxk_iq3_s_prep_row(const uint8_t *row, size_t blocks, void *scratch)
+{ oc_oxk_init(); g_ctx.iq3_s_prep_row(row, blocks, scratch); }
+
+void oc_oxk_dot_iq3_s_prepped_multi(const void *scratch, size_t blocks,
+                                    const uint8_t *acts, size_t act_stride,
+                                    size_t n_act, float *out)
+{ oc_oxk_init(); g_ctx.dot_iq3_s_prepped_multi(scratch, blocks, acts,
+                                               act_stride, n_act, out); }
