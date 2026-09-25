@@ -49,6 +49,8 @@ typedef struct OcCliArgs {
     const char *quantize_type;   /* target quant type string (Q4_0, etc.) */
     /* Streaming. */
     bool       stream;
+    /* Wrap --prompt as one user turn with the GGUF's chat template. */
+    bool       chat;
     /* Backend selection. */
     const char *backend;         /* "cpu" (default) or "cuda"             */
     /* Benchmark mode. */

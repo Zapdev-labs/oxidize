@@ -32,6 +32,13 @@
  *   `<|im_start|>{role}\n{content}<|im_end|>\n` per message, plus an
  *   optional trailing `<|im_start|>assistant\n`.
  *
+ * Pre-tokenized path (`tokenizer.ggml.pre` selects a splitter, currently
+ * "k2-horizon"): mirrors llama.cpp `llm_tokenizer_bpe_session::tokenize`
+ * exactly — special pieces are partitioned out longest-first, each raw
+ * fragment is split into words by the pre-tokenizer (src/format/pretokenize.c),
+ * and BPE merges run per word with a (rank, position) priority queue plus a
+ * per-call word cache, so long prompts cost ~O(n log w) instead of O(n^2).
+ *
  * The Qwen pre-tokenization regex
  *   `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|...`
  * is NOT applied here because the Rust reference does not apply it either.
@@ -52,6 +59,8 @@
 #include "oxidize/gguf.h"
 #include "oxidize/hashtable.h"
 #include "oxidize/log.h"
+#include "oxidize/pretokenize.h"
+#include "oxidize/unicode.h"
 #include "oxidize/vector.h"
 
 #include "utf8_utils.h"
@@ -60,6 +69,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -309,6 +319,7 @@ struct OcBpeSpecialPiece {
     char    *piece;   /* arena-owned, NUL-terminated */
     uint32_t id;
     size_t   len;     /* byte length of piece (for O(n) matching) */
+    bool     control; /* CONTROL (3) piece; USER_DEFINED (4) otherwise */
 };
 
 struct OcBpeTokenizer {
@@ -339,6 +350,12 @@ struct OcBpeTokenizer {
      * length so overlapping markers match greedily (mirrors Rust). */
     struct OcBpeSpecialPiece *special_pieces;
     size_t    n_special_pieces;
+    /* Pre-tokenizer from `tokenizer.ggml.pre`. OC_PRETOK_NONE keeps the
+     * legacy whole-segment merge path (Qwen) bit-for-bit unchanged. */
+    OcPretokType pretok;
+    /* Pre-tokenized path only: vocab id of each byte's GPT-2 character. */
+    uint32_t  byte_ids[256];
+    bool      byte_id_ok[256];
 };
 
 /* ─── Train (toy constructor, mirrors Rust BpeTokenizer::train) ────────── */
@@ -759,6 +776,385 @@ static OcError bpe_encode_segment(const OcBpeTokenizer *bpe, const char *text,
     return OC_OK;
 }
 
+/* ─── Pre-tokenized encode path (llama.cpp parity) ───────────────────── */
+
+/* Growable u32 buffer for the output ids. */
+typedef struct {
+    uint32_t *v;
+    size_t    n;
+    size_t    cap;
+} OcIdBuf;
+
+static OcError idbuf_reserve(OcIdBuf *b, size_t extra)
+{
+    if (b->n + extra <= b->cap) return OC_OK;
+    size_t cap = b->cap ? b->cap : 64;
+    while (cap < b->n + extra) cap *= 2;
+    uint32_t *v = (uint32_t *)realloc(b->v, cap * sizeof(uint32_t));
+    if (!v) return OC_ERR_OOM;
+    b->v = v;
+    b->cap = cap;
+    return OC_OK;
+}
+
+static OcError idbuf_push(OcIdBuf *b, uint32_t id)
+{
+    OcError e = idbuf_reserve(b, 1);
+    if (e != OC_OK) return e;
+    b->v[b->n++] = id;
+    return OC_OK;
+}
+
+/* A candidate merge of symbols `left` and `right` (adjacent when pushed),
+ * remembered with the ids they had so stale entries can be discarded. */
+typedef struct {
+    uint32_t rank;
+    int32_t  left;
+    int32_t  right;
+    uint32_t lid;
+    uint32_t rid;
+} OcBigram;
+
+/* Per-call scratch for merging one word (grown to the longest word). */
+typedef struct {
+    uint32_t *id;      /* symbol token id (UINT32_MAX once merged away) */
+    int32_t  *prev;
+    int32_t  *next;
+    OcBigram *heap;
+    size_t    heap_n;
+    size_t    cap;     /* symbols; heap holds 3 * cap entries */
+} OcMergeScratch;
+
+static OcError scratch_reserve(OcMergeScratch *m, size_t n)
+{
+    if (n <= m->cap) return OC_OK;
+    size_t cap = m->cap ? m->cap : 64;
+    while (cap < n) cap *= 2;
+    uint32_t *id = (uint32_t *)realloc(m->id, cap * sizeof(uint32_t));
+    if (!id) return OC_ERR_OOM;
+    m->id = id;
+    int32_t *prev = (int32_t *)realloc(m->prev, cap * sizeof(int32_t));
+    if (!prev) return OC_ERR_OOM;
+    m->prev = prev;
+    int32_t *next = (int32_t *)realloc(m->next, cap * sizeof(int32_t));
+    if (!next) return OC_ERR_OOM;
+    m->next = next;
+    OcBigram *heap = (OcBigram *)realloc(m->heap, 3 * cap * sizeof(OcBigram));
+    if (!heap) return OC_ERR_OOM;
+    m->heap = heap;
+    m->cap = cap;
+    return OC_OK;
+}
+
+static void scratch_free(OcMergeScratch *m)
+{
+    free(m->id);
+    free(m->prev);
+    free(m->next);
+    free(m->heap);
+}
+
+/* llama.cpp llm_bigram_bpe::comparator: lowest rank first, then leftmost. */
+static inline bool bigram_before(const OcBigram *a, const OcBigram *b)
+{
+    return a->rank < b->rank || (a->rank == b->rank && a->left < b->left);
+}
+
+static void heap_push(OcMergeScratch *m, OcBigram b)
+{
+    size_t i = m->heap_n++;
+    while (i > 0) {
+        size_t parent = (i - 1) / 2;
+        if (!bigram_before(&b, &m->heap[parent])) break;
+        m->heap[i] = m->heap[parent];
+        i = parent;
+    }
+    m->heap[i] = b;
+}
+
+static OcBigram heap_pop(OcMergeScratch *m)
+{
+    OcBigram top = m->heap[0];
+    OcBigram last = m->heap[--m->heap_n];
+    size_t i = 0;
+    for (;;) {
+        size_t c = 2 * i + 1;
+        if (c >= m->heap_n) break;
+        if (c + 1 < m->heap_n && bigram_before(&m->heap[c + 1], &m->heap[c])) c++;
+        if (!bigram_before(&m->heap[c], &last)) break;
+        m->heap[i] = m->heap[c];
+        i = c;
+    }
+    if (m->heap_n > 0) m->heap[i] = last;
+    return top;
+}
+
+static void try_bigram(const OcBpeTokenizer *bpe, OcMergeScratch *m,
+                       int32_t left, int32_t right)
+{
+    if (left < 0 || right < 0) return;
+    uint32_t rank;
+    if (!u64map_get(bpe->merge_ranks, pair_key(m->id[left], m->id[right]), &rank))
+        return;
+    OcBigram b = { rank, left, right, m->id[left], m->id[right] };
+    heap_push(m, b);
+}
+
+/* Merge symbols m->id[0..n) (one pre-token) and append the result to `out`.
+ * Same order of merges as llama.cpp's priority-queue BPE session. */
+static OcError merge_word(const OcBpeTokenizer *bpe, OcMergeScratch *m,
+                          size_t n, OcIdBuf *out)
+{
+    if (n == 0) return OC_OK;
+    for (size_t i = 0; i < n; ++i) {
+        m->prev[i] = (int32_t)i - 1;
+        m->next[i] = (i + 1 < n) ? (int32_t)(i + 1) : -1;
+    }
+    m->heap_n = 0;
+    for (size_t i = 1; i < n; ++i) try_bigram(bpe, m, (int32_t)i - 1, (int32_t)i);
+
+    while (m->heap_n > 0) {
+        OcBigram b = heap_pop(m);
+        /* Symbols only ever grow, so unchanged ids + adjacency means the
+         * bigram is still current (llama compares the concatenated text). */
+        if (m->id[b.left] != b.lid || m->id[b.right] != b.rid
+            || m->next[b.left] != b.right) {
+            continue;
+        }
+        uint32_t merged;
+        if (!u64map_get(bpe->merged_ids, pair_key(b.lid, b.rid), &merged)) continue;
+        m->id[b.left] = merged;
+        m->id[b.right] = UINT32_MAX;
+        m->next[b.left] = m->next[b.right];
+        if (m->next[b.right] >= 0) m->prev[m->next[b.right]] = b.left;
+        try_bigram(bpe, m, m->prev[b.left], b.left);
+        try_bigram(bpe, m, b.left, m->next[b.left]);
+    }
+
+    OcError e = idbuf_reserve(out, n);
+    if (e != OC_OK) return e;
+    for (int32_t i = 0; i >= 0; i = m->next[i]) out->v[out->n++] = m->id[i];
+    return OC_OK;
+}
+
+/* Per-fragment word cache entry: a word (code point slice) → the ids it
+ * produced, stored as a range of the output buffer. */
+typedef struct {
+    uint64_t hash;
+    size_t   cpt_off;
+    size_t   out_off;
+    uint32_t cpt_len;   /* 0 = empty slot */
+    uint32_t out_len;
+} OcWordCacheEntry;
+
+static uint64_t hash_cpts(const uint32_t *c, size_t n)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) {
+        h ^= c[i];
+        h *= 1099511628211ull;
+    }
+    return h | 1u;  /* never 0 */
+}
+
+/* Words longer than this are merged directly, not cached (keeps the cache
+ * cheap for pathological inputs such as huge whitespace runs). */
+#define OC_WORD_CACHE_MAX_CPTS 256u
+
+/* Encode one raw (special-free) fragment: decode → pre-tokenize → per-word
+ * byte-level BPE. */
+static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
+                               size_t len, OcMergeScratch *m, OcIdBuf *out)
+{
+    if (len == 0) return OC_OK;
+    OcError e = OC_OK;
+    uint32_t *cpts = (uint32_t *)malloc(len * sizeof(uint32_t));
+    uint32_t *lens = (uint32_t *)malloc(len * sizeof(uint32_t));
+    OcWordCacheEntry *cache = NULL;
+    if (!cpts || !lens) { e = OC_ERR_OOM; goto done; }
+
+    size_t n = oc_unicode_cpts_from_utf8(text, len, cpts);
+    size_t n_words = oc_pretok_split(bpe->pretok, cpts, n, lens);
+
+    size_t cache_cap = 16;
+    while (cache_cap < n_words * 2) cache_cap <<= 1;
+    cache = (OcWordCacheEntry *)calloc(cache_cap, sizeof(*cache));
+    if (!cache) { e = OC_ERR_OOM; goto done; }
+
+    size_t off = 0;
+    for (size_t w = 0; w < n_words; off += lens[w], ++w) {
+        const uint32_t *word = cpts + off;
+        const uint32_t wlen = lens[w];
+
+        OcWordCacheEntry *slot = NULL;
+        if (wlen <= OC_WORD_CACHE_MAX_CPTS) {
+            uint64_t h = hash_cpts(word, wlen);
+            size_t i = (size_t)h & (cache_cap - 1);
+            while (cache[i].cpt_len != 0) {
+                if (cache[i].hash == h && cache[i].cpt_len == wlen
+                    && memcmp(cpts + cache[i].cpt_off, word,
+                              wlen * sizeof(uint32_t)) == 0) {
+                    break;
+                }
+                i = (i + 1) & (cache_cap - 1);
+            }
+            slot = &cache[i];
+            if (slot->cpt_len != 0) {
+                e = idbuf_reserve(out, slot->out_len);
+                if (e != OC_OK) goto done;
+                memcpy(out->v + out->n, out->v + slot->out_off,
+                       slot->out_len * sizeof(uint32_t));
+                out->n += slot->out_len;
+                continue;
+            }
+            slot->hash = h;
+        }
+
+        /* Byte-encode the word: each code point → UTF-8 → GPT-2 char ids. */
+        e = scratch_reserve(m, (size_t)wlen * 4);
+        if (e != OC_OK) goto done;
+        size_t n_sym = 0;
+        for (uint32_t k = 0; k < wlen; ++k) {
+            char buf[4];
+            size_t nb = oc_unicode_cpt_to_utf8(word[k], buf);
+            for (size_t j = 0; j < nb; ++j) {
+                uint8_t b = (uint8_t)buf[j];
+                if (bpe->byte_id_ok[b]) m->id[n_sym++] = bpe->byte_ids[b];
+                else if (bpe->has_unknown) m->id[n_sym++] = bpe->unknown_id;
+            }
+        }
+        size_t start = out->n;
+        e = merge_word(bpe, m, n_sym, out);
+        if (e != OC_OK) goto done;
+        if (slot) {
+            slot->cpt_off = off;
+            slot->cpt_len = wlen;
+            slot->out_off = start;
+            slot->out_len = (uint32_t)(out->n - start);
+        }
+    }
+
+done:
+    free(cpts);
+    free(lens);
+    free(cache);
+    return e;
+}
+
+/* Text fragment (tok < 0) or an already-resolved special token. */
+typedef struct {
+    size_t  off;
+    size_t  len;
+    int64_t tok;
+} OcFragment;
+
+static const char *find_bytes(const char *hay, size_t hay_len,
+                              const char *needle, size_t n_len)
+{
+    if (n_len == 0 || n_len > hay_len) return NULL;
+    const char *end = hay + hay_len - n_len + 1;
+    const char *p = hay;
+    while (p < end) {
+        p = (const char *)memchr(p, needle[0], (size_t)(end - p));
+        if (!p) return NULL;
+        if (memcmp(p, needle, n_len) == 0) return p;
+        p++;
+    }
+    return NULL;
+}
+
+/* llama.cpp tokenizer_st_partition: for each special piece (longest
+ * first), carve every occurrence out of the remaining raw fragments.
+ * CONTROL pieces are skipped when `parse_special` is false; USER_DEFINED
+ * pieces are always matched (as in llama.cpp / HF tokenizers). */
+static OcError partition_specials(const OcBpeTokenizer *bpe, const char *text,
+                                  size_t len, bool parse_special,
+                                  OcFragment **out_frags, size_t *out_n)
+{
+    size_t cap = 16, n = 1;
+    OcFragment *frags = (OcFragment *)malloc(cap * sizeof(*frags));
+    if (!frags) return OC_ERR_OOM;
+    frags[0] = (OcFragment){ 0, len, -1 };
+
+    for (size_t s = 0; s < bpe->n_special_pieces; ++s) {
+        const struct OcBpeSpecialPiece *sp = &bpe->special_pieces[s];
+        if (!parse_special && sp->control) continue;
+        /* Quick reject: piece absent from every raw fragment. */
+        bool any = false;
+        for (size_t i = 0; i < n && !any; ++i) {
+            if (frags[i].tok < 0
+                && find_bytes(text + frags[i].off, frags[i].len, sp->piece, sp->len))
+                any = true;
+        }
+        if (!any) continue;
+
+        size_t ncap = cap, nn = 0;
+        OcFragment *next = (OcFragment *)malloc(ncap * sizeof(*next));
+        if (!next) { free(frags); return OC_ERR_OOM; }
+#define PUSH_FRAG(F) do {                                                   \
+            if (nn == ncap) {                                               \
+                ncap *= 2;                                                  \
+                OcFragment *g = (OcFragment *)realloc(next, ncap * sizeof(*g)); \
+                if (!g) { free(next); free(frags); return OC_ERR_OOM; }     \
+                next = g;                                                   \
+            }                                                               \
+            next[nn++] = (F);                                               \
+        } while (0)
+        for (size_t i = 0; i < n; ++i) {
+            OcFragment f = frags[i];
+            if (f.tok >= 0) { PUSH_FRAG(f); continue; }
+            size_t pos = f.off, end = f.off + f.len;
+            const char *hit;
+            while ((hit = find_bytes(text + pos, end - pos, sp->piece, sp->len))) {
+                size_t at = (size_t)(hit - text);
+                if (at > pos) PUSH_FRAG(((OcFragment){ pos, at - pos, -1 }));
+                PUSH_FRAG(((OcFragment){ at, sp->len, (int64_t)sp->id }));
+                pos = at + sp->len;
+            }
+            if (pos < end) PUSH_FRAG(((OcFragment){ pos, end - pos, -1 }));
+        }
+#undef PUSH_FRAG
+        free(frags);
+        frags = next;
+        n = nn;
+        cap = ncap;
+    }
+    *out_frags = frags;
+    *out_n = n;
+    return OC_OK;
+}
+
+static OcError bpe_encode_pretok(const OcBpeTokenizer *bpe, const char *text,
+                                 bool parse_special,
+                                 uint32_t **out_ids, size_t *out_count)
+{
+    size_t len = strlen(text);
+    OcIdBuf out = { NULL, 0, 0 };
+    OcMergeScratch m;
+    memset(&m, 0, sizeof(m));
+    OcFragment *frags = NULL;
+    size_t n_frags = 0;
+
+    OcError e = partition_specials(bpe, text, len, parse_special, &frags, &n_frags);
+    for (size_t i = 0; e == OC_OK && i < n_frags; ++i) {
+        if (frags[i].tok >= 0) e = idbuf_push(&out, (uint32_t)frags[i].tok);
+        else e = encode_fragment(bpe, text + frags[i].off, frags[i].len, &m, &out);
+    }
+    free(frags);
+    scratch_free(&m);
+    if (e == OC_OK && !out.v) {
+        out.v = (uint32_t *)malloc(sizeof(uint32_t));
+        if (!out.v) e = OC_ERR_OOM;
+    }
+    if (e != OC_OK) {
+        free(out.v);
+        return e;
+    }
+    *out_ids = out.v;
+    *out_count = out.n;
+    return OC_OK;
+}
+
 /* Encode with special-piece pre-split. Mirrors Rust `BpeTokenizer::encode`. */
 OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
                       uint32_t **out_ids, size_t *out_count)
@@ -766,6 +1162,10 @@ OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
     if (!bpe || !text || !out_ids || !out_count) return OC_ERR_INVALID_ARG;
     *out_ids = NULL;
     *out_count = 0;
+
+    if (bpe->pretok != OC_PRETOK_NONE) {
+        return bpe_encode_pretok(bpe, text, true, out_ids, out_count);
+    }
 
     if (bpe->n_special_pieces == 0) {
         return bpe_encode_segment(bpe, text, out_ids, out_count);
@@ -940,7 +1340,94 @@ OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
     return OC_OK;
 }
 
-/* ─── ChatML template rendering ───────────────────────────────────────── */
+/* ─── Chat template rendering (ChatML + K2-Horizon) ──────────────────── */
+
+typedef struct {
+    char  *p;
+    size_t n;
+    size_t cap;
+    bool   oom;
+} OcStrBuf;
+
+static void sb_append_n(OcStrBuf *b, const char *s, size_t n)
+{
+    if (b->oom || n == 0) return;
+    if (b->n + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < b->n + n + 1) cap *= 2;
+        char *p = (char *)realloc(b->p, cap);
+        if (!p) { b->oom = true; return; }
+        b->p = p;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->n, s, n);
+    b->n += n;
+    b->p[b->n] = '\0';
+}
+
+static void sb_append(OcStrBuf *b, const char *s)
+{
+    sb_append_n(b, s, strlen(s));
+}
+
+/* Last occurrence of `needle` in s[0..len), or NULL. */
+static const char *find_last(const char *s, size_t len, const char *needle)
+{
+    size_t nl = strlen(needle);
+    if (nl == 0 || nl > len) return NULL;
+    for (size_t i = len - nl + 1; i-- > 0;) {
+        if (memcmp(s + i, needle, nl) == 0) return s + i;
+    }
+    return NULL;
+}
+
+/* K2 assistant turn. Mirrors the GGUF Jinja template: when the content
+ * embeds a closed think block (`...</ifm|think>answer`), the thinking text
+ * is split out (`split(close)[0].rstrip('\n').split(open)[-1].lstrip('\n')`)
+ * and the answer is the text after the last close tag, left-stripped of
+ * newlines. The think block is always emitted (empty when no thinking). */
+static void render_k2_assistant(OcStrBuf *b, const char *content)
+{
+    static const char *const tags[] = { "ifm|think", "ifm|think_fast",
+                                        "ifm|think_faster" };
+    const char *tag = tags[0];
+    const char *think = "";
+    size_t think_len = 0;
+    const char *answer = content;
+    size_t clen = strlen(content);
+    for (size_t t = 0; t < 3; ++t) {
+        char close[32], open[32];
+        snprintf(close, sizeof(close), "</%s>", tags[t]);
+        snprintf(open, sizeof(open), "<%s>", tags[t]);
+        const char *first_close = strstr(content, close);
+        if (!first_close) continue;
+        tag = tags[t];
+        /* thinking = before first close, rstrip '\n', after last open,
+         * lstrip '\n'. */
+        size_t before = (size_t)(first_close - content);
+        while (before > 0 && content[before - 1] == '\n') before--;
+        const char *o = find_last(content, before, open);
+        think = o ? o + strlen(open) : content;
+        think_len = before - (size_t)(think - content);
+        while (think_len > 0 && *think == '\n') { think++; think_len--; }
+        answer = find_last(content, clen, close) + strlen(close);
+        break;
+    }
+    while (*answer == '\n') answer++;
+
+    sb_append(b, "<|ifm|im_start|>assistant\n<");
+    sb_append(b, tag);
+    sb_append(b, ">\n");
+    if (think_len > 0) {
+        sb_append_n(b, think, think_len);
+        sb_append(b, "\n");
+    }
+    sb_append(b, "</");
+    sb_append(b, tag);
+    sb_append(b, ">\n");
+    sb_append(b, answer);
+    sb_append(b, "<|ifm|im_end|>");
+}
 
 OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
                                          size_t n_messages,
@@ -949,42 +1436,68 @@ OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
                                          char **out_text)
 {
     if (!out_text || (n_messages > 0 && !messages)) return OC_ERR_INVALID_ARG;
-    if (kind != OC_TEMPLATE_CHATML) return OC_ERR_INVALID_ARG;
+    if (kind != OC_TEMPLATE_CHATML && kind != OC_TEMPLATE_K2
+        && kind != OC_TEMPLATE_K2_NO_THINK) {
+        return OC_ERR_INVALID_ARG;
+    }
     *out_text = NULL;
-
-    /* Compute total length. Each message contributes:
-     *   "<|im_start|>" (12) + role + "\n" + content + "<|im_end|>\n" (11)
-     * Plus optional "<|im_start|>assistant\n" (22). */
-    size_t total = 0;
     for (size_t i = 0; i < n_messages; ++i) {
-        if (!messages[i].role || !messages[i].content) {
-            return OC_ERR_INVALID_ARG;
+        if (!messages[i].role || !messages[i].content) return OC_ERR_INVALID_ARG;
+    }
+
+    OcStrBuf b = { NULL, 0, 0, false };
+    sb_append_n(&b, "", 0);
+    if (kind == OC_TEMPLATE_CHATML) {
+        for (size_t i = 0; i < n_messages; ++i) {
+            sb_append(&b, "<|im_start|>");
+            sb_append(&b, messages[i].role);
+            sb_append(&b, "\n");
+            sb_append(&b, messages[i].content);
+            sb_append(&b, "<|im_end|>\n");
         }
-        total += 12 + strlen(messages[i].role) + 1
-               + strlen(messages[i].content) + 11;
+        if (add_generation_prompt) sb_append(&b, "<|im_start|>assistant\n");
+    } else {
+        for (size_t i = 0; i < n_messages; ++i) {
+            const char *role = messages[i].role;
+            if (strcmp(role, "assistant") == 0) {
+                render_k2_assistant(&b, messages[i].content);
+            } else if (strcmp(role, "system") == 0 || strcmp(role, "user") == 0
+                       || strcmp(role, "tool") == 0) {
+                sb_append(&b, "<|ifm|im_start|>");
+                sb_append(&b, role);
+                sb_append(&b, "\n");
+                sb_append(&b, messages[i].content);
+                sb_append(&b, "<|ifm|im_end|>");
+            }
+            /* Other roles are dropped, as by the Jinja template. */
+        }
+        if (add_generation_prompt) {
+            sb_append(&b, kind == OC_TEMPLATE_K2_NO_THINK
+                          ? "<|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>\n"
+                          : "<|ifm|im_start|>assistant\n<ifm|think>\n");
+        }
     }
-    if (add_generation_prompt) {
-        total += 22;
+    if (!b.p && !b.oom) {
+        b.p = (char *)calloc(1, 1);
+        if (!b.p) b.oom = true;
     }
-
-    char *out = (char *)malloc(total + 1);
-    if (!out) return OC_ERR_OOM;
-    size_t off = 0;
-    for (size_t i = 0; i < n_messages; ++i) {
-        memcpy(out + off, "<|im_start|>", 12); off += 12;
-        size_t rl = strlen(messages[i].role);
-        memcpy(out + off, messages[i].role, rl); off += rl;
-        out[off++] = '\n';
-        size_t cl = strlen(messages[i].content);
-        memcpy(out + off, messages[i].content, cl); off += cl;
-        memcpy(out + off, "<|im_end|>\n", 11); off += 11;
+    if (b.oom) {
+        free(b.p);
+        return OC_ERR_OOM;
     }
-    if (add_generation_prompt) {
-        memcpy(out + off, "<|im_start|>assistant\n", 22); off += 22;
-    }
-    out[off] = '\0';
-    *out_text = out;
+    *out_text = b.p;
     return OC_OK;
+}
+
+OcTemplateKind oc_tokenizer_detect_template(const OcGgufFile *gguf)
+{
+    const char *tmpl = NULL;
+    size_t len = 0;
+    if (gguf && oc_gguf_metadata_get_str(gguf, "tokenizer.chat_template", &tmpl, &len)
+        && tmpl && find_bytes(tmpl, len, "<|ifm|im_start|>", 16)) {
+        return OC_TEMPLATE_K2;
+    }
+    return OC_TEMPLATE_CHATML;
 }
 
 /* ─── Load from GGUF metadata ─────────────────────────────────────────── */
@@ -1060,6 +1573,21 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
         oc_hashtable_put(bpe->vocab, tok, (void *)(uintptr_t)id, NULL);
     }
 
+    /* Pre-tokenizer selection (absent / unknown → legacy path). */
+    const char *pre = NULL;
+    size_t pre_len = 0;
+    if (oc_gguf_metadata_get_str(gguf, "tokenizer.ggml.pre", &pre, &pre_len)) {
+        bpe->pretok = oc_pretok_type_from_name(pre);
+    }
+    if (bpe->pretok != OC_PRETOK_NONE) {
+        for (uint32_t b = 0; b < 256; ++b) {
+            void *vp;
+            bpe->byte_id_ok[b] = oc_hashtable_get(bpe->vocab, byte_to_gpt2_str[b], &vp);
+            bpe->byte_ids[b] = bpe->byte_id_ok[b] ? (uint32_t)(uintptr_t)vp : 0;
+        }
+    }
+    size_t n_unresolved_merges = 0;
+
     /* Build merge ranks + merged ids. */
     for (size_t rank = 0; rank < oc_vector_len(&merges); ++rank) {
         const char *merge = *(char *const *)oc_vector_get(&merges, rank);
@@ -1085,8 +1613,11 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
             return OC_ERR_OOM;
         }
         void *lvp, *rvp, *mvp;
-        if (!oc_hashtable_get(bpe->vocab, left, &lvp)) continue;
-        if (!oc_hashtable_get(bpe->vocab, right, &rvp)) continue;
+        if (!oc_hashtable_get(bpe->vocab, left, &lvp)
+            || !oc_hashtable_get(bpe->vocab, right, &rvp)) {
+            n_unresolved_merges++;
+            continue;
+        }
         /* Build merged token string: left + right. */
         size_t right_len = strlen(right);
         char *merged = oc_arena_alloc(arena, left_len + right_len + 1, 1);
@@ -1098,12 +1629,28 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
         memcpy(merged, left, left_len);
         memcpy(merged + left_len, right, right_len);
         merged[left_len + right_len] = '\0';
-        if (!oc_hashtable_get(bpe->vocab, merged, &mvp)) continue;
+        if (!oc_hashtable_get(bpe->vocab, merged, &mvp)) {
+            n_unresolved_merges++;
+            continue;
+        }
         uint32_t left_id = (uint32_t)(uintptr_t)lvp;
         uint32_t right_id = (uint32_t)(uintptr_t)rvp;
         uint32_t merged_id = (uint32_t)(uintptr_t)mvp;
+        uint32_t prev_rank;
+        if (bpe->pretok != OC_PRETOK_NONE
+            && u64map_get(bpe->merge_ranks, pair_key(left_id, right_id), &prev_rank)) {
+            /* llama.cpp keeps the first rank of a duplicated merge. */
+            continue;
+        }
         u64map_put(bpe->merge_ranks, pair_key(left_id, right_id), (uint32_t)rank);
         u64map_put(bpe->merged_ids, pair_key(left_id, right_id), merged_id);
+    }
+
+    if (n_unresolved_merges > 0 && bpe->pretok != OC_PRETOK_NONE) {
+        /* llama.cpp would still apply these (as non-vocab intermediate
+         * strings); the id-based merge table cannot represent them. */
+        oc_log(OC_LOG_WARN, "tokenizer_bpe: %zu merge(s) reference strings "
+               "outside the vocab and were skipped", n_unresolved_merges);
     }
 
     /* Collect CONTROL (3) / USER_DEFINED (4) special pieces. */
@@ -1146,6 +1693,7 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                         bpe->special_pieces[idx].piece = (char *)piece;
                         bpe->special_pieces[idx].id = (uint32_t)i;
                         bpe->special_pieces[idx].len = strlen(piece);
+                        bpe->special_pieces[idx].control = (t == 3);
                         idx++;
                     }
                 }
@@ -1207,6 +1755,30 @@ void oc_bpe_fill_special_tokens(const OcBpeTokenizer *bpe, OcTokenizer *out)
     out->has_separator = bpe->has_separator; out->separator_id = bpe->separator_id;
     out->has_cls = bpe->has_cls;             out->cls_id = bpe->cls_id;
     out->has_mask = bpe->has_mask;           out->mask_id = bpe->mask_id;
+
+    /* Extra end-of-generation tokens. `<|ifm|im_end|>` closes every K2
+     * turn; `<|eot_id|>` is on llama.cpp's EOG list for this vocab. */
+    static const char *const k_eog_names[] = { "<|ifm|im_end|>", "<|eot_id|>" };
+    out->n_eog = 0;
+    for (size_t i = 0; i < sizeof(k_eog_names) / sizeof(k_eog_names[0]); ++i) {
+        if (i > 0 && bpe->pretok != OC_PRETOK_K2_HORIZON) break;
+        uint32_t id;
+        if (oc_bpe_token_to_id(bpe, k_eog_names[i], &id)
+            && !(out->has_eos && out->eos_id == id)
+            && out->n_eog < OC_TOK_MAX_EOG) {
+            out->eog_ids[out->n_eog++] = id;
+        }
+    }
+}
+
+bool oc_bpe_token_to_id(const OcBpeTokenizer *bpe, const char *text,
+                        uint32_t *out_id)
+{
+    if (!bpe || !bpe->vocab || !text || !out_id) return false;
+    void *vp;
+    if (!oc_hashtable_get(bpe->vocab, text, &vp)) return false;
+    *out_id = (uint32_t)(uintptr_t)vp;
+    return true;
 }
 
 /* ─── OcTokenizer wrapper dispatch ────────────────────────────────────── */
@@ -1232,7 +1804,10 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
     OcError e;
     if (t->kind == OC_TOK_KIND_BPE && t->bpe) {
         const OcBpeTokenizer *bpe = t->bpe;
-        if (policy == OC_TOK_DISALLOW_SPECIAL) {
+        if (bpe->pretok != OC_PRETOK_NONE) {
+            e = bpe_encode_pretok(bpe, text, policy != OC_TOK_DISALLOW_SPECIAL,
+                                  out_ids, out_count);
+        } else if (policy == OC_TOK_DISALLOW_SPECIAL) {
             OcBpeTokenizer tmp = *bpe;
             tmp.n_special_pieces = 0;
             e = oc_bpe_encode(&tmp, text, out_ids, out_count);
@@ -1324,6 +1899,16 @@ bool oc_tokenizer_is_special(const OcTokenizer *t, uint32_t id)
         || (t->has_separator && t->separator_id == id)
         || (t->has_cls && t->cls_id == id)
         || (t->has_mask && t->mask_id == id);
+}
+
+bool oc_tokenizer_is_eog(const OcTokenizer *t, uint32_t id)
+{
+    if (!t) return false;
+    if (t->has_eos && t->eos_id == id) return true;
+    for (size_t i = 0; i < t->n_eog && i < OC_TOK_MAX_EOG; ++i) {
+        if (t->eog_ids[i] == id) return true;
+    }
+    return false;
 }
 
 bool oc_tokenizer_add_bos_default(const OcTokenizer *t)

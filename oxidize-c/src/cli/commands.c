@@ -730,7 +730,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
             if (!ctx->bench_no_eos && tok.has_eos) {
                 size_t keep = 0;
                 for (; keep < n; keep++) {
-                    if (toks[keep] == tok.eos_id) break;
+                    if (oc_tokenizer_is_eog(&tok, toks[keep])) break;
                 }
                 emitted += keep;
                 if (keep < n) break;
