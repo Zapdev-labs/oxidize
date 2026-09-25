@@ -49,6 +49,11 @@ lib: liboxidize-c.a
 liboxidize-c.a: $(LIB_OBJS)
 	ar rcs $@ $^
 
+# Tokenizer-only driver (GGUF metadata only, no weights) for parity checks:
+#   ./oc-tokenize MODEL.gguf < hex-lines ; see scripts/tokenizer_parity.py
+oc-tokenize: scripts/oc_tokenize.c $(LIB_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 # Vendored Criterion (MIT) test framework — see tests/criterion/README.md.
 # Each tests/test_<module>.c uses Criterion's Test(Suite, Case) macro for
 # auto-registration; Criterion provides main(), so no separate runner.c is
@@ -240,6 +245,6 @@ clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
 	      $(LIB_ASAN_OBJS) $(CUDA_OBJS) \
 	      $(DEP_FILES) \
-	      oxidize-c test_runner liboxidize-c.a
+	      oxidize-c oc-tokenize test_runner liboxidize-c.a
 
-.PHONY: build lib test lint clean avx512 cuda manual-tests
+.PHONY: build lib test lint clean avx512 cuda manual-tests oc-tokenize

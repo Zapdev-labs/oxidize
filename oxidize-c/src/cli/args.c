@@ -168,6 +168,7 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
         if (match(arg, "--print-plan"))     { a->print_plan = true; continue; }
         if (match(arg, "--serve-api"))       { a->serve_api = true; continue; }
         if (match(arg, "--stream"))          { a->stream = true; continue; }
+        if (match(arg, "--chat"))            { a->chat = true; continue; }
         if (match(arg, "--bench"))           { a->bench = true; continue; }
         if (match(arg, "--inspect"))         { a->inspect = true; continue; }
         if (match(arg, "--perplexity") || match(arg, "--ppl")) { a->perplexity = true; continue; }

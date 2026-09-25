@@ -146,6 +146,7 @@ static void print_help(void)
 "  --prerouter-prefetch   Load prerouter heads but keep native router\n"
 "  --lora PATH            Edge0 Recover-LoRA safetensors (unmerged, scale α/r=2)\n"
 "  --experts-per-tok K    Override MoE top-k (Edge0 adapters were trained at 4)\n"
+"  --chat                 Wrap the prompt as a user turn (GGUF chat template)\n"
 "  -v, --verbose          Verbose logging\n"
 "  -h, --help             Show this help\n"
 "  --version              Print version and exit\n",
@@ -360,7 +361,16 @@ static OcError run_generation(const OcCliArgs *args)
     size_t n_ids = 0;
     OcSpecialTokenPolicy policy = tok.has_add_bos_token && tok.add_bos_token
         ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
-    e = oc_tokenizer_encode(&tok, prompt, policy, &ids, &n_ids);
+    char *chat_prompt = NULL;
+    if (args->chat) {
+        OcChatMessage msg = { "user", prompt };
+        e = oc_tokenizer_apply_chat_template(
+            &msg, 1, oc_tokenizer_detect_template(&model.gguf.unified), true,
+            &chat_prompt);
+        if (e == OC_OK) prompt = chat_prompt;
+    }
+    if (e == OC_OK) e = oc_tokenizer_encode(&tok, prompt, policy, &ids, &n_ids);
+    free(chat_prompt);
     if (e != OC_OK || n_ids == 0) {
         fprintf(stderr, "error: prompt encode failed (%s)\n", oc_error_msg(e));
         oc_llama_session_free(&sess);
@@ -487,7 +497,7 @@ static OcError run_generation(const OcCliArgs *args)
                 if (e != OC_OK || n == 0) break;
                 for (size_t i = 0; i < n; i++) {
                     sampled = toks[i];
-                    if (tok.has_eos && sampled == tok.eos_id) {
+                    if (oc_tokenizer_is_eog(&tok, sampled)) {
                         eos_reached = true;
                         break;
                     }
@@ -507,7 +517,7 @@ static OcError run_generation(const OcCliArgs *args)
             sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
             scfg.seed++;
-            if (tok.has_eos && sampled == tok.eos_id) { eos_reached = true; break; }
+            if (oc_tokenizer_is_eog(&tok, sampled)) { eos_reached = true; break; }
 
             /* Decode + print the sampled token. */
             char *piece = NULL;
@@ -1046,7 +1056,7 @@ int main(int argc, char **argv)
             size_t emitted = 0;
             while (emitted < (size_t)args.n_predict) {
                 uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
-                if (tok.has_eos && sampled == tok.eos_id) break;
+                if (oc_tokenizer_is_eog(&tok, sampled)) break;
                 emitted++;
                 if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
             }
