@@ -124,6 +124,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--draft-model"))  { a->draft_model = val; *consumed_val = true; }
     else if (match(arg, "--draft-tokens")) { a->draft_tokens = atoi(val); *consumed_val = true; }
     else if (match(arg, "--spec-type"))    { a->spec_type = val; *consumed_val = true; }
+    else if (match(arg, "--mtp-model"))    { a->mtp_model = val; *consumed_val = true; }
     else if (match(arg, "--quantize"))     { a->quantize_input = val; *consumed_val = true; }
     else if (match(arg, "--output"))       { a->quantize_output = val; *consumed_val = true; }
     else if (match(arg, "--quant-type"))   { a->quantize_type = val; *consumed_val = true; }
@@ -169,6 +170,7 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
         if (match(arg, "--serve-api"))       { a->serve_api = true; continue; }
         if (match(arg, "--stream"))          { a->stream = true; continue; }
         if (match(arg, "--chat"))            { a->chat = true; continue; }
+        if (match(arg, "--mtp"))             { a->mtp = true; continue; }
         if (match(arg, "--bench"))           { a->bench = true; continue; }
         if (match(arg, "--inspect"))         { a->inspect = true; continue; }
         if (match(arg, "--perplexity") || match(arg, "--ppl")) { a->perplexity = true; continue; }

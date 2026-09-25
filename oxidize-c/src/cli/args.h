@@ -43,6 +43,8 @@ typedef struct OcCliArgs {
     const char *draft_model;       /* path to draft model GGUF            */
     int        draft_tokens;       /* K draft tokens per step (0=default 4) */
     const char *spec_type;         /* none|mtp|dspark (NULL = auto)       */
+    const char *mtp_model;         /* --mtp-model: K2 nextn sidecar GGUF  */
+    bool       mtp;                /* --mtp: K2 MTP speculative decoding  */
     /* Quantization mode. */
     const char *quantize_input;   /* input GGUF path                      */
     const char *quantize_output;  /* output GGUF path                     */
