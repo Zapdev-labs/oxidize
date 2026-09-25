@@ -3877,10 +3877,6 @@ static double pf_now(void)
 }
 
 
-/* Largest PrefillBuf that carries the few-row MoE scratch (verify buffers;
- * prompt chunks are far larger and never take that path). */
-#define OC_SMALL_MOE_CAP 8u
-
 typedef struct {
     size_t cap;             /* tokens per chunk                          */
     size_t n_embd, n_qo, kv_row, ffw, n_slots, k;
@@ -3902,11 +3898,6 @@ typedef struct {
     float    *rope_cos;     /* [cap][rope_dim/2] K2 angle table          */
     float    *rope_sin;
     size_t    rope_half;
-    /* Few-row MoE (speculative verify, cap <= OC_SMALL_MOE_CAP): per
-     * (row, expert) gate/up/down outputs for prefill_moe_ffn_small. */
-    float    *sm_gate;      /* [cap*(k+1)][i_size]                       */
-    float    *sm_up;        /* [cap*(k+1)][i_size]                       */
-    float    *sm_down;      /* [cap*(k+1)][n_embd]                       */
 } PrefillBuf;
 
 static void prefill_buf_free(PrefillBuf *b)
@@ -3922,7 +3913,6 @@ static void prefill_buf_free(PrefillBuf *b)
     free(b->ex_off); free(b->ex_fill);
     oc_k2_mova_batch_free(&b->mova);
     free(b->rope_cos); free(b->rope_sin);
-    free(b->sm_gate); free(b->sm_up); free(b->sm_down);
     memset(b, 0, sizeof(*b));
 }
 
@@ -4011,18 +4001,6 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
         if (b->act == NULL) { prefill_buf_free(b); return OC_ERR_OOM; }
     }
 
-    if (b->n_slots > 0 && cap <= OC_SMALL_MOE_CAP && c->num_experts > 0) {
-        const size_t pairs = cap * (b->k + 1u);
-        const size_t isz = c->expert_intermediate_size ? c->expert_intermediate_size
-                                                       : c->n_ff;
-        b->sm_gate = xcalloc(pairs * isz, sizeof(float));
-        b->sm_up   = xcalloc(pairs * isz, sizeof(float));
-        b->sm_down = xcalloc(pairs * b->n_embd, sizeof(float));
-        if (!b->sm_gate || !b->sm_up || !b->sm_down) {
-            prefill_buf_free(b);
-            return OC_ERR_OOM;
-        }
-    }
     if (b->n_slots > 0) {
         b->expert_out = xcalloc(cap * b->n_embd, sizeof(float));
         b->router     = xcalloc(cap * b->n_slots, sizeof(float));
@@ -4053,172 +4031,6 @@ static void mm_batch(const OcWeightView *w, const float *in, size_t in_stride,
                                   w->row_bytes, in, in_stride, out, out_stride,
                                   n, b->dequant_temp, b->act, b->act_bytes);
     }
-}
-
-/* OC_SMALL_MOE=0 disables prefill_moe_ffn_small (A/B switch). */
-static bool small_moe_enabled(void)
-{
-    static int on = -1;
-    if (on < 0) {
-        const char *e = getenv("OC_SMALL_MOE");
-        on = (e == NULL || atoi(e) != 0) ? 1 : 0;
-    }
-    return on == 1;
-}
-
-/* Few-row MoE (speculative verify): every (row, routed expert) pair and
- * each row's shared expert run through the decode path's grouped kernels —
- * one parallel region for all gate/up matrices, one for all down matrices —
- * instead of three small regions per distinct expert. Each pair is the
- * decode kernel on the decode input, accumulated in the decode order, so
- * every row's FFN output is bit-identical to forward_moe_ffn(). An expert
- * routed by two rows is read twice; at 2-5 rows that costs less than the
- * per-expert synchronization it replaces. Returns false (nothing done) when
- * the layer does not fit; the caller then runs the general path. */
-static bool prefill_moe_ffn_small(OcLlamaSession *s, const OcLlamaLayer *L,
-                                  PrefillBuf *b, size_t n, uint32_t i_size)
-{
-    const OcLlamaConfig *c = &s->model->cfg;
-    const uint32_t n_exp = c->num_experts;
-    const size_t k = b->k;
-    const size_t D = b->n_embd;
-    if (b->sm_gate == NULL || n > b->cap || s->lora != NULL) return false;
-    if (L->ffn_gate_exps.qtype == OC_QUANT_F32 ||
-        L->ffn_up_exps.qtype == OC_QUANT_F32 ||
-        L->ffn_down_exps.qtype == OC_QUANT_F32) return false;
-    const size_t grb = L->ffn_gate_exps.row_bytes;
-    const size_t urb = L->ffn_up_exps.row_bytes;
-    const size_t drb = L->ffn_down_exps.row_bytes;
-    const bool has_sh = L->ffn_gate_shexp.data != NULL &&
-                        L->ffn_up_shexp.data != NULL &&
-                        L->ffn_down_shexp.data != NULL;
-    /* Same eligibility as forward_moe_ffn's shexp_fused. */
-    const bool sh_fused = has_sh &&
-        c->shared_expert_intermediate_size == i_size &&
-        L->ffn_gate_shexp.rows == i_size && L->ffn_up_shexp.rows == i_size &&
-        L->ffn_gate_shexp.cols == D && L->ffn_up_shexp.cols == D &&
-        L->ffn_down_shexp.rows == D && L->ffn_down_shexp.cols == i_size &&
-        L->ffn_gate_shexp.qtype == L->ffn_gate_exps.qtype &&
-        L->ffn_up_shexp.qtype == L->ffn_up_exps.qtype &&
-        L->ffn_down_shexp.qtype == L->ffn_down_exps.qtype &&
-        L->ffn_gate_shexp.row_bytes == grb &&
-        L->ffn_up_shexp.row_bytes == urb &&
-        L->ffn_down_shexp.row_bytes == drb;
-    if (has_sh && !sh_fused) return false;
-
-    enum { MAXP = OC_SMALL_MOE_CAP * 17 };
-    if (n * (k + 1u) > MAXP) return false;
-    OcGgufQuantizationType gu_q[2 * MAXP], d_q[MAXP];
-    const uint8_t *gu_d[2 * MAXP], *d_d[MAXP];
-    size_t gu_r[2 * MAXP], gu_s[2 * MAXP], d_r[MAXP], d_s[MAXP];
-    const float *gu_in[2 * MAXP], *d_in[MAXP];
-    float *gu_out[2 * MAXP], *d_out[MAXP];
-    size_t np = 0;
-    for (size_t j = 0; j < n; j++) {
-        const float *x = b->normed + j * D;
-        for (size_t i = 0; i <= k; i++) {
-            const uint8_t *g, *u, *dn;
-            if (i < k) {
-                const uint32_t e = b->sel[j * k + i];
-                if (e >= n_exp) continue;           /* zero expert: no weights */
-                g  = L->ffn_gate_exps.data + (size_t)e * i_size * grb;
-                u  = L->ffn_up_exps.data + (size_t)e * i_size * urb;
-                dn = L->ffn_down_exps.data + (size_t)e * D * drb;
-            } else {
-                if (!has_sh) continue;
-                g = L->ffn_gate_shexp.data;
-                u = L->ffn_up_shexp.data;
-                dn = L->ffn_down_shexp.data;
-            }
-            gu_q[2 * np] = L->ffn_gate_exps.qtype;
-            gu_q[2 * np + 1] = L->ffn_up_exps.qtype;
-            gu_d[2 * np] = g;
-            gu_d[2 * np + 1] = u;
-            gu_r[2 * np] = gu_r[2 * np + 1] = i_size;
-            gu_s[2 * np] = grb;
-            gu_s[2 * np + 1] = urb;
-            gu_in[2 * np] = gu_in[2 * np + 1] = x;
-            gu_out[2 * np] = b->sm_gate + np * i_size;
-            gu_out[2 * np + 1] = b->sm_up + np * i_size;
-            d_q[np] = L->ffn_down_exps.qtype;
-            d_d[np] = dn;
-            d_r[np] = D;
-            d_s[np] = drb;
-            d_in[np] = b->sm_gate + np * i_size;
-            d_out[np] = b->sm_down + np * D;
-            np++;
-        }
-    }
-    double t_m0 = pf_now();
-    if (np > 0) {
-        if (L->ffn_gate_exps.qtype == L->ffn_up_exps.qtype) {
-            oc_matvec_quantized_multi_input(gu_q, gu_d, gu_r, D, gu_s, 2 * np,
-                                            gu_in, gu_out, b->dequant_temp);
-        } else {
-            /* Mixed gate/up types: the grouped kernel needs one type. */
-            OcGgufQuantizationType q1[MAXP], q2[MAXP];
-            const uint8_t *d1[MAXP], *d2[MAXP];
-            size_t r1[MAXP], s1[MAXP], s2[MAXP];
-            const float *i1[MAXP];
-            float *o1[MAXP], *o2[MAXP];
-            for (size_t p = 0; p < np; p++) {
-                q1[p] = gu_q[2 * p];     q2[p] = gu_q[2 * p + 1];
-                d1[p] = gu_d[2 * p];     d2[p] = gu_d[2 * p + 1];
-                r1[p] = i_size;
-                s1[p] = gu_s[2 * p];     s2[p] = gu_s[2 * p + 1];
-                i1[p] = gu_in[2 * p];
-                o1[p] = gu_out[2 * p];   o2[p] = gu_out[2 * p + 1];
-            }
-            oc_matvec_quantized_multi_input(q1, d1, r1, D, s1, np, i1, o1,
-                                            b->dequant_temp);
-            oc_matvec_quantized_multi_input(q2, d2, r1, D, s2, np, i1, o2,
-                                            b->dequant_temp);
-        }
-        swiglu_parallel(b->sm_gate, b->sm_up, np * (size_t)i_size);
-        oc_matvec_quantized_multi_input(d_q, d_d, d_r, i_size, d_s, np,
-                                        d_in, d_out, b->dequant_temp);
-    }
-    g_pf_t.expert_mm += pf_now() - t_m0;
-
-    /* Accumulate per row in forward_moe_ffn's order: routed experts in
-     * selection order (zero experts pass the input through), then the
-     * shared expert with its optional sigmoid gate. */
-    double t_s0 = pf_now();
-    size_t p = 0;
-    for (size_t j = 0; j < n; j++) {
-        float *dst = b->expert_out + j * D;
-        const float *x = b->normed + j * D;
-        memset(dst, 0, D * sizeof(float));
-        for (size_t i = 0; i < k; i++) {
-            const uint32_t e = b->sel[j * k + i];
-            const float w = b->sel_w[j * k + i];
-            if (e >= n_exp) {
-                for (size_t q = 0; q < D; q++) dst[q] += w * x[q];
-                continue;
-            }
-            const float *src = b->sm_down + p * D;
-            for (size_t q = 0; q < D; q++) dst[q] += w * src[q];
-            p++;
-        }
-        if (has_sh) {
-            float *sh = b->sm_down + p * D;
-            p++;
-            if (L->ffn_gate_inp_shexp.data != NULL) {
-                float gl = 0.0f;
-                matvec(&L->ffn_gate_inp_shexp, x, &gl, b->dequant_temp);
-                const float sc = 1.0f / (1.0f + expf(-gl));
-                for (size_t q = 0; q < D; q++) sh[q] *= sc;
-            }
-            for (size_t q = 0; q < D; q++) dst[q] += sh[q];
-        }
-    }
-    for (size_t j = 0; j < n; j++) {
-        const float *src = b->expert_out + j * D;
-        float *dst = b->x + j * D;
-        for (size_t q = 0; q < D; q++) dst[q] += src[q];
-    }
-    g_pf_t.scatter += pf_now() - t_s0;
-    return true;
 }
 
 /* Batched MoE FFN. Same routing decision per token as forward_moe_ffn(); the
@@ -4341,11 +4153,6 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
                                       b->sel + j * k, k);
         }
     }
-
-    /* Few rows (speculative verify): the decode path's grouped kernels. */
-    if (n <= OC_SMALL_MOE_CAP && small_moe_enabled() &&
-        prefill_moe_ffn_small(s, L, b, n, i_size))
-        return;
 
     /* 5. Counting sort of (token, weight) pairs into per-expert groups. */
     for (uint32_t e = 0; e < n_slots; e++) b->ex_off[e + 1] += b->ex_off[e];

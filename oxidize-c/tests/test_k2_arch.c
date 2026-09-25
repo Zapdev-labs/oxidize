@@ -48,8 +48,8 @@
 #define K2_FF       48u
 #define K2_NEXP     6u
 #define K2_NUSED    2u
-#define K2_EFF      32u     /* multiple of 32: Q8_0-able expert down rows  */
-#define K2_SHFF     32u
+#define K2_EFF      8u
+#define K2_SHFF     8u
 #define K2_NVEXP    5u
 #define K2_NVUSED   3u
 #define K2_VOCAB    23u
@@ -192,10 +192,6 @@ static void add_mtp_tensors(OcGgufWriter *w, RefModel *rm, bool quant);
 static void build_k2_gguf_mtp(const char *path, RefModel *rm, uint64_t seed,
                               bool quant, int mtp);
 
-/* When set, the routed and shared expert matrices are stored as Q8_0 too
- * (the few-row MoE verify path only takes quantized experts). */
-static bool g_q8_experts = false;
-
 static void build_k2_gguf(const char *path, RefModel *rm, uint64_t seed,
                           bool quant)
 {
@@ -244,12 +240,12 @@ static void build_k2_gguf_mtp(const char *path, RefModel *rm, uint64_t seed,
         } else {
             add_layer_tensor(&w, rm, l, "ffn_gate_inp.weight", K2_EMBD, K2_NEXP, 0, 0.4f, 0, false);
             add_layer_tensor(&w, rm, l, "exp_probs_b.bias", K2_NEXP, 0, 0, 0.15f, 0, false);
-            add_layer_tensor(&w, rm, l, "ffn_gate_exps.weight", K2_EMBD, K2_EFF, K2_NEXP, 0.3f, 0, g_q8_experts);
-            add_layer_tensor(&w, rm, l, "ffn_up_exps.weight", K2_EMBD, K2_EFF, K2_NEXP, 0.3f, 0, g_q8_experts);
-            add_layer_tensor(&w, rm, l, "ffn_down_exps.weight", K2_EFF, K2_EMBD, K2_NEXP, 0.3f, 0, g_q8_experts);
-            add_layer_tensor(&w, rm, l, "ffn_gate_shexp.weight", K2_EMBD, K2_SHFF, 0, 0.3f, 0, g_q8_experts);
-            add_layer_tensor(&w, rm, l, "ffn_up_shexp.weight", K2_EMBD, K2_SHFF, 0, 0.3f, 0, g_q8_experts);
-            add_layer_tensor(&w, rm, l, "ffn_down_shexp.weight", K2_SHFF, K2_EMBD, 0, 0.3f, 0, g_q8_experts);
+            add_layer_tensor(&w, rm, l, "ffn_gate_exps.weight", K2_EMBD, K2_EFF, K2_NEXP, 0.3f, 0, false);
+            add_layer_tensor(&w, rm, l, "ffn_up_exps.weight", K2_EMBD, K2_EFF, K2_NEXP, 0.3f, 0, false);
+            add_layer_tensor(&w, rm, l, "ffn_down_exps.weight", K2_EFF, K2_EMBD, K2_NEXP, 0.3f, 0, false);
+            add_layer_tensor(&w, rm, l, "ffn_gate_shexp.weight", K2_EMBD, K2_SHFF, 0, 0.3f, 0, false);
+            add_layer_tensor(&w, rm, l, "ffn_up_shexp.weight", K2_EMBD, K2_SHFF, 0, 0.3f, 0, false);
+            add_layer_tensor(&w, rm, l, "ffn_down_shexp.weight", K2_SHFF, K2_EMBD, 0, 0.3f, 0, false);
         }
     }
     if (mtp) add_mtp_tensors(&w, rm, quant);
@@ -1096,56 +1092,6 @@ Test(k2_mtp, greedy_output_equals_plain_decode)
     oc_llama_free(&m);
     ref_free(&rm);
     remove(FIXTURE("mtp_gen"));
-}
-
-/* Quantized experts take the few-row MoE path in the batched verify; with
- * k = 0 every verify is one row, and each row must reproduce plain decode's
- * logits exactly (same kernels, same accumulation order), and k >= 1 must
- * keep the greedy output. */
-Test(k2_mtp, verify_rows_match_decode_with_quantized_experts)
-{
-    RefModel rm;
-    g_q8_experts = true;
-    build_k2_gguf_mtp(FIXTURE("mtp_qexp"), &rm, 17, true, 1);
-    g_q8_experts = false;
-    OcLlamaModel m;
-    cr_assert_eq(oc_llama_load(FIXTURE("mtp_qexp"), &m), OC_OK);
-    cr_assert_eq(m.layers[K2_DENSE].ffn_gate_exps.qtype, OC_QUANT_Q8_0);
-    cr_assert_eq(m.layers[K2_DENSE].ffn_down_exps.qtype, OC_QUANT_Q8_0);
-
-    OcLlamaSession a, b;
-    cr_assert_eq(oc_llama_session_init_kv(&m, &a, OC_KV_F32), OC_OK);
-    cr_assert_eq(oc_llama_session_init_kv(&m, &b, OC_KV_F32), OC_OK);
-    cr_assert_eq(oc_llama_mtp_enable(&b, true), OC_OK);
-    float la[K2_VOCAB], lb[K2_VOCAB];
-    cr_assert_eq(oc_llama_prefill(&a, k_tokens, K2_T, 0, la), OC_OK);
-    cr_assert_eq(oc_llama_prefill(&b, k_tokens, K2_T, 0, lb), OC_OK);
-    for (size_t i = 0; i < GEN_N; i++) {
-        const uint32_t t = oc_argmax(la, K2_VOCAB);
-        cr_assert_eq(oc_llama_forward(&a, t, la), OC_OK);
-        uint32_t got;
-        size_t n = 0;
-        cr_assert_eq(oc_llama_mtp_step(&b, 0, lb, &got, 1, &n, NULL), OC_OK);
-        cr_assert_eq(n, 1u);
-        cr_assert_eq(got, t, "token %zu", i);
-        for (size_t v = 0; v < K2_VOCAB; v++)
-            cr_assert_eq(la[v], lb[v], "step %zu logit %zu: %.9g vs %.9g", i, v,
-                         (double)la[v], (double)lb[v]);
-    }
-    oc_llama_session_free(&a);
-    oc_llama_session_free(&b);
-
-    uint32_t plain[GEN_N], got[GEN_N];
-    plain_greedy(&m, plain);
-    OcMtpStats st;
-    for (uint32_t k = 1; k <= 3; k++) {
-        mtp_greedy(&m, k, NULL, got, &st);
-        for (size_t i = 0; i < GEN_N; i++)
-            cr_assert_eq(got[i], plain[i], "k=%u token %zu", k, i);
-    }
-    oc_llama_free(&m);
-    ref_free(&rm);
-    remove(FIXTURE("mtp_qexp"));
 }
 
 /* Oracle drafts force full acceptance, then a rejection in the middle of a
