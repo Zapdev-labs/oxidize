@@ -58,6 +58,11 @@ typedef struct OcMmap OcMmap;
 /* Skip MADV_SEQUENTIAL + MADV_WILLNEED at open. Use for SSD expert
  * streaming so the kernel does not readahead the whole checkpoint. */
 #define OC_MMAP_F_NO_READAHEAD 1u
+/* Leave the mapping at MADV_NORMAL (no SEQUENTIAL, no WILLNEED): demand
+ * paging with the kernel's default readaround, and no drop-behind of pages
+ * that are re-read later (hot MoE experts). Ignored when
+ * OC_MMAP_F_NO_READAHEAD is also set. */
+#define OC_MMAP_F_NORMAL_ADVICE 2u
 
 OcError oc_mmap_open_readonly(const char *path, OcMmap **out);
 
