@@ -643,7 +643,7 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
     for (int t = 0; t < max_tokens; t++) {
         uint32_t tok = oc_sample(sess.logits, st->model->cfg.vocab_size, &scfg,
                                  ids, n_hist);
-        if (st->tokenizer->has_eos && tok == st->tokenizer->eos_id) break;
+        if (oc_tokenizer_is_eog(st->tokenizer, tok)) break;
         ids[n_hist++] = tok;
         char *piece = NULL;
         if (oc_tokenizer_decode(st->tokenizer, &tok, 1, &piece) == OC_OK && piece) {

@@ -1024,6 +1024,15 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     if (!ctx || !model) return OC_ERR_INVALID_ARG;
     memset(ctx, 0, sizeof(*ctx));
 
+    /* K2-Horizon needs grouped norms, MoVA values and the softplus output
+     * gate, none of which the device forward implements: it would run the
+     * model as plain llama and emit garbage. Refuse so the CLI falls back
+     * to the CPU path. */
+    if (model->cfg.is_k2) {
+        oc_log(OC_LOG_WARN, "cuda: k2-horizon is CPU-only");
+        return OC_ERR_BACKEND;
+    }
+
     if (!oc_cuda_available()) return OC_ERR_BACKEND;
 
     for (int i = 0; i < 3; i++) {

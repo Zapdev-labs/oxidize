@@ -23,6 +23,7 @@ typedef enum {
     OC_CHAT_LLAMA2,              /* Llama-2: [INST] ... [/INST]           */
     OC_CHAT_GEMMA,              /* Gemma: <start_of_turn>role\n...        */
     OC_CHAT_PLAIN,              /* Plain text concatenation              */
+    OC_CHAT_K2,                 /* K2-Horizon: <|ifm|im_start|>role\n...  */
 } OcChatTemplate;
 
 /* Render a single message into the template buffer.
