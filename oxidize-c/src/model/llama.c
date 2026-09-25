@@ -4380,6 +4380,130 @@ static void attention_slice(size_t begin, size_t end, size_t tid, void *ud)
     }
 }
 
+/* Few-row attention (speculative verify, MTP catch-up): one task per KV
+ * head sweeps that head's cache ONCE for every (row, grouped query head)
+ * pair, instead of once per pair as attention_slice does. At long context
+ * the per-pair sweep reads the cache n_rows * group times. Arithmetic per
+ * query is the decode kernel's (same online-softmax order), so results are
+ * bit-identical to attention_head_at. */
+#define OC_FEW_ROWS_MAX 8u
+#define OC_FEW_Q_MAX    64u
+
+typedef struct {
+    OcLlamaSession *s;
+    PrefillBuf     *b;
+    uint32_t        layer;
+    int64_t         pos0;
+    size_t          n;
+    size_t          hd;
+    uint32_t        n_head, n_kv, group;
+    int64_t         start;
+    float           scale;
+    const float    *mgate;
+    OcAttnGateKind  gate_kind;
+} FewRowsAttnJob;
+
+static void attention_few_rows_slice(size_t begin, size_t end, size_t tid,
+                                     void *ud)
+{
+    (void)tid;
+    const FewRowsAttnJob *j = (const FewRowsAttnJob *)ud;
+    const OcLlamaSession *s = j->s;
+    const OcLlamaConfig *c = &s->model->cfg;
+    const size_t hd = j->hd, kv_row = s->kv_row_floats;
+    const bool q8 = s->kv_type == OC_KV_Q8;
+    const size_t sc_stride = c->n_head_kv;
+    for (size_t kvh = begin; kvh < end; kvh++) {
+        const float *qs[OC_FEW_Q_MAX];
+        float *outs[OC_FEW_Q_MAX];
+        float run_max[OC_FEW_Q_MAX], run_sum[OC_FEW_Q_MAX];
+        int64_t qpos[OC_FEW_Q_MAX];
+        size_t nq = 0;
+        for (size_t t = 0; t < j->n; t++) {
+            for (uint32_t g = 0; g < j->group; g++) {
+                const uint32_t h = (uint32_t)kvh * j->group + g;
+                qs[nq] = j->b->q + t * j->b->n_qo + (size_t)h * hd;
+                outs[nq] = j->b->attn_out + t * j->b->n_qo + (size_t)h * hd;
+                run_max[nq] = -INFINITY;
+                run_sum[nq] = 0.0f;
+                qpos[nq] = j->pos0 + (int64_t)t;
+                for (size_t i = 0; i < hd; i++) outs[nq][i] = 0.0f;
+                nq++;
+            }
+        }
+        const size_t kv_off = (size_t)j->layer * c->n_ctx * kv_row + kvh * hd;
+        const size_t sc_base = (size_t)j->layer * c->n_ctx * sc_stride + kvh;
+        const int64_t last = j->pos0 + (int64_t)j->n - 1;
+        for (int64_t t = j->start; t <= last; t++) {
+            /* Rows are ordered by position, so the queries that may see
+             * position t are a suffix of the list. */
+            const size_t first = t <= j->pos0 ? 0
+                               : (size_t)(t - j->pos0) * j->group;
+            if (q8) {
+                const int8_t *kq = s->kv_k_q + kv_off + (size_t)t * kv_row;
+                const int8_t *vq = s->kv_v_q + kv_off + (size_t)t * kv_row;
+                const float ks = s->kv_k_scale[sc_base + (size_t)t * sc_stride];
+                const float vs = s->kv_v_scale[sc_base + (size_t)t * sc_stride];
+                for (size_t q = first; q < nq; q++) {
+                    float score = oc_attn_dot_q8(qs[q], kq, hd) * ks * j->scale;
+                    float nm = score > run_max[q] ? score : run_max[q];
+                    float ef = expf(run_max[q] - nm);
+                    float es = expf(score - nm);
+                    oc_attn_scale_f32(outs[q], ef, hd);
+                    oc_attn_axpy_q8(outs[q], vq, es * vs, hd);
+                    run_sum[q] = run_sum[q] * ef + es;
+                    run_max[q] = nm;
+                }
+            } else {
+                const float *kt = s->kv_k + kv_off + (size_t)t * kv_row;
+                const float *vt = s->kv_v + kv_off + (size_t)t * kv_row;
+                for (size_t q = first; q < nq; q++) {
+                    float score = oc_attn_dot_f32(qs[q], kt, hd) * j->scale;
+                    float nm = score > run_max[q] ? score : run_max[q];
+                    float ef = expf(run_max[q] - nm);
+                    float es = expf(score - nm);
+                    oc_attn_scale_f32(outs[q], ef, hd);
+                    oc_attn_axpy_f32(outs[q], vt, es, hd);
+                    run_sum[q] = run_sum[q] * ef + es;
+                    run_max[q] = nm;
+                }
+            }
+        }
+        for (size_t q = 0; q < nq; q++) {
+            (void)qpos[q];
+            if (run_sum[q] > 0.0f)
+                oc_attn_scale_f32(outs[q], 1.0f / run_sum[q], hd);
+            if (j->mgate != NULL) {
+                const size_t t = q / j->group;
+                const uint32_t h = (uint32_t)kvh * j->group +
+                                   (uint32_t)(q % j->group);
+                const float *gate = j->mgate + t * j->b->n_qo + (size_t)h * hd;
+                if (j->gate_kind == OC_ATTN_GATE_SOFTPLUS_LN2) {
+                    oc_k2_softplus_gate_apply(outs[q], gate, hd);
+                } else {
+                    for (size_t d = 0; d < hd; d++)
+                        outs[q][d] *= qwen35_sigmoid(gate[d]);
+                }
+            }
+        }
+    }
+}
+
+/* Whether attention_few_rows_slice can replace attention_slice here: plain
+ * full-attention layers on the dense f32/q8 cache only. */
+static bool few_rows_attention_ok(const OcLlamaSession *s, uint32_t layer,
+                                  size_t n)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const OcLlamaLayer *GL = layer_for_attn(s, layer);
+    if (n < 1 || n > OC_FEW_ROWS_MAX || use_compressed_attn(s, layer)) return false;
+    if (c->is_qwen35 || c->uses_mla || c->uses_gemma4) return false;
+    if (GL->sliding_window > 0 || c->sliding_window > 0) return false;
+    const uint32_t n_kv = GL->n_head_kv ? GL->n_head_kv : c->n_head_kv;
+    if (n_kv == 0 || c->n_head % n_kv != 0) return false;
+    return n * (c->n_head / n_kv) <= OC_FEW_Q_MAX;
+}
+
 /* Per-token half of a qwen35 full-attention layer: split Q out of the fused
  * attn_q output, per-head QK RMSNorm, partial RoPE, then the KV cache store. */
 typedef struct {
@@ -4799,7 +4923,21 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, NULL,
                      c->attn_out_gate ? b->mgate : NULL, OC_OK,
                      c->attn_gate_kind };
-    oc_parallel_for(n * c->n_head, attention_slice, &ajob);
+    if (few_rows_attention_ok(s, layer, n)) {
+        FewRowsAttnJob fj = {
+            .s = s, .b = b, .layer = layer, .pos0 = pos0, .n = n, .hd = hd,
+            .n_head = c->n_head, .n_kv = n_kv, .group = c->n_head / n_kv,
+            .start = (layer >= c->n_layer && c->is_k2) ? 1 : 0,
+            .scale = (c->attn_scale > 0.0f) ? c->attn_scale
+                                            : (1.0f / sqrtf((float)hd)),
+            .mgate = (c->attn_out_gate && L->attn_gate.data != NULL)
+                   ? b->mgate : NULL,
+            .gate_kind = c->attn_gate_kind,
+        };
+        oc_parallel_for(n_kv, attention_few_rows_slice, &fj);
+    } else {
+        oc_parallel_for(n * c->n_head, attention_slice, &ajob);
+    }
     g_pf_t.attn += pf_now() - t0;
     if (atomic_load(&ajob.error) != OC_OK) {
         OcError ae = (OcError)atomic_load(&ajob.error);
@@ -5243,14 +5381,25 @@ static OcError k2_main_rows(OcLlamaSession *s, PrefillBuf *b,
                              b->rope_cos + j * (b->rope_half + 1u),
                              b->rope_sin + j * (b->rope_half + 1u));
     }
+    memset(&g_pf_t, 0, sizeof g_pf_t);
+    const double t0 = pf_now();
     for (uint32_t l = 0; l < c->n_layer; l++) {
         OcError e = prefill_layer(s, l, b, n, pos0);
         if (e != OC_OK) return e;
     }
+    const double t1 = pf_now();
     for (size_t j = 0; j < n; j++)
         model_rms_norm(c, b->x + j * D, m->final_norm, hid + j * D);
     if (lg != NULL) {
         mm_batch(&m->output, hid, D, lg, c->vocab_size, n, b);
+        oc_log(OC_LOG_DEBUG,
+               "mtp verify n=%zu (ms): layers=%.1f head=%.1f | qkv=%.1f "
+               "rope_kv=%.1f attn=%.1f proj=%.1f router=%.1f gather=%.1f "
+               "expert_mm=%.1f scatter=%.1f", n, (t1 - t0) * 1e3,
+               (pf_now() - t1) * 1e3, g_pf_t.qkv * 1e3, g_pf_t.rope_kv * 1e3,
+               g_pf_t.attn * 1e3, g_pf_t.proj * 1e3, g_pf_t.router * 1e3,
+               g_pf_t.gather * 1e3, g_pf_t.expert_mm * 1e3,
+               g_pf_t.scatter * 1e3);
         for (size_t j = 0; j < n; j++) {
             float *l = lg + j * (size_t)c->vocab_size;
             if (c->logit_scale > 0.0f && c->logit_scale != 1.0f)
