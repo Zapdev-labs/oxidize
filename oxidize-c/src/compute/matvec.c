@@ -890,6 +890,14 @@ static void matvec_batch_rows_slice(size_t begin, size_t end, size_t tid,
     if (strip < 4) strip = 4;
     for (size_t r0 = begin; r0 < end; r0 += strip) {
         const size_t n = (end - r0 < strip) ? (end - r0) : strip;
+        if (j->qtype == OC_QUANT_IQ3_S && j->tile <= 4) {
+            /* Decode each IQ3_S row once for the whole (small) tile. */
+            oc_oxk_dot_rows_iq3_s_q8_k_multi(j->data + r0 * j->row_bytes,
+                                             j->row_bytes, n, j->blocks,
+                                             j->acts, j->act_stride, j->tile,
+                                             j->outputs + r0, j->out_stride);
+            continue;
+        }
         for (size_t v = 0; v < j->tile; v++)
             rows_fn(j->data + r0 * j->row_bytes, j->row_bytes, n, j->blocks,
                     j->acts + v * j->act_stride,
@@ -907,7 +915,7 @@ static size_t small_batch_max(OcGgufQuantizationType qtype)
     static size_t max_m = 4;
     if (types < 0) {
         const char *e = getenv("OC_SMALL_BATCH_TYPES");
-        types = e ? atoi(e) : 3;
+        types = e ? atoi(e) : 7;
         const char *m = getenv("OC_SMALL_BATCH_MAX");
         if (m) max_m = (size_t)atoi(m);
     }

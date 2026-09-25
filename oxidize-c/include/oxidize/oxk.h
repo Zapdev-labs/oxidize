@@ -325,6 +325,19 @@ void oc_oxk_dot_rows_q6_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
 void oc_oxk_dot_rows_iq3_s_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
                                      size_t n_rows, size_t blocks,
                                      const uint8_t *q8, float *out);
+/* Rows form over several activations: out[a*out_stride + r] for a < n_act.
+ * IQ3_S decodes each row once for up to four activations (speculative
+ * verify, sparsely routed experts); bit-identical to the rows form. */
+void oc_oxk_dot_rows_iq3_s_q8_k_multi(const uint8_t *rows, size_t row_bytes,
+                                      size_t n_rows, size_t blocks,
+                                      const uint8_t *acts, size_t act_stride,
+                                      size_t n_act, float *out,
+                                      size_t out_stride);
+void oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(const uint8_t *rows,
+                                           size_t row_bytes, size_t n_rows,
+                                           size_t blocks, const uint8_t *acts,
+                                           size_t act_stride, size_t n_act,
+                                           float *out, size_t out_stride);
 
 /* ─── IQ3_S × Q8_K ────────────────────────────────────────────────────────
  *
