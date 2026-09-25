@@ -261,12 +261,13 @@ int main(int argc, char **argv)
 
     uint32_t vocab = model.cfg.vocab_size;
     float *logits = malloc((size_t)vocab * sizeof(float));
-    uint32_t *ids = malloc(65536 * sizeof(uint32_t));
-    char *line = malloc(1 << 20);
+    const size_t max_ids = 1u << 20, line_cap = 16u << 20;
+    uint32_t *ids = malloc(max_ids * sizeof(uint32_t));
+    char *line = malloc(line_cap);
     if (!logits || !ids || !line) return 1;
     OcLlamaSession sess;
     if (oc_llama_session_init_kv_opts(&model, &sess, &kvo) != OC_OK) return 1;
-    while (fgets(line, 1 << 20, stdin)) {
+    while (fgets(line, (int)line_cap, stdin)) {
         char name[128];
         int ngen = 0, off = 0;
         if (sscanf(line, "%127s %d%n", name, &ngen, &off) < 2) continue;
@@ -275,7 +276,7 @@ int main(int argc, char **argv)
         for (;;) {
             char *end;
             unsigned long v = strtoul(p, &end, 10);
-            if (end == p) break;
+            if (end == p || n == max_ids) break;
             ids[n++] = (uint32_t)v;
             p = end;
         }
@@ -300,7 +301,12 @@ int main(int argc, char **argv)
             printf("]}");
             if (s + 1 < ngen) oc_llama_forward(&sess, tid[0], logits);
         }
-        printf("],\"decode_s\":%.4f}\n", now_s() - ts);
+        const double dt = now_s() - ts;
+        printf("],\"decode_s\":%.4f,\"n_prompt\":%zu,\"pp_tps\":%.3f,"
+               "\"tg_tps\":%.3f,\"rss_mb\":%ld,\"swap_mb\":%ld}\n", dt, n,
+               tp > 0 ? (double)n / tp : 0.0,
+               ngen > 1 ? (double)(ngen - 1) / dt : 0.0,
+               rss_kb("VmRSS:") / 1024, rss_kb("VmSwap:") / 1024);
         fflush(stdout);
     }
     oc_llama_session_free(&sess);

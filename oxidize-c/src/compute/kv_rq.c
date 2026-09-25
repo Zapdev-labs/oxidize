@@ -453,12 +453,16 @@ static KVRQ_TGT __m128 hsum4x8(__m256 a, __m256 b, __m256 c, __m256 d)
                       _mm256_extractf128_ps(abcd, 1));
 }
 
+/* Scores for G heads (in groups of 4) against n blocks. Two positions per
+ * iteration: eight independent FMA chains keep both FMA pipes busy (four
+ * chains of 16 dependent FMAs per position would be latency-bound). */
 static KVRQ_TGT void rq_score_avx2_b(const OcKvRqCodec *c,
                                      const uint8_t *blocks, size_t n,
                                      const float *q, size_t G, float *scores,
-                                     size_t ss, const unsigned bits)
+                                     size_t ss, const unsigned bits,
+                                     const size_t d)
 {
-    const size_t d = c->d, bb = c->block_bytes, nm = d / 8;
+    const size_t bb = 2 + d * bits / 8, nm = d / 8;
     const __m256 c_lo = _mm256_loadu_ps(c->centroids);
     const __m256 c_hi = _mm256_loadu_ps(c->centroids + 8);
     for (size_t g0 = 0; g0 < G; g0 += 4) {
@@ -467,14 +471,43 @@ static KVRQ_TGT void rq_score_avx2_b(const OcKvRqCodec *c,
         const float *q1 = q + (g0 + (gc > 1 ? 1 : 0)) * d;
         const float *q2 = q + (g0 + (gc > 2 ? 2 : 0)) * d;
         const float *q3 = q + (g0 + (gc > 3 ? 3 : 0)) * d;
-        for (size_t t = 0; t < n; t++) {
+        size_t t = 0;
+        for (; t + 2 <= n; t += 2) {
+            const uint8_t *b0 = blocks + t * bb, *b1 = b0 + bb;
+            __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+            __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+            __m256 e0 = _mm256_setzero_ps(), e1 = _mm256_setzero_ps();
+            __m256 e2 = _mm256_setzero_ps(), e3 = _mm256_setzero_ps();
+            for (size_t m = 0; m < nm; m++) {
+                const __m256 v0 = rq_lut(rq_idx8(b0 + 2, d, bits, m), c_lo,
+                                         c_hi, bits);
+                const __m256 v1 = rq_lut(rq_idx8(b1 + 2, d, bits, m), c_lo,
+                                         c_hi, bits);
+                __m256 qv = _mm256_loadu_ps(q0 + 8 * m);
+                a0 = _mm256_fmadd_ps(v0, qv, a0); e0 = _mm256_fmadd_ps(v1, qv, e0);
+                qv = _mm256_loadu_ps(q1 + 8 * m);
+                a1 = _mm256_fmadd_ps(v0, qv, a1); e1 = _mm256_fmadd_ps(v1, qv, e1);
+                qv = _mm256_loadu_ps(q2 + 8 * m);
+                a2 = _mm256_fmadd_ps(v0, qv, a2); e2 = _mm256_fmadd_ps(v1, qv, e2);
+                qv = _mm256_loadu_ps(q3 + 8 * m);
+                a3 = _mm256_fmadd_ps(v0, qv, a3); e3 = _mm256_fmadd_ps(v1, qv, e3);
+            }
+            float r0[4], r1[4];
+            _mm_storeu_ps(r0, _mm_mul_ps(hsum4x8(a0, a1, a2, a3),
+                                         _mm_set1_ps(_cvtsh_ss(load_u16(b0)))));
+            _mm_storeu_ps(r1, _mm_mul_ps(hsum4x8(e0, e1, e2, e3),
+                                         _mm_set1_ps(_cvtsh_ss(load_u16(b1)))));
+            for (size_t g = 0; g < gc; g++) {
+                scores[(g0 + g) * ss + t] = r0[g];
+                scores[(g0 + g) * ss + t + 1] = r1[g];
+            }
+        }
+        for (; t < n; t++) {
             const uint8_t *blk = blocks + t * bb;
-            const float s = _cvtsh_ss(load_u16(blk));
-            const uint8_t *codes = blk + 2;
             __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
             __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
             for (size_t m = 0; m < nm; m++) {
-                const __m256 cv = rq_lut(rq_idx8(codes, d, bits, m), c_lo,
+                const __m256 cv = rq_lut(rq_idx8(blk + 2, d, bits, m), c_lo,
                                          c_hi, bits);
                 a0 = _mm256_fmadd_ps(cv, _mm256_loadu_ps(q0 + 8 * m), a0);
                 a1 = _mm256_fmadd_ps(cv, _mm256_loadu_ps(q1 + 8 * m), a1);
@@ -483,7 +516,7 @@ static KVRQ_TGT void rq_score_avx2_b(const OcKvRqCodec *c,
             }
             float r[4];
             _mm_storeu_ps(r, _mm_mul_ps(hsum4x8(a0, a1, a2, a3),
-                                        _mm_set1_ps(s)));
+                                        _mm_set1_ps(_cvtsh_ss(load_u16(blk)))));
             for (size_t g = 0; g < gc; g++) scores[(g0 + g) * ss + t] = r[g];
         }
     }
@@ -491,15 +524,18 @@ static KVRQ_TGT void rq_score_avx2_b(const OcKvRqCodec *c,
 
 #define KVRQ_CHUNK 64u
 
+/* acc_g += sum_t w_gt s_t c[idx_t]. Accumulators split by position parity
+ * (eight chains) for the same latency reason as the score kernel. */
 static KVRQ_TGT void rq_accum_avx2_b(const OcKvRqCodec *c,
                                      const uint8_t *blocks, size_t n,
                                      const float *w, size_t ws, size_t G,
-                                     float *acc, const unsigned bits)
+                                     float *acc, const unsigned bits,
+                                     const size_t d)
 {
-    const size_t d = c->d, bb = c->block_bytes, nm = d / 8;
+    const size_t bb = 2 + d * bits / 8, nm = d / 8;
     const __m256 c_lo = _mm256_loadu_ps(c->centroids);
     const __m256 c_hi = _mm256_loadu_ps(c->centroids + 8);
-    float wsc[4][KVRQ_CHUNK];
+    float wsc[4][KVRQ_CHUNK + 1];
     for (size_t t0 = 0; t0 < n; t0 += KVRQ_CHUNK) {
         const size_t tn = n - t0 < KVRQ_CHUNK ? n - t0 : KVRQ_CHUNK;
         const uint8_t *bl = blocks + t0 * bb;
@@ -510,7 +546,7 @@ static KVRQ_TGT void rq_accum_avx2_b(const OcKvRqCodec *c,
                 for (size_t g = 0; g < 4; g++)
                     wsc[g][t] = g < gc ? w[(g0 + g) * ws + t0 + t] * s : 0.0f;
             }
-            float *o0 = acc + (g0 + 0) * d;
+            float *o0 = acc + g0 * d;
             for (size_t m = 0; m < nm; m++) {
                 __m256 a0 = _mm256_loadu_ps(o0 + 8 * m);
                 __m256 a1 = gc > 1 ? _mm256_loadu_ps(o0 + d + 8 * m)
@@ -519,18 +555,35 @@ static KVRQ_TGT void rq_accum_avx2_b(const OcKvRqCodec *c,
                                    : _mm256_setzero_ps();
                 __m256 a3 = gc > 3 ? _mm256_loadu_ps(o0 + 3 * d + 8 * m)
                                    : _mm256_setzero_ps();
-                for (size_t t = 0; t < tn; t++) {
-                    const __m256 cv = rq_lut(rq_idx8(bl + t * bb + 2, d, bits,
+                __m256 e0 = _mm256_setzero_ps(), e1 = _mm256_setzero_ps();
+                __m256 e2 = _mm256_setzero_ps(), e3 = _mm256_setzero_ps();
+                size_t t = 0;
+                for (; t + 2 <= tn; t += 2) {
+                    const __m256 v0 = rq_lut(rq_idx8(bl + t * bb + 2, d, bits,
                                                      m), c_lo, c_hi, bits);
-                    a0 = _mm256_fmadd_ps(cv, _mm256_broadcast_ss(&wsc[0][t]), a0);
-                    a1 = _mm256_fmadd_ps(cv, _mm256_broadcast_ss(&wsc[1][t]), a1);
-                    a2 = _mm256_fmadd_ps(cv, _mm256_broadcast_ss(&wsc[2][t]), a2);
-                    a3 = _mm256_fmadd_ps(cv, _mm256_broadcast_ss(&wsc[3][t]), a3);
+                    const __m256 v1 = rq_lut(rq_idx8(bl + (t + 1) * bb + 2, d,
+                                                     bits, m), c_lo, c_hi, bits);
+                    a0 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[0][t]), a0);
+                    e0 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(&wsc[0][t + 1]), e0);
+                    a1 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[1][t]), a1);
+                    e1 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(&wsc[1][t + 1]), e1);
+                    a2 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[2][t]), a2);
+                    e2 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(&wsc[2][t + 1]), e2);
+                    a3 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[3][t]), a3);
+                    e3 = _mm256_fmadd_ps(v1, _mm256_broadcast_ss(&wsc[3][t + 1]), e3);
                 }
-                _mm256_storeu_ps(o0 + 8 * m, a0);
-                if (gc > 1) _mm256_storeu_ps(o0 + d + 8 * m, a1);
-                if (gc > 2) _mm256_storeu_ps(o0 + 2 * d + 8 * m, a2);
-                if (gc > 3) _mm256_storeu_ps(o0 + 3 * d + 8 * m, a3);
+                if (t < tn) {
+                    const __m256 v0 = rq_lut(rq_idx8(bl + t * bb + 2, d, bits,
+                                                     m), c_lo, c_hi, bits);
+                    a0 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[0][t]), a0);
+                    a1 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[1][t]), a1);
+                    a2 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[2][t]), a2);
+                    a3 = _mm256_fmadd_ps(v0, _mm256_broadcast_ss(&wsc[3][t]), a3);
+                }
+                _mm256_storeu_ps(o0 + 8 * m, _mm256_add_ps(a0, e0));
+                if (gc > 1) _mm256_storeu_ps(o0 + d + 8 * m, _mm256_add_ps(a1, e1));
+                if (gc > 2) _mm256_storeu_ps(o0 + 2 * d + 8 * m, _mm256_add_ps(a2, e2));
+                if (gc > 3) _mm256_storeu_ps(o0 + 3 * d + 8 * m, _mm256_add_ps(a3, e3));
             }
         }
     }
@@ -538,9 +591,10 @@ static KVRQ_TGT void rq_accum_avx2_b(const OcKvRqCodec *c,
 
 static KVRQ_TGT void rq_decode_rows_avx2_b(const OcKvRqCodec *c,
                                            const uint8_t *blocks, size_t n,
-                                           float *rows, const unsigned bits)
+                                           float *rows, const unsigned bits,
+                                           const size_t d)
 {
-    const size_t d = c->d, bb = c->block_bytes, nm = d / 8;
+    const size_t bb = 2 + d * bits / 8, nm = d / 8;
     const __m256 c_lo = _mm256_loadu_ps(c->centroids);
     const __m256 c_hi = _mm256_loadu_ps(c->centroids + 8);
     for (size_t t = 0; t < n; t++) {
@@ -554,37 +608,46 @@ static KVRQ_TGT void rq_decode_rows_avx2_b(const OcKvRqCodec *c,
     }
 }
 
+/* Specialize on (bits, d) so every offset/shift in rq_idx8 folds to a
+ * constant: a runtime d turns them into integer divisions per group. */
+#define KVRQ_SPECIALIZE(CALL)                                              \
+    switch (c->d * 8 + c->bits) {                                          \
+    case 128 * 8 + 2: CALL(2, 128); break;                                 \
+    case 128 * 8 + 3: CALL(3, 128); break;                                 \
+    case 128 * 8 + 4: CALL(4, 128); break;                                 \
+    case 64 * 8 + 2: CALL(2, 64); break;                                   \
+    case 64 * 8 + 3: CALL(3, 64); break;                                   \
+    case 64 * 8 + 4: CALL(4, 64); break;                                   \
+    case 256 * 8 + 2: CALL(2, 256); break;                                 \
+    case 256 * 8 + 3: CALL(3, 256); break;                                 \
+    default: CALL(4, 256); break;                                          \
+    }
+
 __attribute__((target("avx2,fma,f16c")))
 static void rq_score_avx2(const OcKvRqCodec *c, const uint8_t *b, size_t n,
                           const float *q, size_t G, float *s, size_t ss)
 {
-    switch (c->bits) {
-    case 2: rq_score_avx2_b(c, b, n, q, G, s, ss, 2); break;
-    case 3: rq_score_avx2_b(c, b, n, q, G, s, ss, 3); break;
-    default: rq_score_avx2_b(c, b, n, q, G, s, ss, 4); break;
-    }
+#define C_(B, D) rq_score_avx2_b(c, b, n, q, G, s, ss, B, D)
+    KVRQ_SPECIALIZE(C_)
+#undef C_
 }
 
 __attribute__((target("avx2,fma,f16c")))
 static void rq_accum_avx2(const OcKvRqCodec *c, const uint8_t *b, size_t n,
                           const float *w, size_t ws, size_t G, float *acc)
 {
-    switch (c->bits) {
-    case 2: rq_accum_avx2_b(c, b, n, w, ws, G, acc, 2); break;
-    case 3: rq_accum_avx2_b(c, b, n, w, ws, G, acc, 3); break;
-    default: rq_accum_avx2_b(c, b, n, w, ws, G, acc, 4); break;
-    }
+#define C_(B, D) rq_accum_avx2_b(c, b, n, w, ws, G, acc, B, D)
+    KVRQ_SPECIALIZE(C_)
+#undef C_
 }
 
 __attribute__((target("avx2,fma,f16c")))
 static void rq_decode_rows_avx2(const OcKvRqCodec *c, const uint8_t *b,
                                 size_t n, float *rows)
 {
-    switch (c->bits) {
-    case 2: rq_decode_rows_avx2_b(c, b, n, rows, 2); break;
-    case 3: rq_decode_rows_avx2_b(c, b, n, rows, 3); break;
-    default: rq_decode_rows_avx2_b(c, b, n, rows, 4); break;
-    }
+#define C_(B, D) rq_decode_rows_avx2_b(c, b, n, rows, B, D)
+    KVRQ_SPECIALIZE(C_)
+#undef C_
 }
 
 static KVRQ_TGT __m256 load8_i8f(const int8_t *p)
@@ -593,35 +656,119 @@ static KVRQ_TGT __m256 load8_i8f(const int8_t *p)
         _mm_loadl_epi64((const __m128i *)(const void *)p)));
 }
 
+/* Generic two-position score / parity-split accumulate for rows that
+ * load as eight floats per 8-dim group (int8 codes or f32). ROW(t, m)
+ * yields the __m256 for row t, coordinates 8m..8m+7. */
+#define DENSE_SCORE_BODY(ROW, SCALE)                                          \
+    const size_t nm = d / 8;                                                  \
+    for (size_t g0 = 0; g0 < G; g0 += 4) {                                    \
+        const size_t gc = G - g0 < 4 ? G - g0 : 4;                            \
+        const float *q0 = q + (g0 + 0) * d;                                   \
+        const float *q1 = q + (g0 + (gc > 1 ? 1 : 0)) * d;                    \
+        const float *q2 = q + (g0 + (gc > 2 ? 2 : 0)) * d;                    \
+        const float *q3 = q + (g0 + (gc > 3 ? 3 : 0)) * d;                    \
+        size_t t = 0;                                                         \
+        for (; t + 2 <= n; t += 2) {                                          \
+            __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();        \
+            __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();        \
+            __m256 e0 = _mm256_setzero_ps(), e1 = _mm256_setzero_ps();        \
+            __m256 e2 = _mm256_setzero_ps(), e3 = _mm256_setzero_ps();        \
+            for (size_t m = 0; m < nm; m++) {                                 \
+                const __m256 v0 = ROW(t, m), v1 = ROW(t + 1, m);              \
+                __m256 qv = _mm256_loadu_ps(q0 + 8 * m);                      \
+                a0 = _mm256_fmadd_ps(v0, qv, a0); e0 = _mm256_fmadd_ps(v1, qv, e0); \
+                qv = _mm256_loadu_ps(q1 + 8 * m);                             \
+                a1 = _mm256_fmadd_ps(v0, qv, a1); e1 = _mm256_fmadd_ps(v1, qv, e1); \
+                qv = _mm256_loadu_ps(q2 + 8 * m);                             \
+                a2 = _mm256_fmadd_ps(v0, qv, a2); e2 = _mm256_fmadd_ps(v1, qv, e2); \
+                qv = _mm256_loadu_ps(q3 + 8 * m);                             \
+                a3 = _mm256_fmadd_ps(v0, qv, a3); e3 = _mm256_fmadd_ps(v1, qv, e3); \
+            }                                                                 \
+            float r0[4], r1[4];                                               \
+            _mm_storeu_ps(r0, _mm_mul_ps(hsum4x8(a0, a1, a2, a3),             \
+                                         _mm_set1_ps(SCALE(t))));             \
+            _mm_storeu_ps(r1, _mm_mul_ps(hsum4x8(e0, e1, e2, e3),             \
+                                         _mm_set1_ps(SCALE(t + 1))));         \
+            for (size_t g = 0; g < gc; g++) {                                 \
+                scores[(g0 + g) * ss + t] = r0[g];                            \
+                scores[(g0 + g) * ss + t + 1] = r1[g];                        \
+            }                                                                 \
+        }                                                                     \
+        for (; t < n; t++) {                                                  \
+            __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();        \
+            __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();        \
+            for (size_t m = 0; m < nm; m++) {                                 \
+                const __m256 v0 = ROW(t, m);                                  \
+                a0 = _mm256_fmadd_ps(v0, _mm256_loadu_ps(q0 + 8 * m), a0);    \
+                a1 = _mm256_fmadd_ps(v0, _mm256_loadu_ps(q1 + 8 * m), a1);    \
+                a2 = _mm256_fmadd_ps(v0, _mm256_loadu_ps(q2 + 8 * m), a2);    \
+                a3 = _mm256_fmadd_ps(v0, _mm256_loadu_ps(q3 + 8 * m), a3);    \
+            }                                                                 \
+            float r[4];                                                       \
+            _mm_storeu_ps(r, _mm_mul_ps(hsum4x8(a0, a1, a2, a3),              \
+                                        _mm_set1_ps(SCALE(t))));              \
+            for (size_t g = 0; g < gc; g++) scores[(g0 + g) * ss + t] = r[g]; \
+        }                                                                     \
+    }
+
+#define DENSE_ACCUM_BODY(ROW, WT)                                             \
+    const size_t nm = d / 8;                                                  \
+    for (size_t g0 = 0; g0 < G; g0 += 4) {                                    \
+        const size_t gc = G - g0 < 4 ? G - g0 : 4;                            \
+        const float *w0 = w + (g0 + 0) * ws;                                  \
+        const float *w1 = w + (g0 + (gc > 1 ? 1 : 0)) * ws;                   \
+        const float *w2 = w + (g0 + (gc > 2 ? 2 : 0)) * ws;                   \
+        const float *w3 = w + (g0 + (gc > 3 ? 3 : 0)) * ws;                   \
+        float *o0 = acc + g0 * d;                                             \
+        for (size_t m = 0; m < nm; m++) {                                     \
+            __m256 a0 = _mm256_loadu_ps(o0 + 8 * m);                          \
+            __m256 a1 = gc > 1 ? _mm256_loadu_ps(o0 + d + 8 * m)              \
+                               : _mm256_setzero_ps();                         \
+            __m256 a2 = gc > 2 ? _mm256_loadu_ps(o0 + 2 * d + 8 * m)          \
+                               : _mm256_setzero_ps();                         \
+            __m256 a3 = gc > 3 ? _mm256_loadu_ps(o0 + 3 * d + 8 * m)          \
+                               : _mm256_setzero_ps();                         \
+            __m256 e0 = _mm256_setzero_ps(), e1 = _mm256_setzero_ps();        \
+            __m256 e2 = _mm256_setzero_ps(), e3 = _mm256_setzero_ps();        \
+            size_t t = 0;                                                     \
+            for (; t + 2 <= n; t += 2) {                                      \
+                const __m256 v0 = ROW(t, m), v1 = ROW(t + 1, m);              \
+                a0 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w0, t)), a0);      \
+                e0 = _mm256_fmadd_ps(v1, _mm256_set1_ps(WT(w0, t + 1)), e0);  \
+                a1 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w1, t)), a1);      \
+                e1 = _mm256_fmadd_ps(v1, _mm256_set1_ps(WT(w1, t + 1)), e1);  \
+                a2 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w2, t)), a2);      \
+                e2 = _mm256_fmadd_ps(v1, _mm256_set1_ps(WT(w2, t + 1)), e2);  \
+                a3 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w3, t)), a3);      \
+                e3 = _mm256_fmadd_ps(v1, _mm256_set1_ps(WT(w3, t + 1)), e3);  \
+            }                                                                 \
+            if (t < n) {                                                      \
+                const __m256 v0 = ROW(t, m);                                  \
+                a0 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w0, t)), a0);      \
+                a1 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w1, t)), a1);      \
+                a2 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w2, t)), a2);      \
+                a3 = _mm256_fmadd_ps(v0, _mm256_set1_ps(WT(w3, t)), a3);      \
+            }                                                                 \
+            _mm256_storeu_ps(o0 + 8 * m, _mm256_add_ps(a0, e0));              \
+            if (gc > 1) _mm256_storeu_ps(o0 + d + 8 * m, _mm256_add_ps(a1, e1)); \
+            if (gc > 2) _mm256_storeu_ps(o0 + 2 * d + 8 * m, _mm256_add_ps(a2, e2)); \
+            if (gc > 3) _mm256_storeu_ps(o0 + 3 * d + 8 * m, _mm256_add_ps(a3, e3)); \
+        }                                                                     \
+    }
+
+#define Q8_ROW(t, m) load8_i8f(codes + (t) * cs + 8 * (m))
+#define Q8_SCALE(t) scales[(t) * sst]
+#define Q8_WT(wp, t) ((wp)[t] * scales[(t) * sst])
+#define F32_ROW(t, m) _mm256_loadu_ps(x + (t) * xs + 8 * (m))
+#define F32_SCALE(t) 1.0f
+#define F32_WT(wp, t) ((wp)[t])
+
 __attribute__((target("avx2,fma,f16c")))
 static void q8_score_avx2(const int8_t *codes, size_t cs, const float *scales,
                           size_t sst, size_t d, size_t n, const float *q,
                           size_t G, float *scores, size_t ss)
 {
-    const size_t nm = d / 8;
-    for (size_t g0 = 0; g0 < G; g0 += 4) {
-        const size_t gc = G - g0 < 4 ? G - g0 : 4;
-        const float *q0 = q + (g0 + 0) * d;
-        const float *q1 = q + (g0 + (gc > 1 ? 1 : 0)) * d;
-        const float *q2 = q + (g0 + (gc > 2 ? 2 : 0)) * d;
-        const float *q3 = q + (g0 + (gc > 3 ? 3 : 0)) * d;
-        for (size_t t = 0; t < n; t++) {
-            const int8_t *r = codes + t * cs;
-            __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
-            __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
-            for (size_t m = 0; m < nm; m++) {
-                const __m256 kv = load8_i8f(r + 8 * m);
-                a0 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q0 + 8 * m), a0);
-                a1 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q1 + 8 * m), a1);
-                a2 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q2 + 8 * m), a2);
-                a3 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q3 + 8 * m), a3);
-            }
-            float rr[4];
-            _mm_storeu_ps(rr, _mm_mul_ps(hsum4x8(a0, a1, a2, a3),
-                                         _mm_set1_ps(scales[t * sst])));
-            for (size_t g = 0; g < gc; g++) scores[(g0 + g) * ss + t] = rr[g];
-        }
-    }
+    DENSE_SCORE_BODY(Q8_ROW, Q8_SCALE)
 }
 
 __attribute__((target("avx2,fma,f16c")))
@@ -629,104 +776,21 @@ static void q8_accum_avx2(const int8_t *codes, size_t cs, const float *scales,
                           size_t sst, size_t d, size_t n, const float *w,
                           size_t ws, size_t G, float *acc)
 {
-    const size_t nm = d / 8;
-    float wsc[4][KVRQ_CHUNK];
-    for (size_t t0 = 0; t0 < n; t0 += KVRQ_CHUNK) {
-        const size_t tn = n - t0 < KVRQ_CHUNK ? n - t0 : KVRQ_CHUNK;
-        for (size_t g0 = 0; g0 < G; g0 += 4) {
-            const size_t gc = G - g0 < 4 ? G - g0 : 4;
-            for (size_t t = 0; t < tn; t++) {
-                const float s = scales[(t0 + t) * sst];
-                for (size_t g = 0; g < 4; g++)
-                    wsc[g][t] = g < gc ? w[(g0 + g) * ws + t0 + t] * s : 0.0f;
-            }
-            float *o0 = acc + g0 * d;
-            for (size_t m = 0; m < nm; m++) {
-                __m256 a0 = _mm256_loadu_ps(o0 + 8 * m);
-                __m256 a1 = gc > 1 ? _mm256_loadu_ps(o0 + d + 8 * m)
-                                   : _mm256_setzero_ps();
-                __m256 a2 = gc > 2 ? _mm256_loadu_ps(o0 + 2 * d + 8 * m)
-                                   : _mm256_setzero_ps();
-                __m256 a3 = gc > 3 ? _mm256_loadu_ps(o0 + 3 * d + 8 * m)
-                                   : _mm256_setzero_ps();
-                for (size_t t = 0; t < tn; t++) {
-                    const __m256 kv = load8_i8f(codes + (t0 + t) * cs + 8 * m);
-                    a0 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(&wsc[0][t]), a0);
-                    a1 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(&wsc[1][t]), a1);
-                    a2 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(&wsc[2][t]), a2);
-                    a3 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(&wsc[3][t]), a3);
-                }
-                _mm256_storeu_ps(o0 + 8 * m, a0);
-                if (gc > 1) _mm256_storeu_ps(o0 + d + 8 * m, a1);
-                if (gc > 2) _mm256_storeu_ps(o0 + 2 * d + 8 * m, a2);
-                if (gc > 3) _mm256_storeu_ps(o0 + 3 * d + 8 * m, a3);
-            }
-        }
-    }
+    DENSE_ACCUM_BODY(Q8_ROW, Q8_WT)
 }
 
 __attribute__((target("avx2,fma,f16c")))
 static void f32_score_avx2(const float *x, size_t xs, size_t d, size_t n,
                            const float *q, size_t G, float *scores, size_t ss)
 {
-    const size_t nm = d / 8;
-    for (size_t g0 = 0; g0 < G; g0 += 4) {
-        const size_t gc = G - g0 < 4 ? G - g0 : 4;
-        const float *q0 = q + (g0 + 0) * d;
-        const float *q1 = q + (g0 + (gc > 1 ? 1 : 0)) * d;
-        const float *q2 = q + (g0 + (gc > 2 ? 2 : 0)) * d;
-        const float *q3 = q + (g0 + (gc > 3 ? 3 : 0)) * d;
-        for (size_t t = 0; t < n; t++) {
-            const float *r = x + t * xs;
-            __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
-            __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
-            for (size_t m = 0; m < nm; m++) {
-                const __m256 kv = _mm256_loadu_ps(r + 8 * m);
-                a0 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q0 + 8 * m), a0);
-                a1 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q1 + 8 * m), a1);
-                a2 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q2 + 8 * m), a2);
-                a3 = _mm256_fmadd_ps(kv, _mm256_loadu_ps(q3 + 8 * m), a3);
-            }
-            float rr[4];
-            _mm_storeu_ps(rr, hsum4x8(a0, a1, a2, a3));
-            for (size_t g = 0; g < gc; g++) scores[(g0 + g) * ss + t] = rr[g];
-        }
-    }
+    DENSE_SCORE_BODY(F32_ROW, F32_SCALE)
 }
 
 __attribute__((target("avx2,fma,f16c")))
 static void f32_accum_avx2(const float *x, size_t xs, size_t d, size_t n,
                            const float *w, size_t ws, size_t G, float *acc)
 {
-    const size_t nm = d / 8;
-    for (size_t g0 = 0; g0 < G; g0 += 4) {
-        const size_t gc = G - g0 < 4 ? G - g0 : 4;
-        const float *w0 = w + (g0 + 0) * ws;
-        const float *w1 = w + (g0 + (gc > 1 ? 1 : 0)) * ws;
-        const float *w2 = w + (g0 + (gc > 2 ? 2 : 0)) * ws;
-        const float *w3 = w + (g0 + (gc > 3 ? 3 : 0)) * ws;
-        float *o0 = acc + g0 * d;
-        for (size_t m = 0; m < nm; m++) {
-            __m256 a0 = _mm256_loadu_ps(o0 + 8 * m);
-            __m256 a1 = gc > 1 ? _mm256_loadu_ps(o0 + d + 8 * m)
-                               : _mm256_setzero_ps();
-            __m256 a2 = gc > 2 ? _mm256_loadu_ps(o0 + 2 * d + 8 * m)
-                               : _mm256_setzero_ps();
-            __m256 a3 = gc > 3 ? _mm256_loadu_ps(o0 + 3 * d + 8 * m)
-                               : _mm256_setzero_ps();
-            for (size_t t = 0; t < n; t++) {
-                const __m256 kv = _mm256_loadu_ps(x + t * xs + 8 * m);
-                a0 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(w0 + t), a0);
-                a1 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(w1 + t), a1);
-                a2 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(w2 + t), a2);
-                a3 = _mm256_fmadd_ps(kv, _mm256_broadcast_ss(w3 + t), a3);
-            }
-            _mm256_storeu_ps(o0 + 8 * m, a0);
-            if (gc > 1) _mm256_storeu_ps(o0 + d + 8 * m, a1);
-            if (gc > 2) _mm256_storeu_ps(o0 + 2 * d + 8 * m, a2);
-            if (gc > 3) _mm256_storeu_ps(o0 + 3 * d + 8 * m, a3);
-        }
-    }
+    DENSE_ACCUM_BODY(F32_ROW, F32_WT)
 }
 
 #define KVRQ_HAVE_AVX2 1

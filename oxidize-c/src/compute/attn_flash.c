@@ -307,6 +307,38 @@ static void seg_rows(const OcKvView *v, const Seg *sg, int kind, float *rows)
     }
 }
 
+/* The dense caches are [pos][kv_head][d]: one head's rows sit a whole
+ * cache row apart (1 KB for q8 on K2), so the hardware prefetchers lose the
+ * stream at every page boundary and decode turns latency-bound. Prefetch
+ * the next block's rows while this one is computed. RQ is [head][pos] and
+ * streams sequentially without help. */
+static void dense_prefetch(const OcKvView *v, int64_t t0, size_t n)
+{
+    if (v->kind == OC_KVV_F32) {
+        const size_t bytes = v->d * sizeof(float);
+        for (size_t t = 0; t < n; t++) {
+            const char *k = (const char *)(v->kf + (size_t)(t0 + (int64_t)t) * v->fs);
+            const char *vv = (const char *)(v->vf + (size_t)(t0 + (int64_t)t) * v->fs);
+            for (size_t o = 0; o < bytes; o += 64) {
+                __builtin_prefetch(k + o, 0, 3);
+                __builtin_prefetch(vv + o, 0, 3);
+            }
+        }
+    } else if (v->kind == OC_KVV_Q8) {
+        for (size_t t = 0; t < n; t++) {
+            const size_t r = (size_t)(t0 + (int64_t)t);
+            const char *k = (const char *)(v->kq + r * v->qs);
+            const char *vv = (const char *)(v->vq + r * v->qs);
+            for (size_t o = 0; o < v->d; o += 64) {
+                __builtin_prefetch(k + o, 0, 3);
+                __builtin_prefetch(vv + o, 0, 3);
+            }
+            __builtin_prefetch(v->ksc + r * v->ss, 0, 3);
+            __builtin_prefetch(v->vsc + r * v->ss, 0, 3);
+        }
+    }
+}
+
 /* ─── Decode ──────────────────────────────────────────────────────────── */
 
 size_t oc_attn_flash_decode_scratch(size_t G)
@@ -323,8 +355,17 @@ void oc_attn_flash_decode_range(const OcKvView *v, const float *q, size_t G,
     Seg seg[T_];
     for (size_t g = 0; g < G; g++) { m[g] = -INFINITY; l[g] = 0.0f; }
     memset(acc, 0, G * d * sizeof(float));
+    const int dense = v->kind != OC_KVV_RQ;
+    if (dense)
+        dense_prefetch(v, t0, (size_t)(t1 - t0 < (int64_t)T_ ? t1 - t0
+                                                              : (int64_t)T_));
     for (int64_t tb = t0; tb < t1; tb += T_) {
         const size_t n = (size_t)(t1 - tb < (int64_t)T_ ? t1 - tb : (int64_t)T_);
+        if (dense && tb + (int64_t)T_ < t1) {
+            const int64_t nb = tb + (int64_t)T_;
+            dense_prefetch(v, nb, (size_t)(t1 - nb < (int64_t)T_ ? t1 - nb
+                                                                  : (int64_t)T_));
+        }
         const size_t ns = make_segs(v, tb, n, seg);
         for (size_t s = 0; s < ns; s++)
             seg_score(v, &seg[s], q, G, S + (size_t)(seg[s].t - tb), T_);
