@@ -223,7 +223,6 @@ typedef struct {
     int8_t  q8[FL_Q8_GMAX * OC_KVRQ_DIM_MAX];
     float   qscale[FL_Q8_GMAX];
     int32_t qsum[FL_Q8_GMAX];
-    int     center;               /* RQ blocks are centered            */
     int64_t qmu_page;             /* page qmu[] belongs to (-1: none)  */
     float   qmu[FL_Q8_GMAX];      /* q_g . mu_k(page), added to scores */
 } FlQ8;
@@ -269,21 +268,24 @@ static void seg_score(const OcKvView *v, const Seg *sg, const float *q,
                 oc_kvrq_score(&c->kc, oc_kvrq_kblocks(c, v->layer, v->head) +
                               (size_t)sg->t * c->kc.block_bytes, sg->n, q, G,
                               S, ss);
+            /* Centered blocks hold x - mu: add q.mu back (seg_accum adds
+             * the V mean unconditionally, so this must never be skipped). */
             const float *mu = seg_mu(v, sg, 0);
-            if (mu != NULL && qi != NULL && qi->center) {
-                FlQ8 *qm = qi;
+            if (mu != NULL) {
                 const int64_t pg = (int64_t)oc_kvrq_page_of(c, sg->t);
-                if (qm->qmu_page != pg) {
-                    for (size_t g = 0; g < G; g++) {
-                        float a = 0.0f;
+                const int cache = qi != NULL && G <= FL_Q8_GMAX;
+                for (size_t g = 0; g < G; g++) {
+                    float a;
+                    if (cache && qi->qmu_page == pg) {
+                        a = qi->qmu[g];
+                    } else {
+                        a = 0.0f;
                         for (size_t i = 0; i < d; i++) a += q[g * d + i] * mu[i];
-                        qm->qmu[g] = a;
+                        if (cache) qi->qmu[g] = a;
                     }
-                    qm->qmu_page = pg;
+                    for (size_t t = 0; t < sg->n; t++) S[g * ss + t] += a;
                 }
-                for (size_t g = 0; g < G; g++)
-                    for (size_t t = 0; t < sg->n; t++)
-                        S[g * ss + t] += qm->qmu[g];
+                if (cache) qi->qmu_page = pg;
             }
         }
         return;
@@ -518,7 +520,6 @@ void oc_attn_flash_decode_range(const OcKvView *v, const float *q, size_t G,
     qi.on = !dense && G <= FL_Q8_GMAX && d <= OC_KVRQ_DIM_MAX &&
             (fl_isa(), g_fl_i8);
     if (qi.on) oc_kvrq_prep_q(q, G, d, qi.q8, qi.qscale, qi.qsum);
-    qi.center = !dense && G <= FL_Q8_GMAX && oc_kvrq_centered(v->rq);
     qi.qmu_page = -1;
     if (dense)
         dense_prefetch(v, t0, (size_t)(t1 - t0 < (int64_t)T_ ? t1 - t0

@@ -281,3 +281,33 @@ Test(attn_flash, prefill_sliding_window)
     check_prefill(OC_KVV_F32, 70, 0, 0);
     check_prefill(OC_KVV_Q8, 5, 0, 0);
 }
+
+/* More query heads per kv head than the integer-score path takes (G > 16,
+ * e.g. MQA): scores fall back to f32, but a centered RQ cache still needs
+ * the q.mu_k page term, or every RQ-coded position loses it while V keeps
+ * its mean. */
+Test(attn_flash, decode_rq_centered_many_heads)
+{
+    const size_t n = 517, d = 128, G = 20;
+    TCache tc;
+    rs(4242);
+    tcache_make(&tc, OC_KVV_RQ, n, d, 3, 3, 4, 100);
+    cr_assert(oc_kvrq_centered(&tc.rq));
+    float *q = malloc(G * d * sizeof(float));
+    for (size_t i = 0; i < G * d; i++) q[i] = rg() * 0.15f;
+    float *scr = malloc(oc_attn_flash_decode_scratch(G) * sizeof(float));
+    float m[20], l[20];
+    float *acc = malloc(G * d * sizeof(float));
+    float *out = malloc(G * d * sizeof(float));
+    oc_attn_flash_decode_range(&tc.v, q, G, 0, (int64_t)n, m, l, acc, scr);
+    oc_attn_flash_merge(G, d, 1, m, l, acc, out);
+    for (size_t g = 0; g < G; g++) {
+        double ref[128];
+        ref_attn(&tc, q + g * d, 0, (int64_t)n - 1, ref);
+        for (size_t i = 0; i < d; i++)
+            cr_assert(fabs(out[g * d + i] - ref[i]) < 2e-4 * (1 + fabs(ref[i])),
+                      "g %zu i %zu: G=20 %f ref %f", g, i, out[g * d + i], ref[i]);
+    }
+    free(q); free(scr); free(acc); free(out);
+    tcache_free(&tc);
+}
