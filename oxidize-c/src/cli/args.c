@@ -7,6 +7,7 @@
 #include "args.h"
 
 #include "oxidize/cli_commands.h"
+#include "oxidize/llama.h"
 #include "oxidize/util/string.h"
 
 #include <stdbool.h>
@@ -102,7 +103,11 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--prompt-file")){ a->prompt_file = val; *consumed_val = true; }
     else if (match(arg, "--n-predict"))  { a->n_predict = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
     else if (match(arg, "--ctx"))        { a->n_ctx = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
-    else if (match(arg, "--kv"))         { a->kv_type = val; *consumed_val = true; }
+    else if (match(arg, "--kv") || match(arg, "--kv-type")) { a->kv_type = val; *consumed_val = true; }
+    else if (match(arg, "--kv-k-bits"))  { oc_llama_set_rq_defaults(atoi(val), 0, 0, 0); *consumed_val = true; }
+    else if (match(arg, "--kv-v-bits"))  { oc_llama_set_rq_defaults(0, atoi(val), 0, 0); *consumed_val = true; }
+    else if (match(arg, "--kv-sinks"))   { oc_llama_set_rq_defaults(0, 0, atoi(val) == 0 ? -1 : atoi(val), 0); *consumed_val = true; }
+    else if (match(arg, "--kv-window"))  { oc_llama_set_rq_defaults(0, 0, 0, atoi(val) == 0 ? -1 : atoi(val)); *consumed_val = true; }
     else if (match(arg, "--kv-compress")){ a->kv_compress = val; *consumed_val = true; }
     else if (match(arg, "--threads"))    { a->threads = atoi(val); *consumed_val = true; }
     else if (match(arg, "--batch-size")) { a->batch_size = val[0] == '-' ? 0u : (uint32_t)strtoul(val, NULL, 10); *consumed_val = true; }
@@ -124,6 +129,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--draft-model"))  { a->draft_model = val; *consumed_val = true; }
     else if (match(arg, "--draft-tokens")) { a->draft_tokens = atoi(val); *consumed_val = true; }
     else if (match(arg, "--spec-type"))    { a->spec_type = val; *consumed_val = true; }
+    else if (match(arg, "--mtp-model"))    { a->mtp_model = val; *consumed_val = true; }
     else if (match(arg, "--quantize"))     { a->quantize_input = val; *consumed_val = true; }
     else if (match(arg, "--output"))       { a->quantize_output = val; *consumed_val = true; }
     else if (match(arg, "--quant-type"))   { a->quantize_type = val; *consumed_val = true; }
@@ -168,6 +174,8 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
         if (match(arg, "--print-plan"))     { a->print_plan = true; continue; }
         if (match(arg, "--serve-api"))       { a->serve_api = true; continue; }
         if (match(arg, "--stream"))          { a->stream = true; continue; }
+        if (match(arg, "--chat"))            { a->chat = true; continue; }
+        if (match(arg, "--mtp"))             { a->mtp = true; continue; }
         if (match(arg, "--bench"))           { a->bench = true; continue; }
         if (match(arg, "--inspect"))         { a->inspect = true; continue; }
         if (match(arg, "--perplexity") || match(arg, "--ppl")) { a->perplexity = true; continue; }
@@ -236,7 +244,11 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--prompt-file"))    { ctx->prompt_file = val; i++; }
         else if (match(arg, "--n-predict"))      { ctx->n_predict = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--ctx"))            { ctx->n_ctx = (uint32_t)strtoul(val, NULL, 10); i++; }
-        else if (match(arg, "--kv"))             { ctx->kv_type = val; i++; }
+        else if (match(arg, "--kv") || match(arg, "--kv-type")) { ctx->kv_type = val; i++; }
+        else if (match(arg, "--kv-k-bits"))      { oc_llama_set_rq_defaults(atoi(val), 0, 0, 0); i++; }
+        else if (match(arg, "--kv-v-bits"))      { oc_llama_set_rq_defaults(0, atoi(val), 0, 0); i++; }
+        else if (match(arg, "--kv-sinks"))       { oc_llama_set_rq_defaults(0, 0, atoi(val) == 0 ? -1 : atoi(val), 0); i++; }
+        else if (match(arg, "--kv-window"))      { oc_llama_set_rq_defaults(0, 0, 0, atoi(val) == 0 ? -1 : atoi(val)); i++; }
         else if (match(arg, "--kv-compress"))    { ctx->kv_compress = val; i++; }
         else if (match(arg, "--prefill-chunk-size")) {
             parse_prefill_chunk_size(&ctx->prefill_chunk_size, val);

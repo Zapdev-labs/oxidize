@@ -165,7 +165,7 @@ OcError oc_chat_process_input(OcLlamaModel *model, OcTokenizer *tok,
 
     for (uint32_t t = 0; t < n_predict; t++) {
         uint32_t token = oc_sample(logits, model->cfg.vocab_size, (OcSamplerConfig *)scfg, NULL, 0);
-        if (tok->has_eos && token == tok->eos_id) break;
+        if (oc_tokenizer_is_eog(tok, token)) break;
 
         char *piece = NULL;
         if (oc_tokenizer_decode(tok, &token, 1, &piece) == OC_OK && piece) {

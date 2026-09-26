@@ -117,7 +117,12 @@ static void print_help(void)
 "  --prompt-file PATH     Read prompt from a file\n"
 "  --n-predict N          Max tokens to generate (default 128)\n"
 "  --ctx N                Cap KV context below the model's advertised length\n"
-"  --kv f32|q8            KV cache dtype (default: q8 when ctx>=8192)\n"
+"  --kv, --kv-type T      f32 | q8 | rq | rq:K,V  KV cache type (default:\n"
+"                         q8 when ctx>=8192, rq when ctx>=131072)\n"
+"  --kv-k-bits N          RQ key bits 2..4 (default 3)\n"
+"  --kv-v-bits N          RQ value bits 2..4 (default 3)\n"
+"  --kv-window N          RQ exact int8 window of recent tokens (default 1024, 0 = off)\n"
+"  --kv-sinks N           RQ exact int8 attention-sink tokens (0 = off)\n"
 "  --kv-compress MODE     none | rotor | helix (default none)\n"
 "  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill this)\n"
 "  --threads N            CPU thread hint (0 = auto)\n"
@@ -137,7 +142,9 @@ static void print_help(void)
 "  --repeat-penalty P     Repeat penalty (default 1.1)\n"
 "  --seed N               RNG seed (0 = deterministic default)\n"
 "  --spec-type TYPE       none | mtp | dspark (default: dspark if GGUF has MTP)\n"
-"  --draft-tokens N       MTP/DSpark draft block size (default 4)\n"
+"  --draft-tokens N       MTP/DSpark draft block size (default 4; K2 MTP 1)\n"
+"  --mtp                  K2-Horizon: MTP speculative decoding (greedy, opt-in)\n"
+"  --mtp-model PATH       K2-Horizon: load an mtp-*.gguf nextn head sidecar\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
 "  --stream-experts       SSD expert offload (no whole-file readahead/mlock)\n"
@@ -146,6 +153,7 @@ static void print_help(void)
 "  --prerouter-prefetch   Load prerouter heads but keep native router\n"
 "  --lora PATH            Edge0 Recover-LoRA safetensors (unmerged, scale α/r=2)\n"
 "  --experts-per-tok K    Override MoE top-k (Edge0 adapters were trained at 4)\n"
+"  --chat                 Wrap the prompt as a user turn (GGUF chat template)\n"
 "  -v, --verbose          Verbose logging\n"
 "  -h, --help             Show this help\n"
 "  --version              Print version and exit\n",
@@ -196,6 +204,16 @@ static OcError run_generation(const OcCliArgs *args)
         fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
         free(file_prompt);
         return e;
+    }
+    if (args->mtp_model != NULL) {
+        e = oc_llama_load_mtp_sidecar(&model, args->mtp_model);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: failed to load MTP head %s (%s)\n",
+                    args->mtp_model, oc_error_msg(e));
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
     }
 
     /* Clamp the context before anything sizes a KV cache off it. Models now
@@ -330,6 +348,23 @@ static OcError run_generation(const OcCliArgs *args)
         return e;
     }
 
+    /* K2-Horizon MTP is opt-in (--mtp or --spec-type mtp): with the current
+     * head it is not faster than plain decode on CPU (see oc_llama_mtp_step
+     * docs). Greedy only, and only without a repeat penalty, since the
+     * verify compares raw argmaxes. */
+    bool k2_mtp = false;
+    if (model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
+        (args->mtp || (args->spec_type && strcmp(args->spec_type, "mtp") == 0))) {
+        if (use_cuda || args->temperature > 0.0f || args->repeat_penalty != 1.0f) {
+            oc_log(OC_LOG_WARN, "mtp: needs CPU greedy decoding with "
+                   "--repeat-penalty 1 (--temperature 0); decoding without it");
+        } else if (oc_llama_mtp_enable(&sess, true) == OC_OK) {
+            k2_mtp = true;
+        } else {
+            oc_log(OC_LOG_WARN, "mtp: could not enable (compressed KV?)");
+        }
+    }
+
     if (args->prerouter_path) {
         e = oc_llama_session_load_prerouter(&sess, args->prerouter_path,
                                             !args->prerouter_prefetch);
@@ -360,7 +395,16 @@ static OcError run_generation(const OcCliArgs *args)
     size_t n_ids = 0;
     OcSpecialTokenPolicy policy = tok.has_add_bos_token && tok.add_bos_token
         ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
-    e = oc_tokenizer_encode(&tok, prompt, policy, &ids, &n_ids);
+    char *chat_prompt = NULL;
+    if (args->chat) {
+        OcChatMessage msg = { "user", prompt };
+        e = oc_tokenizer_apply_chat_template(
+            &msg, 1, oc_tokenizer_detect_template(&model.gguf.unified), true,
+            &chat_prompt);
+        if (e == OC_OK) prompt = chat_prompt;
+    }
+    if (e == OC_OK) e = oc_tokenizer_encode(&tok, prompt, policy, &ids, &n_ids);
+    free(chat_prompt);
     if (e != OC_OK || n_ids == 0) {
         fprintf(stderr, "error: prompt encode failed (%s)\n", oc_error_msg(e));
         oc_llama_session_free(&sess);
@@ -467,11 +511,42 @@ static OcError run_generation(const OcCliArgs *args)
         /* Decode + print the prompt's last token context implicitly; generate. */
         size_t emitted = 0;
         bool eos_reached = false;
+        OcMtpStats mtp_stats;
+        memset(&mtp_stats, 0, sizeof mtp_stats);
         double decode_start = wall_now();
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
             uint32_t sampled;
+            if (k2_mtp) {
+                uint32_t toks[8];
+                size_t n = 0;
+                size_t want = (size_t)args->n_predict - emitted;
+                if (want > 8) want = 8;
+                uint32_t k = args->draft_tokens > 0 ? (uint32_t)args->draft_tokens : 1u;
+                e = oc_llama_mtp_step(&sess, k, logits, toks, want, &n, &mtp_stats);
+                if (e != OC_OK || n == 0) {
+                    if (e == OC_ERR_INVALID_ARG) {
+                        oc_log(OC_LOG_WARN, "context window full at position %lld",
+                               (long long)sess.pos);
+                        e = OC_OK;
+                    }
+                    break;
+                }
+                for (size_t i = 0; i < n; i++) {
+                    sampled = toks[i];
+                    if (oc_tokenizer_is_eog(&tok, sampled)) { eos_reached = true; break; }
+                    char *piece = NULL;
+                    if (oc_tokenizer_decode(&tok, &sampled, 1, &piece) == OC_OK && piece) {
+                        fputs(piece, stdout);
+                        fflush(stdout);
+                        free(piece);
+                    }
+                    emitted++;
+                    if (emitted >= (size_t)args->n_predict) break;
+                }
+                continue;
+            }
             if (!use_cuda && scfg.type == OC_SAMPLER_GREEDY &&
-                oc_llama_mtp_present(&model) &&
+                !model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
                 !(args->spec_type && strcmp(args->spec_type, "none") == 0)) {
                 uint32_t toks[8];
                 size_t n = 0;
@@ -487,7 +562,7 @@ static OcError run_generation(const OcCliArgs *args)
                 if (e != OC_OK || n == 0) break;
                 for (size_t i = 0; i < n; i++) {
                     sampled = toks[i];
-                    if (tok.has_eos && sampled == tok.eos_id) {
+                    if (oc_tokenizer_is_eog(&tok, sampled)) {
                         eos_reached = true;
                         break;
                     }
@@ -507,7 +582,7 @@ static OcError run_generation(const OcCliArgs *args)
             sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
             scfg.seed++;
-            if (tok.has_eos && sampled == tok.eos_id) { eos_reached = true; break; }
+            if (oc_tokenizer_is_eog(&tok, sampled)) { eos_reached = true; break; }
 
             /* Decode + print the sampled token. */
             char *piece = NULL;
@@ -538,6 +613,15 @@ static OcError run_generation(const OcCliArgs *args)
         }
         if (emitted > 0) fputs("\n", stdout);
         oc_log(OC_LOG_INFO, "generated %zu tokens", emitted);
+        if (k2_mtp && mtp_stats.steps > 0)
+            oc_log(OC_LOG_INFO, "mtp: %llu steps, %llu/%llu drafts accepted "
+                   "(%.1f%%), %.2f tokens/step",
+                   (unsigned long long)mtp_stats.steps,
+                   (unsigned long long)mtp_stats.accepted,
+                   (unsigned long long)mtp_stats.drafted,
+                   mtp_stats.drafted ? 100.0 * (double)mtp_stats.accepted /
+                                       (double)mtp_stats.drafted : 0.0,
+                   (double)mtp_stats.emitted / (double)mtp_stats.steps);
         if (model.expert_stream) {
             oc_log(OC_LOG_INFO,
                    "expert-stream: resident=%.1f MiB prefetch=%.1f MiB reclaim=%.1f MiB",
@@ -1046,7 +1130,7 @@ int main(int argc, char **argv)
             size_t emitted = 0;
             while (emitted < (size_t)args.n_predict) {
                 uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
-                if (tok.has_eos && sampled == tok.eos_id) break;
+                if (oc_tokenizer_is_eog(&tok, sampled)) break;
                 emitted++;
                 if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
             }

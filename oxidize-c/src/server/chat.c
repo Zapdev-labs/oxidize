@@ -5,8 +5,11 @@
  */
 #include "oxidize/chat.h"
 
+#include "oxidize/tokenizer.h"
+
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static size_t append_str(char *out, size_t *pos, size_t cap, const char *s)
@@ -34,6 +37,9 @@ static size_t append_fmt(char *out, size_t *pos, size_t cap, const char *fmt, ..
 OcChatTemplate oc_chat_detect(const char *arch_str)
 {
     if (!arch_str) return OC_CHAT_CHATML;
+    if (strcmp(arch_str, "k2-horizon") == 0 ||
+        strcmp(arch_str, "k2_horizon") == 0)
+        return OC_CHAT_K2;
     if (strncmp(arch_str, "gemma", 5) == 0) return OC_CHAT_GEMMA;
     if (strncmp(arch_str, "llama", 5) == 0) {
         return OC_CHAT_LLAMA3;
@@ -69,6 +75,10 @@ OcChatTemplate oc_chat_detect_full(const char *arch_str, const char *name,
                                     const char *chat_template)
 {
     if (chat_template && *chat_template) {
+        /* Checked first: K2's 51 KB tool-rendering template could mention
+         * other formats' markers in passing. */
+        if (strstr(chat_template, "<|ifm|im_start|>") != NULL)
+            return OC_CHAT_K2;
         if (strstr(chat_template, "[INST]") != NULL)
             return OC_CHAT_LLAMA2;
         if (strstr(chat_template, "<|start_header_id|>") != NULL)
@@ -136,6 +146,21 @@ size_t oc_chat_render_message(OcChatTemplate template,
         if (ok && is_last)
             ok = append_str(out, &pos, out_cap, "<start_of_turn>model\n") != 0;
         break;
+
+    case OC_CHAT_K2: {
+        /* Same rendering as the tokenizer's K2 template (no newline between
+         * turns; an assistant turn always carries a think block, split out
+         * of the content when it embeds one). The generation prompt opens a
+         * high-effort think block, as the GGUF template's default does. */
+        OcChatMessage msg = { role, content };
+        char *text = NULL;
+        ok = oc_tokenizer_apply_chat_template(&msg, 1, OC_TEMPLATE_K2,
+                                              is_last, &text) == OC_OK &&
+             text != NULL &&
+             (text[0] == '\0' || append_str(out, &pos, out_cap, text) != 0);
+        free(text);
+        break;
+    }
 
     case OC_CHAT_PLAIN:
         ok = append_str(out, &pos, out_cap, content) != 0 || content[0] == '\0';

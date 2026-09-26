@@ -34,6 +34,14 @@ extern "C" {
 typedef struct OcPrerouter OcPrerouter;
 typedef struct OcLoraModel OcLoraModel;
 
+/* Attention-output gate function. SIGMOID is Muse Glimmer's
+ * sigmoid(W_gate·x); SOFTPLUS_LN2 is K2-Horizon's softplus with beta = ln 2,
+ * i.e. log2(1 + 2^g), which is exactly 1 at g = 0. */
+typedef enum OcAttnGateKind {
+    OC_ATTN_GATE_SIGMOID      = 0,
+    OC_ATTN_GATE_SOFTPLUS_LN2 = 1,
+} OcAttnGateKind;
+
 /* ─── Config (port of InferenceConfig, Llama-relevant subset) ──────────── */
 typedef struct OcLlamaConfig {
     uint32_t vocab_size;
@@ -184,6 +192,30 @@ typedef struct OcLlamaConfig {
      * with the wrong one the model stays locally fluent and drifts within a
      * couple of dozen tokens. */
     bool     rope_norm_pairs;
+    /* Which function the attention-output gate applies (only consulted when
+     * attn_out_gate is set). Zero is SIGMOID so hand-built configs and Muse
+     * Glimmer keep their behaviour. */
+    OcAttnGateKind attn_gate_kind;
+    /* ── K2-Horizon (GGUF arch "k2-horizon") ─────────────────────────────
+     *
+     * Grouped RMSNorm at every norm site, MoVA routed values on the MoE
+     * layers (V is a sigmoid-routed mixture of value experts instead of one
+     * projection), a per-element softplus(beta=ln2) attention-output gate,
+     * NEOX RoPE computed from a double-precision angle table, and a
+     * DeepSeek-style sigmoid MoE FFN with a shared expert. See k2_arch.h. */
+    bool     is_k2;
+    /* RMSNorm groups (attention.group_norm_groups): the hidden vector is cut
+     * into this many contiguous slices that are normalized independently.
+     * 0 or 1 = ordinary RMSNorm. */
+    uint32_t norm_groups;
+    /* MoVA value experts (attention.value_expert_count / _used_count). 0 =
+     * no routed values. */
+    uint32_t value_expert_count;
+    uint32_t value_expert_used;
+    /* Normalize the selected expert weights to sum 1 before scaling. */
+    bool     expert_weights_norm;
+    /* First N blocks use a dense FFN + a plain attn_v projection. */
+    uint32_t leading_dense_block_count;
 } OcLlamaConfig;
 
 /* Upper bound on LongCat n-gram tables. LongCat-2.0 has
@@ -238,6 +270,15 @@ typedef struct OcLlamaLayer {
     float *exp_probs_b;
     float *attn_norm;       /* owned f32, length n_embd              */
     float *ffn_norm;       /* owned f32, length n_embd              */
+    /* K2-Horizon MoVA (routed values). attn_v_exps is the stacked 3-D
+     * [n_embd, kv_row, value_expert_count] tensor: `rows` is ONE expert's
+     * row count (kv_row) and expert e starts at data + e*rows*row_bytes.
+     * attn_v_gate is the [value_expert_count, n_embd] router (F32 in
+     * practice); attn_v_gate_b is its selection-only bias (owned f32, length
+     * value_expert_count). All empty on dense layers. */
+    OcWeightView attn_v_exps;
+    OcWeightView attn_v_gate;
+    float *attn_v_gate_b;
     /* LayerNorm biases (beta) for GPT-2/NeoX/Falcon; NULL for RMSNorm
      * architectures (Llama-family has no norm bias). Owned f32, n_embd. */
     float *attn_norm_bias;
@@ -313,6 +354,10 @@ typedef struct OcLlamaModel {
     unsigned         load_flags;
     OcExpertStreamPool *expert_stream; /* owned; SSD expert offload        */
     uint32_t         live_sessions;
+    /* MTP sidecar (oc_llama_load_mtp_sidecar): a second mapping whose blk.N
+     * tensors back m->mtp. Owned; unmapped by oc_llama_free. */
+    OcGgufMmappedFile mtp_gguf;
+    bool             mtp_gguf_open;
 } OcLlamaModel;
 
 /* KV cache element type.
@@ -328,7 +373,25 @@ typedef struct OcLlamaModel {
 typedef enum {
     OC_KV_F32 = 0,
     OC_KV_Q8  = 1,
+    /* RotorQuant: rotated Lloyd-Max codes, separate K/V bit widths, lazily
+     * committed per-layer mmap regions (see kv_rq.h). kv_k/kv_v/kv_k_q/...
+     * are all NULL; the cache lives in `kv_rq`. */
+    OC_KV_RQ  = 2,
 } OcKvCacheType;
+
+/* Full KV cache selection. Zero-initialised fields take the defaults:
+ * rq_k_bits/rq_v_bits 3/3 (or OC_KV_RQ_BITS env "K,V"), rq_sinks 4,
+ * rq_window 1024, Hadamard rotation (OC_KV_RQ_ROT=iso for the 4-D rotor). Use
+ * rq_window = -1 / rq_sinks = -1 to disable the exact window / sinks. */
+typedef struct OcKvOptions {
+    OcKvCacheType type;
+    unsigned rq_k_bits, rq_v_bits;
+    int      rq_sinks;
+    int      rq_window;
+    int      rq_rot;        /* 0 Hadamard, 1 iso */
+} OcKvOptions;
+
+struct OcKvRqCache;
 
 /* Per-sequence KV cache + scratch workspace. One session = one sequence. */
 typedef struct OcLlamaSession {
@@ -406,9 +469,24 @@ typedef struct OcLlamaSession {
      * path. When set, dense decode stores pre-RoPE K/V and attends through
      * the facade. */
     OcCompressedKvCache *kv_compress;
+    /* OC_KV_RQ cache (owned), NULL otherwise. */
+    struct OcKvRqCache *kv_rq;
+    /* Flash-decoding partials: [n_kv][n_chunks][group] of (m, l, acc[hd]). */
+    float  *flash_part;
+    size_t  flash_part_cap;   /* floats */
     OcExpertStreamPool *expert_stream; /* borrowed from model              */
     OcPrerouter        *prerouter;     /* owned                            */
     OcLoraModel        *lora;          /* owned                            */
+    /* K2-Horizon scratch (NULL for every other architecture). */
+    float    *mova_probs;    /* value_expert_count router probabilities   */
+    uint32_t *mova_sel;      /* value_expert_count selection scratch      */
+    float    *mova_w;        /* value_expert_used applied weights         */
+    float    *mova_out_all;  /* value_expert_used * kv_row expert outputs */
+    float    *rope_cos;      /* rope_dim/2, current position (K2)          */
+    float    *rope_sin;
+    /* K2 MTP speculative state (oc_llama_mtp_enable). NULL when off. While
+     * on, mtp_hidden holds h_{pos-1} after output_norm. */
+    struct OcK2Mtp *k2mtp;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -484,6 +562,11 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out);
 /* Skip kernel readahead of the whole GGUF so routed experts can stream
  * from SSD (Edge0-style). Combine with oc_llama_enable_expert_stream(). */
 #define OC_LLAMA_LOAD_STREAM 1u
+/* Map the GGUF with the kernel's default (MADV_NORMAL) advice instead of
+ * MADV_SEQUENTIAL + MADV_WILLNEED. Sequential advice drops pages soon after
+ * they are read, which evicts hot routed experts on a large MoE that does not
+ * comfortably fit in RAM. Applied automatically to K2-Horizon files. */
+#define OC_LLAMA_LOAD_NORMAL_ADVICE 2u
 
 OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out);
 
@@ -506,6 +589,34 @@ OcError oc_llama_session_init(OcLlamaModel *model, OcLlamaSession *out);
  * the attention read stride must agree. */
 OcError oc_llama_session_init_kv(OcLlamaModel *model, OcLlamaSession *out,
                                  OcKvCacheType kv_type);
+
+/* Initialize a session from full KV options (the only way to get OC_KV_RQ
+ * with explicit bit widths). */
+OcError oc_llama_session_init_kv_opts(OcLlamaModel *model, OcLlamaSession *out,
+                                      const OcKvOptions *opts);
+
+/* Parse "f32" | "q8" | "rq" | "rq:K,V" into opts->type (+ bits). Returns
+ * false on an unknown name. */
+bool oc_llama_parse_kv_type(const char *name, OcKvOptions *opts);
+
+/* Bytes of KV one cached token costs for the session's cache type. */
+size_t oc_llama_kv_bytes_per_token(const OcLlamaSession *sess);
+
+/* Pretend the first `depth` positions are filled by tiling the KV entries
+ * of positions [0, sess->pos) (at least 1) over [sess->pos, depth), then set
+ * pos = depth. For decode-speed measurements at a given depth without paying
+ * for a real prefill: attention cost does not depend on the cache contents.
+ * Touches (commits) the memory like a real fill would. */
+OcError oc_llama_session_fake_fill(OcLlamaSession *sess, int64_t depth);
+
+/* Prefill that also returns logits for every token j >= first_logit (in
+ * this call's numbering): cb(ud, j, logits) is called in order of j with a
+ * vocab_size buffer valid only during the call. Used for perplexity. */
+typedef void (*OcLogitsFn)(void *ud, size_t j, const float *logits);
+OcError oc_llama_prefill_all_logits(OcLlamaSession *sess,
+                                    const uint32_t *tokens, size_t n_tokens,
+                                    size_t first_logit, OcLogitsFn cb,
+                                    void *ud);
 
 /* Attach a compressed KV cache. Decode stays on the f32/q8 path until this
  * is called. `name` is "none" | "rotor" | "helix". Refused while
@@ -531,13 +642,18 @@ OcError oc_llama_session_init_with_compress(OcLlamaModel *model,
                                             const char *name);
 
 /* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
- * explicit: "q8", "f32", or NULL. Contexts >= 8192 default to Q8. */
+ * explicit: "q8", "f32" ("f16" is an alias), "rq", "rq:K,V", or NULL.
+ * Contexts >= 8192 default to Q8, >= 131072 to RQ. */
 OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx,
                                       const char *explicit_value);
 
 /* Bytes the KV cache occupies for `model` under `kv_type`. Useful for
  * reporting and for deciding whether a context length is affordable. */
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
+
+/* Process-wide RQ defaults from the CLI (--kv-k-bits/--kv-v-bits/--kv-sinks/
+ * --kv-window). 0 keeps the current value; -1 disables sinks / window. */
+void oc_llama_set_rq_defaults(int k_bits, int v_bits, int sinks, int window);
 
 /* Run one forward step: embed `token`, advance position, write logits_out
  * (length model->cfg.vocab_size). Returns OC_OK or OC_ERR_INVALID_ARG.
@@ -546,6 +662,71 @@ size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out);
 
 bool oc_llama_mtp_present(const OcLlamaModel *model);
+
+/* Overlay a K2-Horizon MTP sidecar (`mtp-*.gguf`: block_count = base + 1,
+ * nextn_predict_layers = 1, only blk.{base}.* tensors) onto a loaded base
+ * model. Must be called before any session is created. Refused when the
+ * model already has an MTP head, when the architecture or base block count
+ * differ, or when the head's tensors are missing or mis-shaped. */
+OcError oc_llama_load_mtp_sidecar(OcLlamaModel *model, const char *path);
+
+/* ─── K2-Horizon MTP speculative decoding (greedy) ───────────────────────
+ *
+ * DeepSeek-style nextn pairing (SPEC.md): the MTP entry at position p is
+ * built from (emb(t_p), h_{p-1}), with h the post-output_norm hidden state,
+ * and predicts t_{p+1}. The head has its own KV layer (index n_layer).
+ *
+ * Usage: oc_llama_mtp_enable(sess, true) before the prompt, then
+ * oc_llama_prefill() (which also fills the MTP KV), then repeated
+ * oc_llama_mtp_step(). Each step emits the greedy token of `logits` plus
+ * every accepted draft, verifying [t, d_1..d_k] in one batched forward and
+ * rolling rejected rows back. `logits` is updated to the distribution after
+ * the last emitted token, exactly as a plain greedy loop would leave it. */
+typedef struct OcMtpStats {
+    uint64_t steps;          /* oc_llama_mtp_step calls                   */
+    uint64_t drafted;        /* draft tokens proposed                     */
+    uint64_t accepted;       /* draft tokens accepted                     */
+    uint64_t emitted;        /* tokens returned                           */
+    uint64_t accept_hist[9]; /* steps that accepted exactly i drafts      */
+    uint64_t draft_at[8];    /* drafts proposed at depth i                */
+    uint64_t accept_at[8];   /* drafts accepted at depth i                */
+    double   t_draft;        /* seconds in MTP drafting (chain steps)     */
+    double   t_verify;       /* seconds in the batched main forward       */
+    double   t_mtp;          /* seconds in MTP catch-up + first draft     */
+} OcMtpStats;
+
+OcError oc_llama_mtp_enable(OcLlamaSession *sess, bool on);
+
+OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
+                          uint32_t *out_tokens, size_t max_out, size_t *n_out,
+                          OcMtpStats *stats);
+
+/* Greedy acceptance: the number of leading drafts that equal the target's
+ * argmax at the same row (draft[i] is checked against target[i]). */
+uint32_t oc_mtp_accept_prefix(const uint32_t *draft, const uint32_t *target,
+                              uint32_t k);
+
+/* Test/parity hook: run the K2 MTP head over `n` rows at MTP positions
+ * pos0 .. pos0+n-1 (pos0 >= 1) with explicit tokens and hidden states
+ * (n x n_embd, post-output_norm), writing each row's shared_head_norm
+ * output to s_out (n x n_embd) and filling the MTP KV. Requires
+ * oc_llama_mtp_enable(). */
+OcError oc_llama_mtp_forward_rows(OcLlamaSession *sess, const uint32_t *tokens,
+                                  const float *hidden, size_t n, int64_t pos0,
+                                  float *s_out);
+
+#ifdef OC_TESTING
+/* Test-only: replace each draft before verification. Called with the
+ * position the draft would occupy and the head's proposal. */
+typedef uint32_t (*OcMtpDraftHook)(void *ud, int64_t pos, uint32_t proposed);
+void oc_llama_mtp_test_set_draft_hook(OcLlamaSession *sess, OcMtpDraftHook fn,
+                                      void *ud);
+#endif
+
+/* Read one MTP KV row (after RoPE) at position pos into k/v (n_head_kv *
+ * head_dim floats each). F32 KV only. */
+OcError oc_llama_mtp_kv_row(const OcLlamaSession *sess, int64_t pos,
+                            float *k, float *v);
 
 /* Greedy MTP: emit 1 + accepted drafts. Updates session and logits. */
 OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,

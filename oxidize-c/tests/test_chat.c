@@ -103,3 +103,29 @@ Test(chat, render_message_reports_overflow)
                                         "this does not fit", out, sizeof(out),
                                         true, true), 0);
 }
+
+/* K2-Horizon: detected from the GGUF template's turn marker or the arch, and
+ * rendered like the GGUF Jinja template (no newline between turns, think
+ * block on assistant turns, high-effort think opener as the generation
+ * prompt). */
+Test(chat, k2_detect_and_render)
+{
+    cr_assert_eq(oc_chat_detect("k2-horizon"), OC_CHAT_K2);
+    cr_assert_eq(oc_chat_detect_full("llama", "x.gguf",
+                                     "{{- '<|ifm|im_start|>' + role }}"),
+                 OC_CHAT_K2);
+
+    const char *roles[] = {"system", "user", "assistant", "user"};
+    const char *contents[] = {"Be brief.", "Hi", "Hello!", "Bye"};
+    char out[4096];
+    size_t n = oc_chat_render_messages(OC_CHAT_K2, roles, contents, 4,
+                                       out, sizeof(out));
+    cr_assert_gt(n, 0);
+    cr_assert_str_eq(out,
+        "<|ifm|im_start|>system\nBe brief.<|ifm|im_end|>"
+        "<|ifm|im_start|>user\nHi<|ifm|im_end|>"
+        "<|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>\nHello!"
+        "<|ifm|im_end|>"
+        "<|ifm|im_start|>user\nBye<|ifm|im_end|>"
+        "<|ifm|im_start|>assistant\n<ifm|think>\n");
+}

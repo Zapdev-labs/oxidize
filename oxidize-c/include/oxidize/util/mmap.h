@@ -47,17 +47,23 @@ typedef struct OcMmap OcMmap;
 
 /* Memory-map `path` for read-only access (PROT_READ, MAP_PRIVATE).
  *
- * On Linux, also applies MADV_SEQUENTIAL + MADV_WILLNEED (best-effort,
- * matching Rust `load_mapped_gguf`). The caller may additionally apply
+ * On Linux, also applies MADV_WILLNEED (best-effort). Not MADV_SEQUENTIAL:
+ * accesses through a VM_SEQ_READ mapping do not age pages, so weights would
+ * be reclaimed first under any page-cache pressure. The caller may additionally apply
  * `oc_mmap_advise_hugepage()` once it has decided hugepages are appropriate
  * (Rust enables THP only when the model fits in RAM with >= 2x headroom).
  *
  * On success, writes a heap-allocated OcMmap* to `*out`. Returns OC_OK,
  * OC_ERR_IO (open/stat), OC_ERR_INVALID_ARG (NULL args), or OC_ERR_OOM
  * (mmap/malloc failure). On error, `*out` is set to NULL. */
-/* Skip MADV_SEQUENTIAL + MADV_WILLNEED at open. Use for SSD expert
+/* Skip MADV_WILLNEED at open (MADV_RANDOM instead). Use for SSD expert
  * streaming so the kernel does not readahead the whole checkpoint. */
 #define OC_MMAP_F_NO_READAHEAD 1u
+/* Leave the mapping at MADV_NORMAL (no SEQUENTIAL, no WILLNEED): demand
+ * paging with the kernel's default readaround, and no drop-behind of pages
+ * that are re-read later (hot MoE experts). Ignored when
+ * OC_MMAP_F_NO_READAHEAD is also set. */
+#define OC_MMAP_F_NORMAL_ADVICE 2u
 
 OcError oc_mmap_open_readonly(const char *path, OcMmap **out);
 

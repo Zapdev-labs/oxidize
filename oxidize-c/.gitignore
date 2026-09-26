@@ -5,6 +5,9 @@
 *.a
 oxidize-c
 test_runner
+oc-tokenize
+oc-eval
+llama-tokenize-ref
 
 # Vendored deps are tracked despite the *.a / *.o rules above.
 !tests/criterion/lib/libcriterion.a

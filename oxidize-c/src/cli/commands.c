@@ -421,7 +421,9 @@ void oc_cli_command_help(void)
 "  --model PATH          GGUF model file\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
-"  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+"  --kv, --kv-type T     f32|q8|rq|rq:K,V (q8 auto when ctx>=8192, rq >=131072)\n"
+"  --kv-k-bits/--kv-v-bits N  RQ key/value bits 2..4 (default 3/3)\n"
+"  --kv-window/--kv-sinks N   RQ exact int8 recent window (1024) / sinks (4); 0 = off\n"
 "  --kv-compress MODE    none|rotor|helix (default none)\n"
 "  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill)\n"
 "  --ctx N               KV context length (default cap 4096)\n"
@@ -730,7 +732,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
             if (!ctx->bench_no_eos && tok.has_eos) {
                 size_t keep = 0;
                 for (; keep < n; keep++) {
-                    if (toks[keep] == tok.eos_id) break;
+                    if (oc_tokenizer_is_eog(&tok, toks[keep])) break;
                 }
                 emitted += keep;
                 if (keep < n) break;
