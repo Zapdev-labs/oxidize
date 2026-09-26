@@ -311,3 +311,36 @@ Test(attn_flash, decode_rq_centered_many_heads)
     free(q); free(scr); free(acc); free(out);
     tcache_free(&tc);
 }
+
+/* Positions past 65535 (16-bit) with sinks, a centered window and splits
+ * straddling 65536 must still match the reference. */
+Test(attn_flash, decode_rq_positions_past_u16)
+{
+    const size_t n = 65600, d = 64, G = 2;
+    TCache tc;
+    rs(65536);
+    tcache_make(&tc, OC_KVV_RQ, n, d, 3, 3, 4, 64);
+    float q[2 * 64], qd[2 * 64];
+    for (size_t i = 0; i < G * d; i++) q[i] = rg() * 0.3f;
+    int8_t q8[2 * 64];
+    float qsc[2];
+    int32_t qsum[2];
+    oc_kvrq_prep_q(q, G, d, q8, qsc, qsum);
+    for (size_t i = 0; i < G * d; i++) qd[i] = (float)q8[i] * qsc[i / d];
+    float *scr = malloc(oc_attn_flash_decode_scratch(G) * sizeof(float));
+    const int64_t cuts[4] = { 0, 65500, 65536 + 3, (int64_t)n };
+    float m[3 * 2], l[3 * 2], acc[3 * 2 * 64], out[2 * 64];
+    for (int p = 0; p < 3; p++)
+        oc_attn_flash_decode_range(&tc.v, q, G, cuts[p], cuts[p + 1],
+                                   m + p * G, l + p * G, acc + p * G * d, scr);
+    oc_attn_flash_merge(G, d, 3, m, l, acc, out);
+    for (size_t g = 0; g < G; g++) {
+        double ref[64];
+        ref_attn2(&tc, q + g * d, qd + g * d, 0, (int64_t)n - 1, ref);
+        for (size_t i = 0; i < d; i++)
+            cr_assert(fabs(out[g * d + i] - ref[i]) < 2e-4 * (1 + fabs(ref[i])),
+                      "g %zu i %zu: %f vs %f", g, i, out[g * d + i], ref[i]);
+    }
+    free(scr);
+    tcache_free(&tc);
+}
