@@ -5114,6 +5114,11 @@ static void qwen35_qk_slice(size_t begin, size_t end, size_t tid, void *ud)
                                           L->rope_theta, j->yarn_factor,
                                           j->yarn_orig_ctx, -1.0f);
         }
+        /* The RQ cache is stored in position order after the parallel
+         * region: a store that completes a centering page encodes the whole
+         * page from the exact ring, so every earlier position of the page
+         * must already be there (and ring slots must not be raced). */
+        if (s->kv_type == OC_KV_RQ) continue;
         const float *v = b->v_buf + t * b->kv_row;
         kv_store_pos(s, L->kv_cache_index, pos, k, v, tmp + hd);
     }
@@ -5273,6 +5278,11 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
     }
     if (qk_serial) qwen35_qk_slice(0, n, 0, &qjob);
     else           oc_parallel_for(n, qwen35_qk_slice, &qjob);
+    if (s->kv_type == OC_KV_RQ)
+        for (size_t t = 0; t < n; t++)
+            kv_store_pos(s, L->kv_cache_index, pos0 + (int64_t)t,
+                         b->k_buf + t * b->kv_row, b->v_buf + t * b->kv_row,
+                         b->dequant_temp);
 
     /* attention_slice applies the sigmoid output gate per head, so the gating
      * rides along on the same parallel region instead of a serial sweep. */
