@@ -274,7 +274,10 @@ void oc_kvrq_encode(const OcKvRqCodec *c, const float *xr, uint8_t *blk)
         cc += (double)c->centroids[k] * c->centroids[k];
     }
     /* Length-preserving scale: ||s c[i]|| == ||x||. */
-    const float s = (float)(norm / sqrt(cc > 0.0 ? cc : 1.0));
+    float s = (float)(norm / sqrt(cc > 0.0 ? cc : 1.0));
+    /* f16 tops out at 65504; saturate rather than store inf (inf * c
+     * would turn every score and the softmax into NaN). */
+    if (!(s <= 65504.0f)) s = 65504.0f;
     const uint16_t h = oc_f32_to_f16_bits(s);
     memcpy(blk, &h, 2);
 }

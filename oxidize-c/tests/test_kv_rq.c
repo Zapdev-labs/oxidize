@@ -139,6 +139,21 @@ Test(kv_rq, codec_zero_vector)
     for (int i = 0; i < 128; i++) cr_assert_eq(y[i], 0.0f);
 }
 
+/* A vector longer than f16's range saturates the scale instead of
+ * storing inf (which would make every score NaN). */
+Test(kv_rq, codec_huge_norm_saturates)
+{
+    OcKvRqCodec c;
+    cr_assert_eq(oc_kvrq_codec_init(&c, 128, 3), OC_OK);
+    float x[128], y[128];
+    rs(3);
+    for (size_t i = 0; i < 128; i++) x[i] = rg() * 2.0e4f;
+    uint8_t blk[2 + 128 * 3 / 8];
+    oc_kvrq_encode(&c, x, blk);
+    oc_kvrq_decode(&c, blk, y);
+    for (size_t i = 0; i < 128; i++) cr_assert(isfinite(y[i]), "coord %zu", i);
+}
+
 Test(kv_rq, codec_rejects_bad_args)
 {
     OcKvRqCodec c;
