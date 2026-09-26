@@ -6267,6 +6267,13 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
     size_t nc = (size_t)acc + 1;
     if ((uint64_t)P2 >= c->n_ctx) nc--;   /* no slot for the next draft */
     K->have_draft = false;
+    /* The chained draft rows wrote head slots P+1..P+k-1 from draft inputs
+     * and may have completed (fixed the mean of) a head page there; the
+     * catch-up rewrites those positions, and a page it completes again
+     * would keep that draft-derived mean. Drop them first. */
+    if (ck_n > 0 && k > 1)
+        oc_kvrq_ckpt_restore(sess->kv_rq, P, ck_n, K->rq_ckpt, c->n_layer,
+                             P + 1);
     if (nc > 0) {
         e = k2_mtp_rows(sess, &K->buf, K->cat, crow, K->hid, nc, P + 1, K->s);
         if (e != OC_OK) {

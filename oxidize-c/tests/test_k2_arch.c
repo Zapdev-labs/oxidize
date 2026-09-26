@@ -1230,6 +1230,31 @@ Test(k2_mtp, rq_kv_rollback_matches_k0)
                         }
             }
         }
+        /* Page means (centering) of every complete page, main layers and
+         * the head's layer K2_LAYERS: chained draft rows and rejected rows
+         * must not leave their values in a fixed mean. */
+        for (size_t l = 0; l <= K2_LAYERS; l++) {
+            for (size_t pg = 0; (int64_t)((pg + 1) * b->page) <= s.pos; pg++) {
+                cr_assert_eq(a->mu_fixed[l * a->n_pages + pg],
+                             b->mu_fixed[l * b->n_pages + pg],
+                             "run %d layer %zu page %zu fixed", run, l, pg);
+                if (!a->mu_fixed[l * a->n_pages + pg]) continue;
+                for (size_t kind = 0; kind < 2; kind++)
+                    for (size_t h = 0; h < K2_KV_HEADS; h++) {
+                        const float *ma = oc_kvrq_mu(a, l, pg, kind, h);
+                        const float *mb = oc_kvrq_mu(b, l, pg, kind, h);
+                        double num = 0, den = 0;
+                        for (size_t i = 0; i < K2_HD; i++) {
+                            num += ((double)ma[i] - mb[i]) * ((double)ma[i] - mb[i]);
+                            den += (double)ma[i] * ma[i];
+                        }
+                        cr_assert(num <= 1e-4 * den + 1e-12,
+                                  "run %d layer %zu page %zu kind %zu head %zu: "
+                                  "mean rel err %g", run, l, pg, kind, h,
+                                  sqrt(num / (den + 1e-30)));
+                    }
+            }
+        }
         oc_llama_session_free(&s);
     }
     oc_llama_session_free(&s0);
