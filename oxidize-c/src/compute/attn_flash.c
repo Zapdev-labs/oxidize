@@ -197,7 +197,10 @@ static size_t make_segs(const OcKvView *v, int64_t t0, size_t n, Seg *seg)
     size_t ns = 0;
     for (size_t i = 0; i < n; i++) {
         const int64_t t = t0 + (int64_t)i;
-        const int64_t s = oc_kvrq_slot(c, v->layer, t);
+        /* Exact only inside the window of the newest query (sinks always):
+         * ring_extra slots may still hold older positions. */
+        const int64_t s = (t < safe_lo || t > safe_hi)
+                        ? oc_kvrq_slot(c, v->layer, t) : -1;
         if (ns > 0) {
             Seg *p = &seg[ns - 1];
             if ((s < 0 && p->slot < 0 &&

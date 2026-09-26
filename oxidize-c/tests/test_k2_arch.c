@@ -1175,9 +1175,10 @@ Test(k2_mtp, step_refuses_desynced_session)
 
 /* MTP on the RotorQuant cache with a tiny exact ring (window 8 = centering
  * page): verify rows overwrite ring slots of older positions and complete
- * pages; rejected rows must be undone, so every k (and forced rejections)
- * gives the k=0 output and leaves each ring slot holding the newest
- * accepted position, dequantizing to what the k=0 run holds. */
+ * pages, and rejected rows must be undone. Every k (and forced rejections)
+ * gives the k=0 output (verify rows attend like single decode steps: the
+ * ring headroom keeps every row's exact window), and afterwards each ring
+ * slot holds the newest accepted position with the k=0 run's values. */
 Test(k2_mtp, rq_kv_rollback_matches_k0)
 {
     RefModel rm;
@@ -1186,13 +1187,12 @@ Test(k2_mtp, rq_kv_rollback_matches_k0)
     cr_assert_eq(oc_llama_load(FIXTURE("mtp_rq"), &m), OC_OK);
     OcKvOptions kvo = { .type = OC_KV_RQ, .rq_k_bits = 4, .rq_v_bits = 4,
                         .rq_sinks = 2, .rq_window = 8 };
-    uint32_t ref[GEN_N], got[GEN_N], plain[GEN_N];
-    plain_greedy(&m, plain);
+    uint32_t ref[GEN_N], got[GEN_N];
     OcMtpStats st;
     OcLlamaSession s0;
     mtp_greedy_kv(&m, 0, NULL, ref, &st, &kvo, &s0);
     cr_assert_eq(s0.kv_type, OC_KV_RQ);
-    Oracle o = { plain, (int64_t)K2_T, (int64_t)K2_T + 6 };
+    Oracle o = { ref, (int64_t)K2_T, (int64_t)K2_T + 6 };
     for (int run = 0; run < 4; run++) {
         const uint32_t k = run < 3 ? (uint32_t)run + 1 : 3;
         OcLlamaSession s;
@@ -1208,7 +1208,8 @@ Test(k2_mtp, rq_kv_rollback_matches_k0)
         for (size_t l = 0; l < K2_LAYERS; l++) {
             for (int64_t t = 0; t < s.pos; t++) {
                 const int64_t sa = oc_kvrq_slot(a, l, t), sb = oc_kvrq_slot(b, l, t);
-                const bool newest = t < 2 || t >= s.pos - 8;
+                /* ring = window 8 + OC_KV_RQ_RING_EXTRA 8 */
+                const bool newest = t < 2 || t >= s.pos - 16;
                 cr_assert_eq(sb >= 0, newest, "run %d layer %zu pos %lld exact",
                              run, l, (long long)t);
                 cr_assert_eq(sa, sb);
@@ -1220,7 +1221,8 @@ Test(k2_mtp, rq_kv_rollback_matches_k0)
                                              oc_kvrq_xs(a, l, kind, h)[sa];
                             const float vb = oc_kvrq_xq(b, l, kind, h)[sb * K2_HD + i] *
                                              oc_kvrq_xs(b, l, kind, h)[sb];
-                            /* int8 codes: at most one step apart */
+                            /* batched vs single-row matmuls: at most one
+                             * int8 step apart */
                             cr_assert(fabsf(va - vb) <=
                                       1e-5f + 1.01f * oc_kvrq_xs(a, l, kind, h)[sa],
                                       "run %d layer %zu pos %lld: %g vs %g", run, l,

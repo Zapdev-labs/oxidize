@@ -135,7 +135,13 @@ void oc_kvq8_encode_row(const float *x, size_t d, int8_t *codes, float *scale);
 typedef struct {
     unsigned      k_bits, v_bits;    /* 2..4 each                       */
     uint32_t      n_sink;            /* exact attention-sink positions  */
-    uint32_t      window;            /* exact recent-position ring      */
+    uint32_t      window;            /* exact recent positions          */
+    /* Extra ring slots beyond `window` (0 = none). A position is exact for
+     * a query at q only while q - window < t, but the ring keeps it for
+     * ring_extra more stores, so a batch of up to ring_extra + 1 rows
+     * (speculative verify) stored before attention still finds every
+     * earlier row's window intact. */
+    uint32_t      ring_extra;
     OcKvRqRotKind rot;
     uint64_t      seed;
 } OcKvRqParams;
@@ -147,7 +153,8 @@ typedef struct OcKvRqCache {
     OcKvRqCodec   kc, vc;
     size_t        layer_bytes;       /* bytes of one layer's region     */
     uint8_t     **layer;             /* [n_layers] mmap regions         */
-    size_t        n_slots;           /* n_sink + window                 */
+    size_t        n_slots;           /* n_sink + ring                   */
+    size_t        ring;              /* window + ring_extra (0: none)   */
     int8_t       *xq;                /* [layer][2][head][slot][d]       */
     float        *xs;                /* [layer][2][head][slot]          */
     int64_t      *tag;               /* [layer][slot] position or -1    */
@@ -247,8 +254,8 @@ static inline int64_t oc_kvrq_slot(const OcKvRqCache *c, size_t layer,
     if (t < 0) return -1;
     int64_t s;
     if ((uint64_t)t < c->p.n_sink) s = t;
-    else if (c->p.window == 0) return -1;
-    else s = (int64_t)c->p.n_sink + t % (int64_t)c->p.window;
+    else if (c->ring == 0) return -1;
+    else s = (int64_t)c->p.n_sink + t % (int64_t)c->ring;
     return c->tag[layer * c->n_slots + (size_t)s] == t ? s : -1;
 }
 

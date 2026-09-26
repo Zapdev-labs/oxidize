@@ -52,6 +52,11 @@ static void k2_mtp_resync(struct OcK2Mtp *k, int64_t synced_pos);
 
 static inline size_t oc_max_sz(size_t a, size_t b) { return a > b ? a : b; }
 
+/* Extra RQ exact-ring slots: a batch of up to this many rows (MTP verify,
+ * OC_FEW_ROWS_MAX) stores its K/V before attention without evicting any
+ * position still inside an earlier row's exact window. */
+#define OC_KV_RQ_RING_EXTRA 8u
+
 static void *xcalloc(size_t n, size_t sz)
 {
     void *p = calloc(n, sz);
@@ -1629,6 +1634,8 @@ static void rq_params_resolve(const OcKvOptions *o, OcKvRqParams *p)
      * more sensitive half (K4V2 +13%, K2V2 +23%). */
     p->k_bits = 3; p->v_bits = 3;
     p->n_sink = 4; p->window = 1024;
+    /* Ring headroom for batched verify rows (see OC_FEW_ROWS_MAX). */
+    p->ring_extra = OC_KV_RQ_RING_EXTRA;
     p->rot = OC_KVRQ_ROT_HADAMARD;
     p->seed = 0x4B32u;
     const char *e = getenv("OC_KV_RQ_BITS");
@@ -1764,6 +1771,10 @@ static OcError session_init_kv_impl2(OcLlamaModel *model, OcLlamaSession *out,
         maxw = model->cfg.shared_expert_intermediate_size;
     if (model->cfg.n_embd * 2u > maxw)
         maxw = model->cfg.n_embd * 2u;
+    /* attn_output's input width (n_head*head_dim) can exceed all of the
+     * above on a small-FFN model, and a quantized row dequantizes here. */
+    if ((size_t)model->cfg.n_head * model->cfg.head_dim > maxw)
+        maxw = (size_t)model->cfg.n_head * model->cfg.head_dim;
     out->x = xcalloc(model->cfg.n_embd, sizeof(float));
     out->normed = xcalloc(model->cfg.n_embd, sizeof(float));
     out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));
@@ -2068,7 +2079,7 @@ OcError oc_llama_session_fake_fill(OcLlamaSession *sess, int64_t depth)
                 if (lo < p0) lo = p0;
                 if (lo < (int64_t)q->p.n_sink) lo = q->p.n_sink;
                 for (int64_t t = lo; t < depth; t++) {
-                    const size_t slot = q->p.n_sink + (size_t)(t % q->p.window);
+                    const size_t slot = q->p.n_sink + (size_t)(t % q->ring);
                     for (size_t h = 0; h < q->n_kv; h++) {
                         for (size_t kind = 0; kind < 2; kind++) {
                             oc_kvrq_decode_pos(q, l, kind, h, t, tmp);
@@ -2781,6 +2792,7 @@ typedef struct {
     size_t cache_layer, hd, G, n_kv, nc;
     int64_t start, seq_len, chunk_len;
     const float *qs;          /* [n_kv*G][hd] prepared queries */
+    float *out;               /* [n_head][hd] attention output */
     float *part;
     size_t part_stride;
     const float *softplus_gate;
@@ -2821,7 +2833,7 @@ static void flash_merge_task(size_t begin, size_t end, size_t tid, void *ud)
     const size_t G = j->G, hd = j->hd, nc = j->nc;
     for (size_t kvh = begin; kvh < end && kvh < j->n_kv; kvh++) {
         const float *base = j->part + kvh * j->part_stride;
-        float *out = j->s->attn_out + kvh * G * hd;
+        float *out = j->out + kvh * G * hd;
         oc_attn_flash_merge(G, hd, nc, base, base + nc * G, base + 2 * nc * G,
                             out);
         for (size_t g = 0; g < G; g++) {
@@ -2838,7 +2850,8 @@ static void flash_merge_task(size_t begin, size_t end, size_t tid, void *ud)
 static OcError attention_decode_flash(OcLlamaSession *s, uint32_t layer,
                                       size_t hd, uint32_t n_kv, uint32_t group,
                                       int64_t start, int64_t seq_len,
-                                      float scale, const float *softplus_gate)
+                                      float scale, const float *softplus_gate,
+                                      const float *q, float *out)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     const OcLlamaLayer *GL = layer_for_attn(s, layer);
@@ -2862,11 +2875,11 @@ static OcError attention_decode_flash(OcLlamaSession *s, uint32_t layer,
     }
     float *qs = s->flash_part + n_kv * part_stride;
     for (size_t h = 0; h < (size_t)n_kv * group; h++)
-        flash_prep_q(s, s->q + h * hd, hd, scale, qs + h * hd);
+        flash_prep_q(s, q + h * hd, hd, scale, qs + h * hd);
     FlashDecJob job = {
         .s = s, .cache_layer = cache_layer, .hd = hd, .G = group,
         .n_kv = n_kv, .nc = nc, .start = start, .seq_len = seq_len,
-        .chunk_len = chunk, .qs = qs, .part = s->flash_part,
+        .chunk_len = chunk, .qs = qs, .out = out, .part = s->flash_part,
         .part_stride = part_stride, .softplus_gate = softplus_gate,
     };
     oc_parallel_for(n_kv * nc, flash_dec_task, &job);
@@ -2924,7 +2937,8 @@ static OcError attention_decode_layer(OcLlamaSession *s, uint32_t layer)
     }
     if (s->kv_type == OC_KV_RQ || !attn_legacy())
         return attention_decode_flash(s, layer, hd, n_kv, group, start,
-                                      seq_len, scale, softplus_gate);
+                                      seq_len, scale, softplus_gate, s->q,
+                                      s->attn_out);
     AttnDecodeJob job = {
         .s = s,
         .layer = layer,
@@ -5033,6 +5047,22 @@ static bool few_rows_attention_ok(const OcLlamaSession *s, uint32_t layer,
     return n * (c->n_head / n_kv) <= OC_FEW_Q_MAX;
 }
 
+/* Whether a few-row chunk on the RQ cache can run as per-row decode
+ * attention (attention_decode_flash): plain full-attention layers whose
+ * rows fit the ring headroom. */
+static bool few_rows_rq_ok(const OcLlamaSession *s, uint32_t layer, size_t n)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const OcLlamaLayer *GL = layer_for_attn(s, layer);
+    if (s->kv_type != OC_KV_RQ || s->kv_rq == NULL) return false;
+    if (n < 1 || n > OC_FEW_ROWS_MAX || use_compressed_attn(s, layer)) return false;
+    if (s->kv_rq->ring > 0 && n > (size_t)s->kv_rq->p.ring_extra + 1u) return false;
+    if (c->is_qwen35 || c->uses_mla || c->uses_gemma4) return false;
+    if (GL->sliding_window > 0 || c->sliding_window > 0) return false;
+    const uint32_t n_kv = GL->n_head_kv ? GL->n_head_kv : c->n_head_kv;
+    return n_kv > 0 && c->n_head % n_kv == 0;
+}
+
 /* Per-token half of a qwen35 full-attention layer: split Q out of the fused
  * attn_q output, per-head QK RMSNorm, partial RoPE, then the KV cache store. */
 typedef struct {
@@ -5435,6 +5465,25 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
             .gate_kind = c->attn_gate_kind,
         };
         oc_parallel_for(n_kv, attention_few_rows_slice, &fj);
+    } else if (few_rows_rq_ok(s, layer, n)) {
+        /* RQ verify rows: each row is a decode step (flash-decoding over
+         * its own exact window, integer RQ scores), so a batched verify
+         * attends exactly like n single-row steps. */
+        const float scale = (c->attn_scale > 0.0f) ? c->attn_scale
+                                                   : (1.0f / sqrtf((float)hd));
+        const int64_t start = (layer >= c->n_layer && c->is_k2) ? 1 : 0;
+        for (size_t t = 0; t < n && atomic_load(&ajob.error) == OC_OK; t++) {
+            float *out = b->attn_out + t * b->n_qo;
+            OcError ae = attention_decode_flash(
+                s, layer, hd, n_kv, c->n_head / n_kv, start,
+                pos0 + (int64_t)t + 1, scale, NULL, b->q + t * b->n_qo, out);
+            if (ae != OC_OK) {
+                atomic_store(&ajob.error, (int)ae);
+                break;
+            }
+            for (uint32_t h = 0; h < c->n_head; h++)
+                prefill_out_gate(&ajob, t, h, out + (size_t)h * hd);
+        }
     } else {
         (void)prefill_attention(&ajob, n);
     }
@@ -6297,6 +6346,8 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
     size_t maxw = model->cfg.n_embd > model->cfg.n_ff ? model->cfg.n_embd : model->cfg.n_ff;
     if (model->cfg.expert_intermediate_size > maxw)
         maxw = model->cfg.expert_intermediate_size;
+    if ((size_t)model->cfg.n_head * model->cfg.head_dim > maxw)
+        maxw = (size_t)model->cfg.n_head * model->cfg.head_dim;
     out->x = xcalloc(model->cfg.n_embd, sizeof(float));
     out->normed = xcalloc(model->cfg.n_embd, sizeof(float));
     out->q = xcalloc((size_t)model->cfg.n_head * model->cfg.head_dim, sizeof(float));

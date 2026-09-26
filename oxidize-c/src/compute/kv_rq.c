@@ -1244,7 +1244,8 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
         c->layer[l] = map_lazy(c->layer_bytes);
         if (c->layer[l] == NULL) { oc_kvrq_cache_free(c); return OC_ERR_OOM; }
     }
-    c->n_slots = (size_t)p->n_sink + p->window;
+    c->ring = p->window > 0 ? (size_t)p->window + p->ring_extra : 0;
+    c->n_slots = (size_t)p->n_sink + c->ring;
     if (c->n_slots > 0) {
         c->xq_bytes = n_layers * 2u * n_kv * c->n_slots * d;
         c->xs_bytes = n_layers * 2u * n_kv * c->n_slots * sizeof(float);
@@ -1399,8 +1400,8 @@ static int64_t ckpt_slot_index(const OcKvRqCache *c, int64_t pos)
 {
     if (pos < 0) return -1;
     if ((uint64_t)pos < c->p.n_sink) return pos;
-    if (c->p.window == 0) return -1;
-    return (int64_t)c->p.n_sink + pos % (int64_t)c->p.window;
+    if (c->ring == 0) return -1;
+    return (int64_t)c->p.n_sink + pos % (int64_t)c->ring;
 }
 
 static size_t ckpt_rec_bytes(const OcKvRqCache *c)
@@ -1506,8 +1507,8 @@ void oc_kvrq_store(OcKvRqCache *c, size_t layer, int64_t pos, const float *k,
     float *kr = scratch, *vr = scratch + d;
     int64_t slot = -1;
     if ((uint64_t)pos < c->p.n_sink) slot = pos;
-    else if (c->p.window > 0)
-        slot = (int64_t)c->p.n_sink + pos % (int64_t)c->p.window;
+    else if (c->ring > 0)
+        slot = (int64_t)c->p.n_sink + pos % (int64_t)c->ring;
     /* Centered: the ring holds the current page; its RQ blocks are
      * written when the page completes (page_encode). */
     const int direct = c->page == 0 && (uint64_t)pos >= c->p.n_sink;
