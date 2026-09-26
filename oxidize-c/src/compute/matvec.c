@@ -874,6 +874,62 @@ static void matvec_batch_fused_slice(size_t begin, size_t end, size_t tid,
     }
 }
 
+/* Small tiles (speculative verify, sparsely routed experts): the prepared
+ * row decode costs more than it saves when only a few activations share a
+ * row, so run the single-activation multi-row kernel once per activation
+ * over an L2-sized strip of rows. The strip is read from DRAM once and hit
+ * in cache for the other activations. Same kernel as oc_matvec_quantized,
+ * so each output is bit-identical to the single-vector path. */
+static void matvec_batch_rows_slice(size_t begin, size_t end, size_t tid,
+                                    void *ud)
+{
+    (void)tid;
+    const BatchJob *j = (const BatchJob *)ud;
+    const FusedRowsFn rows_fn = fused_rows_fn(j->qtype);
+    size_t strip = (size_t)(96u * 1024u) / (j->row_bytes ? j->row_bytes : 1u);
+    if (strip < 4) strip = 4;
+    for (size_t r0 = begin; r0 < end; r0 += strip) {
+        const size_t n = (end - r0 < strip) ? (end - r0) : strip;
+        if (j->qtype == OC_QUANT_IQ3_S && j->tile <= 4) {
+            /* Decode each IQ3_S row once for the whole (small) tile. */
+            oc_oxk_dot_rows_iq3_s_q8_k_multi(j->data + r0 * j->row_bytes,
+                                             j->row_bytes, n, j->blocks,
+                                             j->acts, j->act_stride, j->tile,
+                                             j->outputs + r0, j->out_stride);
+            continue;
+        }
+        for (size_t v = 0; v < j->tile; v++)
+            rows_fn(j->data + r0 * j->row_bytes, j->row_bytes, n, j->blocks,
+                    j->acts + v * j->act_stride,
+                    j->outputs + v * j->out_stride + r0);
+    }
+}
+
+/* Largest activation tile routed to matvec_batch_rows_slice, per weight
+ * type (bit 0 Q4_K, bit 1 Q6_K, bit 2 IQ3_S in OC_SMALL_BATCH_TYPES).
+ * Measured on K2-Horizon IQ3_M (Ryzen 6850H, 8 threads); see
+ * report-mtp-impl. */
+static size_t small_batch_max(OcGgufQuantizationType qtype)
+{
+    static int types = -1;
+    static size_t max_m = 4;
+    if (types < 0) {
+        const char *e = getenv("OC_SMALL_BATCH_TYPES");
+        types = e ? atoi(e) : 7;
+        const char *m = getenv("OC_SMALL_BATCH_MAX");
+        if (m) max_m = (size_t)atoi(m);
+    }
+    int bit;
+    switch (qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M: bit = 1; break;
+    case OC_QUANT_Q6_K:   bit = 2; break;
+    case OC_QUANT_IQ3_S:  bit = 4; break;
+    default:              return 0;
+    }
+    return (types & bit) ? max_m : 0;
+}
+
 static void matvec_batch_packed_slice(size_t begin, size_t end, size_t tid,
                                       void *ud)
 {
@@ -1071,7 +1127,10 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                              act_scratch, abytes, NULL, in_stride,
                              outputs + base * out_stride, out_stride, m,
                              temp, prep_bytes, prep_fn, multi_fn, packed_multi };
-            if (prep_fn != NULL && m > 1) {
+            if (m > 1 && m <= small_batch_max(qtype) &&
+                fused_rows_fn(qtype) != NULL) {
+                oc_parallel_for(rows, matvec_batch_rows_slice, &job);
+            } else if (prep_fn != NULL && m > 1) {
                 oc_parallel_for(rows, matvec_batch_prep_slice, &job);
             } else if (packed_multi != NULL && m > 1) {
                 oc_parallel_for(rows, matvec_batch_packed_slice, &job);

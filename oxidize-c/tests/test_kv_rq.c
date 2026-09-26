@@ -462,3 +462,105 @@ Test(kv_rq, centering_removes_shared_component)
     cr_assert_eq(c.mu_fixed[2], 0);
     oc_kvrq_cache_free(&c);
 }
+
+/* Deterministic K/V of one (layer, position, variant): variant 0 is the
+ * "real" row, others are speculative rows that get rejected. */
+static void ckpt_row(size_t layer, int64_t pos, int variant, float *k,
+                     float *v, size_t n)
+{
+    rs(1000003u * (uint64_t)layer + 7919u * (uint64_t)pos +
+       104729u * (uint64_t)variant + 11u);
+    for (size_t i = 0; i < n; i++) { k[i] = rg() + 3.0f; v[i] = rg() - 1.0f; }
+}
+
+static void ckpt_store(OcKvRqCache *c, int64_t pos, int variant)
+{
+    float k[2 * 64], v[2 * 64], scr[128];
+    for (size_t l = 0; l < c->n_layers; l++) {
+        ckpt_row(l, pos, variant, k, v, 128);
+        oc_kvrq_store(c, l, pos, k, v, scr);
+    }
+}
+
+/* Ring slots, tags, page-mean flags and (for fixed pages) means and RQ
+ * blocks of every position below `upto` must match exactly. */
+static void ckpt_assert_same(const OcKvRqCache *a, const OcKvRqCache *b,
+                             int64_t upto)
+{
+    const size_t d = a->d;
+    for (size_t l = 0; l < a->n_layers; l++) {
+        for (size_t s = 0; s < a->n_slots; s++) {
+            const int64_t ta = a->tag[l * a->n_slots + s];
+            cr_assert_eq(ta, b->tag[l * b->n_slots + s], "layer %zu slot %zu", l, s);
+            if (ta < 0) continue;
+            for (size_t kind = 0; kind < 2; kind++)
+                for (size_t h = 0; h < a->n_kv; h++) {
+                    cr_assert_eq(memcmp(oc_kvrq_xq(a, l, kind, h) + s * d,
+                                        oc_kvrq_xq(b, l, kind, h) + s * d, d), 0);
+                    cr_assert_eq(oc_kvrq_xs(a, l, kind, h)[s],
+                                 oc_kvrq_xs(b, l, kind, h)[s]);
+                }
+        }
+        for (size_t pg = 0; pg < a->n_pages; pg++) {
+            const uint8_t fa = a->mu_fixed[l * a->n_pages + pg];
+            cr_assert_eq(fa, b->mu_fixed[l * b->n_pages + pg], "layer %zu page %zu", l, pg);
+            if (!fa) continue;
+            for (size_t kind = 0; kind < 2; kind++)
+                for (size_t h = 0; h < a->n_kv; h++)
+                    cr_assert_eq(memcmp(oc_kvrq_mu(a, l, pg, kind, h),
+                                        oc_kvrq_mu(b, l, pg, kind, h),
+                                        d * sizeof(float)), 0);
+            const int64_t lo = (int64_t)(pg * a->page) < (int64_t)a->p.n_sink
+                             ? (int64_t)a->p.n_sink : (int64_t)(pg * a->page);
+            for (int64_t t = lo; t < (int64_t)((pg + 1) * a->page) && t < upto; t++)
+                for (size_t h = 0; h < a->n_kv; h++) {
+                    cr_assert_eq(memcmp(oc_kvrq_kblocks(a, l, h) + (size_t)t * a->kc.block_bytes,
+                                        oc_kvrq_kblocks(b, l, h) + (size_t)t * b->kc.block_bytes,
+                                        a->kc.block_bytes), 0, "K block %lld", (long long)t);
+                    cr_assert_eq(memcmp(oc_kvrq_vblocks(a, l, h) + (size_t)t * a->vc.block_bytes,
+                                        oc_kvrq_vblocks(b, l, h) + (size_t)t * b->vc.block_bytes,
+                                        a->vc.block_bytes), 0, "V block %lld", (long long)t);
+                }
+        }
+    }
+}
+
+/* Speculative rows (MTP verify) overwrite ring slots of older positions and
+ * can complete a page with rows that are then rejected. After
+ * ckpt_restore(keep) the cache must be bit-identical to one that only ever
+ * stored the accepted rows, and stay identical as real rows follow. */
+Test(kv_rq, speculative_rows_checkpoint_restores_exactly)
+{
+    OcKvRqParams p = { .k_bits = 3, .v_bits = 3, .n_sink = 2, .window = 8,
+                       .rot = OC_KVRQ_ROT_HADAMARD, .seed = 5 };
+    const int64_t cases[][2] = {   /* {P, accepted rows} */
+        { 13, 2 },   /* rejected rows complete page 1 (8..15)            */
+        { 13, 0 },
+        { 13, 6 },   /* everything accepted                              */
+        { 20, 1 },   /* within one page                                  */
+        { 3, 1 },    /* touches the sinks                                */
+    };
+    for (size_t ci = 0; ci < sizeof cases / sizeof cases[0]; ci++) {
+        const int64_t P = cases[ci][0], acc = cases[ci][1];
+        const size_t n = 6;
+        OcKvRqCache a, b;
+        cr_assert_eq(oc_kvrq_cache_init(&a, 2, 2, 64, 64, &p), OC_OK);
+        cr_assert_eq(oc_kvrq_cache_init(&b, 2, 2, 64, 64, &p), OC_OK);
+        for (int64_t t = 0; t < P; t++) { ckpt_store(&a, t, 0); ckpt_store(&b, t, 0); }
+        void *buf = malloc(oc_kvrq_ckpt_bytes(&b, n));
+        cr_assert_not_null(buf);
+        oc_kvrq_ckpt_save(&b, P, n, buf);
+        for (int64_t j = 0; j < (int64_t)n; j++)
+            ckpt_store(&b, P + j, j < acc ? 0 : 1 + (int)j);
+        const int64_t keep = P + acc;
+        for (size_t l = 0; l < b.n_layers; l++)
+            oc_kvrq_ckpt_restore(&b, P, n, buf, l, keep);
+        for (int64_t t = P; t < keep; t++) ckpt_store(&a, t, 0);
+        ckpt_assert_same(&a, &b, keep);
+        for (int64_t t = keep; t < 40; t++) { ckpt_store(&a, t, 0); ckpt_store(&b, t, 0); }
+        ckpt_assert_same(&a, &b, 40);
+        free(buf);
+        oc_kvrq_cache_free(&a);
+        oc_kvrq_cache_free(&b);
+    }
+}

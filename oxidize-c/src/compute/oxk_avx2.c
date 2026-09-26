@@ -583,6 +583,88 @@ static inline float iq3_s_dot_body(const uint8_t *row, size_t blocks,
 }
 
 
+/* One IQ3_S row against NA (2..4) activations: the grid gathers and sign
+ * expansion are done once per sub-block pair and shared, the per-activation
+ * work is the sign-apply + maddubs. Per activation the integer sums, the
+ * scale and the lane accumulation are exactly iq3_s_dot_body's, so every
+ * output is bit-identical to the single-activation kernel. */
+__attribute__((target("avx2,fma,f16c"), always_inline))
+static inline void iq3_s_dot_body_multi(const uint8_t *row, size_t blocks,
+                                        const uint8_t *acts, size_t act_stride,
+                                        const int NA, float *out)
+{
+    __m256 accf[4] = { _mm256_setzero_ps(), _mm256_setzero_ps(),
+                       _mm256_setzero_ps(), _mm256_setzero_ps() };
+    for (size_t b = 0; b < blocks; b++) {
+        const uint8_t *xb = row + b * OC_OXK_BLOCK_IQ3_S_SIZE;
+        _mm_prefetch((const char *)(xb + OXK_PREFETCH_AHEAD), _MM_HINT_T0);
+        const float dw = iq3_s_f16(xb);
+        const uint8_t *qs = xb + 2;
+        const uint8_t *qh = xb + 66;
+        const uint8_t *sg = xb + 74;
+        const uint8_t *sc = xb + 106;
+        __m256i sumi1[4], sumi2[4];
+        for (int a = 0; a < NA; a++) {
+            sumi1[a] = _mm256_setzero_si256();
+            sumi2[a] = _mm256_setzero_si256();
+        }
+        const size_t yo = b * OC_OXK_BLOCK_Q8_K_SIZE;
+        for (int ib32 = 0; ib32 < 8; ib32 += 2) {
+            __m256i g1, g2, s1, s2;
+            iq3_s_load_pair(qs, qh + ib32, sg, &g1, &g2, &s1, &s2);
+            qs += 16;
+            sg += 8;
+            const __m256i vls1 = _mm256_set1_epi16(
+                (int16_t)(2 * (sc[ib32 / 2] & 0x0F) + 1));
+            const __m256i vls2 = _mm256_set1_epi16(
+                (int16_t)(2 * (sc[ib32 / 2] >> 4) + 1));
+            for (int a = 0; a < NA; a++) {
+                const int8_t *qa = (const int8_t *)(acts + a * act_stride + yo + 4)
+                                 + 32 * ib32;
+                const __m256i q8_1 = _mm256_loadu_si256((const __m256i *)qa);
+                const __m256i q8_2 = _mm256_loadu_si256((const __m256i *)(qa + 32));
+                const __m256i q8s_1 = _mm256_sub_epi8(_mm256_xor_si256(s1, q8_1), s1);
+                const __m256i q8s_2 = _mm256_sub_epi8(_mm256_xor_si256(s2, q8_2), s2);
+                sumi1[a] = _mm256_add_epi32(sumi1[a], _mm256_madd_epi16(
+                               _mm256_maddubs_epi16(g1, q8s_1), vls1));
+                sumi2[a] = _mm256_add_epi32(sumi2[a], _mm256_madd_epi16(
+                               _mm256_maddubs_epi16(g2, q8s_2), vls2));
+            }
+        }
+        for (int a = 0; a < NA; a++) {
+            float yd;
+            memcpy(&yd, acts + a * act_stride + yo, 4);
+            accf[a] = iq3_s_lane_acc(accf[a], dw * yd,
+                                     _mm256_add_epi32(sumi1[a], sumi2[a]));
+        }
+    }
+    for (int a = 0; a < NA; a++) out[a] = iq3_s_hsum_f32_8(accf[a]);
+}
+
+/* out[a * out_stride + r] for a < n_act (<= 4), r < n_rows. */
+__attribute__((target("avx2,fma,f16c")))
+void oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(const uint8_t *rows, size_t row_bytes,
+                                           size_t n_rows, size_t blocks,
+                                           const uint8_t *acts,
+                                           size_t act_stride, size_t n_act,
+                                           float *out, size_t out_stride)
+{
+    float res[4];
+    for (size_t r = 0; r < n_rows; r++) {
+        const uint8_t *row = rows + r * row_bytes;
+        switch (n_act) {
+        case 2: iq3_s_dot_body_multi(row, blocks, acts, act_stride, 2, res); break;
+        case 3: iq3_s_dot_body_multi(row, blocks, acts, act_stride, 3, res); break;
+        case 4: iq3_s_dot_body_multi(row, blocks, acts, act_stride, 4, res); break;
+        default:
+            for (size_t a = 0; a < n_act; a++)
+                res[a] = iq3_s_dot_body(row, blocks, acts + a * act_stride);
+            break;
+        }
+        for (size_t a = 0; a < n_act && a < 4; a++) out[a * out_stride + r] = res[a];
+    }
+}
+
 /* ─── Exported single-row and rows forms (shared inlined bodies) ───────── */
 
 #define OXK_ROWS_WRAPPERS(NAME, BODY)                                          \
@@ -775,5 +857,7 @@ void oc_oxk_dot_rows_q6_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes, size_
 { for (size_t r = 0; r < n_rows; r++) out[r] = oc_oxk_dot_q6_k_q8_k_scalar(rows + r * row_bytes, blocks, q8); }
 void oc_oxk_dot_rows_iq3_s_q8_k_avx2(const uint8_t *rows, size_t row_bytes, size_t n_rows, size_t blocks, const uint8_t *q8, float *out)
 { for (size_t r = 0; r < n_rows; r++) out[r] = oc_oxk_dot_iq3_s_q8_k_scalar(rows + r * row_bytes, blocks, q8); }
+void oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(const uint8_t *rows, size_t row_bytes, size_t n_rows, size_t blocks, const uint8_t *acts, size_t act_stride, size_t n_act, float *out, size_t out_stride)
+{ for (size_t a = 0; a < n_act; a++) for (size_t r = 0; r < n_rows; r++) out[a * out_stride + r] = oc_oxk_dot_iq3_s_q8_k_scalar(rows + r * row_bytes, blocks, acts + a * act_stride); }
 
 #endif  /* __x86_64__ || __i386__ */

@@ -1330,6 +1330,24 @@ OXK_ROWS_DISPATCH(q6_k, dot_q6_k_q8_k)
 OXK_ROWS_DISPATCH(iq3_s, dot_iq3_s_q8_k)
 #undef OXK_ROWS_DISPATCH
 
+void oc_oxk_dot_rows_iq3_s_q8_k_multi(const uint8_t *rows, size_t row_bytes,
+                                      size_t n_rows, size_t blocks,
+                                      const uint8_t *acts, size_t act_stride,
+                                      size_t n_act, float *out,
+                                      size_t out_stride)
+{
+    oc_oxk_init();
+    if (n_act <= 4 && g_ctx.dot_iq3_s_q8_k == oc_oxk_dot_iq3_s_q8_k_avx2) {
+        oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(rows, row_bytes, n_rows, blocks,
+                                              acts, act_stride, n_act, out,
+                                              out_stride);
+        return;
+    }
+    for (size_t a = 0; a < n_act; a++)
+        oc_oxk_dot_rows_iq3_s_q8_k(rows, row_bytes, n_rows, blocks,
+                                   acts + a * act_stride, out + a * out_stride);
+}
+
 void oc_oxk_iq3_s_prep_row(const uint8_t *row, size_t blocks, void *scratch)
 { oc_oxk_init(); g_ctx.iq3_s_prep_row(row, blocks, scratch); }
 

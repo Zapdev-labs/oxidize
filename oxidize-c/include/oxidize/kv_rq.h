@@ -175,6 +175,20 @@ void oc_kvrq_cache_free(OcKvRqCache *c);
 void oc_kvrq_cache_clear(OcKvRqCache *c);
 /* Rewind: positions >= pos are no longer valid. */
 void oc_kvrq_cache_rewind(OcKvRqCache *c, int64_t pos);
+/* Speculative-row checkpoint. Storing positions [pos0, pos0+n) overwrites
+ * the exact-ring slots of positions pos0-window.. and may complete a page
+ * (fixing its mean from rows that are later rejected). ckpt_save() copies
+ * those slots (all layers) and the touched pages' mean flags into buf
+ * (oc_kvrq_ckpt_bytes(c, n) bytes, n <= window); ckpt_restore() puts back,
+ * for one layer, every slot of that range now tagged >= keep and the flags
+ * of pages whose last position is >= keep, so the cache is exactly what
+ * storing only positions < keep would have produced. */
+size_t oc_kvrq_ckpt_bytes(const OcKvRqCache *c, size_t n);
+void oc_kvrq_ckpt_save(const OcKvRqCache *c, int64_t pos0, size_t n,
+                       void *buf);
+void oc_kvrq_ckpt_restore(OcKvRqCache *c, int64_t pos0, size_t n,
+                          const void *buf, size_t layer, int64_t keep);
+
 /* Bytes one position costs across all layers/heads (RQ blocks only). */
 size_t oc_kvrq_bytes_per_token(const OcKvRqCache *c);
 

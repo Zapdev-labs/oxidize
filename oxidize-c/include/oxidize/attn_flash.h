@@ -51,6 +51,9 @@ typedef struct {
     const OcKvRqCache *rq;
     size_t layer, head;
     int64_t hi_written;   /* newest position stored (ring reference)   */
+    /* Prefill only: positions below t_min are never attended (a layer
+     * with no entry at position 0, e.g. the K2 MTP head). 0 = none. */
+    int64_t t_min;
 } OcKvView;
 
 /* Scratch floats oc_attn_flash_decode_range() needs for G heads. */

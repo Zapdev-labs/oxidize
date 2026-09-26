@@ -610,8 +610,9 @@ void oc_attn_flash_prefill(const OcKvView *v, const float *q, size_t R,
     }
     memset(O, 0, Rp * d * sizeof(float));
     const int64_t max_pos = rp[Rp - 1];
-    int64_t first = 0;
-    if (sw > 0 && rp[0] - sw + 1 > 0) first = rp[0] - sw + 1;
+    const int64_t tmin = v->t_min > 0 ? v->t_min : 0;
+    int64_t first = tmin;
+    if (sw > 0 && rp[0] - sw + 1 > first) first = rp[0] - sw + 1;
 
     for (int64_t tb = first; tb <= max_pos; tb += T_) {
         const size_t n = (size_t)(max_pos + 1 - tb < (int64_t)T_
@@ -638,8 +639,9 @@ void oc_attn_flash_prefill(const OcKvView *v, const float *q, size_t R,
                                                                  : (int64_t)n);
             /* Sliding window: columns before the row's window start. */
             size_t lo = 0;
-            if (sw > 0) {
-                const int64_t ws = rp[r] - sw + 1 - tb;
+            {
+                int64_t ws = tmin - tb;
+                if (sw > 0 && rp[r] - sw + 1 - tb > ws) ws = rp[r] - sw + 1 - tb;
                 if (ws > 0) lo = ws > (int64_t)valid ? valid : (size_t)ws;
             }
             if (valid <= lo) {

@@ -1391,6 +1391,109 @@ void oc_kvrq_decode_pos(const OcKvRqCache *c, size_t layer, size_t kind,
     for (size_t i = 0; i < c->d; i++) out[i] += mu[i];
 }
 
+/* ── Speculative-row checkpoint ─────────────────────────────────────────
+ * Per layer: n slot records {tag, then for kind K,V and every head: d int8
+ * codes + f32 scale}, then the mean flags of pages page_of(pos0) ..
+ * page_of(pos0+n-1) (at most 2 since n <= page). */
+static int64_t ckpt_slot_index(const OcKvRqCache *c, int64_t pos)
+{
+    if (pos < 0) return -1;
+    if ((uint64_t)pos < c->p.n_sink) return pos;
+    if (c->p.window == 0) return -1;
+    return (int64_t)c->p.n_sink + pos % (int64_t)c->p.window;
+}
+
+static size_t ckpt_rec_bytes(const OcKvRqCache *c)
+{
+    return sizeof(int64_t) + 2u * c->n_kv * (c->d + sizeof(float));
+}
+
+static size_t ckpt_layer_bytes(const OcKvRqCache *c, size_t n)
+{
+    return n * ckpt_rec_bytes(c) + 2u;
+}
+
+size_t oc_kvrq_ckpt_bytes(const OcKvRqCache *c, size_t n)
+{
+    if (c == NULL) return 0;
+    return c->n_layers * ckpt_layer_bytes(c, n);
+}
+
+void oc_kvrq_ckpt_save(const OcKvRqCache *c, int64_t pos0, size_t n,
+                       void *buf)
+{
+    if (c == NULL || buf == NULL || n == 0) return;
+    const size_t d = c->d, rec = ckpt_rec_bytes(c);
+    for (size_t l = 0; l < c->n_layers; l++) {
+        uint8_t *b = (uint8_t *)buf + l * ckpt_layer_bytes(c, n);
+        for (size_t j = 0; j < n; j++) {
+            uint8_t *r = b + j * rec;
+            const int64_t s = ckpt_slot_index(c, pos0 + (int64_t)j);
+            int64_t tag = -1;
+            if (s >= 0 && c->n_slots > 0) {
+                tag = c->tag[l * c->n_slots + (size_t)s];
+                uint8_t *w = r + sizeof(int64_t);
+                for (size_t kind = 0; kind < 2; kind++)
+                    for (size_t h = 0; h < c->n_kv; h++) {
+                        memcpy(w, oc_kvrq_xq(c, l, kind, h) + (size_t)s * d, d);
+                        w += d;
+                        memcpy(w, oc_kvrq_xs(c, l, kind, h) + s, sizeof(float));
+                        w += sizeof(float);
+                    }
+            }
+            memcpy(r, &tag, sizeof tag);
+        }
+        uint8_t *fl = b + n * rec;
+        fl[0] = fl[1] = 0;
+        if (c->page != 0) {
+            const size_t p0 = oc_kvrq_page_of(c, pos0);
+            const size_t p1 = oc_kvrq_page_of(c, pos0 + (int64_t)n - 1);
+            for (size_t pg = p0; pg <= p1 && pg < p0 + 2 && pg < c->n_pages; pg++)
+                fl[pg - p0] = c->mu_fixed[l * c->n_pages + pg];
+        }
+    }
+}
+
+void oc_kvrq_ckpt_restore(OcKvRqCache *c, int64_t pos0, size_t n,
+                          const void *buf, size_t layer, int64_t keep)
+{
+    if (c == NULL || buf == NULL || n == 0 || layer >= c->n_layers) return;
+    const size_t d = c->d, rec = ckpt_rec_bytes(c);
+    const uint8_t *b = (const uint8_t *)buf + layer * ckpt_layer_bytes(c, n);
+    if (c->n_slots > 0) {
+        for (size_t j = 0; j < n; j++) {
+            const int64_t pos = pos0 + (int64_t)j;
+            if (pos < keep) continue;
+            const int64_t s = ckpt_slot_index(c, pos);
+            if (s < 0) continue;
+            int64_t *tag = &c->tag[layer * c->n_slots + (size_t)s];
+            if (*tag < keep) continue;          /* already real data */
+            const uint8_t *r = b + j * rec;
+            memcpy(tag, r, sizeof(int64_t));
+            const uint8_t *w = r + sizeof(int64_t);
+            for (size_t kind = 0; kind < 2; kind++)
+                for (size_t h = 0; h < c->n_kv; h++) {
+                    memcpy((int8_t *)oc_kvrq_xq(c, layer, kind, h) +
+                           (size_t)s * d, w, d);
+                    w += d;
+                    memcpy((float *)oc_kvrq_xs(c, layer, kind, h) + s, w,
+                           sizeof(float));
+                    w += sizeof(float);
+                }
+        }
+    }
+    if (c->page != 0) {
+        const uint8_t *fl = b + n * rec;
+        const size_t p0 = oc_kvrq_page_of(c, pos0);
+        const size_t p1 = oc_kvrq_page_of(c, pos0 + (int64_t)n - 1);
+        for (size_t pg = p0; pg <= p1 && pg < p0 + 2 && pg < c->n_pages; pg++) {
+            const int64_t last = (int64_t)((pg + 1) * c->page) - 1;
+            if (last >= keep)
+                c->mu_fixed[layer * c->n_pages + pg] = fl[pg - p0];
+        }
+    }
+}
+
 size_t oc_kvrq_bytes_per_token(const OcKvRqCache *c)
 {
     return c->n_layers * c->n_kv * (c->kc.block_bytes + c->vc.block_bytes);

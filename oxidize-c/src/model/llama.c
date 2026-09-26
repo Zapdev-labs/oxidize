@@ -44,6 +44,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct OcK2Mtp;
+static void k2_mtp_free(struct OcK2Mtp *k);
+static void k2_mtp_resync(struct OcK2Mtp *k, int64_t synced_pos);
+
 /* ─── Helpers ──────────────────────────────────────────────────────────── */
 
 static inline size_t oc_max_sz(size_t a, size_t b) { return a > b ? a : b; }
@@ -487,6 +491,29 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
             return OC_ERR_MODEL;
         }
     }
+    /* K2-Horizon MTP: a merged file stores the nextn head as the last block
+     * (block_count = base + nextn_predict_layers), so the main stack is the
+     * first block_count - nextn blocks and blk.{n_layer} binds to m->mtp. */
+    if (cfg->is_k2) {
+        snprintf(key, sizeof(key), "%snextn_predict_layers", prefix);
+        const uint32_t nextn = cfg_u32(f, key, 0);
+        if (nextn > 0) {
+            if (nextn != 1 || nextn >= cfg->n_layer) {
+                oc_log(OC_LOG_ERROR, "k2: nextn_predict_layers=%u unsupported "
+                       "(only 1)", nextn);
+                return OC_ERR_MODEL;
+            }
+            cfg->nextn_predict_layers = nextn;
+            cfg->n_layer -= nextn;
+            snprintf(key, sizeof(key), "%snextn.base_block_count", prefix);
+            const uint32_t base = cfg_u32(f, key, cfg->n_layer);
+            if (base != cfg->n_layer) {
+                oc_log(OC_LOG_ERROR, "k2: nextn.base_block_count %u != %u",
+                       base, cfg->n_layer);
+                return OC_ERR_MODEL;
+            }
+        }
+    }
     if (is_longcat_arch(arch_str)) {
         /* LongCat states its MLA geometry directly rather than through
          * DeepSeek's key_length_mla, and splits each block into two
@@ -698,7 +725,10 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
                 m->mtp.shared_head_norm = load_norm(mm, info, m->cfg.n_embd);
             } else if (strcmp(suf, "embed_tokens.weight") == 0) {
                 m->mtp.embed_tokens = view_from_info(mm, info);
-            } else if (strcmp(suf, "shared_head.weight") == 0) {
+            } else if (strcmp(suf, "shared_head.weight") == 0 ||
+                       strcmp(suf, "shared_head_head.weight") == 0) {
+                /* llama.cpp / oxidize-core spell it shared_head_head; older
+                 * oxidize-c Qwen3.5 exports used shared_head. */
                 m->mtp.shared_head_head = view_from_info(mm, info);
             }
             return true;
@@ -824,6 +854,69 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
         return true;
     }
     return false;
+}
+
+/* K2-Horizon MTP head (SPEC.md): nextn.{eh_proj,enorm,hnorm,shared_head_norm}
+ * plus one dense K2 block (grouped norms, plain attn_v, softplus attn_gate,
+ * SwiGLU FFN of width n_ff). It reuses the target's token_embd and output.
+ * Returns OC_OK with mtp.present = false when no MTP tensors were bound. */
+static OcError k2_mtp_bind(OcLlamaModel *m)
+{
+    const OcLlamaConfig *c = &m->cfg;
+    OcLlamaLayer *M = &m->mtp.layer;
+    const bool any = M->attn_q.data || m->mtp.eh_proj.data || M->attn_norm;
+    if (!any) {
+        oc_log(OC_LOG_WARN, "k2: nextn_predict_layers set but no blk.%u "
+               "tensors; MTP disabled", c->n_layer);
+        m->mtp.present = false;
+        return OC_OK;
+    }
+    const size_t D = c->n_embd;
+    const size_t nq = (size_t)c->n_head * c->head_dim;
+    const size_t kv = (size_t)c->n_head_kv * c->head_dim;
+#define K2M_CHECK(v, r, cc) ((v).data != NULL && (v).rows == (r) && (v).cols == (cc))
+    const bool ok =
+        K2M_CHECK(m->mtp.eh_proj, D, 2u * D) &&
+        m->mtp.enorm && m->mtp.hnorm && m->mtp.shared_head_norm &&
+        M->attn_norm && M->ffn_norm &&
+        K2M_CHECK(M->attn_q, nq, D) && K2M_CHECK(M->attn_k, kv, D) &&
+        K2M_CHECK(M->attn_v, kv, D) && K2M_CHECK(M->attn_gate, nq, D) &&
+        K2M_CHECK(M->attn_output, D, nq) &&
+        K2M_CHECK(M->ffn_gate, c->n_ff, D) && K2M_CHECK(M->ffn_up, c->n_ff, D) &&
+        K2M_CHECK(M->ffn_down, D, c->n_ff) &&
+        M->ffn_gate_inp.data == NULL && M->attn_v_exps.data == NULL &&
+        c->head_dim == c->kv_head_dim;
+#undef K2M_CHECK
+    if (!ok) {
+        oc_log(OC_LOG_ERROR, "k2: MTP block blk.%u tensors missing or "
+               "mis-shaped", c->n_layer);
+        m->mtp.present = false;
+        return OC_ERR_TENSOR;
+    }
+    if (m->mtp.embed_tokens.data != NULL &&
+        (m->mtp.embed_tokens.cols != D ||
+         m->mtp.embed_tokens.rows != m->tok_embeddings.rows)) {
+        oc_log(OC_LOG_ERROR, "k2: nextn.embed_tokens mis-shaped");
+        return OC_ERR_TENSOR;
+    }
+    if (m->mtp.shared_head_head.data != NULL &&
+        (m->mtp.shared_head_head.cols != D ||
+         m->mtp.shared_head_head.rows != m->output.rows)) {
+        oc_log(OC_LOG_ERROR, "k2: nextn.shared_head_head mis-shaped");
+        return OC_ERR_TENSOR;
+    }
+    M->kind = OC_LLAMA_LAYER_FULL_ATTENTION;
+    M->head_dim = c->head_dim;
+    M->n_head_kv = c->n_head_kv;
+    M->rope_dim = c->rope_dim;
+    M->rope_theta = c->rope_theta;
+    M->sliding_window = 0;
+    M->use_rope = true;
+    M->kv_cache_index = c->n_layer;
+    if (M->layer_output_scale == 0.0f) M->layer_output_scale = 1.0f;
+    m->mtp.present = true;
+    oc_log(OC_LOG_INFO, "k2: MTP/nextn head bound (blk.%u)", c->n_layer);
+    return OC_OK;
 }
 
 static OcError resolve_weights(OcLlamaModel *m)
@@ -1091,6 +1184,10 @@ static OcError resolve_weights(OcLlamaModel *m)
     if (m->cfg.is_k2) {
         OcError ke = oc_k2_validate_layers(m);
         if (ke != OC_OK) return ke;
+        if (m->cfg.nextn_predict_layers > 0) {
+            ke = k2_mtp_bind(m);
+            if (ke != OC_OK) return ke;
+        }
     }
     if (m->tok_embeddings.rows == 0 || m->tok_embeddings.rows > UINT32_MAX ||
         m->tok_embeddings.cols != m->cfg.n_embd ||
@@ -1184,6 +1281,84 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
     if (flags & OC_LLAMA_LOAD_STREAM)
         oc_log(OC_LOG_INFO, "llama: mmap opened without readahead (expert stream)");
     return OC_OK;
+}
+
+OcError oc_llama_load_mtp_sidecar(OcLlamaModel *m, const char *path)
+{
+    if (m == NULL || path == NULL) return OC_ERR_INVALID_ARG;
+    if (m->live_sessions > 0 || m->mtp.present || m->mtp_gguf_open)
+        return OC_ERR_INVALID_ARG;
+    if (!m->cfg.is_k2) {
+        oc_log(OC_LOG_ERROR, "mtp sidecar: only K2-Horizon is supported");
+        return OC_ERR_MODEL;
+    }
+    OcError e = oc_gguf_map_open(path, &m->mtp_gguf);
+    if (e != OC_OK) return e;
+    m->mtp_gguf_open = true;
+    const OcGgufFile *f = &m->mtp_gguf.unified;
+    const char *arch = NULL;
+    size_t arch_len = 0;
+    if (!oc_gguf_metadata_get_str(f, "general.architecture", &arch, &arch_len) ||
+        !oc_k2_arch_match(arch)) {
+        oc_log(OC_LOG_ERROR, "mtp sidecar: architecture is not k2-horizon");
+        e = OC_ERR_MODEL;
+        goto fail;
+    }
+    char key[160];
+    snprintf(key, sizeof key, "%s.block_count", arch);
+    const uint32_t blocks = cfg_u32(f, key, 0);
+    snprintf(key, sizeof key, "%s.nextn_predict_layers", arch);
+    const uint32_t nextn = cfg_u32(f, key, 0);
+    snprintf(key, sizeof key, "%s.nextn.base_block_count", arch);
+    const uint32_t base = cfg_u32(f, key, blocks - nextn);
+    snprintf(key, sizeof key, "%s.embedding_length", arch);
+    const uint32_t embd = cfg_u32(f, key, 0);
+    if (nextn != 1 || blocks != m->cfg.n_layer + 1 || base != m->cfg.n_layer ||
+        embd != m->cfg.n_embd) {
+        oc_log(OC_LOG_ERROR, "mtp sidecar: block_count=%u nextn=%u base=%u "
+               "n_embd=%u do not match base model (n_layer=%u n_embd=%u)",
+               blocks, nextn, base, embd, m->cfg.n_layer, m->cfg.n_embd);
+        e = OC_ERR_MODEL;
+        goto fail;
+    }
+
+    OcArena *arena = oc_arena_new(1u << 16);
+    if (arena == NULL) { e = OC_ERR_OOM; goto fail; }
+    OcGgufTensorInfo *infos = NULL;
+    size_t n = 0;
+    e = oc_gguf_map_mapped_tensor_infos(&m->mtp_gguf, arena, &infos, &n);
+    if (e != OC_OK) { oc_arena_free(arena); goto fail; }
+    char pfx[32];
+    const int pl = snprintf(pfx, sizeof pfx, "blk.%u.", m->cfg.n_layer);
+    const uint32_t saved_nextn = m->cfg.nextn_predict_layers;
+    m->cfg.nextn_predict_layers = 1;   /* makes assign_tensor route blk.N */
+    m->mtp.layer.layer_output_scale = 1.0f;
+    size_t bound = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (strncmp(infos[i].name, pfx, (size_t)pl) != 0) continue;
+        if (assign_tensor(m, infos[i].name, &m->mtp_gguf, &infos[i])) bound++;
+    }
+    oc_arena_free(arena);
+    e = bound > 0 ? k2_mtp_bind(m) : OC_ERR_TENSOR;
+    if (e != OC_OK || !m->mtp.present) {
+        m->cfg.nextn_predict_layers = saved_nextn;
+        if (e == OC_OK) e = OC_ERR_TENSOR;
+        goto fail_unbind;
+    }
+    oc_log(OC_LOG_INFO, "mtp sidecar: %zu tensors from %s", bound, path);
+    return OC_OK;
+
+fail_unbind:
+    free(m->mtp.layer.attn_norm);
+    free(m->mtp.layer.ffn_norm);
+    free(m->mtp.enorm);
+    free(m->mtp.hnorm);
+    free(m->mtp.shared_head_norm);
+    memset(&m->mtp, 0, sizeof m->mtp);
+fail:
+    oc_gguf_map_free(&m->mtp_gguf);
+    m->mtp_gguf_open = false;
+    return e;
 }
 
 OcError oc_llama_enable_expert_stream(OcLlamaModel *model,
@@ -2095,6 +2270,7 @@ void oc_llama_session_reset(OcLlamaSession *sess)
     if (sess == NULL) return;
     sess->pos = 0;
     sess->mtp_pos = 0;
+    k2_mtp_resync(sess->k2mtp, 0);
     if (sess->kv_compress) oc_compressed_kv_clear(sess->kv_compress);
     if (sess->kv_rq) oc_kvrq_cache_clear(sess->kv_rq);
     if (sess->qwen35_delta && sess->model) {
@@ -2108,6 +2284,9 @@ void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos)
 {
     if (!sess) return;
     sess->pos = pos;
+    /* The K2 MTP head needs h_{pos-1}, which a rewind does not restore; its
+     * steps refuse until the next prefill from position 0. */
+    k2_mtp_resync(sess->k2mtp, -1);
     if (sess->kv_compress)
         oc_compressed_kv_rewind(sess->kv_compress, (size_t)pos);
     if (sess->kv_rq) oc_kvrq_cache_rewind(sess->kv_rq, (int64_t)pos);
@@ -2158,6 +2337,8 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->mova_out_all);
     free(sess->rope_cos);
     free(sess->rope_sin);
+    k2_mtp_free(sess->k2mtp);
+    sess->k2mtp = NULL;
     if (sess->kv_compress) {
         oc_compressed_kv_free(sess->kv_compress);
         free(sess->kv_compress);
@@ -2213,6 +2394,7 @@ void oc_llama_free(OcLlamaModel *model)
     free(model->final_norm_bias);
     free(model->cfg.layer_is_swa);
     if (model->expert_stream) oc_expert_stream_free(model->expert_stream);
+    if (model->mtp_gguf_open) oc_gguf_map_free(&model->mtp_gguf);
     oc_gguf_map_free(&model->gguf);
     memset(model, 0, sizeof(*model));
 }
@@ -2355,7 +2537,9 @@ static void attention_head_at(const OcLlamaSession *s, uint32_t head,
      * for layers matching the alternating pattern. Layer L uses sliding
      * window when (L % pattern) == 1 (i.e., every other layer for pattern=2). */
     int64_t seq_len = query_pos + 1;
-    int64_t start = 0;
+    /* K2 MTP layer: no entry exists at position 0 (slot p is built from
+     * (emb(t_p), h_{p-1})), so its attention starts at 1. */
+    int64_t start = (layer >= c->n_layer && c->is_k2) ? 1 : 0;
     if (GL->sliding_window > 0) {
         /* Gemma 4 (and any model whose loader filled in a per-layer window):
          * the pattern came from metadata, so trust the resolved value rather
@@ -3958,6 +4142,9 @@ OcError oc_llama_mtp_draft_tokens(OcLlamaSession *sess, uint32_t k,
     *n_out = 0;
     if (!sess->model || !sess->model->mtp.present || sess->last_hidden == NULL)
         return OC_ERR_MODEL;
+    /* K2's head is driven by oc_llama_mtp_step (mtp_forward_one is the
+     * Qwen3.5 layer). */
+    if (sess->model->cfg.is_k2) return OC_ERR_MODEL;
     if (k == 0) return OC_OK;
     if (k > 8) k = 8;
     OcLlamaModel *m = sess->model;
@@ -3992,7 +4179,8 @@ OcError oc_llama_mtp_greedy_advance(OcLlamaSession *sess, float *logits,
     if (max_out == 0) return OC_OK;
     OcLlamaModel *m = sess->model;
     const uint32_t vocab = m->cfg.vocab_size;
-    if (!m->mtp.present || sess->last_hidden == NULL || max_out == 1) {
+    if (!m->mtp.present || m->cfg.is_k2 || sess->last_hidden == NULL ||
+        max_out == 1) {
         uint32_t t = oc_argmax(logits, vocab);
         out_tokens[(*n_out)++] = t;
         return oc_llama_forward(sess, t, logits);
@@ -4613,6 +4801,7 @@ typedef struct {
     size_t cache_layer, n, G, n_kv, nb;
     float scale;
     int64_t sw;
+    int64_t t_min;            /* first attended position (K2 MTP head: 1) */
 } FlashPreJob;
 
 static void flash_pre_task(size_t begin, size_t end, size_t tid, void *ud)
@@ -4651,8 +4840,9 @@ static void flash_pre_task(size_t begin, size_t end, size_t tid, void *ud)
                 rpos[r] = j->pos0 + (int64_t)tok;
             }
         }
-        const OcKvView v = kv_view_for(s, fj->cache_layer, kvh, hd,
-                                       j->pos0 + (int64_t)fj->n - 1);
+        OcKvView v = kv_view_for(s, fj->cache_layer, kvh, hd,
+                                 j->pos0 + (int64_t)fj->n - 1);
+        v.t_min = fj->t_min;
         oc_attn_flash_prefill(&v, Q, R, rpos, fj->sw, O, fs);
         for (size_t tok = j0; tok < j1; tok++) {
             for (size_t g = 0; g < G; g++) {
@@ -4700,9 +4890,147 @@ static OcError prefill_attention(AttnJob *aj, size_t n)
         .scale = (c->attn_scale > 0.0f) ? c->attn_scale
                                         : (1.0f / sqrtf((float)aj->hd)),
         .sw = sw,
+        /* K2 MTP layer: slot 0 has no entry (see attention_head_at). */
+        .t_min = (aj->layer >= c->n_layer && c->is_k2) ? 1 : 0,
     };
     oc_parallel_for(fj.n_kv * fj.nb, flash_pre_task, &fj);
     return (OcError)atomic_load(&aj->error);
+}
+
+/* Few-row attention (speculative verify, MTP catch-up): one task per KV
+ * head sweeps that head's cache ONCE for every (row, grouped query head)
+ * pair, instead of once per pair as attention_slice does. At long context
+ * the per-pair sweep reads the cache n_rows * group times. Arithmetic per
+ * query is the decode kernel's (same online-softmax order), so results are
+ * bit-identical to attention_head_at: the rescale is skipped only when the
+ * running max is unchanged, where the decode kernel scales by expf(0) = 1
+ * exactly, and a new max contributes expf(0) = 1 exactly. That halves the
+ * expf calls and drops almost every full-vector rescale. */
+#define OC_FEW_ROWS_MAX 8u
+#define OC_FEW_Q_MAX    64u
+
+typedef struct {
+    OcLlamaSession *s;
+    PrefillBuf     *b;
+    uint32_t        layer;
+    int64_t         pos0;
+    size_t          n;
+    size_t          hd;
+    uint32_t        n_head, n_kv, group;
+    int64_t         start;
+    float           scale;
+    const float    *mgate;
+    OcAttnGateKind  gate_kind;
+} FewRowsAttnJob;
+
+static void attention_few_rows_slice(size_t begin, size_t end, size_t tid,
+                                     void *ud)
+{
+    (void)tid;
+    const FewRowsAttnJob *j = (const FewRowsAttnJob *)ud;
+    const OcLlamaSession *s = j->s;
+    const OcLlamaConfig *c = &s->model->cfg;
+    const size_t hd = j->hd, kv_row = s->kv_row_floats;
+    const bool q8 = s->kv_type == OC_KV_Q8;
+    const size_t sc_stride = c->n_head_kv;
+    for (size_t kvh = begin; kvh < end; kvh++) {
+        const float *qs[OC_FEW_Q_MAX];
+        float *outs[OC_FEW_Q_MAX];
+        float run_max[OC_FEW_Q_MAX], run_sum[OC_FEW_Q_MAX];
+        int64_t qpos[OC_FEW_Q_MAX];
+        size_t nq = 0;
+        for (size_t t = 0; t < j->n; t++) {
+            for (uint32_t g = 0; g < j->group; g++) {
+                const uint32_t h = (uint32_t)kvh * j->group + g;
+                qs[nq] = j->b->q + t * j->b->n_qo + (size_t)h * hd;
+                outs[nq] = j->b->attn_out + t * j->b->n_qo + (size_t)h * hd;
+                run_max[nq] = -INFINITY;
+                run_sum[nq] = 0.0f;
+                qpos[nq] = j->pos0 + (int64_t)t;
+                for (size_t i = 0; i < hd; i++) outs[nq][i] = 0.0f;
+                nq++;
+            }
+        }
+        const size_t kv_off = (size_t)j->layer * c->n_ctx * kv_row + kvh * hd;
+        const size_t sc_base = (size_t)j->layer * c->n_ctx * sc_stride + kvh;
+        const int64_t last = j->pos0 + (int64_t)j->n - 1;
+        for (int64_t t = j->start; t <= last; t++) {
+            /* Rows are ordered by position, so the queries that may see
+             * position t are a suffix of the list. */
+            const size_t first = t <= j->pos0 ? 0
+                               : (size_t)(t - j->pos0) * j->group;
+            if (q8) {
+                const int8_t *kq = s->kv_k_q + kv_off + (size_t)t * kv_row;
+                const int8_t *vq = s->kv_v_q + kv_off + (size_t)t * kv_row;
+                const float ks = s->kv_k_scale[sc_base + (size_t)t * sc_stride];
+                const float vs = s->kv_v_scale[sc_base + (size_t)t * sc_stride];
+                for (size_t q = first; q < nq; q++) {
+                    float score = oc_attn_dot_q8(qs[q], kq, hd) * ks * j->scale;
+                    if (score > run_max[q]) {
+                        float ef = expf(run_max[q] - score);
+                        oc_attn_scale_f32(outs[q], ef, hd);
+                        oc_attn_axpy_q8(outs[q], vq, vs, hd);
+                        run_sum[q] = run_sum[q] * ef + 1.0f;
+                        run_max[q] = score;
+                    } else {
+                        float es = expf(score - run_max[q]);
+                        oc_attn_axpy_q8(outs[q], vq, es * vs, hd);
+                        run_sum[q] += es;
+                    }
+                }
+            } else {
+                const float *kt = s->kv_k + kv_off + (size_t)t * kv_row;
+                const float *vt = s->kv_v + kv_off + (size_t)t * kv_row;
+                for (size_t q = first; q < nq; q++) {
+                    float score = oc_attn_dot_f32(qs[q], kt, hd) * j->scale;
+                    if (score > run_max[q]) {
+                        float ef = expf(run_max[q] - score);
+                        oc_attn_scale_f32(outs[q], ef, hd);
+                        oc_attn_axpy_f32(outs[q], vt, 1.0f, hd);
+                        run_sum[q] = run_sum[q] * ef + 1.0f;
+                        run_max[q] = score;
+                    } else {
+                        float es = expf(score - run_max[q]);
+                        oc_attn_axpy_f32(outs[q], vt, es, hd);
+                        run_sum[q] += es;
+                    }
+                }
+            }
+        }
+        for (size_t q = 0; q < nq; q++) {
+            (void)qpos[q];
+            if (run_sum[q] > 0.0f)
+                oc_attn_scale_f32(outs[q], 1.0f / run_sum[q], hd);
+            if (j->mgate != NULL) {
+                const size_t t = q / j->group;
+                const uint32_t h = (uint32_t)kvh * j->group +
+                                   (uint32_t)(q % j->group);
+                const float *gate = j->mgate + t * j->b->n_qo + (size_t)h * hd;
+                if (j->gate_kind == OC_ATTN_GATE_SOFTPLUS_LN2) {
+                    oc_k2_softplus_gate_apply(outs[q], gate, hd);
+                } else {
+                    for (size_t d = 0; d < hd; d++)
+                        outs[q][d] *= qwen35_sigmoid(gate[d]);
+                }
+            }
+        }
+    }
+}
+
+/* Whether attention_few_rows_slice can replace attention_slice here: plain
+ * full-attention layers on the dense f32/q8 cache only. */
+static bool few_rows_attention_ok(const OcLlamaSession *s, uint32_t layer,
+                                  size_t n)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const OcLlamaLayer *GL = layer_for_attn(s, layer);
+    if (n < 1 || n > OC_FEW_ROWS_MAX || use_compressed_attn(s, layer)) return false;
+    if (s->kv_type != OC_KV_F32 && s->kv_type != OC_KV_Q8) return false;
+    if (c->is_qwen35 || c->uses_mla || c->uses_gemma4) return false;
+    if (GL->sliding_window > 0 || c->sliding_window > 0) return false;
+    const uint32_t n_kv = GL->n_head_kv ? GL->n_head_kv : c->n_head_kv;
+    if (n_kv == 0 || c->n_head % n_kv != 0) return false;
+    return n * (c->n_head / n_kv) <= OC_FEW_Q_MAX;
 }
 
 /* Per-token half of a qwen35 full-attention layer: split Q out of the fused
@@ -4942,7 +5270,10 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
                              size_t n, int64_t pos0)
 {
     const OcLlamaConfig *c = &s->model->cfg;
-    OcLlamaLayer *L = &s->model->layers[layer];
+    /* layer == n_layer is the MTP/nextn block (K2 MTP rows); its KV lives
+     * in the extra cache layer the session reserves for it. */
+    OcLlamaLayer *L = layer < c->n_layer ? &s->model->layers[layer]
+                                         : &s->model->mtp.layer;
     const size_t hd = L->head_dim ? (size_t)L->head_dim : (size_t)c->head_dim;
     const uint32_t n_kv = L->n_head_kv ? L->n_head_kv : c->n_head_kv;
     const uint32_t rope_dim = L->head_dim ? L->rope_dim : c->rope_dim;
@@ -5092,7 +5423,21 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, NULL,
                      c->attn_out_gate ? b->mgate : NULL, OC_OK,
                      c->attn_gate_kind };
-    (void)prefill_attention(&ajob, n);
+    if (few_rows_attention_ok(s, layer, n)) {
+        FewRowsAttnJob fj = {
+            .s = s, .b = b, .layer = layer, .pos0 = pos0, .n = n, .hd = hd,
+            .n_head = c->n_head, .n_kv = n_kv, .group = c->n_head / n_kv,
+            .start = (layer >= c->n_layer && c->is_k2) ? 1 : 0,
+            .scale = (c->attn_scale > 0.0f) ? c->attn_scale
+                                            : (1.0f / sqrtf((float)hd)),
+            .mgate = (c->attn_out_gate && L->attn_gate.data != NULL)
+                   ? b->mgate : NULL,
+            .gate_kind = c->attn_gate_kind,
+        };
+        oc_parallel_for(n_kv, attention_few_rows_slice, &fj);
+    } else {
+        (void)prefill_attention(&ajob, n);
+    }
     g_pf_t.attn += pf_now() - t0;
     if (atomic_load(&ajob.error) != OC_OK) {
         OcError ae = (OcError)atomic_load(&ajob.error);
@@ -5142,6 +5487,10 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     }
     return OC_OK;
 }
+
+static OcError k2_mtp_prefill_chunk(OcLlamaSession *s, PrefillBuf *b,
+                                    const uint32_t *toks, size_t n,
+                                    int64_t pos0);
 
 /* Whether the batched path covers this model. Everything it does not cover
  * falls back to the per-token loop, which is unchanged. MLA, Gemma 4's dual
@@ -5236,7 +5585,8 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
 
     /* Fall back to the per-token path when batching cannot help or is not
      * supported: identical results, just the old speed. */
-    if (cb != NULL && (!prefill_batch_supported(m) || n_tokens < 2)) {
+    if (cb != NULL && (!prefill_batch_supported(m) ||
+                       (n_tokens < 2 && sess->k2mtp == NULL))) {
         float *lg = malloc(m->cfg.vocab_size * sizeof(float));
         if (lg == NULL) return OC_ERR_OOM;
         for (size_t i = 0; i < n_tokens; i++) {
@@ -5248,7 +5598,7 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
         free(lg);
         return OC_OK;
     }
-    if (!prefill_batch_supported(m) || n_tokens < 2) {
+    if (!prefill_batch_supported(m) || (n_tokens < 2 && sess->k2mtp == NULL)) {
         for (size_t i = 0; i < n_tokens; i++) {
             float *lg = (i + 1 == n_tokens) ? logits_out : NULL;
             OcError e = oc_llama_forward(sess, tokens[i], lg);
@@ -5344,6 +5694,16 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
             }
             }
         }
+
+        /* K2 MTP: fill the head's KV for this chunk's positions, slot p from
+         * (emb(t_p), h_{p-1}), and carry h of the chunk's last row. */
+        if (sess->k2mtp != NULL) {
+            e = k2_mtp_prefill_chunk(sess, &buf, tokens + base, n, pos0);
+            if (e != OC_OK) {
+                prefill_buf_free(&buf);
+                return e;
+            }
+        }
     }
 
     prefill_buf_free(&buf);
@@ -5416,6 +5776,479 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
     if (dst->mtp_hidden != NULL && src->mtp_hidden != NULL)
         memcpy(dst->mtp_hidden, src->mtp_hidden,
                c->n_embd * sizeof(*src->mtp_hidden));
+    return OC_OK;
+}
+
+/* ─── K2-Horizon MTP speculative decoding ────────────────────────────────
+ *
+ * The head (SPEC.md) is one dense K2 block fed with
+ *     x = eh_proj · [GRMS(E[t_p], enorm) ; GRMS(h_{p-1}, hnorm)]
+ * at RoPE position p, followed by shared_head_norm and the target's own
+ * output.weight. Its KV lives in the session's extra cache layer n_layer;
+ * slot p is filled for every prompt and accepted token (catch-up), and
+ * position 0 has no entry.
+ *
+ * One oc_llama_mtp_step():
+ *   t     = argmax(logits)                   the target's next token (P = pos)
+ *   d_1   = pending draft from the previous step's catch-up (or a fresh
+ *           1-row MTP pass on (t, h_{P-1}) at slot P)
+ *   d_i   = chained MTP pass on (d_{i-1}, s_{i-1}) at slot P+i-1
+ *   verify: the main model runs [t, d_1..d_k] at P..P+k in ONE batched
+ *           forward (the prefill path), giving logits and h for every row
+ *   accept the longest prefix with d_i == argmax(row i-1), rewind the main
+ *   position to P+1+m, then one MTP pass over the verified rows
+ *   [d_1..d_m, t'] with [h_P..h_{P+m}] at slots P+1..P+1+m rewrites the
+ *   head's KV with real inputs and yields the next step's d_1.
+ * Rejected rows leave stale KV above the new position in both caches; every
+ * attention is bounded by its query position, so they are never read and
+ * get overwritten. */
+
+#define OC_K2_MTP_MAX_K 4u
+
+struct OcK2Mtp {
+    PrefillBuf buf;          /* cap = OC_K2_MTP_MAX_K + 1 rows            */
+    float   *hid;            /* [cap][D] post-norm hidden of verify rows  */
+    float   *lg;             /* [cap][V] verify logits                    */
+    float   *s;              /* [cap][D] MTP shared_head_norm outputs     */
+    float   *s_prev;         /* [D] chain input for the next draft        */
+    float   *lg_draft;       /* [V] draft logits                          */
+    float   *cat;            /* [cap][2D] eh_proj input rows              */
+    float   *pf_h;           /* [pf_cap+1][D] prefill hidden rows         */
+    size_t   pf_cap;
+    void    *rq_ckpt;        /* RQ exact-ring checkpoint of a step's rows */
+    size_t   rq_ckpt_cap;
+    uint32_t draft;          /* pending d_1 (valid when have_draft)       */
+    bool     have_draft;
+    int64_t  synced_pos;     /* sess->pos that mtp_hidden belongs to      */
+#ifdef OC_TESTING
+    OcMtpDraftHook hook;     /* test-only draft override                  */
+    void    *hook_ud;
+#endif
+};
+
+#ifdef OC_TESTING
+void oc_llama_mtp_test_set_draft_hook(OcLlamaSession *sess, OcMtpDraftHook fn,
+                                      void *ud)
+{
+    if (sess == NULL || sess->k2mtp == NULL) return;
+    sess->k2mtp->hook = fn;
+    sess->k2mtp->hook_ud = ud;
+}
+#define K2_MTP_HOOK(K, pos, d) \
+    ((K)->hook ? (K)->hook((K)->hook_ud, (pos), (d)) : (d))
+#else
+#define K2_MTP_HOOK(K, pos, d) (d)
+#endif
+
+static void k2_mtp_resync(struct OcK2Mtp *k, int64_t synced_pos)
+{
+    if (k == NULL) return;
+    k->synced_pos = synced_pos;
+    k->have_draft = false;
+}
+
+static void k2_mtp_free(struct OcK2Mtp *k)
+{
+    if (k == NULL) return;
+    prefill_buf_free(&k->buf);
+    free(k->hid); free(k->lg); free(k->s); free(k->s_prev);
+    free(k->lg_draft); free(k->cat); free(k->pf_h); free(k->rq_ckpt);
+    free(k);
+}
+
+OcError oc_llama_mtp_enable(OcLlamaSession *sess, bool on)
+{
+    if (sess == NULL || sess->model == NULL) return OC_ERR_INVALID_ARG;
+    if (!on) {
+        k2_mtp_free(sess->k2mtp);
+        sess->k2mtp = NULL;
+        return OC_OK;
+    }
+    const OcLlamaModel *m = sess->model;
+    if (!m->cfg.is_k2 || !m->mtp.present) return OC_ERR_MODEL;
+    /* The head's cache is the extra layer of the f32/q8/RQ cache;
+     * compressed KV has no slot for it. */
+    if (sess->kv_compress != NULL) return OC_ERR_INVALID_ARG;
+    if (sess->k2mtp != NULL) return OC_OK;
+    struct OcK2Mtp *k = xcalloc(1, sizeof *k);
+    if (k == NULL) return OC_ERR_OOM;
+    const size_t cap = OC_K2_MTP_MAX_K + 1u;
+    const size_t D = m->cfg.n_embd, V = m->cfg.vocab_size;
+    if (prefill_buf_init(m, cap, &k->buf) != OC_OK) { free(k); return OC_ERR_OOM; }
+    k->hid      = xcalloc(cap * D, sizeof(float));
+    k->lg       = xcalloc(cap * V, sizeof(float));
+    k->s        = xcalloc(cap * D, sizeof(float));
+    k->s_prev   = xcalloc(D, sizeof(float));
+    k->lg_draft = xcalloc(V, sizeof(float));
+    k->cat      = xcalloc(cap * 2u * D, sizeof(float));
+    if (!k->hid || !k->lg || !k->s || !k->s_prev || !k->lg_draft || !k->cat) {
+        k2_mtp_free(k);
+        return OC_ERR_OOM;
+    }
+    k->synced_pos = sess->pos == 0 ? 0 : -1;   /* mid-sequence: unknown h */
+    sess->k2mtp = k;
+    return OC_OK;
+}
+
+uint32_t oc_mtp_accept_prefix(const uint32_t *draft, const uint32_t *target,
+                              uint32_t k)
+{
+    if (draft == NULL || target == NULL) return 0;
+    uint32_t m = 0;
+    while (m < k && draft[m] == target[m]) m++;
+    return m;
+}
+
+/* The MTP head over n rows at MTP positions pos0..pos0+n-1: tokens[j] with
+ * hidden[j] (post-norm, row stride D). Writes shared_head_norm outputs to
+ * s_out and the head's KV. Uses (and clobbers) b. */
+static OcError k2_mtp_rows(OcLlamaSession *s, PrefillBuf *b, float *cat,
+                           const uint32_t *toks, const float *hidden,
+                           size_t n, int64_t pos0, float *s_out)
+{
+    OcLlamaModel *m = s->model;
+    const OcLlamaConfig *c = &m->cfg;
+    const size_t D = c->n_embd;
+    if (n == 0) return OC_OK;
+    if (n > b->cap || pos0 < 1 || (uint64_t)pos0 + n > c->n_ctx)
+        return OC_ERR_INVALID_ARG;
+    const OcWeightView *emb = m->mtp.embed_tokens.data ? &m->mtp.embed_tokens
+                                                       : &m->tok_embeddings;
+    for (size_t j = 0; j < n; j++) {
+        float *e = b->gath + j * D;
+        uint32_t t = toks[j];
+        if (t >= c->vocab_size) t = c->vocab_size - 1;
+        if (emb->qtype == OC_QUANT_F32)
+            memcpy(e, emb->data + (size_t)t * emb->row_bytes, D * sizeof(float));
+        else
+            oc_quant_dequant_row(emb->qtype, emb->data + (size_t)t * emb->row_bytes,
+                                 emb->row_bytes, e, D);
+        /* Embedding FIRST, hidden SECOND. */
+        model_rms_norm(c, e, m->mtp.enorm, cat + j * 2u * D);
+        model_rms_norm(c, hidden + j * D, m->mtp.hnorm, cat + j * 2u * D + D);
+    }
+    mm_batch(&m->mtp.eh_proj, cat, 2u * D, b->x, D, n, b);
+    if (b->rope_cos != NULL) {
+        for (size_t j = 0; j < n; j++)
+            oc_k2_rope_table(pos0 + (int64_t)j, c->rope_theta, c->rope_dim,
+                             b->rope_cos + j * (b->rope_half + 1u),
+                             b->rope_sin + j * (b->rope_half + 1u));
+    }
+    OcError e = prefill_layer(s, c->n_layer, b, n, pos0);
+    if (e != OC_OK) return e;
+    for (size_t j = 0; j < n; j++)
+        model_rms_norm(c, b->x + j * D, m->mtp.shared_head_norm, s_out + j * D);
+    return OC_OK;
+}
+
+/* Draft token from one shared_head_norm output. */
+static uint32_t k2_mtp_head_argmax(OcLlamaSession *s, const float *sv,
+                                   float *lg)
+{
+    OcLlamaModel *m = s->model;
+    const OcWeightView *head = m->mtp.shared_head_head.data
+                             ? &m->mtp.shared_head_head : &m->output;
+    matvec(head, sv, lg, s->dequant_temp);
+    return oc_argmax(lg, m->cfg.vocab_size);
+}
+
+/* Main model over n rows at sess->pos (the prefill path): post-norm hidden
+ * of every row into hid and, when lg != NULL, logits of every row. Advances
+ * sess->pos by n. */
+static OcError k2_main_rows(OcLlamaSession *s, PrefillBuf *b,
+                            const uint32_t *toks, size_t n, float *hid,
+                            float *lg)
+{
+    OcLlamaModel *m = s->model;
+    const OcLlamaConfig *c = &m->cfg;
+    const size_t D = c->n_embd;
+    const int64_t pos0 = s->pos;
+    if (n == 0 || n > b->cap || (uint64_t)pos0 + n > c->n_ctx)
+        return OC_ERR_INVALID_ARG;
+    for (size_t j = 0; j < n; j++)
+        embed_token_into(s, toks[j], b->x + j * D);
+    if (b->rope_cos != NULL) {
+        for (size_t j = 0; j < n; j++)
+            oc_k2_rope_table(pos0 + (int64_t)j, c->rope_theta, c->rope_dim,
+                             b->rope_cos + j * (b->rope_half + 1u),
+                             b->rope_sin + j * (b->rope_half + 1u));
+    }
+    memset(&g_pf_t, 0, sizeof g_pf_t);
+    const double t0 = pf_now();
+    for (uint32_t l = 0; l < c->n_layer; l++) {
+        OcError e = prefill_layer(s, l, b, n, pos0);
+        if (e != OC_OK) return e;
+    }
+    const double t1 = pf_now();
+    for (size_t j = 0; j < n; j++)
+        model_rms_norm(c, b->x + j * D, m->final_norm, hid + j * D);
+    if (lg != NULL) {
+        mm_batch(&m->output, hid, D, lg, c->vocab_size, n, b);
+        oc_log(OC_LOG_DEBUG,
+               "mtp verify n=%zu (ms): layers=%.1f head=%.1f | qkv=%.1f "
+               "rope_kv=%.1f attn=%.1f proj=%.1f router=%.1f gather=%.1f "
+               "expert_mm=%.1f scatter=%.1f", n, (t1 - t0) * 1e3,
+               (pf_now() - t1) * 1e3, g_pf_t.qkv * 1e3, g_pf_t.rope_kv * 1e3,
+               g_pf_t.attn * 1e3, g_pf_t.proj * 1e3, g_pf_t.router * 1e3,
+               g_pf_t.gather * 1e3, g_pf_t.expert_mm * 1e3,
+               g_pf_t.scatter * 1e3);
+        for (size_t j = 0; j < n; j++) {
+            float *l = lg + j * (size_t)c->vocab_size;
+            if (c->logit_scale > 0.0f && c->logit_scale != 1.0f)
+                for (size_t i = 0; i < c->vocab_size; i++) l[i] *= c->logit_scale;
+            if (c->logit_softcap > 0.0f) {
+                const float inv = 1.0f / c->logit_softcap;
+                for (size_t i = 0; i < c->vocab_size; i++)
+                    l[i] = tanhf(l[i] * inv) * c->logit_softcap;
+            }
+        }
+    }
+    s->pos = pos0 + (int64_t)n;
+    s->last_token = toks[n - 1];
+    return OC_OK;
+}
+
+static OcError k2_mtp_prefill_chunk(OcLlamaSession *s, PrefillBuf *b,
+                                    const uint32_t *toks, size_t n,
+                                    int64_t pos0)
+{
+    struct OcK2Mtp *k = s->k2mtp;
+    const OcLlamaConfig *c = &s->model->cfg;
+    const size_t D = c->n_embd;
+    if (pos0 != k->synced_pos) {
+        oc_log(OC_LOG_ERROR, "k2 mtp: prefill at pos %lld but head synced at "
+               "%lld (was the session advanced without MTP?)",
+               (long long)pos0, (long long)k->synced_pos);
+        return OC_ERR_INVALID_ARG;
+    }
+    if (k->pf_cap < n) {
+        free(k->pf_h);
+        free(k->cat);
+        k->pf_h = xcalloc((n + 1) * D, sizeof(float));
+        k->cat = xcalloc((n > OC_K2_MTP_MAX_K + 1 ? n : OC_K2_MTP_MAX_K + 1) *
+                         2u * D, sizeof(float));
+        if (k->pf_h == NULL || k->cat == NULL) { k->pf_cap = 0; return OC_ERR_OOM; }
+        k->pf_cap = n;
+    }
+    /* Row 0 = h_{pos0-1}; row j+1 = h of this chunk's row j. */
+    memcpy(k->pf_h, s->mtp_hidden, D * sizeof(float));
+    for (size_t j = 0; j < n; j++)
+        model_rms_norm(c, b->x + j * D, s->model->final_norm,
+                       k->pf_h + (j + 1) * D);
+    /* Slot p = pos0 + j pairs toks[j] with pf_h row j; slot 0 has none. */
+    const size_t skip = pos0 == 0 ? 1u : 0u;
+    if (n > skip) {
+        /* The MTP rows reuse the chunk's buffer; its s_out goes to b->proj's
+         * sibling scratch (gath is the embedding scratch, so use ffn_b). */
+        OcError e = k2_mtp_rows(s, b, k->cat, toks + skip, k->pf_h + skip * D,
+                                n - skip, pos0 + (int64_t)skip, b->ffn_b);
+        if (e != OC_OK) return e;
+    }
+    memcpy(s->mtp_hidden, k->pf_h + n * D, D * sizeof(float));
+    k->synced_pos = pos0 + (int64_t)n;
+    k->have_draft = false;
+    return OC_OK;
+}
+
+OcError oc_llama_mtp_forward_rows(OcLlamaSession *sess, const uint32_t *tokens,
+                                  const float *hidden, size_t n, int64_t pos0,
+                                  float *s_out)
+{
+    if (sess == NULL || sess->k2mtp == NULL || tokens == NULL ||
+        hidden == NULL || s_out == NULL)
+        return OC_ERR_INVALID_ARG;
+    struct OcK2Mtp *k = sess->k2mtp;
+    const size_t D = sess->model->cfg.n_embd;
+    for (size_t base = 0; base < n; base += k->buf.cap) {
+        const size_t r = n - base < k->buf.cap ? n - base : k->buf.cap;
+        OcError e = k2_mtp_rows(sess, &k->buf, k->cat, tokens + base,
+                                hidden + base * D, r, pos0 + (int64_t)base,
+                                s_out + base * D);
+        if (e != OC_OK) return e;
+    }
+    return OC_OK;
+}
+
+OcError oc_llama_mtp_kv_row(const OcLlamaSession *sess, int64_t pos,
+                            float *kk, float *vv)
+{
+    if (sess == NULL || sess->model == NULL || !sess->model->mtp.present ||
+        kk == NULL || vv == NULL || sess->kv_type != OC_KV_F32 ||
+        sess->kv_k == NULL || pos < 0 || (uint64_t)pos >= sess->model->cfg.n_ctx)
+        return OC_ERR_INVALID_ARG;
+    const OcLlamaConfig *c = &sess->model->cfg;
+    const size_t off = ((size_t)c->n_layer * c->n_ctx + (size_t)pos) *
+                       sess->kv_row_floats;
+    memcpy(kk, sess->kv_k + off, sess->kv_row_floats * sizeof(float));
+    memcpy(vv, sess->kv_v + off, sess->kv_row_floats * sizeof(float));
+    return OC_OK;
+}
+
+static double k2m_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
+                          uint32_t *out_tokens, size_t max_out, size_t *n_out,
+                          OcMtpStats *st)
+{
+    if (sess == NULL || sess->model == NULL || logits == NULL ||
+        out_tokens == NULL || n_out == NULL)
+        return OC_ERR_INVALID_ARG;
+    *n_out = 0;
+    struct OcK2Mtp *K = sess->k2mtp;
+    if (K == NULL) return OC_ERR_MODEL;
+    if (max_out == 0) return OC_OK;
+    OcLlamaModel *m = sess->model;
+    const OcLlamaConfig *c = &m->cfg;
+    const size_t D = c->n_embd, V = c->vocab_size;
+    const int64_t P = sess->pos;
+    if (P < 1 || P != K->synced_pos) {
+        oc_log(OC_LOG_ERROR, "k2 mtp: step at pos %lld, head synced at %lld",
+               (long long)P, (long long)K->synced_pos);
+        return OC_ERR_INVALID_ARG;
+    }
+    if ((uint64_t)P + 1 > c->n_ctx) return OC_ERR_INVALID_ARG;
+    if (k > OC_K2_MTP_MAX_K) k = OC_K2_MTP_MAX_K;
+    if ((size_t)k > max_out - 1) k = (uint32_t)(max_out - 1);
+    if ((uint64_t)P + 1 + k > c->n_ctx) k = (uint32_t)(c->n_ctx - (uint64_t)P - 1);
+
+    const uint32_t t = oc_argmax(logits, V);
+    uint32_t d[OC_K2_MTP_MAX_K];
+    uint32_t g[OC_K2_MTP_MAX_K + 1];
+    double t0 = k2m_now();
+
+    /* RQ cache: this step stores rows at P..P+k+1 (main verify rows up to
+     * P+k, head rows up to P+1+k). Each overwrites the exact-ring slot of
+     * position - window and may complete a page; checkpoint them so the
+     * rejected rows can be undone exactly (k2_mtp_rq_undo). */
+    size_t ck_n = 0;
+    if (sess->kv_type == OC_KV_RQ && sess->kv_rq != NULL) {
+        ck_n = (size_t)k + 2u;
+        if ((uint64_t)P + ck_n > c->n_ctx) ck_n = (size_t)(c->n_ctx - (uint64_t)P);
+        const size_t w = sess->kv_rq->p.window;
+        if (w > 0 && ck_n > w) ck_n = 0;   /* tiny ring: cannot checkpoint */
+        if (ck_n > 0) {
+            const size_t need = oc_kvrq_ckpt_bytes(sess->kv_rq, ck_n);
+            if (need > K->rq_ckpt_cap) {
+                void *nb = realloc(K->rq_ckpt, need);
+                if (nb == NULL) return OC_ERR_OOM;
+                K->rq_ckpt = nb;
+                K->rq_ckpt_cap = need;
+            }
+            oc_kvrq_ckpt_save(sess->kv_rq, P, ck_n, K->rq_ckpt);
+        }
+    }
+#define K2_MTP_RQ_UNDO(keep_main, keep_head)                                 \
+    do {                                                                     \
+        if (ck_n > 0) {                                                      \
+            for (uint32_t l_ = 0; l_ < c->n_layer; l_++)                     \
+                oc_kvrq_ckpt_restore(sess->kv_rq, P, ck_n, K->rq_ckpt, l_,   \
+                                     (keep_main));                           \
+            oc_kvrq_ckpt_restore(sess->kv_rq, P, ck_n, K->rq_ckpt,           \
+                                 c->n_layer, (keep_head));                   \
+        }                                                                    \
+    } while (0)
+
+    /* Step-1 entry at slot P from (t, h_{P-1}) — unless the previous step's
+     * catch-up already wrote it and produced d_1. */
+    if (!K->have_draft) {
+        OcError e = k2_mtp_rows(sess, &K->buf, K->cat, &t, sess->mtp_hidden,
+                                1, P, K->s_prev);
+        if (e != OC_OK) { K2_MTP_RQ_UNDO(P, P); return e; }
+        K->draft = k2_mtp_head_argmax(sess, K->s_prev, K->lg_draft);
+        K->have_draft = true;
+    }
+    double t1 = k2m_now();
+    if (st) st->t_mtp += t1 - t0;
+    if (k > 0) {
+        d[0] = K2_MTP_HOOK(K, P + 1, K->draft);
+        for (uint32_t i = 1; i < k; i++) {
+            /* Chained: hidden = previous s, token = previous draft, at P+i. */
+            OcError e = k2_mtp_rows(sess, &K->buf, K->cat, &d[i - 1], K->s_prev,
+                                    1, P + (int64_t)i, K->s);
+            if (e != OC_OK) {
+                K->have_draft = false;
+                K2_MTP_RQ_UNDO(P, P);
+                return e;
+            }
+            memcpy(K->s_prev, K->s, D * sizeof(float));
+            d[i] = k2_mtp_head_argmax(sess, K->s_prev, K->lg_draft);
+            d[i] = K2_MTP_HOOK(K, P + 1 + (int64_t)i, d[i]);
+        }
+    }
+    double t2 = k2m_now();
+    if (st) st->t_draft += t2 - t1;
+
+    /* Verify [t, d_1..d_k] in one batched forward. */
+    uint32_t rows[OC_K2_MTP_MAX_K + 1];
+    rows[0] = t;
+    for (uint32_t i = 0; i < k; i++) rows[i + 1] = d[i];
+    OcError e = k2_main_rows(sess, &K->buf, rows, (size_t)k + 1, K->hid, K->lg);
+    if (e != OC_OK) {
+        sess->pos = P;
+        K->have_draft = false;
+        K2_MTP_RQ_UNDO(P, P);
+        return e;
+    }
+    for (uint32_t i = 0; i <= k; i++) g[i] = oc_argmax(K->lg + (size_t)i * V, V);
+    const uint32_t acc = oc_mtp_accept_prefix(d, g, k);
+    double t3 = k2m_now();
+    if (st) st->t_verify += t3 - t2;
+
+    out_tokens[(*n_out)++] = t;
+    for (uint32_t i = 0; i < acc; i++) out_tokens[(*n_out)++] = d[i];
+    const int64_t P2 = P + 1 + (int64_t)acc;
+    sess->pos = P2;                       /* roll back rejected rows */
+    sess->last_token = rows[acc];
+    if (sess->last_hidden != NULL)
+        memcpy(sess->last_hidden, K->buf.x + (size_t)acc * D, D * sizeof(float));
+    memcpy(logits, K->lg + (size_t)acc * V, V * sizeof(float));
+    if (sess->prerouter) oc_prerouter_reset(sess->prerouter);
+
+    /* Catch-up + next draft: slots P+1..P2 from ([d_1..d_acc, t'],
+     * [h_P..h_{P+acc}]); the last row's output drafts the next d_1. */
+    const uint32_t tn = g[acc];
+    uint32_t crow[OC_K2_MTP_MAX_K + 1];
+    for (uint32_t i = 0; i < acc; i++) crow[i] = d[i];
+    crow[acc] = tn;
+    size_t nc = (size_t)acc + 1;
+    if ((uint64_t)P2 >= c->n_ctx) nc--;   /* no slot for the next draft */
+    K->have_draft = false;
+    if (nc > 0) {
+        e = k2_mtp_rows(sess, &K->buf, K->cat, crow, K->hid, nc, P + 1, K->s);
+        if (e != OC_OK) {
+            K2_MTP_RQ_UNDO(P2, P + 1);
+            K->synced_pos = -1;          /* head KV above P is unknown */
+            return e;
+        }
+        if (nc == (size_t)acc + 1) {
+            memcpy(K->s_prev, K->s + acc * D, D * sizeof(float));
+            K->draft = k2_mtp_head_argmax(sess, K->s_prev, K->lg_draft);
+            K->have_draft = true;
+        }
+    }
+    /* Undo the rejected rows: the main cache is real below P2, the head's
+     * below P+1+nc (the catch-up rows P+1..P+nc). */
+    K2_MTP_RQ_UNDO(P2, P + 1 + (int64_t)nc);
+#undef K2_MTP_RQ_UNDO
+    memcpy(sess->mtp_hidden, K->hid + (size_t)acc * D, D * sizeof(float));
+    K->synced_pos = P2;
+    if (st) {
+        st->t_mtp += k2m_now() - t3;
+        st->steps++;
+        st->drafted += k;
+        st->accepted += acc;
+        st->emitted += *n_out;
+        st->accept_hist[acc < 8 ? acc : 8]++;
+        for (uint32_t i = 0; i < k && i < 8; i++) {
+            st->draft_at[i]++;
+            if (i < acc) st->accept_at[i]++;
+        }
+    }
     return OC_OK;
 }
 

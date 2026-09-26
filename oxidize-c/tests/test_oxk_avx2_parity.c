@@ -279,3 +279,50 @@ Test(oxk_avx2, dot_rows_iq3_s_bit_exact_vs_single)
                oc_oxk_dot_rows_iq3_s_q8_k, oc_oxk_dot_rows_iq3_s_q8_k_avx2,
                "iq3_s");
 }
+
+/* The multi-activation IQ3_S rows kernel (speculative verify, small expert
+ * tiles) decodes each row once for up to four activations; every output
+ * must equal the scalar single-activation dot bit for bit. */
+Test(oxk_avx2, dot_rows_iq3_s_multi_bit_exact_vs_single)
+{
+    uint32_t s = 0x5EED1234u;
+    static const size_t k_blocks[] = { 1, 3, 10 };
+    enum { MAX_ROWS = 7, MAX_BLOCKS = 10, MAX_ACT = 5 };
+    const size_t bsize = OC_OXK_BLOCK_IQ3_S_SIZE;
+    uint8_t *w = malloc(MAX_ROWS * MAX_BLOCKS * bsize);
+    uint8_t *a = malloc(MAX_ACT * MAX_BLOCKS * OC_OXK_BLOCK_Q8_K_SIZE);
+    cr_assert(w && a);
+    for (size_t bi = 0; bi < sizeof k_blocks / sizeof k_blocks[0]; bi++) {
+        const size_t blocks = k_blocks[bi];
+        const size_t rb = blocks * bsize;
+        const size_t as = blocks * OC_OXK_BLOCK_Q8_K_SIZE;
+        rand_blocks(w, MAX_ROWS * blocks, bsize, 0, false, &s);
+        for (size_t v = 0; v < MAX_ACT; v++) rand_act_q8_k(a + v * as, blocks, &s);
+        for (size_t na = 1; na <= MAX_ACT; na++) {
+            for (size_t n = 1; n <= MAX_ROWS; n++) {
+                float ref[MAX_ACT * MAX_ROWS], got[MAX_ACT * MAX_ROWS];
+                for (size_t v = 0; v < na; v++)
+                    for (size_t r = 0; r < n; r++)
+                        ref[v * MAX_ROWS + r] = oc_oxk_dot_iq3_s_q8_k_scalar(
+                            w + r * rb, blocks, a + v * as);
+                oc_oxk_dot_rows_iq3_s_q8_k_multi(w, rb, n, blocks, a, as, na,
+                                                 got, MAX_ROWS);
+                for (size_t v = 0; v < na; v++)
+                    cr_assert(memcmp(ref + v * MAX_ROWS, got + v * MAX_ROWS,
+                                     n * sizeof(float)) == 0,
+                              "iq3_s multi blocks=%zu n_act=%zu rows=%zu act=%zu",
+                              blocks, na, n, v);
+                if (host_avx2() && na <= 4) {
+                    oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(w, rb, n, blocks, a,
+                                                          as, na, got, MAX_ROWS);
+                    for (size_t v = 0; v < na; v++)
+                        cr_assert(memcmp(ref + v * MAX_ROWS, got + v * MAX_ROWS,
+                                         n * sizeof(float)) == 0,
+                                  "iq3_s multi avx2 n_act=%zu", na);
+                }
+            }
+        }
+    }
+    free(w);
+    free(a);
+}
