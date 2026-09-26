@@ -136,7 +136,12 @@ OcError oc_mmap_open_readonly_flags(const char *path, unsigned flags,
                    strerror(errno));
         }
     } else {
-        oc_mmap_advise_sequential(m);
+        /* WILLNEED only. MADV_SEQUENTIAL marks the VMA VM_SEQ_READ, and the
+         * kernel ignores accesses through such a VMA when aging pages: every
+         * weight page stays "unreferenced" and is the first thing reclaimed.
+         * Once anything else holds the page cache (another model, a build)
+         * a dense model then re-reads its whole file from disk per token
+         * (qwen35 27B Q2_K on a 23 GB box: 0.2 tok/s, ~1.9 GB/s of page-in). */
         oc_mmap_advise_willneed(m);
     }
     *out = m;
@@ -209,7 +214,7 @@ OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out)
     m->addr = addr;
     m->len  = len;
     m->fd   = fd;
-    oc_mmap_advise_sequential(m);
+    /* No MADV_SEQUENTIAL: see oc_mmap_open_readonly_flags. */
     oc_mmap_advise_willneed(m);
     *out = m;
     return OC_OK;

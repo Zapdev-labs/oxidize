@@ -2072,6 +2072,25 @@ OcError oc_llama_session_fake_fill(OcLlamaSession *sess, int64_t depth)
                            q->vc.block_bytes);
                 }
             }
+            /* A real run has fixed the mean of every complete page, and
+             * decode then pays the centered q.mu / V-mean terms on each of
+             * them; leaving the tiled pages unfixed made --depth benches
+             * skip that work. Tiled blocks were encoded against their
+             * source page's mean, so that is the mean to give them. */
+            if (oc_kvrq_centered(q)) {
+                for (size_t pg = oc_kvrq_page_of(q, p0 - 1) + 1;
+                     (int64_t)((pg + 1) * q->page) <= depth; pg++) {
+                    const size_t src = oc_kvrq_page_of(
+                        q, (int64_t)(pg * q->page) % p0);
+                    if (!q->mu_fixed[l * q->n_pages + src]) continue;
+                    for (size_t kind = 0; kind < 2; kind++)
+                        for (size_t h = 0; h < q->n_kv; h++)
+                            memcpy((float *)oc_kvrq_mu(q, l, pg, kind, h),
+                                   oc_kvrq_mu(q, l, src, kind, h),
+                                   q->d * sizeof(float));
+                    q->mu_fixed[l * q->n_pages + pg] = 1;
+                }
+            }
             /* The exact ring must describe the newest positions. */
             if (q->p.window > 0) {
                 float tmp[OC_KVRQ_DIM_MAX];
