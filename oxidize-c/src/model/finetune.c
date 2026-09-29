@@ -265,7 +265,7 @@ OcError oc_finetune_generate_synthetic(OcLlamaModel *model, OcTokenizer *tok,
         size_t resp_len = 0;
         for (size_t t = 0; t < 256; t++) {
             uint32_t token = oc_sample(logits, model->cfg.vocab_size, &scfg, NULL, 0);
-            if (tok->has_eos && token == tok->eos_id) break;
+            if (oc_tokenizer_is_eog(tok, token)) break;
 
             char *piece = NULL;
             if (oc_tokenizer_decode(tok, &token, 1, &piece) == OC_OK && piece) {

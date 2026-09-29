@@ -286,13 +286,11 @@ static OcError generate_text_response(OcRealtimeSession *sess,
     /* Generate up to max_response_tokens. */
     OcSamplerConfig scfg = OC_SAMPLER_DEFAULT;
     scfg.temperature = sess->cfg.temperature;
-    uint32_t eos = sess->tokenizer->eos_id;
-    bool has_eos = sess->tokenizer->has_eos;
     for (uint32_t step = 0; step < sess->cfg.max_response_tokens; step++) {
         uint32_t tok = oc_sample(sess->llama_sess.logits,
                                  sess->model->cfg.vocab_size,
                                  &scfg, NULL, 0);
-        if (has_eos && tok == eos) break;
+        if (oc_tokenizer_is_eog(sess->tokenizer, tok)) break;
         char *piece = NULL;
         if (oc_tokenizer_decode(sess->tokenizer, &tok, 1, &piece) == OC_OK &&
             piece != NULL) {

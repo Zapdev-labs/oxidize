@@ -227,8 +227,8 @@ OcModelArchitecture oc_gguf_arch_from_file(const OcGgufFile *f);
  * shards are mmap'd and their tensor tables merged into a single unified
  * view (mirrors Rust `load_mapped_gguf` + `load_mapped_gguf_shards`).
  *
- * On Linux the loader applies MADV_SEQUENTIAL + MADV_WILLNEED (best-effort)
- * to each shard at open time; the caller may additionally opt into
+ * On Linux the loader applies MADV_WILLNEED (best-effort) to each shard at
+ * open time (not MADV_SEQUENTIAL); the caller may additionally opt into
  * MADV_HUGEPAGE via `oc_gguf_map_advise_hugepage()` and/or mlock via
  * `oc_gguf_map_mlock_with_headroom()`.
  *
@@ -267,8 +267,8 @@ typedef struct OcGgufMmappedFile {
  * split-GGUF pattern `<base>-NNNNN-of-MMMMM.gguf` and all sibling shards
  * exist, opens all shards and merges their tensor tables into a single
  * unified view (shard 0 provides all metadata; subsequent shards contribute
- * only their tensors). On Linux, applies MADV_SEQUENTIAL + MADV_WILLNEED
- * (best-effort) to each shard.
+ * only their tensors). On Linux, applies MADV_WILLNEED (best-effort, not
+ * MADV_SEQUENTIAL) to each shard.
  *
  * Returns OC_OK, OC_ERR_IO, OC_ERR_FORMAT, OC_ERR_OOM, or OC_ERR_INVALID_ARG.
  * On error, `*out` is zeroed. */
