@@ -52,12 +52,12 @@ liboxidize-c.a: $(LIB_OBJS)
 # Tokenizer-only driver (GGUF metadata only, no weights) for parity checks:
 #   ./oc-tokenize MODEL.gguf < hex-lines ; see scripts/tokenizer_parity.py
 oc-tokenize: scripts/oc_tokenize.c $(LIB_OBJS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -o $@ scripts/oc_tokenize.c $(LIB_OBJS) $(LDFLAGS)
 
 # Token-id eval/bench driver: greedy top-5 logprob dumps for parity against
 # llama.cpp goldens, plus llama-bench style pp/tg timing (scripts/oc_eval.c).
 oc-eval: scripts/oc_eval.c $(LIB_OBJS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -o $@ scripts/oc_eval.c $(LIB_OBJS) $(LDFLAGS)
 
 # Vendored Criterion (MIT) test framework — see tests/criterion/README.md.
 # Each tests/test_<module>.c uses Criterion's Test(Suite, Case) macro for
@@ -97,7 +97,8 @@ TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) -fsanitize=address,undefined
 # ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
 DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
-             $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d)
+             $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d) \
+             oc-tokenize.d oc-eval.d
 
 test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LINK) $(TEST_LDFLAGS)
@@ -183,7 +184,7 @@ test-avx512: clean test
 # Lint: clang-tidy on library sources. Focused on bug-finding checks;
 # stylistic checks (short names, braces-around-statements, etc.) are excluded
 # to match the project's C style. The primary gate is -Wall -Wextra -Werror.
-LINT_SOURCES := $(LIB_SRCS) $(BIN_SRCS)
+LINT_SOURCES := $(LIB_SRCS) $(BIN_SRCS) scripts/oc_eval.c scripts/oc_tokenize.c
 LINT_CHECKS  := 'bugprone-*,clang-analyzer-*,performance-*,cert-*,misc-*,-misc-include-cleaner,-llvmlibc-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,-cert-err33-c,-bugprone-reserved-identifier,-bugprone-implicit-widening-of-multiplication-result,-bugprone-narrowing-conversions,-cert-dcl37-c,-cert-dcl51-cpp,-cert-int09-c,-performance-no-int-to-ptr'
 lint:
 	@if command -v clang-tidy >/dev/null 2>&1; then \
@@ -252,4 +253,4 @@ clean:
 	      $(DEP_FILES) \
 	      oxidize-c oc-tokenize oc-eval test_runner liboxidize-c.a
 
-.PHONY: build lib test lint clean avx512 cuda manual-tests oc-tokenize oc-eval
+.PHONY: build lib test lint clean avx512 cuda manual-tests

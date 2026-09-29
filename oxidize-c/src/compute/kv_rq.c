@@ -501,6 +501,7 @@ static KVRQ_TGT __m256 rq_lut(__m256i idx, __m256 c_lo, __m256 c_hi,
                             _mm256_castsi256_ps(_mm256_slli_epi32(idx, 28)));
 }
 
+__attribute__((unused))
 static KVRQ_TGT float hsum8(__m256 v)
 {
     __m128 s = _mm_add_ps(_mm256_castps256_ps128(v),
@@ -1221,6 +1222,20 @@ static void unmap_lazy(void *p, size_t bytes)
     if (p != NULL && bytes != 0) munmap(p, bytes);
 }
 
+static int kvrq_mul(size_t a, size_t b, size_t *o)
+{
+    if (a != 0 && b > SIZE_MAX / a) return 0;
+    *o = a * b;
+    return 1;
+}
+
+static int kvrq_add(size_t a, size_t b, size_t *o)
+{
+    if (a > SIZE_MAX - b) return 0;
+    *o = a + b;
+    return 1;
+}
+
 OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
                            size_t d, size_t n_ctx, const OcKvRqParams *p)
 {
@@ -1240,19 +1255,41 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
         memset(c, 0, sizeof(*c));
         return e;
     }
-    c->layer_bytes = n_kv * n_ctx * (c->kc.block_bytes + c->vc.block_bytes);
+    size_t blk_sum, per_head;
+    if (!kvrq_add(c->kc.block_bytes, c->vc.block_bytes, &blk_sum) ||
+        !kvrq_mul(n_ctx, blk_sum, &per_head) ||
+        !kvrq_mul(n_kv, per_head, &c->layer_bytes)) {
+        oc_kvrq_cache_free(c);
+        return OC_ERR_INVALID_ARG;
+    }
     c->layer = calloc(n_layers, sizeof(*c->layer));
     if (c->layer == NULL) { oc_kvrq_cache_free(c); return OC_ERR_OOM; }
     for (size_t l = 0; l < n_layers; l++) {
         c->layer[l] = map_lazy(c->layer_bytes);
         if (c->layer[l] == NULL) { oc_kvrq_cache_free(c); return OC_ERR_OOM; }
     }
+    if (p->window > 0 && (size_t)p->window > SIZE_MAX - p->ring_extra) {
+        oc_kvrq_cache_free(c);
+        return OC_ERR_INVALID_ARG;
+    }
     c->ring = p->window > 0 ? (size_t)p->window + p->ring_extra : 0;
+    if ((size_t)p->n_sink > SIZE_MAX - c->ring) {
+        oc_kvrq_cache_free(c);
+        return OC_ERR_INVALID_ARG;
+    }
     c->n_slots = (size_t)p->n_sink + c->ring;
     if (c->n_slots > 0) {
-        c->xq_bytes = n_layers * 2u * n_kv * c->n_slots * d;
-        c->xs_bytes = n_layers * 2u * n_kv * c->n_slots * sizeof(float);
-        c->tag_bytes = n_layers * c->n_slots * sizeof(int64_t);
+        size_t slots_kv;
+        if (!kvrq_mul(n_layers, 2u, &slots_kv) ||
+            !kvrq_mul(slots_kv, n_kv, &slots_kv) ||
+            !kvrq_mul(slots_kv, c->n_slots, &slots_kv) ||
+            !kvrq_mul(slots_kv, d, &c->xq_bytes) ||
+            !kvrq_mul(slots_kv, sizeof(float), &c->xs_bytes) ||
+            !kvrq_mul(n_layers, c->n_slots, &c->tag_bytes) ||
+            !kvrq_mul(c->tag_bytes, sizeof(int64_t), &c->tag_bytes)) {
+            oc_kvrq_cache_free(c);
+            return OC_ERR_INVALID_ARG;
+        }
         c->xq = map_lazy(c->xq_bytes);
         c->xs = map_lazy(c->xs_bytes);
         c->tag = malloc(c->tag_bytes);
@@ -1263,10 +1300,25 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
     }
     if (p->window > 0 && getenv("OC_KVRQ_NO_CENTER") == NULL) {
         c->page = p->window;
+        if (c->page == 0 || n_ctx > SIZE_MAX - (c->page - 1)) {
+            oc_kvrq_cache_free(c);
+            return OC_ERR_INVALID_ARG;
+        }
         c->n_pages = (n_ctx + c->page - 1) / c->page;
-        c->mu_bytes = n_layers * c->n_pages * 2u * n_kv * d * sizeof(float);
+        size_t mu;
+        if (!kvrq_mul(n_layers, c->n_pages, &mu) || !kvrq_mul(mu, 2u, &mu) ||
+            !kvrq_mul(mu, n_kv, &mu) || !kvrq_mul(mu, d, &mu) ||
+            !kvrq_mul(mu, sizeof(float), &c->mu_bytes)) {
+            oc_kvrq_cache_free(c);
+            return OC_ERR_INVALID_ARG;
+        }
         c->mu = map_lazy(c->mu_bytes);
-        c->mu_fixed = calloc(n_layers * c->n_pages, 1);
+        size_t nfix;
+        if (!kvrq_mul(n_layers, c->n_pages, &nfix)) {
+            oc_kvrq_cache_free(c);
+            return OC_ERR_INVALID_ARG;
+        }
+        c->mu_fixed = calloc(nfix, 1);
         if (c->mu == NULL || c->mu_fixed == NULL) {
             oc_kvrq_cache_free(c);
             return OC_ERR_OOM;
@@ -1383,15 +1435,31 @@ void oc_kvrq_flush(OcKvRqCache *c, size_t layer)
 void oc_kvrq_decode_pos(const OcKvRqCache *c, size_t layer, size_t kind,
                         size_t head, int64_t t, float *out)
 {
+    if (c == NULL || out == NULL || t < 0) return;
+    int page_fixed = 0;
+    if (c->page != 0) {
+        const size_t pg = oc_kvrq_page_of(c, t);
+        if (pg < c->n_pages)
+            page_fixed = c->mu_fixed[layer * c->n_pages + pg] != 0;
+    }
+    /* Sinks are never written into an RQ block. The current page is still
+     * in the exact ring until it is flushed; decoding the (absent) block
+     * would return zeros instead of the cached row. */
+    const int64_t slot = oc_kvrq_slot(c, layer, t);
+    const int sink = (uint64_t)t < c->p.n_sink;
+    if (slot >= 0 && (sink || (c->page != 0 && !page_fixed))) {
+        const int8_t *q = oc_kvrq_xq(c, layer, kind, head) + (size_t)slot * c->d;
+        const float sc = oc_kvrq_xs(c, layer, kind, head)[slot];
+        for (size_t i = 0; i < c->d; i++) out[i] = sc * (float)q[i];
+        return;
+    }
     const OcKvRqCodec *cd = kind ? &c->vc : &c->kc;
     const uint8_t *b = (kind ? oc_kvrq_vblocks(c, layer, head)
                              : oc_kvrq_kblocks(c, layer, head)) +
                        (size_t)t * cd->block_bytes;
     oc_kvrq_decode(cd, b, out);
-    if (c->page == 0) return;
-    const size_t pg = oc_kvrq_page_of(c, t);
-    if (!c->mu_fixed[layer * c->n_pages + pg]) return;
-    const float *mu = oc_kvrq_mu(c, layer, pg, kind, head);
+    if (!page_fixed) return;
+    const float *mu = oc_kvrq_mu(c, layer, oc_kvrq_page_of(c, t), kind, head);
     for (size_t i = 0; i < c->d; i++) out[i] += mu[i];
 }
 

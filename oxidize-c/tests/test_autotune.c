@@ -479,6 +479,10 @@ Test(autotune, openai_apply_prefill_without_plan)
     cr_assert_eq(st.sched.prefill_chunk_size, 256u);
     cr_assert(st.kv_set);
     cr_assert_eq(st.kv_type, OC_KV_Q8);
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, NULL, 0, "rq"), OC_OK);
+    cr_assert_eq(st.kv_type, OC_KV_RQ);
+    cr_assert_eq(oc_openai_apply_tuning_plan(&st, NULL, 0, "rq:3,3"), OC_OK);
+    cr_assert_eq(st.kv_type, OC_KV_RQ);
 }
 
 Test(autotune, openai_apply_invalid_kv_does_not_override_hopper)

@@ -51,6 +51,24 @@ static double now_s(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+static int mul_sz(size_t a, size_t b, size_t *o)
+{
+    if (a != 0 && b > SIZE_MAX / a) return 0;
+    *o = a * b;
+    return 1;
+}
+
+static void json_str(const char *s)
+{
+    putchar('"');
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; ++p) {
+        if (*p == '"' || *p == '\\') { putchar('\\'); putchar((int)*p); }
+        else if (*p < 0x20) printf("\\u%04x", *p);
+        else putchar((int)*p);
+    }
+    putchar('"');
+}
+
 static void top5(const float *logits, uint32_t n, uint32_t *ids, double *lp)
 {
     double mx = -INFINITY;
@@ -104,41 +122,95 @@ static void ppl_cb(void *ud, size_t j, const float *lg)
     for (uint32_t i = 0; i < g_vocab; ++i) if (lg[i] > mx) mx = lg[i];
     double sum = 0.0;
     for (uint32_t i = 0; i < g_vocab; ++i) sum += exp((double)lg[i] - mx);
-    a->nll += (mx + log(sum)) - (double)lg[a->toks[j + 1]];
+    const uint32_t tok = a->toks[j + 1];
+    if (tok >= g_vocab) return;
+    a->nll += (mx + log(sum)) - (double)lg[tok];
     a->count++;
 }
 
 static int run_ppl(OcLlamaModel *model, const OcKvOptions *kvo,
                    const char *path, uint32_t ctx, int chunks, uint32_t bos)
 {
+    if (ctx < 2) {
+        fprintf(stderr, "ppl: --ctx must be at least 2\n");
+        return 1;
+    }
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "cannot open %s\n", path); return 1; }
     size_t cap = 1 << 16, n = 0;
     uint32_t *ids = malloc(cap * sizeof(uint32_t));
+    if (!ids) { fclose(f); return 1; }
+    g_vocab = model->cfg.vocab_size;
     unsigned long v;
     while (fscanf(f, "%lu", &v) == 1) {
-        if (n == cap) { cap *= 2; ids = realloc(ids, cap * sizeof(uint32_t)); }
+        if (v >= g_vocab) {
+            fprintf(stderr, "ppl: token id %lu is outside vocab %u\n", v, g_vocab);
+            free(ids);
+            fclose(f);
+            return 1;
+        }
+        if (n == cap) {
+            if (cap > SIZE_MAX / 2 / sizeof(uint32_t)) {
+                fprintf(stderr, "ppl: token file too large\n");
+                free(ids);
+                fclose(f);
+                return 1;
+            }
+            size_t ncap = cap * 2;
+            uint32_t *grown = realloc(ids, ncap * sizeof(uint32_t));
+            if (!grown) { free(ids); fclose(f); return 1; }
+            ids = grown;
+            cap = ncap;
+        }
         ids[n++] = (uint32_t)v;
     }
     fclose(f);
-    int max_chunks = (int)(n / ctx);
-    if (chunks <= 0 || chunks > max_chunks) chunks = max_chunks;
-    g_vocab = model->cfg.vocab_size;
+    size_t max_chunks = n / ctx;
+    if (chunks <= 0 || (size_t)chunks > max_chunks) chunks = (int)max_chunks;
+    if (chunks <= 0) {
+        fprintf(stderr, "ppl: need at least %u tokens, got %zu\n", ctx, n);
+        free(ids);
+        return 1;
+    }
     OcLlamaSession sess;
-    if (oc_llama_session_init_kv_opts(model, &sess, kvo) != OC_OK) return 1;
-    uint32_t *chunk = malloc(ctx * sizeof(uint32_t));
+    if (oc_llama_session_init_kv_opts(model, &sess, kvo) != OC_OK) {
+        free(ids);
+        return 1;
+    }
+    uint32_t *chunk = malloc((size_t)ctx * sizeof(uint32_t));
+    if (!chunk) { oc_llama_session_free(&sess); free(ids); return 1; }
     double nll = 0.0;
     size_t count = 0;
     fprintf(stderr, "ppl: %zu ids, %d chunks of %u\n", n, chunks, ctx);
+    /* Logits at position j score token j+1. Second-half scoring starts at
+     * toks[ctx/2], so the first callback is the preceding row. */
+    const size_t first_logit = (size_t)ctx / 2 - 1;
     for (int c = 0; c < chunks; ++c) {
         memcpy(chunk, ids + (size_t)c * ctx, ctx * sizeof(uint32_t));
         chunk[0] = bos;
+        if (bos >= g_vocab) {
+            fprintf(stderr, "ppl: bos %u is outside vocab\n", bos);
+            free(chunk);
+            free(ids);
+            oc_llama_session_free(&sess);
+            return 1;
+        }
         oc_llama_session_reset(&sess);
         PplAcc a = { chunk, ctx, 0.0, 0 };
         double t0 = now_s();
-        if (oc_llama_prefill_all_logits(&sess, chunk, ctx, ctx / 2, ppl_cb, &a)
+        if (oc_llama_prefill_all_logits(&sess, chunk, ctx, first_logit, ppl_cb, &a)
             != OC_OK) {
             fprintf(stderr, "prefill failed\n");
+            free(chunk);
+            free(ids);
+            oc_llama_session_free(&sess);
+            return 1;
+        }
+        if (a.count == 0) {
+            fprintf(stderr, "ppl: chunk scored no tokens\n");
+            free(chunk);
+            free(ids);
+            oc_llama_session_free(&sess);
             return 1;
         }
         nll += a.nll;
@@ -215,12 +287,23 @@ static int run_kvstats(OcLlamaModel *model, const char *path, uint32_t n)
 {
     FILE *f = fopen(path, "r");
     if (!f) return 1;
-    uint32_t *ids = malloc(n * sizeof(uint32_t));
+    if (n < 5) {
+        fprintf(stderr, "kvstats: need at least 5 tokens\n");
+        fclose(f);
+        return 1;
+    }
+    uint32_t *ids = malloc((size_t)n * sizeof(uint32_t));
+    if (!ids) { fclose(f); return 1; }
     unsigned long v;
     uint32_t k = 0;
     while (k < n && fscanf(f, "%lu", &v) == 1) ids[k++] = (uint32_t)v;
     fclose(f);
     n = k;
+    if (n < 5) {
+        fprintf(stderr, "kvstats: need at least 5 tokens, got %u\n", n);
+        free(ids);
+        return 1;
+    }
     OcKvOptions kvo = {0};
     kvo.type = OC_KV_F32;
     OcLlamaSession sess;
@@ -298,25 +381,48 @@ static int run_mtp_golden(OcLlamaModel *model, const char *path)
         return 1;
     }
     const size_t T = hdr[1], D = hdr[2], NKV = hdr[3], HD = hdr[4];
-    if (D != model->cfg.n_embd || NKV != model->cfg.n_head_kv ||
+    if (T == 0 || D == 0 || NKV == 0 || HD == 0 ||
+        D != model->cfg.n_embd || NKV != model->cfg.n_head_kv ||
         HD != model->cfg.head_dim) {
         fprintf(stderr, "golden geometry mismatch\n");
         fclose(fp);
         return 1;
     }
-    int32_t *tok32 = malloc((T + 2) * sizeof(int32_t));
+    size_t n_kvhd = 0, n_kplane = 0, n_hd = 0;
+    if (!mul_sz(NKV, HD, &n_kvhd) || !mul_sz(n_kvhd, T, &n_kplane) ||
+        !mul_sz(T, D, &n_hd) || n_kplane > SIZE_MAX / sizeof(float) ||
+        n_hd > SIZE_MAX / sizeof(float) || T > SIZE_MAX - 2) {
+        fprintf(stderr, "golden geometry too large\n");
+        fclose(fp);
+        return 1;
+    }
+    size_t n_h = 0, n_tokb = 0;
+    if (!mul_sz(T + 1, D, &n_h) || !mul_sz(T + 2, sizeof(int32_t), &n_tokb) ||
+        n_h > SIZE_MAX / sizeof(float)) {
+        fprintf(stderr, "golden geometry too large\n");
+        fclose(fp);
+        return 1;
+    }
+    int32_t *tok32 = malloc(n_tokb);
     uint32_t *toks = malloc((T + 2) * sizeof(uint32_t));
-    float *h = malloc((T + 1) * D * sizeof(float));
-    float *s1 = malloc(T * D * sizeof(float));
-    float *s2 = malloc(T * D * sizeof(float));
-    float *k1 = malloc(NKV * T * HD * sizeof(float));
-    float *v1 = malloc(NKV * T * HD * sizeof(float));
-    float *o1 = malloc(T * D * sizeof(float));
-    float *o2 = malloc(T * D * sizeof(float));
-    float *kr = malloc(NKV * HD * sizeof(float));
-    float *vr = malloc(NKV * HD * sizeof(float));
+    float *h = malloc(n_h * sizeof(float));
+    float *s1 = malloc(n_hd * sizeof(float));
+    float *s2 = malloc(n_hd * sizeof(float));
+    float *k1 = malloc(n_kplane * sizeof(float));
+    float *v1 = malloc(n_kplane * sizeof(float));
+    float *o1 = malloc(n_hd * sizeof(float));
+    float *o2 = malloc(n_hd * sizeof(float));
+    float *kr = malloc(n_kvhd * sizeof(float));
+    float *vr = malloc(n_kvhd * sizeof(float));
+    float *kg = malloc(n_kvhd * sizeof(float));
+    float *vg = malloc(n_kvhd * sizeof(float));
     if (!tok32 || !toks || !h || !s1 || !s2 || !k1 || !v1 || !o1 || !o2 ||
-        !kr || !vr) return 1;
+        !kr || !vr || !kg || !vg) {
+        fclose(fp);
+        free(tok32); free(toks); free(h); free(s1); free(s2); free(k1); free(v1);
+        free(o1); free(o2); free(kr); free(vr); free(kg); free(vg);
+        return 1;
+    }
     bool ok = fread(tok32, sizeof(int32_t), T + 2, fp) == T + 2 &&
               fread(h, sizeof(float), (T + 1) * D, fp) == (T + 1) * D &&
               fread(s1, sizeof(float), T * D, fp) == T * D &&
@@ -345,7 +451,6 @@ static int run_mtp_golden(OcLlamaModel *model, const char *path)
     printf("],\"kv\":[");
     for (size_t j = 0; j < T; ++j) {
         oc_llama_mtp_kv_row(&sess, (int64_t)j + 1, kr, vr);
-        float kg[4096], vg[4096];
         for (size_t hh = 0; hh < NKV; ++hh)
             for (size_t d = 0; d < HD; ++d) {
                 kg[hh * HD + d] = k1[(hh * T + j) * HD + d];
@@ -373,7 +478,7 @@ static int run_mtp_golden(OcLlamaModel *model, const char *path)
     printf("],\"worst_rel\":%.3e}}\n", worst);
     oc_llama_session_free(&sess);
     free(tok32); free(toks); free(h); free(s1); free(s2); free(k1); free(v1);
-    free(o1); free(o2); free(kr); free(vr);
+    free(o1); free(o2); free(kr); free(vr); free(kg); free(vg);
     return worst < 2e-2 ? 0 : 3;
 }
 
@@ -511,11 +616,16 @@ int main(int argc, char **argv)
         }
         oc_llama_session_reset(&sess);
         double ts = now_s();
+        OcError fe = OC_OK;
         if (no_prefill) {
-            for (size_t i = 0; i < n; ++i)
-                oc_llama_forward(&sess, ids[i], i + 1 == n ? logits : NULL);
+            for (size_t i = 0; i < n && fe == OC_OK; ++i)
+                fe = oc_llama_forward(&sess, ids[i], i + 1 == n ? logits : NULL);
         } else {
-            oc_llama_prefill(&sess, ids, n, 0, logits);
+            fe = oc_llama_prefill(&sess, ids, n, 0, logits);
+        }
+        if (fe != OC_OK) {
+            fprintf(stderr, "prefill failed for %s\n", name);
+            continue;
         }
         double tp = now_s() - ts;
         if (mtp_k >= 0) {
@@ -547,9 +657,11 @@ int main(int argc, char **argv)
                 ng += got;
             }
             double td = now_s() - ts;
-            printf("{\"name\":\"%s\",\"n_prompt\":%zu,\"prefill_s\":%.4f,"
+            printf("{\"name\":");
+            json_str(name);
+            printf(",\"n_prompt\":%zu,\"prefill_s\":%.4f,"
                    "\"decode_s\":%.4f,\"n_gen\":%zu,\"tg_tps\":%.3f,\"ids\":[",
-                   name, n, tp, td, ng, td > 0 ? (double)ng / td : 0.0);
+                   n, tp, td, ng, td > 0 ? (double)ng / td : 0.0);
             for (size_t i = 0; i < ng; ++i) printf("%s%u", i ? "," : "", gen[i]);
             printf("]");
             if (t5 != NULL) {
@@ -570,7 +682,9 @@ int main(int argc, char **argv)
             free(gen);
             continue;
         }
-        printf("{\"name\":\"%s\",\"n_prompt\":%zu,\"prefill_s\":%.4f,\"steps\":[", name, n, tp);
+        printf("{\"name\":");
+        json_str(name);
+        printf(",\"n_prompt\":%zu,\"prefill_s\":%.4f,\"steps\":[", n, tp);
         ts = now_s();
         for (int s = 0; s < ngen; ++s) {
             uint32_t tid[5];
@@ -580,7 +694,11 @@ int main(int argc, char **argv)
             for (int k = 0; k < 5; ++k)
                 printf("%s[%u,%.5f]", k ? "," : "", tid[k], lp[k]);
             printf("]}");
-            if (s + 1 < ngen) oc_llama_forward(&sess, tid[0], logits);
+            if (s + 1 < ngen &&
+                oc_llama_forward(&sess, tid[0], logits) != OC_OK) {
+                fprintf(stderr, "forward failed for %s\n", name);
+                break;
+            }
         }
         const double dt = now_s() - ts;
         printf("],\"decode_s\":%.4f,\"n_prompt\":%zu,\"pp_tps\":%.3f,"

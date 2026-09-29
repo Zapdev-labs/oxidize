@@ -98,9 +98,9 @@ bool oc_k2_gguf_path_is_k2(const char *path)
         !k2_rd(fp, &version, 4) || version < 2 ||
         !k2_rd(fp, &n_tensors, 8) || !k2_rd(fp, &n_kv, 8))
         goto done;
-    /* general.architecture is the first key in every writer we know of;
-     * bound the walk so a hostile header cannot make this slow. */
-    for (uint64_t i = 0; i < n_kv && i < 64; i++) {
+    /* Walk every metadata entry. Writers usually put general.architecture
+     * first, but the GGUF spec does not require that order. */
+    for (uint64_t i = 0; i < n_kv; i++) {
         uint64_t klen;
         char key[64];
         uint32_t type;
@@ -467,14 +467,16 @@ OcError oc_k2_validate_layers(const OcLlamaModel *m)
     const size_t kv_row = (size_t)c->n_head_kv * c->kv_head_dim;
     for (uint32_t l = 0; l < c->n_layer; l++) {
         const OcLlamaLayer *L = &m->layers[l];
-        if (L->attn_v_exps.data != NULL) {
-            if (c->value_expert_count == 0 ||
+        const bool exps = L->attn_v_exps.data != NULL;
+        const bool gate = L->attn_v_gate.data != NULL;
+        const bool bias = L->attn_v_gate_b != NULL;
+        if (exps || gate || bias) {
+            if (!exps || !gate || !bias ||
+                c->value_expert_count == 0 ||
                 L->attn_v_exps.cols != c->n_embd ||
                 L->attn_v_exps.rows != kv_row ||
-                L->attn_v_gate.data == NULL ||
                 L->attn_v_gate.rows != c->value_expert_count ||
-                L->attn_v_gate.cols != c->n_embd ||
-                L->attn_v_gate_b == NULL) {
+                L->attn_v_gate.cols != c->n_embd) {
                 oc_log(OC_LOG_ERROR,
                        "k2: blk.%u MoVA tensors missing or mis-shaped", l);
                 return OC_ERR_TENSOR;

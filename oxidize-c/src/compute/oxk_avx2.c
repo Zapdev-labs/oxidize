@@ -641,7 +641,8 @@ static inline void iq3_s_dot_body_multi(const uint8_t *row, size_t blocks,
     for (int a = 0; a < NA; a++) out[a] = iq3_s_hsum_f32_8(accf[a]);
 }
 
-/* out[a * out_stride + r] for a < n_act (<= 4), r < n_rows. */
+/* out[a * out_stride + r]. The 2/3/4 paths use the multi-row kernel; every
+ * other n_act stores straight into `out` (res[] is only 4 floats). */
 __attribute__((target("avx2,fma,f16c")))
 void oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(const uint8_t *rows, size_t row_bytes,
                                            size_t n_rows, size_t blocks,
@@ -658,10 +659,11 @@ void oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(const uint8_t *rows, size_t row_bytes
         case 4: iq3_s_dot_body_multi(row, blocks, acts, act_stride, 4, res); break;
         default:
             for (size_t a = 0; a < n_act; a++)
-                res[a] = iq3_s_dot_body(row, blocks, acts + a * act_stride);
-            break;
+                out[a * out_stride + r] = iq3_s_dot_body(
+                    row, blocks, acts + a * act_stride);
+            continue;
         }
-        for (size_t a = 0; a < n_act && a < 4; a++) out[a * out_stride + r] = res[a];
+        for (size_t a = 0; a < n_act; a++) out[a * out_stride + r] = res[a];
     }
 }
 

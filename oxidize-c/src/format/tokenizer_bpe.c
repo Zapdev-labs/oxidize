@@ -941,17 +941,17 @@ static OcError merge_word(const OcBpeTokenizer *bpe, OcMergeScratch *m,
  * produced, stored as a range of the output buffer. */
 typedef struct {
     uint64_t hash;
-    size_t   cpt_off;
+    size_t   byte_off;
     size_t   out_off;
-    uint32_t cpt_len;   /* 0 = empty slot */
+    uint32_t byte_len;  /* 0 = empty slot */
     uint32_t out_len;
 } OcWordCacheEntry;
 
-static uint64_t hash_cpts(const uint32_t *c, size_t n)
+static uint64_t hash_bytes(const char *c, size_t n)
 {
     uint64_t h = 1469598103934665603ull;
     for (size_t i = 0; i < n; ++i) {
-        h ^= c[i];
+        h ^= (uint8_t)c[i];
         h *= 1099511628211ull;
     }
     return h | 1u;  /* never 0 */
@@ -969,12 +969,14 @@ static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
     if (len == 0) return OC_OK;
     OcError e = OC_OK;
     uint32_t *cpts = (uint32_t *)malloc(len * sizeof(uint32_t));
-    uint32_t *lens = (uint32_t *)malloc(len * sizeof(uint32_t));
+    size_t *lens = (size_t *)malloc(len * sizeof(size_t));
+    size_t *boff = (size_t *)malloc((len + 1) * sizeof(size_t));
     OcWordCacheEntry *cache = NULL;
-    if (!cpts || !lens) { e = OC_ERR_OOM; goto done; }
+    if (!cpts || !lens || !boff) { e = OC_ERR_OOM; goto done; }
 
-    size_t n = oc_unicode_cpts_from_utf8(text, len, cpts);
+    size_t n = oc_unicode_cpts_from_utf8_offs(text, len, cpts, boff);
     size_t n_words = oc_pretok_split(bpe->pretok, cpts, n, lens);
+    if (n_words > SIZE_MAX / 2) { e = OC_ERR_INVALID_ARG; goto done; }
 
     size_t cache_cap = 16;
     while (cache_cap < n_words * 2) cache_cap <<= 1;
@@ -983,23 +985,25 @@ static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
 
     size_t off = 0;
     for (size_t w = 0; w < n_words; off += lens[w], ++w) {
-        const uint32_t *word = cpts + off;
-        const uint32_t wlen = lens[w];
+        const size_t wlen = lens[w];
+        const size_t b0 = boff[off];
+        const size_t b1 = boff[off + wlen];
+        const char *bytes = text + b0;
+        const size_t nbytes = b1 - b0;
 
         OcWordCacheEntry *slot = NULL;
-        if (wlen <= OC_WORD_CACHE_MAX_CPTS) {
-            uint64_t h = hash_cpts(word, wlen);
+        if (wlen <= OC_WORD_CACHE_MAX_CPTS && nbytes <= UINT32_MAX) {
+            uint64_t h = hash_bytes(bytes, nbytes);
             size_t i = (size_t)h & (cache_cap - 1);
-            while (cache[i].cpt_len != 0) {
-                if (cache[i].hash == h && cache[i].cpt_len == wlen
-                    && memcmp(cpts + cache[i].cpt_off, word,
-                              wlen * sizeof(uint32_t)) == 0) {
+            while (cache[i].byte_len != 0) {
+                if (cache[i].hash == h && cache[i].byte_len == nbytes
+                    && memcmp(text + cache[i].byte_off, bytes, nbytes) == 0) {
                     break;
                 }
                 i = (i + 1) & (cache_cap - 1);
             }
             slot = &cache[i];
-            if (slot->cpt_len != 0) {
+            if (slot->byte_len != 0) {
                 e = idbuf_reserve(out, slot->out_len);
                 if (e != OC_OK) goto done;
                 memcpy(out->v + out->n, out->v + slot->out_off,
@@ -1010,25 +1014,23 @@ static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
             slot->hash = h;
         }
 
-        /* Byte-encode the word: each code point → UTF-8 → GPT-2 char ids. */
-        e = scratch_reserve(m, (size_t)wlen * 4);
+        /* Byte-encode the word from its raw span. Re-encoding code points
+         * turns an invalid UTF-8 byte into U+FFFD (three tokens); llama.cpp
+         * maps each original byte through byte_to_token. */
+        e = scratch_reserve(m, nbytes > 0 ? nbytes : 1);
         if (e != OC_OK) goto done;
         size_t n_sym = 0;
-        for (uint32_t k = 0; k < wlen; ++k) {
-            char buf[4];
-            size_t nb = oc_unicode_cpt_to_utf8(word[k], buf);
-            for (size_t j = 0; j < nb; ++j) {
-                uint8_t b = (uint8_t)buf[j];
-                if (bpe->byte_id_ok[b]) m->id[n_sym++] = bpe->byte_ids[b];
-                else if (bpe->has_unknown) m->id[n_sym++] = bpe->unknown_id;
-            }
+        for (size_t j = 0; j < nbytes; ++j) {
+            uint8_t b = (uint8_t)bytes[j];
+            if (bpe->byte_id_ok[b]) m->id[n_sym++] = bpe->byte_ids[b];
+            else if (bpe->has_unknown) m->id[n_sym++] = bpe->unknown_id;
         }
         size_t start = out->n;
         e = merge_word(bpe, m, n_sym, out);
         if (e != OC_OK) goto done;
         if (slot) {
-            slot->cpt_off = off;
-            slot->cpt_len = wlen;
+            slot->byte_off = b0;
+            slot->byte_len = (uint32_t)nbytes;
             slot->out_off = start;
             slot->out_len = (uint32_t)(out->n - start);
         }
@@ -1037,6 +1039,7 @@ static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
 done:
     free(cpts);
     free(lens);
+    free(boff);
     free(cache);
     return e;
 }
@@ -1756,17 +1759,19 @@ void oc_bpe_fill_special_tokens(const OcBpeTokenizer *bpe, OcTokenizer *out)
     out->has_cls = bpe->has_cls;             out->cls_id = bpe->cls_id;
     out->has_mask = bpe->has_mask;           out->mask_id = bpe->mask_id;
 
-    /* Extra end-of-generation tokens. `<|ifm|im_end|>` closes every K2
-     * turn; `<|eot_id|>` is on llama.cpp's EOG list for this vocab. */
+    /* Extra end-of-generation tokens for K2 only. `<|ifm|im_end|>` closes
+     * every K2 turn; `<|eot_id|>` is on llama.cpp's EOG list for this vocab.
+     * Other BPE models can contain the same spellings and must not stop. */
     static const char *const k_eog_names[] = { "<|ifm|im_end|>", "<|eot_id|>" };
     out->n_eog = 0;
-    for (size_t i = 0; i < sizeof(k_eog_names) / sizeof(k_eog_names[0]); ++i) {
-        if (i > 0 && bpe->pretok != OC_PRETOK_K2_HORIZON) break;
-        uint32_t id;
-        if (oc_bpe_token_to_id(bpe, k_eog_names[i], &id)
-            && !(out->has_eos && out->eos_id == id)
-            && out->n_eog < OC_TOK_MAX_EOG) {
-            out->eog_ids[out->n_eog++] = id;
+    if (bpe->pretok == OC_PRETOK_K2_HORIZON) {
+        for (size_t i = 0; i < sizeof(k_eog_names) / sizeof(k_eog_names[0]); ++i) {
+            uint32_t id;
+            if (oc_bpe_token_to_id(bpe, k_eog_names[i], &id)
+                && !(out->has_eos && out->eos_id == id)
+                && out->n_eog < OC_TOK_MAX_EOG) {
+                out->eog_ids[out->n_eog++] = id;
+            }
         }
     }
 }

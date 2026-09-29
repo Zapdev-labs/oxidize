@@ -84,6 +84,7 @@ int main(int argc, char **argv)
 
     OcSpecialTokenPolicy pol = no_special ? OC_TOK_DISALLOW_SPECIAL
                              : bos ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
+    enum { LINE_MAX = 64u << 20 };
     size_t cap = 1 << 16;
     char *line = malloc(cap);
     char *text = malloc(cap);
@@ -97,13 +98,23 @@ int main(int argc, char **argv)
         int c;
         while ((c = getchar()) != EOF && c != '\n') {
             if (n + 1 >= cap) {
-                cap *= 2;
-                line = realloc(line, cap);
-                text = realloc(text, cap);
-                if (!line || !text) return 1;
+                if (cap > LINE_MAX / 2) {
+                    fprintf(stderr, "line exceeds %u bytes\n", LINE_MAX);
+                    rc = 1;
+                    break;
+                }
+                size_t ncap = cap * 2;
+                char *nline = realloc(line, ncap);
+                if (!nline) { rc = 1; break; }
+                line = nline;
+                char *ntext = realloc(text, ncap);
+                if (!ntext) { rc = 1; break; }
+                text = ntext;
+                cap = ncap;
             }
             line[n++] = (char)c;
         }
+        if (rc) break;
         if (c == EOF && n == 0) break;
         size_t tl = 0;
         for (size_t i = 0; i + 1 < n; i += 2) {
@@ -130,6 +141,15 @@ int main(int argc, char **argv)
         clock_gettime(CLOCK_MONOTONIC, &t1);
         enc_s += (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
         free(rendered);
+        if (e == OC_OK && no_special && bos && tok.has_bos) {
+            uint32_t *with = malloc((n_ids + 1) * sizeof(uint32_t));
+            if (!with) { free(ids); rc = 1; break; }
+            with[0] = tok.bos_id;
+            if (n_ids) memcpy(with + 1, ids, n_ids * sizeof(uint32_t));
+            free(ids);
+            ids = with;
+            n_ids++;
+        }
         if (e != OC_OK) {
             printf("ERROR %s\n", oc_error_msg(e));
         } else {

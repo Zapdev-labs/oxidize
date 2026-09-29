@@ -216,7 +216,9 @@ static inline const float *oc_kvrq_mu(const OcKvRqCache *c, size_t layer,
     return c->mu + (((layer * c->n_pages + page) * 2u + kind) * c->n_kv +
                     head) * c->d;
 }
-/* Decode position t's RQ block (plus its page mean) into out[d]. */
+/* Decode position t into out[d]. Sinks and rows whose page mean is not
+ * fixed yet come from the exact int8 slot. A flushed page is the RQ block
+ * plus its page mean. */
 void oc_kvrq_decode_pos(const OcKvRqCache *c, size_t layer, size_t kind,
                         size_t head, int64_t t, float *out);
 

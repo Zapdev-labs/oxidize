@@ -1216,10 +1216,11 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
     memset(out, 0, sizeof(*out));
     out->load_flags = flags;
 
-    /* K2-Horizon is a large MoE that is usually close to the RAM limit:
-     * MADV_SEQUENTIAL's drop-behind evicts hot experts and WILLNEED pulls the
-     * whole file in at once, so map it with the default advice instead. The
-     * arch is peeked from the header because the advice is set at open. */
+    /* K2-Horizon is a large MoE that is usually close to the RAM limit.
+     * WILLNEED faults the whole file in at once, so map it with the kernel's
+     * default advice instead. OC_LLAMA_LOAD_STREAM keeps NO_READAHEAD and
+     * wins over this. The arch is peeked from the header because the advice
+     * is set at open. */
     if (!(flags & OC_LLAMA_LOAD_STREAM) && oc_k2_gguf_path_is_k2(path))
         flags |= OC_LLAMA_LOAD_NORMAL_ADVICE;
     out->load_flags = flags;
@@ -1582,6 +1583,75 @@ static size_t kv_cache_layer_count(const OcLlamaModel *model)
     return cache_layers;
 }
 
+static bool size_add(size_t a, size_t b, size_t *out)
+{
+    if (a > SIZE_MAX - b) return false;
+    *out = a + b;
+    return true;
+}
+
+static void rq_params_resolve(const OcKvOptions *o, OcKvRqParams *p);
+
+/* Bytes an RQ session reserves: the per-layer code map plus the exact-slot
+ * ring and (by default) the page-mean tables. Matches oc_kvrq_cache_init
+ * for the resolved defaults, so a long context is not priced as f32. */
+static size_t rq_reservation_bytes(const OcLlamaModel *model)
+{
+    OcKvRqParams p;
+    rq_params_resolve(NULL, &p);
+    const size_t d = model->cfg.kv_head_dim;
+    const size_t n_kv = model->cfg.n_head_kv;
+    const size_t n_ctx = model->cfg.n_ctx;
+    const size_t n_layers = kv_cache_layer_count(model);
+    if (p.k_bits < 2 || p.k_bits > 4 || p.v_bits < 2 || p.v_bits > 4)
+        return SIZE_MAX;
+    if (!(d == 64 || d == 128 || d == 256) || n_kv == 0 || n_ctx == 0 ||
+        n_layers == 0)
+        return SIZE_MAX;
+    const size_t kblk = 2u + d * p.k_bits / 8u;
+    const size_t vblk = 2u + d * p.v_bits / 8u;
+    size_t blk, layer_bytes, total;
+    if (!size_add(kblk, vblk, &blk) || !size_mul(n_ctx, blk, &layer_bytes) ||
+        !size_mul(n_kv, layer_bytes, &layer_bytes) ||
+        !size_mul(n_layers, layer_bytes, &total))
+        return SIZE_MAX;
+    size_t ring = 0;
+    if (p.window > 0) {
+        if ((size_t)p.window > SIZE_MAX - p.ring_extra) return SIZE_MAX;
+        ring = (size_t)p.window + p.ring_extra;
+    }
+    if ((size_t)p.n_sink > SIZE_MAX - ring) return SIZE_MAX;
+    const size_t n_slots = (size_t)p.n_sink + ring;
+    if (n_slots > 0) {
+        size_t xq, xs, tags, aux;
+        if (!size_mul(n_layers, 2u, &xq) || !size_mul(xq, n_kv, &xq) ||
+            !size_mul(xq, n_slots, &xq) || !size_mul(xq, d, &xq))
+            return SIZE_MAX;
+        if (!size_mul(n_layers, 2u, &xs) || !size_mul(xs, n_kv, &xs) ||
+            !size_mul(xs, n_slots, &xs) || !size_mul(xs, sizeof(float), &xs))
+            return SIZE_MAX;
+        if (!size_mul(n_layers, n_slots, &tags) ||
+            !size_mul(tags, sizeof(int64_t), &tags))
+            return SIZE_MAX;
+        if (!size_add(xq, xs, &aux) || !size_add(aux, tags, &aux) ||
+            !size_add(total, aux, &total))
+            return SIZE_MAX;
+    }
+    if (p.window > 0 && getenv("OC_KVRQ_NO_CENTER") == NULL) {
+        const size_t page = p.window;
+        if (page == 0 || n_ctx > SIZE_MAX - (page - 1)) return SIZE_MAX;
+        const size_t n_pages = (n_ctx + page - 1) / page;
+        size_t mu, flags;
+        if (!size_mul(n_layers, n_pages, &mu) || !size_mul(mu, 2u, &mu) ||
+            !size_mul(mu, n_kv, &mu) || !size_mul(mu, d, &mu) ||
+            !size_mul(mu, sizeof(float), &mu) || !size_add(total, mu, &total))
+            return SIZE_MAX;
+        if (!size_mul(n_layers, n_pages, &flags) || !size_add(total, flags, &total))
+            return SIZE_MAX;
+    }
+    return total;
+}
+
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
 {
     if (model == NULL) return 0;
@@ -1601,6 +1671,7 @@ size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type)
             return SIZE_MAX;
         return bytes;
     }
+    if (kv_type == OC_KV_RQ) return rq_reservation_bytes(model);
     size_t buffers = model->cfg.uses_mla ? 1u : 2u;
     size_t bytes;
     return size_mul(elems, buffers * sizeof(float), &bytes) ? bytes : SIZE_MAX;
@@ -1703,6 +1774,15 @@ static OcError session_init_kv_impl2(OcLlamaModel *model, OcLlamaSession *out,
      * strides by head_dim. If those disagree the offsets would not line up,
      * so fall back to f32 rather than compute the wrong thing. */
     out->kv_group = model->cfg.kv_head_dim;
+    /* RQ is rejected before the Q8 checks so the fallback is re-validated.
+     * Gemma 4, MLA, and mismatched head dims cannot use Q8 either; leaving
+     * them on Q8 (kv_k NULL, or a single scale stride) crashes or corrupts
+     * attention. */
+    if (kv_type == OC_KV_RQ && (skip_dense_kv || !rq_supported(model))) {
+        oc_log(OC_LOG_WARN, "llama: RQ KV is not supported for this model "
+               "geometry/arch; falling back");
+        kv_type = OC_KV_Q8;
+    }
     /* Q8 KV indexes its scale array at a single (n_head_kv, kv_head_dim)
      * stride. Gemma 4's two layer geometries give two different strides, so
      * the scales for sliding and global layers would alias. Rather than carry
@@ -1729,11 +1809,6 @@ static OcError session_init_kv_impl2(OcLlamaModel *model, OcLlamaSession *out,
                "(%u vs %u); using f32 KV",
                model->cfg.head_dim, model->cfg.kv_head_dim);
         kv_type = OC_KV_F32;
-    }
-    if (kv_type == OC_KV_RQ && (skip_dense_kv || !rq_supported(model))) {
-        oc_log(OC_LOG_WARN, "llama: RQ KV is not supported for this model "
-               "geometry/arch; using int8 KV");
-        kv_type = OC_KV_Q8;
     }
     out->kv_type = kv_type;
     if (kv_type == OC_KV_RQ) skip_dense_kv = 1;
@@ -5880,8 +5955,6 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
  * Rejected rows leave stale KV above the new position in both caches; every
  * attention is bounded by its query position, so they are never read and
  * get overwritten. */
-
-#define OC_K2_MTP_MAX_K 4u
 
 struct OcK2Mtp {
     PrefillBuf buf;          /* cap = OC_K2_MTP_MAX_K + 1 rows            */

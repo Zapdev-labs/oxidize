@@ -17,12 +17,13 @@
 
 static void check_split(const char *text, const uint32_t *want, size_t n_want)
 {
-    uint32_t cpts[256], lens[256];
+    uint32_t cpts[256];
+    size_t lens[256];
     size_t n = oc_unicode_cpts_from_utf8(text, strlen(text), cpts);
     size_t nw = oc_pretok_split(OC_PRETOK_K2_HORIZON, cpts, n, lens);
     cr_assert_eq(nw, n_want, "'%s': %zu words, want %zu", text, nw, n_want);
     for (size_t i = 0; i < nw; ++i)
-        cr_assert_eq(lens[i], want[i], "'%s': word %zu len %u want %u",
+        cr_assert_eq(lens[i], (size_t)want[i], "'%s': word %zu len %zu want %u",
                      text, i, lens[i], want[i]);
 }
 
@@ -40,7 +41,8 @@ Test(pretokenize, type_from_name)
 
 Test(pretokenize, none_is_single_word)
 {
-    uint32_t cpts[3] = { 'a', ' ', '1' }, lens[3];
+    uint32_t cpts[3] = { 'a', ' ', '1' };
+    size_t lens[3];
     cr_assert_eq(oc_pretok_split(OC_PRETOK_NONE, cpts, 3, lens), 1u);
     cr_assert_eq(lens[0], 3u);
     cr_assert_eq(oc_pretok_split(OC_PRETOK_K2_HORIZON, cpts, 0, lens), 0u);

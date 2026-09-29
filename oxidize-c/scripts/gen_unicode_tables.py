@@ -80,8 +80,10 @@ def from_python():
     lower = []
     for cp in range(MAX_CP):
         lo = chr(cp).lower()
-        if len(lo) == 1 and ord(lo) != cp:
-            lower.append((cp, ord(lo)))
+        # Full lowercase can expand (U+0130 -> i + combining dot). The
+        # llama snapshot keeps the simple 1:1 map (U+0130 -> U+0069).
+        if lo and ord(lo[0]) != cp:
+            lower.append((cp, ord(lo[0])))
     return pairs, ws, lower
 
 

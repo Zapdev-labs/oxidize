@@ -85,6 +85,14 @@ Test(unicode, utf8_decode_matches_llama_rules)
     cr_assert_eq(n, sizeof(want) / sizeof(want[0]));
     for (size_t i = 0; i < n; ++i) cr_assert_eq(out[i], want[i], "cpt %zu", i);
 
+    size_t off[16];
+    n = oc_unicode_cpts_from_utf8_offs(s, strlen(s), out, off);
+    cr_assert_eq(n, sizeof(want) / sizeof(want[0]));
+    cr_assert_eq(off[0], 0u);
+    cr_assert_eq(off[1], 1u);          /* 0xFF */
+    cr_assert_eq(off[2], 2u);          /* U+00E9 starts here */
+    cr_assert_eq(off[n], strlen(s));
+
     const char emoji[] = "\xf0\x9f\x98\x80";
     n = oc_unicode_cpts_from_utf8(emoji, 4, out);
     cr_assert_eq(n, 1u);

@@ -34,6 +34,7 @@ int main(int argc, char ** argv) {
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--no-special")) parse_special = false;
         else if (!strcmp(argv[i], "--bos")) add_special = true;
+        else { fprintf(stderr, "unknown flag %s\n", argv[i]); return 2; }
     }
     llama_log_set([](ggml_log_level, const char *, void *) {}, nullptr);
     llama_backend_init();

@@ -160,14 +160,25 @@ def run_driver(cmd: list[str], texts: list[bytes]) -> tuple[list[list[int]], flo
     return out, dt
 
 
+def _case_rows(rows, id_key: str) -> bool:
+    return isinstance(rows, list) and all(
+        isinstance(c, dict) and isinstance(c.get("text"), str) and id_key in c
+        for c in rows)
+
+def _entry_rows(rows) -> bool:
+    return isinstance(rows, list) and all(
+        isinstance(e, dict) and ("text" in e or "text_hex" in e) and "ids" in e
+        for e in rows)
+
 def load_golden(path: str, no_special: bool = False) -> list[tuple[bytes, list[int]]]:
     with open(path) as f:
         g = json.load(f)
-    if isinstance(g, dict) and "cases" in g:
+    if isinstance(g, dict) and "cases" in g and _case_rows(g["cases"],
+            "ids_no_parse_special" if no_special else "ids_parse_special"):
         # llama-server corpus (golden_gen.py): both parse_special variants.
         key = "ids_no_parse_special" if no_special else "ids_parse_special"
         return [(c["text"].encode(), c[key]) for c in g["cases"]]
-    if isinstance(g, dict) and "entries" in g:
+    if isinstance(g, dict) and "entries" in g and _entry_rows(g["entries"]):
         items = []
         for e in g["entries"]:
             text = bytes.fromhex(e["text_hex"]) if "text_hex" in e else e["text"].encode()

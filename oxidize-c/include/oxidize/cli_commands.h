@@ -104,7 +104,7 @@ typedef struct OcCliContext {
 
     /* Backend. */
     const char        *backend;        /* "cpu" | "cuda"                    */
-    const char        *kv_type;         /* "f32" | "q8"; NULL = auto         */
+    const char        *kv_type;         /* f32|q8|rq|rq:K,V; NULL = auto    */
     const char        *kv_compress;     /* none|rotor|helix; NULL = none     */
 
     /* Server. */
@@ -172,6 +172,9 @@ typedef struct OcCliContext {
     /* Append-only: --prefill-chunk-size N (0 = unset). Kept last so the
      * Server / Benchmark / … offsets stay stable for older callers. */
     uint32_t           prefill_chunk_size;
+    const char        *mtp_model;       /* --mtp-model PATH                  */
+    bool               mtp;             /* --mtp                             */
+    bool               chat;            /* --chat: wrap the prompt as a turn */
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.

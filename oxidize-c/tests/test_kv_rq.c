@@ -1,4 +1,5 @@
 /* test_kv_rq.c — OC_KV_RQ codec, fused kernels and lazily-committed cache. */
+#define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include "oxidize/kv_rq.h"
 #include "oxidize/flash_attention.h"   /* oc_f16_to_f32_bits */
@@ -434,6 +435,7 @@ Test(kv_rq, cache_slots_tags_and_rewind)
  * follow it. */
 Test(kv_rq, centering_removes_shared_component)
 {
+    unsetenv("OC_KVRQ_NO_CENTER");
     const size_t d = 128, n = 300, W = 64;
     OcKvRqParams p = { .k_bits = 3, .v_bits = 2, .n_sink = 4, .window = W,
                        .rot = OC_KVRQ_ROT_HADAMARD, .seed = 1 };
@@ -546,6 +548,7 @@ static void ckpt_assert_same(const OcKvRqCache *a, const OcKvRqCache *b,
  * stored the accepted rows, and stay identical as real rows follow. */
 Test(kv_rq, speculative_rows_checkpoint_restores_exactly)
 {
+    unsetenv("OC_KVRQ_NO_CENTER");
     OcKvRqParams p = { .k_bits = 3, .v_bits = 3, .n_sink = 2, .window = 8,
                        .rot = OC_KVRQ_ROT_HADAMARD, .seed = 5 };
     const int64_t cases[][2] = {   /* {P, accepted rows} */

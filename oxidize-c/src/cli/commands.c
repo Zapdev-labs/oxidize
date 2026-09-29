@@ -457,7 +457,10 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --prerouter PATH      Edge0 prerouter safetensors\n"
                "  --prerouter-prefetch  Prefetch only; keep native MoE router\n"
                "  --lora PATH           Edge0 Recover-LoRA safetensors\n"
-               "  --experts-per-tok K   Override MoE top-k (Edge0 uses 4)\n");
+               "  --experts-per-tok K   Override MoE top-k (Edge0 uses 4)\n"
+               "  --mtp                 K2 MTP speculative decode (forces repeat penalty 1)\n"
+               "  --mtp-model PATH      K2 nextn sidecar GGUF\n"
+               "  --chat                Wrap the prompt as one user turn\n");
         break;
     case OC_CLI_CMD_CHAT:
         printf("interactive chat session\n\n"
@@ -729,7 +732,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
             if (oc_dspark_advance(&sess, logits, &dcfg, toks, want, &n, NULL) != OC_OK)
                 break;
             if (n == 0) break;
-            if (!ctx->bench_no_eos && tok.has_eos) {
+            if (!ctx->bench_no_eos) {
                 size_t keep = 0;
                 for (; keep < n; keep++) {
                     if (oc_tokenizer_is_eog(&tok, toks[keep])) break;

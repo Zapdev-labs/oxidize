@@ -21,7 +21,7 @@ typedef struct OcCliArgs {
      * row is 515 GB of f32 cache, so the default allocation cannot succeed on
      * any machine. 0 = use the model's own value. */
     uint32_t   n_ctx;
-    const char *kv_type;       /* --kv f32|q8; NULL = auto (q8 if ctx>=8192) */
+    const char *kv_type;       /* --kv f32|q8|rq; NULL = auto               */
     const char *kv_compress;   /* --kv-compress none|rotor|helix; NULL = none */
     int        threads;
     const char *numa;
@@ -100,6 +100,11 @@ int oc_cli_cuda_conflicts_kv_compress(const char *backend,
  * name ("serve", "serve-realtime") or "--serve-api". */
 int oc_cli_kv_compress_reject(const char *backend, const char *kv_compress,
                               const char *server_label);
+
+/* Set when the last oc_cli_parse_args / oc_cli_context_parse saw a value
+ * it refused (bad RQ bit width, sink, or window). Cleared at the start of
+ * each parse. */
+int oc_cli_parse_failed(void);
 
 /* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext.
  * Returns true when argv[1] names a known subcommand (ctx is filled in and

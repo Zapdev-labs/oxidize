@@ -26,7 +26,7 @@ OcPretokType oc_pretok_type_from_name(const char *pre)
 typedef struct {
     const uint32_t *cpts;
     size_t          n;
-    uint32_t       *lens;
+    size_t         *lens;
     size_t          n_words;
     size_t          prev_end;
 } Splitter;
@@ -45,7 +45,7 @@ static inline uint16_t get_flags(const Splitter *s, size_t pos)
 static inline size_t add_token(Splitter *s, size_t end)
 {
     size_t len = end - s->prev_end;
-    if (len > 0) s->lens[s->n_words++] = (uint32_t)len;
+    if (len > 0) s->lens[s->n_words++] = len;
     s->prev_end = end;
     return len;
 }
@@ -154,7 +154,7 @@ static size_t split_k2_horizon(Splitter *s)
 }
 
 size_t oc_pretok_split(OcPretokType type, const uint32_t *cpts, size_t n,
-                       uint32_t *out_lens)
+                       size_t *out_lens)
 {
     if (!cpts || !out_lens || n == 0) return 0;
     Splitter s = { cpts, n, out_lens, 0, 0 };
@@ -163,7 +163,7 @@ size_t oc_pretok_split(OcPretokType type, const uint32_t *cpts, size_t n,
         return split_k2_horizon(&s);
     case OC_PRETOK_NONE:
     default:
-        out_lens[0] = (uint32_t)n;
+        out_lens[0] = n;
         return 1;
     }
 }

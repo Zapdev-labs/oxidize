@@ -56,6 +56,11 @@ uint32_t oc_unicode_tolower(uint32_t cp);
  * number of code points written. */
 size_t oc_unicode_cpts_from_utf8(const char *s, size_t len, uint32_t *out);
 
+/* Same decode. When `byte_off` is non-NULL it must hold `len + 1` entries:
+ * byte_off[i] is the byte index of code point i, and byte_off[n] == len. */
+size_t oc_unicode_cpts_from_utf8_offs(const char *s, size_t len, uint32_t *out,
+                                      size_t *byte_off);
+
 /* Encode `cp` as UTF-8 into `out` (up to 4 bytes). Code points above
  * 0x10FFFF are encoded as U+FFFD. Returns the byte count. */
 size_t oc_unicode_cpt_to_utf8(uint32_t cp, char out[4]);

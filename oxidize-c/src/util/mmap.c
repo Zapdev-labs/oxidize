@@ -5,7 +5,8 @@
  *
  * Lifecycle:
  *   - oc_mmap_open_readonly(): open(path) + mmap(PROT_READ, MAP_PRIVATE)
- *     + MADV_SEQUENTIAL + MADV_WILLNEED (best-effort, Linux).
+ *     + MADV_WILLNEED (best-effort, Linux). Not MADV_SEQUENTIAL: a
+ *     VM_SEQ_READ mapping is ignored when the kernel ages pages.
  *   - oc_mmap_advise_hugepage(): MADV_HUGEPAGE (best-effort). Caller decides
  *     when hugepages are appropriate (Rust enables THP only when the model
  *     fits in RAM with >= 2x headroom — see MappedGgufFile::advise_huge_pages).

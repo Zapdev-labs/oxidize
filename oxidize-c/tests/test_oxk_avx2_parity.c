@@ -196,6 +196,7 @@ Test(oxk_avx2, q4_k_raw_blocks_bit_exact_vs_scalar)
 
 Test(oxk_avx2, q6_k_raw_blocks_bit_exact_vs_scalar)
 {
+    if (!host_avx2()) cr_skip("host has no AVX2");
     uint32_t s = 0x7F4A7C15u;
     const size_t nb = 12;
     uint8_t *w = malloc(nb * OC_OXK_BLOCK_Q6_K_SIZE);

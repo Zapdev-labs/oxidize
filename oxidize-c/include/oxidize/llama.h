@@ -563,9 +563,11 @@ OcError oc_llama_load(const char *path, OcLlamaModel *out);
  * from SSD (Edge0-style). Combine with oc_llama_enable_expert_stream(). */
 #define OC_LLAMA_LOAD_STREAM 1u
 /* Map the GGUF with the kernel's default (MADV_NORMAL) advice instead of
- * MADV_SEQUENTIAL + MADV_WILLNEED. Sequential advice drops pages soon after
- * they are read, which evicts hot routed experts on a large MoE that does not
- * comfortably fit in RAM. Applied automatically to K2-Horizon files. */
+ * the loader default MADV_WILLNEED. WILLNEED faults the whole file in;
+ * MADV_NORMAL keeps demand paging so hot routed experts can stay resident
+ * on a large MoE that does not comfortably fit in RAM. Applied automatically
+ * to K2-Horizon files unless OC_LLAMA_LOAD_STREAM is set (streaming maps
+ * with NO_READAHEAD instead). */
 #define OC_LLAMA_LOAD_NORMAL_ADVICE 2u
 
 OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out);
@@ -643,12 +645,16 @@ OcError oc_llama_session_init_with_compress(OcLlamaModel *model,
 
 /* Resolve KV type from `--kv` / OX_KV_TYPE / context length.
  * explicit: "q8", "f32" ("f16" is an alias), "rq", "rq:K,V", or NULL.
- * Contexts >= 8192 default to Q8, >= 131072 to RQ. */
+ * Contexts >= 8192 default to Q8, >= 131072 to RQ. An "rq:K,V" explicit
+ * value also sets the process-wide RQ bit-width defaults (same effect as
+ * oc_llama_set_rq_defaults) for later sessions that do not pass bits. */
 OcKvCacheType oc_llama_select_kv_type(uint32_t n_ctx,
                                       const char *explicit_value);
 
 /* Bytes the KV cache occupies for `model` under `kv_type`. Useful for
- * reporting and for deciding whether a context length is affordable. */
+ * reporting and for deciding whether a context length is affordable.
+ * OC_KV_RQ is the reserved code map plus the exact-slot ring and page-mean
+ * tables at the current RQ defaults, not the f32 estimate. */
 size_t oc_llama_kv_cache_bytes(const OcLlamaModel *model, OcKvCacheType kv_type);
 
 /* Process-wide RQ defaults from the CLI (--kv-k-bits/--kv-v-bits/--kv-sinks/
@@ -697,6 +703,11 @@ typedef struct OcMtpStats {
 
 OcError oc_llama_mtp_enable(OcLlamaSession *sess, bool on);
 
+/* Drafts per step are capped here. A larger `k` is clamped, so n_out and
+ * stats reflect at most this many drafts. */
+#define OC_K2_MTP_MAX_K 4u
+
+/* `k` above OC_K2_MTP_MAX_K is silently clamped. */
 OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
                           uint32_t *out_tokens, size_t max_out, size_t *n_out,
                           OcMtpStats *stats);

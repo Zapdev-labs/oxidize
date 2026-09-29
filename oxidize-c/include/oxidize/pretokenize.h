@@ -33,9 +33,10 @@ OcPretokType oc_pretok_type_from_name(const char *pre);
 
 /* Split `cpts[0..n)` into words. Each word's length (in code points) is
  * written to `out_lens` (capacity >= n); the lengths sum to n. Returns the
- * number of words. OC_PRETOK_NONE yields a single word (when n > 0). */
+ * number of words. OC_PRETOK_NONE yields a single word (when n > 0).
+ * Lengths are size_t so an input longer than UINT32_MAX is not truncated. */
 size_t oc_pretok_split(OcPretokType type, const uint32_t *cpts, size_t n,
-                       uint32_t *out_lens);
+                       size_t *out_lens);
 
 #ifdef __cplusplus
 }

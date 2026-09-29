@@ -1,5 +1,6 @@
 /* test_attn_flash.c — flash-decoding split/merge and blocked prefill vs a
  * double-precision single-pass reference, for f32, int8 and RQ caches. */
+#define _POSIX_C_SOURCE 200809L
 #include <criterion/criterion.h>
 #include "oxidize/attn_flash.h"
 
@@ -288,6 +289,7 @@ Test(attn_flash, prefill_sliding_window)
  * its mean. */
 Test(attn_flash, decode_rq_centered_many_heads)
 {
+    unsetenv("OC_KVRQ_NO_CENTER");
     const size_t n = 517, d = 128, G = 20;
     TCache tc;
     rs(4242);

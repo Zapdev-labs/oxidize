@@ -139,11 +139,12 @@ static void print_help(void)
 "  --temperature T        Sampling temperature (0 = greedy, default 0)\n"
 "  --top-k K              Top-K sampling (default 40, 0 = disabled)\n"
 "  --top-p P              Top-P / nucleus (default 0.95)\n"
-"  --repeat-penalty P     Repeat penalty (default 1.1)\n"
+"  --repeat-penalty P     Repeat penalty (default 1.1; --mtp forces 1)\n"
 "  --seed N               RNG seed (0 = deterministic default)\n"
 "  --spec-type TYPE       none | mtp | dspark (default: dspark if GGUF has MTP)\n"
 "  --draft-tokens N       MTP/DSpark draft block size (default 4; K2 MTP 1)\n"
-"  --mtp                  K2-Horizon: MTP speculative decoding (greedy, opt-in)\n"
+"  --mtp                  K2-Horizon: MTP speculative decoding (greedy, opt-in;\n"
+"                         forces --repeat-penalty 1, needs --temperature 0)\n"
 "  --mtp-model PATH       K2-Horizon: load an mtp-*.gguf nextn head sidecar\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
@@ -350,14 +351,22 @@ static OcError run_generation(const OcCliArgs *args)
 
     /* K2-Horizon MTP is opt-in (--mtp or --spec-type mtp): with the current
      * head it is not faster than plain decode on CPU (see oc_llama_mtp_step
-     * docs). Greedy only, and only without a repeat penalty, since the
-     * verify compares raw argmaxes. */
+     * docs). Greedy only. The default repeat penalty is 1.1, which would
+     * otherwise disable MTP; force 1 so --mtp actually runs. Verify compares
+     * raw argmaxes, so a non-zero temperature still opts out. */
+    float repeat_penalty = args->repeat_penalty;
     bool k2_mtp = false;
-    if (model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
-        (args->mtp || (args->spec_type && strcmp(args->spec_type, "mtp") == 0))) {
-        if (use_cuda || args->temperature > 0.0f || args->repeat_penalty != 1.0f) {
-            oc_log(OC_LOG_WARN, "mtp: needs CPU greedy decoding with "
-                   "--repeat-penalty 1 (--temperature 0); decoding without it");
+    const bool want_k2_mtp = model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
+        (args->mtp || (args->spec_type && strcmp(args->spec_type, "mtp") == 0));
+    if (want_k2_mtp && repeat_penalty != 1.0f) {
+        oc_log(OC_LOG_WARN, "mtp: forcing --repeat-penalty 1 (was %.3f)",
+               repeat_penalty);
+        repeat_penalty = 1.0f;
+    }
+    if (want_k2_mtp) {
+        if (use_cuda || args->temperature > 0.0f) {
+            oc_log(OC_LOG_WARN, "mtp: needs CPU greedy decoding "
+                   "(--temperature 0); decoding without it");
         } else if (oc_llama_mtp_enable(&sess, true) == OC_OK) {
             k2_mtp = true;
         } else {
@@ -420,7 +429,7 @@ static OcError run_generation(const OcCliArgs *args)
     /* Build sampler config. */
     OcSamplerConfig scfg = OC_SAMPLER_DEFAULT;
     scfg.temperature    = args->temperature;
-    scfg.repeat_penalty = args->repeat_penalty;
+    scfg.repeat_penalty = repeat_penalty;
     scfg.seed           = args->seed;
     scfg.min_p = args->min_p;
     scfg.tau = args->mirostat_tau;
@@ -698,6 +707,7 @@ int main(int argc, char **argv)
         if (ctx.command == OC_CLI_CMD_SERVE ||
             ctx.command == OC_CLI_CMD_SERVE_REALTIME)
             server = oc_cli_command_name(ctx.command);
+        if (oc_cli_parse_failed()) return 2;
         if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
             return 1;
         if (ctx.command == OC_CLI_CMD_PROMPT) {
@@ -731,6 +741,9 @@ int main(int argc, char **argv)
             args.lora_path = ctx.lora_path;
             args.experts_per_tok = ctx.experts_per_tok;
             args.prerouter_prefetch = ctx.prerouter_prefetch;
+            args.mtp = ctx.mtp;
+            args.mtp_model = ctx.mtp_model;
+            args.chat = ctx.chat;
             if (args.verbose) oc_log_set_level(OC_LOG_DEBUG);
             init_compute_threads(args.threads);
             OcError ge = run_generation(&args);
@@ -745,6 +758,7 @@ int main(int argc, char **argv)
 
     OcCliArgs args;
     oc_cli_parse_args(argc, argv, &args);
+    if (oc_cli_parse_failed()) return 2;
 
     /* After the early exits: neither help nor --version does any compute, and
      * starting a pool only to tear it down would just add startup latency. */

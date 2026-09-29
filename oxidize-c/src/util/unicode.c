@@ -89,11 +89,13 @@ uint32_t oc_unicode_tolower(uint32_t cp)
     return cp;
 }
 
-size_t oc_unicode_cpts_from_utf8(const char *s, size_t len, uint32_t *out)
+size_t oc_unicode_cpts_from_utf8_offs(const char *s, size_t len, uint32_t *out,
+                                      size_t *byte_off)
 {
     const uint8_t *u = (const uint8_t *)s;
     size_t i = 0, n = 0;
     while (i < len) {
+        if (byte_off) byte_off[n] = i;
         uint8_t b = u[i];
         if (!(b & 0x80)) { out[n++] = b; i += 1; continue; }
         if (!(b & 0x40)) goto invalid;
@@ -125,7 +127,13 @@ invalid:
         out[n++] = OC_UCPT_REPLACEMENT;
         i += 1;
     }
+    if (byte_off) byte_off[n] = len;
     return n;
+}
+
+size_t oc_unicode_cpts_from_utf8(const char *s, size_t len, uint32_t *out)
+{
+    return oc_unicode_cpts_from_utf8_offs(s, len, out, NULL);
 }
 
 size_t oc_unicode_cpt_to_utf8(uint32_t cp, char out[4])
