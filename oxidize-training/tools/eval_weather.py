@@ -52,19 +52,24 @@ def analog_label(query: dict, pool: list[dict], thresholds: dict[str, dict], k: 
     same = [r for r in local if oni_q * float(r["oni"]) > 0 and abs(float(r["oni"])) >= 0.5]
     cand = same if abs(oni_q) >= 1.0 and len(same) >= 4 else local
     sigma = 0.45 if cand is same else 0.7
-    wsum = 0.0
-    dt = 0.0
-    dp = 0.0
-    for r in cand:
+    if not cand:
+        raise ValueError(f"no analog candidates for {loc}")
+
+    def dist2(r: dict) -> float:
         d_oni = (oni_q - float(r["oni"])) / sigma
         d_pdo = (float(query["pdo"]) - float(r["pdo"])) / 1.2
         d_pdsi = (float(query.get("pdsi", 0.0)) - float(r.get("pdsi", 0.0))) / 2.0
-        w = math.exp(-0.5 * (d_oni * d_oni + 0.25 * d_pdo * d_pdo + 0.35 * d_pdsi * d_pdsi))
-        wsum += w
-        dt += w * float(r["djf_t"])
-        dp += w * float(r["djf_p"])
-    dt = dt / wsum
-    dp = dp / wsum
+        return d_oni * d_oni + 0.25 * d_pdo * d_pdo + 0.35 * d_pdsi * d_pdsi
+
+    # Keep only the k nearest seasons, then kernel-weight those by distance.
+    ranked = sorted(((dist2(r), r) for r in cand), key=lambda dr: dr[0])[: max(1, k)]
+    weights = [math.exp(-0.5 * d2) for d2, _ in ranked]
+    wsum = sum(weights)
+    if wsum <= 0.0:  # every neighbor underflowed: fall back to an unweighted mean
+        weights = [1.0] * len(ranked)
+        wsum = float(len(ranked))
+    dt = sum(w * float(r["djf_t"]) for w, (_, r) in zip(weights, ranked)) / wsum
+    dp = sum(w * float(r["djf_p"]) for w, (_, r) in zip(weights, ranked)) / wsum
     label = f"{tercile(dt, th['t33'], th['t67'], 'COLD', 'WARM')}-{tercile(dp, th['p33'], th['p67'], 'DRY', 'WET')}"
     return label, dt, dp
 
@@ -91,6 +96,9 @@ def run_complete(bin_path: str, ckpt: str, vocab: str, prompts: list[str], token
         ],
         input="\n".join(prompts) + "\n",
         text=True,
+        # Byte-level BPE can emit partial UTF-8 sequences from an undertrained model.
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
@@ -138,6 +146,8 @@ def main() -> int:
     ap.add_argument("--temp", type=float, default=0.01)
     ap.add_argument("--k", type=int, default=5)
     args = ap.parse_args()
+    if args.k < 1:
+        ap.error("--k must be >= 1")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 

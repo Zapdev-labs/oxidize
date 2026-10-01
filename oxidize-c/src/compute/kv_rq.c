@@ -1268,11 +1268,13 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
         c->layer[l] = map_lazy(c->layer_bytes);
         if (c->layer[l] == NULL) { oc_kvrq_cache_free(c); return OC_ERR_OOM; }
     }
-    if (p->window > 0 && (size_t)p->window > SIZE_MAX - p->ring_extra) {
+    size_t ring_sum = 0;
+    if (p->window > 0 &&
+        !kvrq_add((size_t)p->window, (size_t)p->ring_extra, &ring_sum)) {
         oc_kvrq_cache_free(c);
         return OC_ERR_INVALID_ARG;
     }
-    c->ring = p->window > 0 ? (size_t)p->window + p->ring_extra : 0;
+    c->ring = ring_sum;
     if ((size_t)p->n_sink > SIZE_MAX - c->ring) {
         oc_kvrq_cache_free(c);
         return OC_ERR_INVALID_ARG;

@@ -34,7 +34,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -405,6 +404,8 @@ class K2HorizonForCausalLM(nn.Module, SupportsPP):
                 continue
             if ".mlp.up_proj." in name or ".shared_experts.up_proj." in name:
                 load(name.replace("up_proj", "gate_up_proj"), w, 1)
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             if name not in params:
                 raise KeyError(f"unexpected checkpoint tensor {name}")

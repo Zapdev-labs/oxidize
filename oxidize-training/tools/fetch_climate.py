@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -38,9 +40,27 @@ PDO_URLS = [
 ]
 
 
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to https URLs, so a server cannot downgrade us to plaintext."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        # newurl is already resolved against the request URL, so relative
+        # redirects are checked too.
+        if urllib.parse.urlsplit(newurl).scheme.lower() != "https":
+            raise urllib.error.HTTPError(newurl, code, f"refusing non-HTTPS redirect to {newurl}", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(HttpsOnlyRedirect)
+
+
 def fetch(url: str) -> bytes:
+    if urllib.parse.urlsplit(url).scheme.lower() != "https":
+        raise ValueError(f"refusing non-HTTPS URL {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "oxidize-training-weather/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with _OPENER.open(req, timeout=120) as resp:
+        if urllib.parse.urlsplit(resp.geturl()).scheme.lower() != "https":
+            raise urllib.error.URLError(f"non-HTTPS final URL {resp.geturl()}")
         return resp.read()
 
 

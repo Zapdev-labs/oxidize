@@ -20,10 +20,23 @@ def row_text(value):
     return str(value).strip()
 
 
+# Same substrings as asks_for_weaponized() in oxidize-c/src/model/finetune.c, so the
+# uploaded raw.jsonl already matches what the card promises.
+WEAPONIZED = (
+    "reverse shell", "meterpreter", "write an exploit", "exploit poc",
+    "ransomware", "webshell", "malware sample",
+)
+
+
+def asks_for_weaponized(user):
+    low = user.lower()
+    return any(bad in low for bad in WEAPONIZED)
+
+
 def emit(out, system, user, assistant, source):
     user = row_text(user)
     assistant = row_text(assistant)
-    if not user or not assistant:
+    if not user or not assistant or asks_for_weaponized(user):
         return 0
     rec = {
         "system": row_text(system),
@@ -91,6 +104,8 @@ def main():
     repo = os.environ.get("HF_DATASET_REPO", "freakyskittle/sec-distill-sft")
     api = HfApi(token=token)
     api.create_repo(repo, repo_type="dataset", private=True, exist_ok=True)
+    # exist_ok leaves an existing repo's visibility alone; force it private.
+    api.update_repo_settings(repo, private=True, repo_type="dataset")
     api.upload_file(
         path_or_fileobj=out_path,
         path_in_repo="raw.jsonl",
@@ -115,9 +130,14 @@ size_categories:
 
 Chat-ready traces for a small student model. Security rows come from a defensive instruction set. General rows are a replay slice of Dolly so the student keeps everyday instruction following while it absorbs security knowledge.
 
-This is not a 27B weight checkpoint and it does not include exploit-construction tasks. The oxidize-c `finetune --strategy distill` command rewrites `raw.jsonl` into `messages` JSONL and drops requests that ask for weaponized output.
+This is not a 27B weight checkpoint and it does not include exploit-construction tasks: rows whose request asks for weaponized output (reverse shells, exploit PoCs, ransomware, webshells, malware samples) are dropped before `raw.jsonl` is written. The oxidize-c `finetune --strategy distill` command rewrites `raw.jsonl` into `messages` JSONL and applies the same filter again.
 
-Sources: a Fenrir or Heimdall defensive cybersecurity set (Apache-2.0) and `databricks/databricks-dolly-15k` (CC BY-SA). The mix follows the stricter share-alike terms.
+## Sources and attribution
+
+- A Fenrir or Heimdall defensive cybersecurity instruction set (Apache-2.0).
+- Databricks, "databricks-dolly-15k", https://huggingface.co/datasets/databricks/databricks-dolly-15k, Copyright Databricks, Inc., licensed under CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0/).
+
+This dataset modifies and adapts databricks-dolly-15k: it takes a subset of rows, joins each instruction with its context, reformats the rows into system/user/assistant records, and mixes them with the security set. The adapted mix is distributed under CC BY-SA 4.0, a later version of the same share-alike license.
 """
     api.upload_file(
         path_or_fileobj=card.encode(),

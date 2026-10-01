@@ -306,14 +306,39 @@ static int run_kvstats(OcLlamaModel *model, const char *path, uint32_t n)
     }
     OcKvOptions kvo = {0};
     kvo.type = OC_KV_F32;
+    if (n > model->cfg.n_ctx) {
+        fprintf(stderr, "kvstats: %u tokens exceed n_ctx %u\n", n,
+                model->cfg.n_ctx);
+        free(ids);
+        return 1;
+    }
     OcLlamaSession sess;
-    if (oc_llama_session_init_kv_opts(model, &sess, &kvo) != OC_OK) return 1;
-    float *lg = malloc(model->cfg.vocab_size * sizeof(float));
-    if (oc_llama_prefill(&sess, ids, n, 0, lg) != OC_OK) return 1;
-    const size_t L = model->cfg.n_layer, H = model->cfg.n_head_kv,
-                 d = model->cfg.kv_head_dim, row = sess.kv_row_floats,
-                 C = model->cfg.n_ctx;
-    double *mu = malloc(d * sizeof(double)), *nrm = malloc(n * sizeof(double));
+    if (oc_llama_session_init_kv_opts(model, &sess, &kvo) != OC_OK) {
+        free(ids);
+        return 1;
+    }
+    /* The dense f32 cache is [cache_layer][n_ctx][row]. MLA keeps only a
+     * latent in kv_k (no kv_v) and other layouts may leave both NULL, so
+     * bail instead of reading a cache this layout does not have. Qwen3.5
+     * caches only its full-attention layers. */
+    if (!sess.kv_k || !sess.kv_v || model->cfg.uses_mla) {
+        fprintf(stderr, "kvstats: needs a dense per-head f32 K/V cache\n");
+        oc_llama_session_free(&sess);
+        free(ids);
+        return 1;
+    }
+    const size_t L = model->cfg.is_qwen35 ? model->cfg.n_full_attention_layers
+                                          : model->cfg.n_layer,
+                 H = model->cfg.n_head_kv, d = model->cfg.kv_head_dim,
+                 row = sess.kv_row_floats, C = model->cfg.n_ctx;
+    float *lg = calloc(model->cfg.vocab_size, sizeof(float));
+    double *mu = calloc(d, sizeof(double)), *nrm = calloc(n, sizeof(double));
+    if (!lg || !mu || !nrm || oc_llama_prefill(&sess, ids, n, 0, lg) != OC_OK) {
+        fprintf(stderr, "kvstats: allocation or prefill failed\n");
+        free(mu); free(nrm); free(lg); free(ids);
+        oc_llama_session_free(&sess);
+        return 1;
+    }
     for (size_t l = 0; l < L; l++) {
         printf("{\"layer\":%zu", l);
         for (int kind = 0; kind < 2; kind++) {
@@ -381,7 +406,7 @@ static int run_mtp_golden(OcLlamaModel *model, const char *path)
         return 1;
     }
     const size_t T = hdr[1], D = hdr[2], NKV = hdr[3], HD = hdr[4];
-    if (T == 0 || D == 0 || NKV == 0 || HD == 0 ||
+    if (T < 2 || D == 0 || NKV == 0 || HD == 0 ||
         D != model->cfg.n_embd || NKV != model->cfg.n_head_kv ||
         HD != model->cfg.head_dim) {
         fprintf(stderr, "golden geometry mismatch\n");
@@ -430,7 +455,12 @@ static int run_mtp_golden(OcLlamaModel *model, const char *path)
               fread(k1, sizeof(float), NKV * T * HD, fp) == NKV * T * HD &&
               fread(v1, sizeof(float), NKV * T * HD, fp) == NKV * T * HD;
     fclose(fp);
-    if (!ok) { fprintf(stderr, "short golden file\n"); return 1; }
+    if (!ok) {
+        fprintf(stderr, "short golden file\n");
+        free(tok32); free(toks); free(h); free(s1); free(s2); free(k1); free(v1);
+        free(o1); free(o2); free(kr); free(vr); free(kg); free(vg);
+        return 1;
+    }
     for (size_t i = 0; i < T + 2; ++i) toks[i] = (uint32_t)tok32[i];
 
     OcLlamaSession sess;

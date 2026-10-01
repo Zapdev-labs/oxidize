@@ -1617,8 +1617,8 @@ static size_t rq_reservation_bytes(const OcLlamaModel *model)
         return SIZE_MAX;
     size_t ring = 0;
     if (p.window > 0) {
-        if ((size_t)p.window > SIZE_MAX - p.ring_extra) return SIZE_MAX;
-        ring = (size_t)p.window + p.ring_extra;
+        if (!size_add((size_t)p.window, (size_t)p.ring_extra, &ring))
+            return SIZE_MAX;
     }
     if ((size_t)p.n_sink > SIZE_MAX - ring) return SIZE_MAX;
     const size_t n_slots = (size_t)p.n_sink + ring;

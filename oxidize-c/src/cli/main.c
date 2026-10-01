@@ -358,11 +358,6 @@ static OcError run_generation(const OcCliArgs *args)
     bool k2_mtp = false;
     const bool want_k2_mtp = model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
         (args->mtp || (args->spec_type && strcmp(args->spec_type, "mtp") == 0));
-    if (want_k2_mtp && repeat_penalty != 1.0f) {
-        oc_log(OC_LOG_WARN, "mtp: forcing --repeat-penalty 1 (was %.3f)",
-               repeat_penalty);
-        repeat_penalty = 1.0f;
-    }
     if (want_k2_mtp) {
         if (use_cuda || args->temperature > 0.0f) {
             oc_log(OC_LOG_WARN, "mtp: needs CPU greedy decoding "
@@ -372,6 +367,13 @@ static OcError run_generation(const OcCliArgs *args)
         } else {
             oc_log(OC_LOG_WARN, "mtp: could not enable (compressed KV?)");
         }
+    }
+    /* Only override the user's penalty once MTP is actually on; when it
+     * stays off, plain sampling keeps --repeat-penalty as given. */
+    if (k2_mtp && repeat_penalty != 1.0f) {
+        oc_log(OC_LOG_WARN, "mtp: forcing --repeat-penalty 1 (was %.3f)",
+               repeat_penalty);
+        repeat_penalty = 1.0f;
     }
 
     if (args->prerouter_path) {

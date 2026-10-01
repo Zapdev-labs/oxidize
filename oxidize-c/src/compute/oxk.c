@@ -1115,8 +1115,11 @@ static void oc_oxk_init_once(void)
     const OcSimdCaps *sc = oc_simd_caps();
     if (sc->level == OC_SIMD_AVX512) {
         level = OC_OXK_AVX512;
-        has_f16c = true;
-        has_fma  = true;
+        /* Report what cpuid saw: the AVX2 kernels below are built with
+         * target("avx2,fma,f16c"), and a VM can mask F16C/FMA while still
+         * exposing AVX-512. */
+        has_f16c = sc->has_f16c;
+        has_fma  = sc->has_fma;
         has_vnni = sc->has_vnni;
         name = "avx512";
     } else if (sc->level == OC_SIMD_AVX2) {
@@ -1172,7 +1175,7 @@ static void oc_oxk_init_once(void)
      * q4_0 / q4_1 / q5_k / q6_k still have scalar-forwarding _avx2 symbols,
      * and routing through them would add a call for no gain. Check the body
      * before adding an entry here, not just the symbol name. */
-    if (level >= OC_OXK_AVX2) {
+    if (level >= OC_OXK_AVX2 && has_f16c && has_fma) {
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
         /* Q6_K now has a real AVX2 body (not a scalar forwarder). It matters

@@ -227,11 +227,14 @@ def cmd_check(args) -> None:
             bad += 1
             if bad <= args.show:
                 print(f"MISMATCH {text[:80]!r}")
+                h = have or []
+                w = want or []
                 n = 0
-                while have and n < min(len(have), len(want)) and have[n] == want[n]:
+                while n < min(len(h), len(w)) and h[n] == w[n]:
                     n += 1
-                print(f"  first diff at {n}: want {want[n:n + 8]} have "
-                      f"{(have or [])[n:n + 8]} (len want {len(want)} have "
+                print(f"  first diff at {n}: want {w[n:n + 8]} have "
+                      f"{h[n:n + 8]} (len want "
+                      f"{len(want) if want is not None else 'ERR'} have "
                       f"{len(have) if have is not None else 'ERR'})")
     total = len(items)
     print(f"{total - bad}/{total} exact matches ({100.0 * (total - bad) / max(total, 1):.2f}%), "
