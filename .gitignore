@@ -47,6 +47,12 @@ oxidize-golang/oxidize
 .omo/
 docs/superpowers/
 
+# oxidize-training generated data / checkpoints / binaries
+oxidize-training/data/
+oxidize-training/out/
+oxidize-training/bin/
+# Kaggle TPU build output (contains secrets.json)
+scripts/kaggle_tpu_k2/build/
 # One-off scripts belong in scripts/ or scripts/local/ (ignored). Never dump at repo root.
 /modal_*.py
 /modal_*.py.tmp.*

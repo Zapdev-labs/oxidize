@@ -650,6 +650,23 @@ static void decode_id(int id, const Merge *merges, int nmerge, FILE *out) {
     }
 }
 
+/* decode_id into a bounded buffer; output past cap - 1 bytes is dropped. */
+static void decode_buf(int id, const Merge *merges, int nmerge, char *buf, size_t cap, size_t *len, int depth) {
+    if (depth > 64 || *len + 1 >= cap) return;
+    if (id < 256) {
+        buf[(*len)++] = (char)id;
+        return;
+    }
+    if (id == BOS || id == EOS) return;
+    for (int i = 0; i < nmerge; i++) {
+        if (merges[i].id == (uint16_t)id) {
+            decode_buf(merges[i].left, merges, nmerge, buf, cap, len, depth + 1);
+            decode_buf(merges[i].right, merges, nmerge, buf, cap, len, depth + 1);
+            return;
+        }
+    }
+}
+
 static int encode_prompt(const char *p, const Merge *merges, int nmerge, int *ids, int cap) {
     int n = 0;
     ids[n++] = BOS;
@@ -882,6 +899,109 @@ static void cmd_sample(int argc, char **argv) {
     printf("\n");
 }
 
+/* Winter outlook classes (tools/gen_weather_corpus.py): `ACTION=<1..9>` encodes
+ * the 3x3 temperature x precipitation tercile grid. */
+enum { N_WINTER = 9 };
+static const char *const WINTER_CLS[N_WINTER] = {
+    ACTION_PREFIX "1", ACTION_PREFIX "2", ACTION_PREFIX "3", ACTION_PREFIX "4", ACTION_PREFIX "5",
+    ACTION_PREFIX "6", ACTION_PREFIX "7", ACTION_PREFIX "8", ACTION_PREFIX "9",
+};
+
+typedef struct {
+    int id[N_WINTER];
+} WinterTok;
+
+/* Same boundary rule as make_act_tok: score the first piece each class adds
+ * after `ACTION=`, and refuse a vocab that maps two classes to one id. */
+static WinterTok make_winter_tok(const Merge *merges, int nmerge) {
+    WinterTok w;
+    for (int i = 0; i < N_WINTER; i++) {
+        w.id[i] = first_continuation_token(ACTION_PREFIX, WINTER_CLS[i], merges, nmerge);
+        if (w.id[i] < 0) die("vocab has no continuation for a winter class after " ACTION_PREFIX);
+        for (int j = 0; j < i; j++)
+            if (w.id[j] == w.id[i]) die("vocab cannot distinguish winter classes after " ACTION_PREFIX);
+    }
+    return w;
+}
+
+/* Returns -1 when no class is representable in this model's vocabulary. */
+static int sample_winter_token(const float *logits, int V, WinterTok t) {
+    int best = -1;
+    float bv = -1e30f;
+    for (int i = 0; i < N_WINTER; i++) {
+        int id = t.id[i];
+        if (id < 0 || id >= V) continue;
+        if (best < 0 || logits[id] > bv) {
+            bv = logits[id];
+            best = id;
+        }
+    }
+    return best;
+}
+
+/* One completion per stdin line. When the line contains `ACTION=`, the first
+ * generated token is forced to a winter class (pass --no-force-action to
+ * sample freely). Output lines hold only the generated text. */
+static void cmd_complete(int argc, char **argv) {
+    const char *ckpt = args(argc, argv, "--ckpt", "out/model.bin");
+    const char *vocab = args(argc, argv, "--vocab", "data/vocab.bin");
+    int ntok = argi(argc, argv, "--tokens", 16);
+    float temp = (float)atof(args(argc, argv, "--temp", "0.4"));
+    unsigned seed = (unsigned)argi(argc, argv, "--seed", 1);
+    rng_state = seed ? seed : 1u;
+    int force_class = !has(argc, argv, "--no-force-action");
+    int nmerge = 0, vocab_sz = 0;
+    Merge *merges = load_merges(vocab, &nmerge, &vocab_sz);
+    WinterTok wtok = make_winter_tok(merges, nmerge);
+    GPT g;
+    load_ckpt(ckpt, &g);
+    g.s.batch = 1;
+    int T = g.s.seq, V = g.s.vocab;
+    Acts a = acts_alloc(g.s);
+    int *inp = (int *)xmalloc((size_t)T * sizeof(int));
+    int *tgt = (int *)xmalloc((size_t)T * sizeof(int));
+    char line[MAX_PROMPT_BYTES + 2];
+    while (fgets(line, (int)sizeof line, stdin)) {
+        size_t L = strlen(line);
+        /* A partial read would split one prompt into two and score the head. */
+        if (L == sizeof line - 1 && line[L - 1] != '\n' && !feof(stdin)) die("prompt line too long");
+        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+        if (!L) continue;
+        int ids[MAX_PROMPT_IDS];
+        int n = encode_prompt_ctx(line, merges, nmerge, ids, T);
+        int n0 = n;
+        int force = force_class && strstr(line, ACTION_PREFIX) != NULL;
+        for (int k = 0; k < ntok; k++) {
+            memset(inp, 0, (size_t)T * sizeof(int));
+            memset(tgt, 0, (size_t)T * sizeof(int));
+            int start = n > T ? n - T : 0;
+            int used = n - start;
+            for (int i = 0; i < used; i++) inp[i] = ids[start + i];
+            gpt_forward_backward(&g, &a, inp, tgt, 0);
+            int pos = used - 1;
+            if (pos < 0) pos = 0;
+            const float *lg = a.logits + (size_t)pos * (size_t)V;
+            int tok = -1;
+            if (k == 0 && force) tok = sample_winter_token(lg, V, wtok);
+            if (tok < 0) tok = sample_token(lg, V, temp);
+            if (tok == EOS) break;
+            if (n >= MAX_PROMPT_IDS) break;
+            ids[n++] = tok;
+        }
+        /* The corpus is one ticket per line, so the model emits a newline once
+         * the class is out. Cut there: callers pair output lines with input
+         * lines, and an embedded newline would shift every later answer. */
+        char outb[1024];
+        size_t ol = 0;
+        for (int t = n0; t < n; t++) decode_buf(ids[t], merges, nmerge, outb, sizeof outb, &ol, 0);
+        outb[ol] = 0;
+        outb[strcspn(outb, "\r\n")] = 0;
+        printf("%s\n", outb);
+        fflush(stdout);
+    }
+    (void)vocab_sz;
+}
+
 static int action_from_logits(const float *lg, int V, ActTok t, float *lb, float *ls, float *lh) {
     *lb = (t.b >= 0 && t.b < V) ? lg[t.b] : -1e30f;
     *ls = (t.s >= 0 && t.s < V) ? lg[t.s] : -1e30f;
@@ -948,36 +1068,51 @@ typedef struct {
     double o, h, l, c;
 } Bar;
 
+/* Loads at most `cap` bars in ascending date order. When the file holds more,
+ * the newest `cap` are kept whatever order the CSV is sorted in, so callers
+ * that default to the last bar never land on a stale date. */
 static int load_ohlc(const char *path, Bar *b, int cap) {
     FILE *f = fopen(path, "r");
     if (!f) die("open csv");
     char line[512];
     if (!fgets(line, (int)sizeof line, f)) die("empty csv");
-    int n = 0;
-    while (fgets(line, (int)sizeof line, f) && n < cap) {
+    int n = 0, have = 0;
+    Bar *all = NULL;
+    while (fgets(line, (int)sizeof line, f)) {
         char d[12];
         double o, h, l, c, v;
         if (sscanf(line, " %11[^,],%lf,%lf,%lf,%lf,%lf", d, &o, &h, &l, &c, &v) != 6) {
             if (sscanf(line, " %11[^,],%lf,%lf,%lf,%lf", d, &o, &h, &l, &c) != 5) continue;
         }
         if (!(c > 0.0 && h >= l && o > 0.0)) continue;
-        snprintf(b[n].d, sizeof b[n].d, "%s", d);
-        b[n].o = o;
-        b[n].h = h;
-        b[n].l = l;
-        b[n].c = c;
+        if (n == have) {
+            if (have > (1 << 24)) die("csv too long");
+            have = have ? have * 2 : 1024;
+            Bar *nb = (Bar *)realloc(all, (size_t)have * sizeof(Bar));
+            if (!nb) die("oom");
+            all = nb;
+        }
+        snprintf(all[n].d, sizeof all[n].d, "%s", d);
+        all[n].o = o;
+        all[n].h = h;
+        all[n].l = l;
+        all[n].c = c;
         n++;
     }
     fclose(f);
     if (n < 50) die("csv too short");
-    if (strcmp(b[0].d, b[n - 1].d) > 0) {
+    if (strcmp(all[0].d, all[n - 1].d) > 0) {
         for (int i = 0; i < n / 2; i++) {
-            Bar t = b[i];
-            b[i] = b[n - 1 - i];
-            b[n - 1 - i] = t;
+            Bar t = all[i];
+            all[i] = all[n - 1 - i];
+            all[n - 1 - i] = t;
         }
     }
-    return n;
+    int keep = n < cap ? n : cap;
+    if (keep < n) fprintf(stderr, "%s: keeping newest %d of %d bars\n", path, keep, n);
+    memcpy(b, all + (n - keep), (size_t)keep * sizeof(Bar));
+    free(all);
+    return keep;
 }
 
 static void load_news_day(const char *dir, const char *day, char *out, int cap) {
@@ -1349,10 +1484,11 @@ static void cmd_picks(int argc, char **argv) {
     const char *day = args(argc, argv, "--date", "");
     if (day[0] && !safe_day_component(day)) die("--date must be digits and dashes");
     char asof[12];
-    Bar spy[4096];
+    /* Same cap as backtest, so both commands see the same SPY history. */
+    Bar *spy = (Bar *)xmalloc((size_t)16384 * sizeof(Bar));
     char spypath[512];
     snprintf(spypath, sizeof spypath, "%s/spy.csv", datadir);
-    int nspy = load_ohlc(spypath, spy, 4096);
+    int nspy = load_ohlc(spypath, spy, 16384);
     if (!day[0]) {
         snprintf(asof, sizeof asof, "%s", spy[nspy - 1].d);
         day = asof;
@@ -1435,6 +1571,7 @@ static void cmd_picks(int argc, char **argv) {
         free(ema);
     }
     printf("PICKS long %s\nPICKS short %s\n", longs[0] ? longs : "(none)", shorts[0] ? shorts : "(none)");
+    free(spy);
     (void)vocab_sz;
 }
 
@@ -1509,7 +1646,9 @@ int main(int argc, char **argv) {
                 "  oxidize-training score --ckpt out/trader.bin --vocab data/vocab.bin < prompts.txt\n"
                 "  oxidize-training backtest --ckpt out/trader.bin --vocab data/vocab.bin --csv data/spy.csv --symbol SPY\n"
                 "  oxidize-training picks --ckpt out/trader.bin --vocab data/vocab.bin --date 2026-09-11\n"
-                "  If the prompt contains ACTION=, the first token is B, S, or H. Pass --no-force-action to disable.\n");
+                "  oxidize-training complete --ckpt out/weather.bin --vocab data/weather/vocab.bin --tokens 2 < prompts.txt\n"
+                "  If the prompt contains ACTION=, the first token is B, S, or H (complete: a winter class 1-9).\n"
+                "  Pass --no-force-action to disable.\n");
         return 1;
     }
     if (!strcmp(argv[1], "train")) {
@@ -1518,6 +1657,10 @@ int main(int argc, char **argv) {
     }
     if (!strcmp(argv[1], "sample")) {
         cmd_sample(argc, argv);
+        return 0;
+    }
+    if (!strcmp(argv[1], "complete")) {
+        cmd_complete(argc, argv);
         return 0;
     }
     if (!strcmp(argv[1], "score")) {

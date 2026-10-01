@@ -421,7 +421,9 @@ void oc_cli_command_help(void)
 "  --model PATH          GGUF model file\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
-"  --kv f32|q8           KV cache dtype (q8 auto when ctx>=8192)\n"
+"  --kv, --kv-type T     f32|q8|rq|rq:K,V (q8 auto when ctx>=8192, rq >=131072)\n"
+"  --kv-k-bits/--kv-v-bits N  RQ key/value bits 2..4 (default 3/3)\n"
+"  --kv-window/--kv-sinks N   RQ exact int8 recent window (1024) / sinks (4); 0 = off\n"
 "  --kv-compress MODE    none|rotor|helix (default none)\n"
 "  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill)\n"
 "  --ctx N               KV context length (default cap 4096)\n"
@@ -455,7 +457,10 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --prerouter PATH      Edge0 prerouter safetensors\n"
                "  --prerouter-prefetch  Prefetch only; keep native MoE router\n"
                "  --lora PATH           Edge0 Recover-LoRA safetensors\n"
-               "  --experts-per-tok K   Override MoE top-k (Edge0 uses 4)\n");
+               "  --experts-per-tok K   Override MoE top-k (Edge0 uses 4)\n"
+               "  --mtp                 K2 MTP speculative decode (forces repeat penalty 1)\n"
+               "  --mtp-model PATH      K2 nextn sidecar GGUF\n"
+               "  --chat                Wrap the prompt as one user turn\n");
         break;
     case OC_CLI_CMD_CHAT:
         printf("interactive chat session\n\n"
@@ -562,7 +567,7 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "USAGE: oxidize-c finetune --model <base.gguf> --dataset data.jsonl \\\n"
                "       --output-dir ./adapters --strategy sft\n\n"
                "OPTIONS:\n"
-               "  --strategy S         sft|self-train|dpo|ppo (default: sft)\n"
+               "  --strategy S         sft|self-train|dpo|ppo|distill (default: sft)\n"
                "  --dataset PATH       JSONL training data\n"
                "  --output-dir PATH    Output directory for adapters\n"
                "  --lora-rank N        LoRA rank (default 8)\n"
@@ -727,10 +732,10 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
             if (oc_dspark_advance(&sess, logits, &dcfg, toks, want, &n, NULL) != OC_OK)
                 break;
             if (n == 0) break;
-            if (!ctx->bench_no_eos && tok.has_eos) {
+            if (!ctx->bench_no_eos) {
                 size_t keep = 0;
                 for (; keep < n; keep++) {
-                    if (toks[keep] == tok.eos_id) break;
+                    if (oc_tokenizer_is_eog(&tok, toks[keep])) break;
                 }
                 emitted += keep;
                 if (keep < n) break;
@@ -1024,10 +1029,6 @@ OcError oc_cli_run_prune(OcCliContext *ctx)
 
 OcError oc_cli_run_finetune(OcCliContext *ctx)
 {
-    if (!ctx->model_path) {
-        cli_error("--model is required for finetune");
-        return OC_ERR_INVALID_ARG;
-    }
     if (!ctx->dataset_path) {
         cli_error("--dataset is required for finetune");
         return OC_ERR_INVALID_ARG;
@@ -1039,17 +1040,23 @@ OcError oc_cli_run_finetune(OcCliContext *ctx)
         else if (ieq(ctx->ft_strategy, "self-train"))      strategy = OC_FT_SELF_TRAIN;
         else if (ieq(ctx->ft_strategy, "dpo"))              strategy = OC_FT_DPO;
         else if (ieq(ctx->ft_strategy, "ppo"))             strategy = OC_FT_PPO;
+        else if (ieq(ctx->ft_strategy, "distill"))         strategy = OC_FT_DISTILL;
         else {
             cli_error("unknown finetune strategy: %s "
-                      "(expected sft|self-train|dpo|ppo)", ctx->ft_strategy);
+                      "(expected sft|self-train|dpo|ppo|distill)", ctx->ft_strategy);
             return OC_ERR_INVALID_ARG;
         }
+    }
+
+    if (strategy != OC_FT_DISTILL && !ctx->model_path) {
+        cli_error("--model is required for finetune");
+        return OC_ERR_INVALID_ARG;
     }
 
     const char *out_dir = ctx->output_dir ? ctx->output_dir : "./adapters";
 
     progress(ctx, "finetuning: model=%s dataset=%s strategy=%s out=%s",
-             ctx->model_path, ctx->dataset_path,
+             ctx->model_path ? ctx->model_path : "(none)", ctx->dataset_path,
              oc_ft_strategy_name(strategy), out_dir);
 
     OcFtConfig fcfg = {
@@ -1077,11 +1084,12 @@ OcError oc_cli_run_finetune(OcCliContext *ctx)
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"finetune\",\"model\":\"%s\",\"dataset\":\"%s\","
                "\"strategy\":\"%s\",\"output_dir\":\"%s\",\"status\":\"ok\"}\n",
-               ctx->model_path, ctx->dataset_path,
+               ctx->model_path ? ctx->model_path : "", ctx->dataset_path,
                oc_ft_strategy_name(strategy), out_dir);
     } else {
         printf("finetune complete: model=%s strategy=%s output=%s\n",
-               ctx->model_path, oc_ft_strategy_name(strategy), out_dir);
+               ctx->model_path ? ctx->model_path : "(none)",
+               oc_ft_strategy_name(strategy), out_dir);
     }
     return OC_OK;
 }
