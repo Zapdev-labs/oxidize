@@ -182,7 +182,12 @@ fn run_sft(args: SftArgs) -> Result<()> {
         ..
     } = loaded;
     config.max_seq_len = clamp_seq_len("sft", config.max_seq_len, model.config().context_size);
-    let eos = require_eos(&tokenizer).map_err(|e| anyhow!("{e}"))?;
+    // EOS only separates packed examples; `--no-pack` never reads it.
+    let eos = if config.pack {
+        require_eos(&tokenizer).map_err(|e| anyhow!("{e}"))?
+    } else {
+        0
+    };
     let mut examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow!("{e}"))?;
     SftTrainer::tokenize_examples(
         &mut examples,
@@ -290,7 +295,7 @@ fn run_ppo(args: PpoArgs) -> Result<()> {
         rank: args.rank,
         learning_rate: args.lr,
         epochs: args.epochs,
-        max_seq_len: args.max_seq_len,
+        max_seq_len: clamp_seq_len("ppo", args.max_seq_len, model.config().context_size),
         seed: args.seed,
         ..FinetuneConfig::default()
     };

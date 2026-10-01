@@ -99,6 +99,13 @@ impl DpoExample {
             if !prompt_ids.is_empty() && !full_c.is_empty() && !full_r.is_empty() {
                 let k = common_prefix_len(&prompt_ids, &full_c)
                     .min(common_prefix_len(&prompt_ids, &full_r));
+                // A merge across the boundary moved prompt text into the
+                // continuations, so supplied reference scores no longer cover
+                // the spans that get scored; fall back to the frozen head.
+                if k < prompt_ids.len() {
+                    self.ref_chosen_logprob = None;
+                    self.ref_rejected_logprob = None;
+                }
                 self.prompt = full_c[..k].to_vec();
                 self.chosen = full_c[k..].to_vec();
                 self.rejected = full_r[k..].to_vec();

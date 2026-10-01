@@ -396,9 +396,9 @@ impl LayerWiseModel {
                 "mla: missing latent projections".to_owned(),
             ));
         }
-        if v_head_dim > k_head_dim {
+        if v_head_dim > k_head_dim || k_nope_dim > k_head_dim {
             return Err(ModelError::InferenceFailed(
-                "mla: value head wider than the KV cache slot".to_owned(),
+                "mla: k_b/v_b head wider than the KV cache slot".to_owned(),
             ));
         }
 
