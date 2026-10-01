@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 use oxidize_finetuning::{
-    DpoConfig, FinetuneConfig, PpoConfig, SftTrainer, export_lora_gguf, load_causal_model,
-    load_jsonl_dpo, load_jsonl_sft, load_prompts_file, pack_chunks, train_dpo_on_model,
-    train_ppo_on_model,
+    DpoConfig, FinetuneConfig, PpoConfig, SftTrainer, export_lora_gguf, fit_seq_len_to_context,
+    load_causal_model, load_jsonl_dpo, load_jsonl_sft, load_prompts_file, pack_chunks, require_eos,
+    train_dpo_on_model, train_ppo_on_model,
 };
 
 #[derive(Debug, Parser)]
@@ -20,7 +20,8 @@ enum LlmCommand {
     Plan(PlanArgs),
     /// Supervised fine-tuning with an LM-head LoRA on the frozen model.
     Sft(SftArgs),
-    /// Direct preference optimization. The frozen LM head is the reference policy.
+    /// Direct preference optimization. The reference is the dataset ref_*_logprob
+    /// scores when both are present and unclipped, otherwise the frozen LM head.
     Dpo(DpoArgs),
     /// On-policy PPO. Reward is the frozen model's log-probability of the greedy token.
     Ppo(PpoArgs),
@@ -56,6 +57,9 @@ struct SftArgs {
     tokens_per_step: usize,
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Required for architectures whose forward is approximated: ALiBi-declared
+    /// Falcon/GPT-2 (RoPE path applied) and GLM-DSA (dense attention instead
+    /// of sparse selection).
     #[arg(long, default_value_t = false)]
     allow_partial_arch: bool,
 }
@@ -82,6 +86,9 @@ struct DpoArgs {
     window: usize,
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Required for architectures whose forward is approximated: ALiBi-declared
+    /// Falcon/GPT-2 (RoPE path applied) and GLM-DSA (dense attention instead
+    /// of sparse selection).
     #[arg(long, default_value_t = false)]
     allow_partial_arch: bool,
 }
@@ -108,6 +115,9 @@ struct PpoArgs {
     clip_eps: f32,
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Required for architectures whose forward is approximated: ALiBi-declared
+    /// Falcon/GPT-2 (RoPE path applied) and GLM-DSA (dense attention instead
+    /// of sparse selection).
     #[arg(long, default_value_t = false)]
     allow_partial_arch: bool,
 }
@@ -135,8 +145,19 @@ fn run_plan(args: PlanArgs) -> Result<()> {
     Ok(())
 }
 
+/// Clamp `--max-seq-len` to the loaded model's context, noting when it shrinks.
+fn clamp_seq_len(mode: &str, requested: usize, context: usize) -> usize {
+    let fitted = fit_seq_len_to_context(requested, context);
+    if fitted < requested {
+        println!(
+            "oxidize-train llm {mode}: --max-seq-len {requested} exceeds the model context {context}; using {fitted}"
+        );
+    }
+    fitted
+}
+
 fn run_sft(args: SftArgs) -> Result<()> {
-    let config = FinetuneConfig {
+    let mut config = FinetuneConfig {
         rank: args.lora_rank,
         alpha: args.lora_alpha,
         learning_rate: args.learning_rate,
@@ -160,7 +181,8 @@ fn run_sft(args: SftArgs) -> Result<()> {
         tokenizer,
         ..
     } = loaded;
-    let eos = tokenizer.special_tokens().eos.unwrap_or(0);
+    config.max_seq_len = clamp_seq_len("sft", config.max_seq_len, model.config().context_size);
+    let eos = require_eos(&tokenizer).map_err(|e| anyhow!("{e}"))?;
     let mut examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow!("{e}"))?;
     SftTrainer::tokenize_examples(
         &mut examples,
@@ -205,7 +227,7 @@ fn run_dpo(args: DpoArgs) -> Result<()> {
         rank: args.rank,
         learning_rate: args.lr,
         epochs: args.epochs,
-        max_seq_len: args.max_seq_len,
+        max_seq_len: clamp_seq_len("dpo", args.max_seq_len, model.config().context_size),
         window: args.window,
         seed: args.seed,
         ..FinetuneConfig::default()
@@ -238,6 +260,12 @@ fn run_dpo(args: DpoArgs) -> Result<()> {
 }
 
 fn run_ppo(args: PpoArgs) -> Result<()> {
+    if !args.clip_eps.is_finite() || args.clip_eps < 0.0 {
+        anyhow::bail!(
+            "--clip-eps must be a finite value >= 0, got {}",
+            args.clip_eps
+        );
+    }
     let prompts = load_prompts_file(&args.prompts).map_err(|e| anyhow!("{e}"))?;
     if prompts.is_empty() {
         anyhow::bail!("prompts file {} is empty", args.prompts.display());

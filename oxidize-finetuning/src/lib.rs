@@ -35,8 +35,9 @@ pub use merge::{AdapterMerger, MergeStrategy, linear_merge, slerp_merge, ties_me
 pub use qlora::{NF4Block, QLoRAAdapter};
 pub use rlhf::{PpoConfig, PpoReport, PpoStepReport, PpoTrainer, RewardModel, RolloutBuffer};
 pub use runtime::{
-    CausalModel, DpoRun, PpoRun, ScoredSpan, clip_prompt_continuation, load_causal_model,
-    score_continuation, train_dpo_on_model, train_ppo_on_model,
+    CausalModel, DpoRun, PpoRun, ScoredSpan, clip_prompt_continuation, dataset_refs,
+    fit_seq_len_to_context, load_causal_model, require_eos, score_continuation, train_dpo_on_model,
+    train_ppo_on_model,
 };
 pub use self_train::{
     SelfTrainConfig, SelfTrainLoop, SelfTrainReport, SelfTrainRoundReport, load_prompts_file,

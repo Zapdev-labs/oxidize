@@ -19,6 +19,7 @@
 use rayon::prelude::*;
 
 use crate::config::FinetuneConfig;
+use crate::error::{FinetuneError, Result};
 use crate::lora::{LoRAAdapter, LoRATarget};
 
 // ---------------------------------------------------------------------------
@@ -90,17 +91,30 @@ impl RewardModel {
             .collect()
     }
 
-    /// One linear-regression step toward `target` so the critic tracks the
+    /// One normalized-LMS step toward `target` so the critic tracks the
     /// rollout reward instead of staying at its random initialization.
+    ///
+    /// The step is `lr / (‖h‖² + 1)` (the `+ 1` covers the bias input), which
+    /// keeps the update stable for any `lr` in `[0, 2)` regardless of the
+    /// hidden width or magnitude.  Negative / non-finite `lr` and non-finite
+    /// errors are ignored.
     pub fn sgd(&mut self, hidden: &[f32], target: f32, lr: f32) {
-        if hidden.len() != self.in_dim || !lr.is_finite() {
+        if hidden.len() != self.in_dim || !lr.is_finite() || lr < 0.0 {
             return;
         }
         let err = self.score(hidden) - target;
-        for (w, h) in self.weights.iter_mut().zip(hidden.iter()) {
-            *w -= lr * err * h;
+        if !err.is_finite() {
+            return;
         }
-        self.bias -= lr * err;
+        let norm_sq: f32 = hidden.iter().map(|h| h * h).sum();
+        let step = lr / (norm_sq + 1.0);
+        if !step.is_finite() {
+            return;
+        }
+        for (w, h) in self.weights.iter_mut().zip(hidden.iter()) {
+            *w -= step * err * h;
+        }
+        self.bias -= step * err;
     }
 }
 
@@ -123,6 +137,20 @@ pub struct PpoConfig {
     pub gae_lambda: f32,
     /// Discount factor γ.  1.0 is standard for next-token prediction.
     pub gamma: f32,
+}
+
+impl PpoConfig {
+    /// Reject hyper-parameters that would make the update undefined; a
+    /// negative `clip_eps` inverts the `clamp` bounds and panics.
+    pub fn validate(&self) -> Result<()> {
+        if !self.clip_eps.is_finite() || self.clip_eps < 0.0 {
+            return Err(FinetuneError::Model(format!(
+                "clip_eps must be a finite value >= 0, got {}",
+                self.clip_eps
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for PpoConfig {
@@ -161,6 +189,10 @@ pub struct RolloutBuffer {
     pub values: Vec<f32>,
     /// GAE advantages A(s_t, a_t), filled by `compute_gae`.
     pub advantages: Vec<f32>,
+    /// Frozen base-model logit rows the behaviour policy added the LoRA
+    /// residual to (one `vocab`-wide row per transition).  Empty means the
+    /// base logits are all zero, i.e. the policy is the LoRA residual alone.
+    pub base_logits: Vec<Vec<f32>>,
 }
 
 impl RolloutBuffer {
@@ -176,6 +208,25 @@ impl RolloutBuffer {
         self.rewards.push(reward);
         self.log_probs.push(log_prob);
         self.values.push(value);
+    }
+
+    /// Append a transition together with the frozen base logits it was
+    /// sampled under, so `PpoTrainer::train_step` re-evaluates the same
+    /// `base + LoRA` policy that produced `log_prob`.
+    ///
+    /// Do not mix with `add` in one buffer: base logits are used only when
+    /// every transition carries a row.
+    pub fn add_with_base(
+        &mut self,
+        state: Vec<f32>,
+        base_logits: Vec<f32>,
+        action: u32,
+        reward: f32,
+        log_prob: f32,
+        value: f32,
+    ) {
+        self.add(state, action, reward, log_prob, value);
+        self.base_logits.push(base_logits);
     }
 
     /// How many transitions are stored.
@@ -414,11 +465,17 @@ impl PpoTrainer {
             .collect();
         debug_assert_eq!(flat_states.len(), n * in_dim);
 
-        // LoRA forward: base logits start at zero; the LoRA residual is added
-        // in-place.  In a full system the caller would also add frozen-base
-        // logits, but since those are constant w.r.t. the LoRA parameters they
-        // do not affect the gradient — so we elide them here.
+        // Policy logits = frozen base logits + LoRA residual.  The base rows
+        // are constant w.r.t. the LoRA parameters but still shape the softmax,
+        // so new_log_prob / entropy / gradient must see them to match the
+        // behaviour policy that produced `old_log_prob`.  Buffers without base
+        // rows (or with a mismatched count) fall back to zero base logits.
         let mut logits = vec![0.0_f32; n * vocab];
+        if buffer.base_logits.len() == n && buffer.base_logits.iter().all(|r| r.len() == vocab) {
+            for (dst, row) in logits.chunks_exact_mut(vocab).zip(&buffer.base_logits) {
+                dst.copy_from_slice(row);
+            }
+        }
         // forward_batch can only fail on shape mismatch; we just constructed
         // flat_states to match, so unwrap is safe.
         self.lora
@@ -668,6 +725,29 @@ mod tests {
     }
 
     #[test]
+    fn reward_model_sgd_converges_on_wide_hidden() {
+        let mut rm = RewardModel::new(4096, 3);
+        let h: Vec<f32> = (0..4096).map(|i| (i as f32 * 0.37).sin()).collect();
+        let target = 2.5_f32;
+        let start = (rm.score(&h) - target).abs();
+        for _ in 0..2000 {
+            rm.sgd(&h, target, 1e-3);
+        }
+        let end = (rm.score(&h) - target).abs();
+        assert!(end.is_finite() && end < start, "start={start} end={end}");
+        assert!(rm.weights.iter().all(|w| w.is_finite()));
+    }
+
+    #[test]
+    fn reward_model_sgd_rejects_negative_lr() {
+        let mut rm = RewardModel::new(8, 1);
+        let before = rm.weights.clone();
+        rm.sgd(&[1.0; 8], 10.0, -0.1);
+        assert_eq!(rm.weights, before);
+        assert_eq!(rm.bias, 0.0);
+    }
+
+    #[test]
     fn reward_model_score_changes_with_weights() {
         let rm = RewardModel::new(4, 7);
         let h = vec![1.0_f32; 4];
@@ -681,6 +761,18 @@ mod tests {
     // -----------------------------------------------------------------------
     // PpoConfig defaults
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn ppo_config_validate_rejects_bad_clip_eps() {
+        assert!(PpoConfig::default().validate().is_ok());
+        for eps in [-0.1_f32, f32::NAN, f32::INFINITY] {
+            let c = PpoConfig {
+                clip_eps: eps,
+                ..Default::default()
+            };
+            assert!(c.validate().is_err(), "clip_eps={eps}");
+        }
+    }
 
     #[test]
     fn ppo_config_defaults_are_sensible() {
@@ -845,6 +937,32 @@ mod tests {
                 .zip(t.lora.a.iter())
                 .any(|(a, b)| (a - b).abs() > 1e-12),
             "LoRA A weights did not change after train_step"
+        );
+    }
+
+    #[test]
+    fn train_step_with_base_logits_starts_at_ratio_one() {
+        // Fresh adapter (B = 0): policy == base, so a rollout log-prob taken
+        // under the base logits must give ratio 1 → zero KL, loss = -A.
+        let mut t = tiny_ppo_trainer();
+        assert!(t.lora.b.iter().all(|v| *v == 0.0));
+        let mut buf = RolloutBuffer::new();
+        for i in 0..4 {
+            let state: Vec<f32> = (0..4).map(|j| ((i * 4 + j) as f32 * 0.3).cos()).collect();
+            let base: Vec<f32> = (0..8).map(|k| ((i + k) as f32 * 0.9).sin() * 3.0).collect();
+            let action = (i * 3 % 8) as u32;
+            let lp = PpoTrainer::log_prob_from_logits(&base, action);
+            buf.add_with_base(state, base, action, 1.0, lp, 0.0);
+        }
+        buf.compute_gae(&PpoConfig::default(), 0.0);
+        let mean_adv: f32 = buf.advantages.iter().sum::<f32>() / 4.0;
+        let r = t.train_step(&buf);
+        assert!(r.kl.abs() < 1e-5, "kl={}", r.kl);
+        assert!(
+            (r.policy_loss + mean_adv).abs() < 1e-4,
+            "policy_loss={} expected {}",
+            r.policy_loss,
+            -mean_adv
         );
     }
 

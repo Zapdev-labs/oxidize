@@ -64,6 +64,60 @@ pub fn load_causal_model(
     })
 }
 
+/// Clamp a requested sequence length to the loaded model's context window
+/// (`context == 0` means unknown and leaves `requested` unchanged).
+pub fn fit_seq_len_to_context(requested: usize, context: usize) -> usize {
+    if context > 0 {
+        requested.min(context)
+    } else {
+        requested
+    }
+}
+
+/// The tokenizer's EOS id; packing and generation need a real one, so a
+/// tokenizer without EOS is an error rather than silently using id 0.
+pub fn require_eos(tokenizer: &LoadedTokenizer) -> Result<u32> {
+    tokenizer.special_tokens().eos.ok_or_else(|| {
+        FinetuneError::Model(
+            "tokenizer has no EOS token; cannot pack or terminate sequences".into(),
+        )
+    })
+}
+
+/// Upper bound on the f32 elements of one scoring buffer (`n * hidden` or
+/// `n * vocab`): 1 Gi elements = 4 GiB.  Larger requests mean corrupt GGUF
+/// metadata or an absurd `max_seq_len`, so they are rejected before allocating.
+const MAX_SCORE_ELEMS: usize = 1 << 30;
+
+fn score_buffer_len(rows: usize, width: usize, what: &str) -> Result<usize> {
+    match rows.checked_mul(width) {
+        Some(len) if width > 0 && len <= MAX_SCORE_ELEMS => Ok(len),
+        _ => Err(FinetuneError::Model(format!(
+            "{what} buffer {rows} x {width} is empty or exceeds {MAX_SCORE_ELEMS} f32 elements; \
+             check hidden_size / vocab_size metadata and --max-seq-len"
+        ))),
+    }
+}
+
+/// True when `clip_prompt_continuation` would drop prompt or continuation
+/// tokens, i.e. the clipped span differs from the full example.
+pub fn clip_truncates(prompt: &[u32], continuation: &[u32], max_len: usize) -> bool {
+    prompt.len() + continuation.len() > max_len.max(2)
+}
+
+/// Dataset reference log-probs for `example`, or `(None, None)` (frozen-head
+/// fallback) when clipping to `max_len` drops prompt or continuation tokens:
+/// the precomputed scores cover the full spans, not the clipped ones.
+pub fn dataset_refs(example: &DpoExample, max_len: usize) -> (Option<f32>, Option<f32>) {
+    let clipped = clip_truncates(&example.prompt, &example.chosen, max_len)
+        || clip_truncates(&example.prompt, &example.rejected, max_len);
+    if clipped {
+        (None, None)
+    } else {
+        (example.ref_chosen_logprob, example.ref_rejected_logprob)
+    }
+}
+
 /// Keep `prompt + continuation` inside `max_len`, reserving at least one
 /// continuation token when the prompt itself is too long.
 pub fn clip_prompt_continuation(
@@ -99,8 +153,8 @@ pub fn score_continuation(
         .rewind_to(0)
         .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
     let inputs = &token_ids[..token_ids.len() - 1];
-    let mut hidden = vec![0.0_f32; n * h];
-    let mut base_logits = vec![0.0_f32; n * vocab];
+    let mut hidden = vec![0.0_f32; score_buffer_len(n, h, "hidden")?];
+    let mut base_logits = vec![0.0_f32; score_buffer_len(n, vocab, "logits")?];
     let mut filled = 0usize;
     let mut pos = 0usize;
     while pos < inputs.len() {
@@ -109,7 +163,7 @@ pub fn score_continuation(
         let normed = model
             .forward_normed_hidden(&inputs[pos..end], pos)
             .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
-        let mut logits = vec![0.0_f32; kk * vocab];
+        let mut logits = vec![0.0_f32; score_buffer_len(kk, vocab, "logits")?];
         model
             .lm_head_logits_batch(&normed, kk, &mut logits)
             .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
@@ -152,6 +206,8 @@ pub fn train_dpo_on_model(
     }
     let h = model.config().hidden_size;
     let vocab = model.config().vocab_size;
+    score_buffer_len(1, h, "hidden")?;
+    score_buffer_len(1, vocab, "logits")?;
     let mut trainer = DpoTrainer::new(h, vocab, finetune.clone(), dpo_config);
     let window = finetune.window.max(1);
     let max_len = finetune.max_seq_len.max(2);
@@ -170,6 +226,7 @@ pub fn train_dpo_on_model(
             }
             let chosen = score_continuation(model, &chosen_ids, chosen_prompt, window)?;
             let rejected = score_continuation(model, &rejected_ids, rejected_prompt, window)?;
+            let (ref_chosen, ref_rejected) = dataset_refs(example, max_len);
             let loss = trainer.train_step_with_base(
                 &chosen.targets,
                 &rejected.targets,
@@ -177,8 +234,8 @@ pub fn train_dpo_on_model(
                 &rejected.hidden,
                 &chosen.base_logits,
                 &rejected.base_logits,
-                example.ref_chosen_logprob,
-                example.ref_rejected_logprob,
+                ref_chosen,
+                ref_rejected,
             )?;
             total += loss;
             steps += 1;
@@ -212,6 +269,9 @@ pub fn train_ppo_on_model(
     let h = model.config().hidden_size;
     let vocab = model.config().vocab_size;
     let mut trainer = PpoTrainer::new(h, vocab, finetune.clone(), ppo_config.clone());
+    score_buffer_len(1, h, "hidden")?;
+    score_buffer_len(1, vocab, "logits")?;
+    ppo_config.validate()?;
     let max_new = max_new_tokens.max(1);
     let max_len = finetune.max_seq_len.max(2);
     let started = Instant::now();
@@ -319,11 +379,13 @@ fn rollout(
         let mut policy = base.clone();
         trainer.lora.forward_batch(&hidden, &mut policy, 1)?;
         let action = argmax(&policy);
-        let log_prob = sequence_logprob(&policy, &[action], vocab);
-        let reward = sequence_logprob(&base, &[action], vocab);
+        let log_prob = sequence_logprob(&policy, &[action], vocab)?;
+        let reward = sequence_logprob(&base, &[action], vocab)?;
         let value = trainer.reward_model.score(&hidden);
-        buffer.add(hidden.clone(), action, reward, log_prob, value);
         trainer.reward_model.sgd(&hidden, reward, critic_lr);
+        // Keep the frozen base row so `train_step` re-scores base + LoRA,
+        // the same policy that produced `log_prob`.
+        buffer.add_with_base(hidden.clone(), base, action, reward, log_prob, value);
 
         let next = model
             .forward_normed_hidden(&[action], pos)
@@ -346,6 +408,45 @@ fn argmax(logits: &[f32]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_seq_len_clamps_to_known_context() {
+        assert_eq!(fit_seq_len_to_context(512, 128), 128);
+        assert_eq!(fit_seq_len_to_context(64, 128), 64);
+        assert_eq!(fit_seq_len_to_context(512, 0), 512);
+    }
+
+    #[test]
+    fn clip_truncates_detects_dropped_tokens() {
+        assert!(!clip_truncates(&[1, 2], &[3, 4], 4));
+        assert!(clip_truncates(&[1, 2], &[3, 4, 5], 4));
+        assert!(clip_truncates(&[1, 2, 3, 4, 5], &[9], 4));
+    }
+
+    #[test]
+    fn dataset_refs_dropped_when_clipped() {
+        let example = DpoExample {
+            prompt: vec![1, 2],
+            chosen: vec![3, 4],
+            rejected: vec![5, 6, 7],
+            prompt_text: None,
+            chosen_text: None,
+            rejected_text: None,
+            ref_chosen_logprob: Some(-1.0),
+            ref_rejected_logprob: Some(-2.0),
+        };
+        assert_eq!(dataset_refs(&example, 8), (Some(-1.0), Some(-2.0)));
+        // Rejected (2 + 3 = 5 tokens) no longer fits in 4.
+        assert_eq!(dataset_refs(&example, 4), (None, None));
+    }
+
+    #[test]
+    fn score_buffer_len_rejects_absurd_sizes() {
+        assert_eq!(score_buffer_len(4, 8, "x").unwrap(), 32);
+        assert!(score_buffer_len(usize::MAX, 2, "x").is_err());
+        assert!(score_buffer_len(1 << 20, 1 << 20, "x").is_err());
+        assert!(score_buffer_len(4, 0, "x").is_err());
+    }
 
     #[test]
     fn clip_reserves_a_continuation_token() {

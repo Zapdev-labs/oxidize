@@ -4,8 +4,8 @@ use crate::conversion::normalize_gguf_tensor_name;
 use crate::flash_attention::flash_attention_decode_f32;
 use crate::gguf::{GgufQuantizationType, GgufTensorInfo, MappedGgufFile};
 use crate::inference::{
-    InferenceConfig, MoeFfnWeights, WeightStorage, lookup_quantized_embedding,
-    moe_ffn_forward_weights,
+    InferenceConfig, MoeFfnWeights, WeightStorage, gemv_weight_head, lookup_quantized_embedding,
+    moe_ffn_forward_weights, pack_head_outputs,
 };
 use crate::kv_cache::KvCache;
 use crate::model::{Logits, Model, ModelError, Session, Token};
@@ -300,14 +300,6 @@ fn activate_ffn(
     }
 }
 
-/// ALiBi slope for `head`, matching the MLX path: `-(2^(-8/n))^(head+1)`.
-/// CPU decode and the layer-wise trainer apply RoPE instead of this slope.
-pub(crate) fn alibi_slope(head: usize, n_heads: usize) -> f32 {
-    let n = n_heads.max(1);
-    let base = 2.0_f32.powf(-(8.0_f32 / n as f32));
-    -(base.powf(head as f32 + 1.0))
-}
-
 fn scale_hidden(xs: &mut [f32], scale: f32) {
     if scale != 1.0 {
         for v in xs.iter_mut() {
@@ -316,11 +308,14 @@ fn scale_hidden(xs: &mut [f32], scale: f32) {
     }
 }
 
-/// KV cache geometry. MLA stores the decompressed per-head K/V
-/// (`n_heads * kv_head_dim`), not the compressed latent.
-pub(super) fn kv_cache_geometry(config: &InferenceConfig) -> (usize, usize) {
+/// KV cache geometry. MLA layers store the decompressed per-head K/V
+/// (`n_heads * kv_head_dim`), not the compressed latent. `has_mla_tensors`
+/// comes from the loaded `attn_kv_a_mqa` tensors — the forward picks MLA by
+/// those, not by the architecture enum, so a DeepSeek-tagged GGUF with plain
+/// GQA attention must keep the `num_key_value_heads` geometry.
+pub(super) fn kv_cache_geometry(config: &InferenceConfig, has_mla_tensors: bool) -> (usize, usize) {
     let head_dim = config.kv_head_dim().max(1);
-    if config.architecture.uses_mla() {
+    if has_mla_tensors {
         (config.num_attention_heads.max(1), head_dim)
     } else {
         (config.num_key_value_heads.max(1), head_dim)
@@ -569,15 +564,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn alibi_slopes_are_negative_and_decay() {
-        let first = alibi_slope(0, 8);
-        let second = alibi_slope(1, 8);
-        assert!((first - -0.5).abs() < 1e-6, "{first}");
-        assert!((second - -0.25).abs() < 1e-6, "{second}");
-        assert!(second > first);
-    }
-
-    #[test]
     fn geglu_differs_from_swiglu() {
         let gate = [1.0_f32];
         let up = [2.0_f32];
@@ -610,10 +596,8 @@ mod tests {
         cfg.num_key_value_heads = 1;
         cfg.hidden_size = 32;
         cfg.key_value_head_dim = 4;
-        let (heads, dim) = kv_cache_geometry(&cfg);
-        assert_eq!((heads, dim), (8, 4));
-        cfg.architecture = crate::inference::ModelArchitecture::Llama;
-        let (heads, dim) = kv_cache_geometry(&cfg);
-        assert_eq!((heads, dim), (1, 4));
+        assert_eq!(kv_cache_geometry(&cfg, true), (8, 4));
+        // DeepSeek-tagged but loaded without MLA tensors: plain GQA widths.
+        assert_eq!(kv_cache_geometry(&cfg, false), (1, 4));
     }
 }
