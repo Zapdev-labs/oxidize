@@ -206,7 +206,7 @@ impl LayerWiseModel {
                     "ssm_out.weight" => layer.ssm_out = WeightStorage::F32(v),
                     "attn_q_norm.weight" => layer.attn_q_norm = v,
                     "attn_k_norm.weight" => layer.attn_k_norm = v,
-                    "post_ffn_norm.weight" => layer.post_ffn_norm = v,
+                    "post_ffn_norm.weight" | "post_ffw_norm.weight" => layer.post_ffn_norm = v,
                     "shortconv.in_proj.weight" => layer.shortconv_in_proj = WeightStorage::F32(v),
                     "shortconv.out_proj.weight" => layer.shortconv_out_proj = WeightStorage::F32(v),
                     "shortconv.conv.weight" => layer.shortconv_conv = v,

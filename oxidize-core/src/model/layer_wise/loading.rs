@@ -127,7 +127,25 @@ impl LayerWiseModel {
         let norm_weight = norm_weight.ok_or("missing norm.weight")?;
         let output_weight = output_weight.unwrap_or_else(|| tok_embeddings.clone());
 
-        let (kv_heads, kv_dim) = kv_cache_geometry(&config);
+        let has_mla_tensors = layer_tensors
+            .iter()
+            .any(|tensors| tensors.contains_key("attn_kv_a_mqa.weight"));
+        let (kv_heads, kv_dim) = kv_cache_geometry(&config, has_mla_tensors);
+        // Head counts and dims come from GGUF metadata; bound the allocation
+        // so a malformed file errors out instead of exhausting memory.
+        const MAX_KV_CACHE_ELEMENTS: usize = 1 << 36;
+        config
+            .layer_count
+            .checked_mul(config.context_size)
+            .and_then(|n| n.checked_mul(kv_heads))
+            .and_then(|n| n.checked_mul(kv_dim))
+            .filter(|n| *n <= MAX_KV_CACHE_ELEMENTS)
+            .ok_or_else(|| {
+                format!(
+                    "kv_cache: {} layers x {} ctx x {kv_heads} heads x {kv_dim} dim exceeds {MAX_KV_CACHE_ELEMENTS} elements",
+                    config.layer_count, config.context_size
+                )
+            })?;
         let kv_cache_config = crate::kv_cache::KvCacheConfig {
             layer_count: config.layer_count,
             context_size: config.context_size,

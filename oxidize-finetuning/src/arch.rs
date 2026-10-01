@@ -38,6 +38,9 @@ impl ArchPlan {
             ModelArchitecture::Falcon | ModelArchitecture::Gpt2 => ForwardFidelity::Partial(
                 "architecture declares ALiBi; the CPU decoder and this trainer apply RoPE",
             ),
+            ModelArchitecture::GlmMoeDsa => ForwardFidelity::Partial(
+                "architecture declares DSA sparse attention; the layer-wise MLA forward runs dense attention over all cached tokens instead of sparse selection",
+            ),
             ModelArchitecture::Llama
             | ModelArchitecture::Mistral
             | ModelArchitecture::Mixtral
@@ -50,7 +53,6 @@ impl ArchPlan {
             | ModelArchitecture::MiniMax
             | ModelArchitecture::Lfm2
             | ModelArchitecture::Lfm2Moe
-            | ModelArchitecture::GlmMoeDsa
             | ModelArchitecture::HunyuanMoe => ForwardFidelity::Full,
         };
         Self {
@@ -281,9 +283,11 @@ mod tests {
             let plan = plan_for(arch);
             assert_eq!(plan.architecture, arch);
             assert!(!plan.render().is_empty());
-            let alibi_on_rope_path =
-                matches!(arch, ModelArchitecture::Falcon | ModelArchitecture::Gpt2);
-            if alibi_on_rope_path {
+            let approximated = matches!(
+                arch,
+                ModelArchitecture::Falcon | ModelArchitecture::Gpt2 | ModelArchitecture::GlmMoeDsa
+            );
+            if approximated {
                 assert!(
                     matches!(plan.fidelity, ForwardFidelity::Partial(_)),
                     "{arch:?}"
@@ -304,6 +308,16 @@ mod tests {
         assert!(plan.ffn.contains("MoE"), "{}", plan.ffn);
         let glm = plan_for(ModelArchitecture::GlmMoeDsa);
         assert!(glm.attention.contains("latent"), "{}", glm.attention);
+    }
+
+    #[test]
+    fn glm_dsa_is_partial_dense_attention() {
+        let plan = plan_for(ModelArchitecture::GlmMoeDsa);
+        let ForwardFidelity::Partial(reason) = plan.fidelity else {
+            panic!("GLM-DSA should be partial");
+        };
+        assert!(reason.contains("dense attention"), "{reason}");
+        assert!(reason.contains("sparse"), "{reason}");
     }
 
     #[test]

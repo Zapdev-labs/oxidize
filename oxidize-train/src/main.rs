@@ -31,7 +31,7 @@ enum Command {
     GenTrain(GenTrainArgs),
     /// Generate a new video from a trained generator checkpoint.
     Generate(GenerateArgs),
-    /// Causal LM training on a GGUF. Prints the architecture plan, then runs SFT or DPO.
+    /// Inspect a GGUF architecture plan or run SFT, DPO, or PPO causal LM training.
     Llm(llm::LlmArgs),
 }
 

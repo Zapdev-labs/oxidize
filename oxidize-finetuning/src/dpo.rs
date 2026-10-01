@@ -81,7 +81,30 @@ impl TokensOrString {
 
 impl DpoExample {
     /// Replace byte-stub tokens with ids from the model's tokenizer.
+    ///
+    /// When the prompt and both continuations are text, `prompt + chosen`
+    /// and `prompt + rejected` are each encoded as one string so BPE merges
+    /// across the prompt/continuation boundary match what the model sees.
+    /// The shared prompt is the longest token prefix common to the
+    /// prompt-alone encoding and both full encodings; each continuation is the
+    /// remainder of its full encoding, so `prompt ++ chosen` (and
+    /// `prompt ++ rejected`) reproduce the joint encodings exactly.
     pub fn apply_tokenizer(&mut self, encode: impl Fn(&str) -> Vec<u32>) {
+        if let (Some(prompt), Some(chosen), Some(rejected)) =
+            (&self.prompt_text, &self.chosen_text, &self.rejected_text)
+        {
+            let prompt_ids = encode(prompt);
+            let full_c = encode(&format!("{prompt}{chosen}"));
+            let full_r = encode(&format!("{prompt}{rejected}"));
+            if !prompt_ids.is_empty() && !full_c.is_empty() && !full_r.is_empty() {
+                let k = common_prefix_len(&prompt_ids, &full_c)
+                    .min(common_prefix_len(&prompt_ids, &full_r));
+                self.prompt = full_c[..k].to_vec();
+                self.chosen = full_c[k..].to_vec();
+                self.rejected = full_r[k..].to_vec();
+                return;
+            }
+        }
         if let Some(text) = &self.prompt_text {
             let ids = encode(text);
             if !ids.is_empty() {
@@ -101,6 +124,10 @@ impl DpoExample {
             }
         }
     }
+}
+
+fn common_prefix_len(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
 /// Load DPO examples from a JSONL file.
@@ -272,13 +299,7 @@ impl DpoTrainer {
         self.lora.forward_batch(hiddens, logits_buf, len)?;
 
         // Sum log-probabilities over all target positions.
-        let mut log_prob = 0.0_f32;
-        for (t, &tgt) in targets.iter().enumerate() {
-            let row = &logits_buf[t * vocab..(t + 1) * vocab];
-            let tgt_idx = (tgt as usize).min(vocab.saturating_sub(1));
-            log_prob -= softmax_cross_entropy(row, tgt_idx);
-        }
-        Ok(log_prob)
+        sequence_logprob(logits_buf, targets, vocab)
     }
 
     // -----------------------------------------------------------------------
@@ -440,16 +461,16 @@ impl DpoTrainer {
         self.lora
             .forward_batch(hidden_rejected, &mut logits_r, rejected_targets.len())?;
 
-        let log_p_chosen = sequence_logprob(&logits_c, chosen_targets, vocab);
-        let log_p_rejected = sequence_logprob(&logits_r, rejected_targets, vocab);
+        let log_p_chosen = sequence_logprob(&logits_c, chosen_targets, vocab)?;
+        let log_p_rejected = sequence_logprob(&logits_r, rejected_targets, vocab)?;
         let (ref_c, ref_r) = if self.dpo_config.reference_free {
             (0.0, 0.0)
         } else if let (Some(rc), Some(rr)) = (ref_chosen, ref_rejected) {
             (rc, rr)
         } else {
             (
-                sequence_logprob(base_logits_chosen, chosen_targets, vocab),
-                sequence_logprob(base_logits_rejected, rejected_targets, vocab),
+                sequence_logprob(base_logits_chosen, chosen_targets, vocab)?,
+                sequence_logprob(base_logits_rejected, rejected_targets, vocab)?,
             )
         };
 
@@ -568,13 +589,28 @@ impl DpoTrainer {
 // ---------------------------------------------------------------------------
 
 /// Sum of log-softmax probabilities of `targets` under row-major `logits`.
-pub fn sequence_logprob(logits: &[f32], targets: &[u32], vocab: usize) -> f32 {
+///
+/// Errors when a target id is outside `vocab` or `logits` is too short,
+/// rather than silently scoring a different class.
+pub fn sequence_logprob(logits: &[f32], targets: &[u32], vocab: usize) -> Result<f32> {
+    if logits.len() < targets.len() * vocab {
+        return Err(FinetuneError::Adapter(format!(
+            "logits shape mismatch: {} < {} * {vocab}",
+            logits.len(),
+            targets.len()
+        )));
+    }
     let mut log_prob = 0.0_f32;
     for (t, &tgt) in targets.iter().enumerate() {
+        if tgt as usize >= vocab {
+            return Err(FinetuneError::Adapter(format!(
+                "target token {tgt} out of range for vocab {vocab}"
+            )));
+        }
         let row = &logits[t * vocab..(t + 1) * vocab];
         log_prob -= softmax_cross_entropy(row, tgt as usize);
     }
-    log_prob
+    Ok(log_prob)
 }
 
 /// Numerically stable log(1 + exp(x)).
@@ -849,6 +885,50 @@ mod tests {
         example.apply_tokenizer(|text| text.chars().map(|c| u32::from(c) + 1000).collect());
         assert_eq!(example.prompt, vec![1097, 1098]);
         assert_eq!(example.chosen, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn apply_tokenizer_encodes_prompt_and_continuation_jointly() {
+        // Toy tokenizer that merges "ab" into one token, so the boundary
+        // between prompt "a" and continuation "b..." changes the encoding.
+        let encode = |text: &str| -> Vec<u32> {
+            let bytes = text.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'a' && bytes.get(i + 1) == Some(&b'b') {
+                    out.push(999);
+                    i += 2;
+                } else {
+                    out.push(u32::from(bytes[i]));
+                    i += 1;
+                }
+            }
+            out
+        };
+        let mut example = toy_example();
+        example.prompt_text = Some("xa".into());
+        example.chosen_text = Some("bc".into());
+        example.rejected_text = Some("d".into());
+        example.apply_tokenizer(encode);
+        // Shared prompt stops before the merged boundary token.
+        assert_eq!(example.prompt, vec![u32::from(b'x')]);
+        let mut full_c = example.prompt.clone();
+        full_c.extend(&example.chosen);
+        assert_eq!(full_c, encode("xabc"));
+        let mut full_r = example.prompt.clone();
+        full_r.extend(&example.rejected);
+        assert_eq!(full_r, encode("xad"));
+    }
+
+    #[test]
+    fn sequence_logprob_rejects_out_of_range_target() {
+        let logits = vec![0.0_f32; 2 * 4];
+        assert!(sequence_logprob(&logits, &[1, 3], 4).is_ok());
+        assert!(matches!(
+            sequence_logprob(&logits, &[1, 4], 4),
+            Err(FinetuneError::Adapter(_))
+        ));
     }
 
     #[test]

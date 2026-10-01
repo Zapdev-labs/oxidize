@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use oxidize_finetuning::{
     AdapterMerger, DpoConfig, FinetuneConfig, FinetuneError, LoRAAdapter, MergeStrategy, PpoConfig,
-    SelfTrainConfig, SelfTrainLoop, SftTrainer, export_lora_gguf, load_adapter_manifest,
-    load_causal_model, load_jsonl_dpo, load_jsonl_sft, load_prompts_file,
-    manifest_to_lora_adapters, pack_chunks, train_dpo_on_model, train_ppo_on_model,
+    SelfTrainConfig, SelfTrainLoop, SftTrainer, export_lora_gguf, fit_seq_len_to_context,
+    load_adapter_manifest, load_causal_model, load_jsonl_dpo, load_jsonl_sft, load_prompts_file,
+    manifest_to_lora_adapters, pack_chunks, require_eos, train_dpo_on_model, train_ppo_on_model,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -98,8 +98,9 @@ struct SftArgs {
     #[arg(long, default_value_t = 0)]
     checkpoint_every: usize,
 
-    /// Train even when the architecture's attention block is not in the
-    /// layer-wise forward (DeepSeek and GLM-DSA MLA).
+    /// Required for architectures whose forward is approximated: ALiBi-declared
+    /// Falcon/GPT-2 (RoPE path applied) and GLM-DSA (dense attention instead
+    /// of sparse selection).
     #[arg(long, default_value_t = false)]
     allow_partial_arch: bool,
 }
@@ -146,7 +147,9 @@ struct DpoArgs {
     #[arg(long, default_value_t = 64)]
     window: usize,
 
-    /// Train even when MLA attention is not executed by this trainer.
+    /// Required for architectures whose forward is approximated: ALiBi-declared
+    /// Falcon/GPT-2 (RoPE path applied) and GLM-DSA (dense attention instead
+    /// of sparse selection).
     #[arg(long, default_value_t = false)]
     allow_partial_arch: bool,
 }
@@ -193,7 +196,9 @@ struct PpoArgs {
     #[arg(long, default_value_t = 256)]
     max_seq_len: usize,
 
-    /// Train even when MLA attention is not executed by this trainer.
+    /// Required for architectures whose forward is approximated: ALiBi-declared
+    /// Falcon/GPT-2 (RoPE path applied) and GLM-DSA (dense attention instead
+    /// of sparse selection).
     #[arg(long, default_value_t = false)]
     allow_partial_arch: bool,
 }
@@ -258,7 +263,9 @@ struct SelfTrainArgs {
     #[arg(long)]
     resume_from: Option<PathBuf>,
 
-    /// Train even when MLA attention is not executed by this trainer.
+    /// Required for architectures whose forward is approximated: ALiBi-declared
+    /// Falcon/GPT-2 (RoPE path applied) and GLM-DSA (dense attention instead
+    /// of sparse selection).
     #[arg(long, default_value_t = false)]
     allow_partial_arch: bool,
 }
@@ -318,12 +325,23 @@ fn main() -> Result<()> {
     }
 }
 
+/// Clamp `--max-seq-len` to the loaded model's context, noting when it shrinks.
+fn clamp_seq_len(mode: &str, requested: usize, context: usize) -> usize {
+    let fitted = fit_seq_len_to_context(requested, context);
+    if fitted < requested {
+        println!(
+            "oxidize-finetuning {mode}: --max-seq-len {requested} exceeds the model context {context}; using {fitted}"
+        );
+    }
+    fitted
+}
+
 // ---------------------------------------------------------------------------
 // SFT implementation (original logic preserved)
 // ---------------------------------------------------------------------------
 
 fn run_sft(args: SftArgs) -> Result<()> {
-    let config = FinetuneConfig {
+    let mut config = FinetuneConfig {
         rank: args.lora_rank,
         alpha: args.lora_alpha,
         learning_rate: args.learning_rate,
@@ -348,7 +366,8 @@ fn run_sft(args: SftArgs) -> Result<()> {
         tokenizer,
         ..
     } = loaded;
-    let eos = tokenizer.special_tokens().eos.unwrap_or(0);
+    config.max_seq_len = clamp_seq_len("sft", config.max_seq_len, model.config().context_size);
+    let eos = require_eos(&tokenizer).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow::anyhow!("{e}"))?;
     let encode = |text: &str| -> Vec<u32> { tokenizer.encode(text) };
@@ -452,7 +471,7 @@ fn run_dpo(args: DpoArgs) -> Result<()> {
         rank: args.rank,
         learning_rate: args.lr,
         epochs: args.epochs,
-        max_seq_len: args.max_seq_len,
+        max_seq_len: clamp_seq_len("dpo", args.max_seq_len, model.config().context_size),
         window: args.window,
         seed: args.seed,
         ..FinetuneConfig::default()
@@ -462,7 +481,7 @@ fn run_dpo(args: DpoArgs) -> Result<()> {
         reference_free: false,
     };
     println!(
-        "oxidize-finetuning dpo: model={} examples={} beta={} rank={} — reference is the frozen LM head",
+        "oxidize-finetuning dpo: model={} examples={} beta={} rank={} — reference uses dataset ref_*_logprob scores when both are present and the spans were not clipped, otherwise the frozen LM head",
         args.model.display(),
         examples.len(),
         args.beta,
@@ -499,6 +518,12 @@ fn run_dpo(args: DpoArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_ppo(args: PpoArgs) -> Result<()> {
+    if !args.clip_eps.is_finite() || args.clip_eps < 0.0 {
+        anyhow::bail!(
+            "--clip-eps must be a finite value >= 0, got {}",
+            args.clip_eps
+        );
+    }
     let prompts = load_prompts_file(&args.prompts).map_err(|e| anyhow::anyhow!("{e}"))?;
     if prompts.is_empty() {
         anyhow::bail!("prompts file {} is empty", args.prompts.display());
@@ -601,7 +626,7 @@ fn run_self_train(args: SelfTrainArgs) -> Result<()> {
         tokenizer,
         ..
     } = loaded;
-    let eos = tokenizer.special_tokens().eos.unwrap_or(0);
+    let eos = require_eos(&tokenizer).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let examples = load_jsonl_sft(&args.dataset).map_err(|e| anyhow::anyhow!("{e}"))?;
     let encode = |text: &str| -> Vec<u32> { tokenizer.encode(text) };
