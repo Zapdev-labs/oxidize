@@ -1543,120 +1543,6 @@ impl InferenceModel {
         Ok(())
     }
 
-    fn gemv_weight_head(
-        storage: &WeightStorage,
-        rows: usize,
-        cols: usize,
-        head: usize,
-        n_heads: usize,
-        input: &[f32],
-        output: &mut [f32],
-    ) -> Result<(), String> {
-        if n_heads == 0 {
-            return Err("n_heads is zero".to_string());
-        }
-        match storage {
-            WeightStorage::F32(data) => {
-                let per_head = data.len() / n_heads;
-                let start = head * per_head;
-                let end = start + per_head;
-                if end > data.len() {
-                    return Err("head slice out of range".to_string());
-                }
-                gemv_f32(&data[start..end], rows, cols, input, output)
-                    .map_err(|e| format!("{:?}", e))
-            }
-            WeightStorage::Quantized(qtype, data) => {
-                let (block_width, block_size) = weight_block_info(*qtype);
-                let blocks_per_row = cols / block_width;
-                let per_head = rows * blocks_per_row * block_size;
-                let start = head * per_head;
-                let end = start + per_head;
-                gemv_quantized_f32(*qtype, &data[start..end], rows, cols, input, output)
-                    .map_err(|e| format!("{:?}", e))
-            }
-            WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
-                let data = &mmap[*offset..*offset + *size];
-                let (block_width, block_size) = weight_block_info(*qtype);
-                let blocks_per_row = cols / block_width;
-                let per_head = rows * blocks_per_row * block_size;
-                let start = head * per_head;
-                let end = start + per_head;
-                gemv_quantized_f32(*qtype, &data[start..end], rows, cols, input, output)
-                    .map_err(|e| format!("{:?}", e))
-            }
-        }
-    }
-
-    fn mla_v_b_head(
-        storage: &WeightStorage,
-        kv_lora: usize,
-        v_dim: usize,
-        head: usize,
-        n_heads: usize,
-        kv_cmpr: &[f32],
-        out: &mut [f32],
-    ) -> Result<(), String> {
-        out.fill(0.0);
-        if let WeightStorage::F32(data) = storage {
-            for v in 0..v_dim {
-                let mut sum = 0.0_f32;
-                for l in 0..kv_lora {
-                    let idx = l * v_dim * n_heads + v * n_heads + head;
-                    if idx < data.len() {
-                        sum += data[idx] * kv_cmpr[l];
-                    }
-                }
-                out[v] = sum;
-            }
-            return Ok(());
-        }
-        let per_head_elems = kv_lora * v_dim;
-        let mut w_host = vec![0.0_f32; per_head_elems];
-        match storage {
-            WeightStorage::Quantized(qtype, data) => {
-                let per_head_bytes = data.len() / n_heads.max(1);
-                let start = head * per_head_bytes;
-                let end = (head + 1) * per_head_bytes;
-                if end > data.len() {
-                    return Err(format!(
-                        "v_b head {head} out of range (bytes {end} > {})",
-                        data.len()
-                    ));
-                }
-                let mut deq = vec![0.0_f32; per_head_elems];
-                dequantize_scalar(*qtype, &data[start..end], &mut deq)
-                    .map_err(|e| format!("dequant v_b: {:?}", e))?;
-                w_host.copy_from_slice(&deq);
-            }
-            WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
-                let data = &mmap[*offset..*offset + *size];
-                let per_head_bytes = data.len() / n_heads.max(1);
-                let start = head * per_head_bytes;
-                let end = (head + 1) * per_head_bytes;
-                if end > data.len() {
-                    return Err(format!(
-                        "v_b head {head} out of range (bytes {end} > {})",
-                        data.len()
-                    ));
-                }
-                let mut deq = vec![0.0_f32; per_head_elems];
-                dequantize_scalar(*qtype, &data[start..end], &mut deq)
-                    .map_err(|e| format!("dequant v_b: {:?}", e))?;
-                w_host.copy_from_slice(&deq);
-            }
-            WeightStorage::F32(_) => {}
-        }
-        for v in 0..v_dim {
-            let mut sum = 0.0_f32;
-            for l in 0..kv_lora {
-                sum += w_host[l * v_dim + v] * kv_cmpr[l];
-            }
-            out[v] = sum;
-        }
-        Ok(())
-    }
-
     #[allow(clippy::too_many_lines)]
     fn deepseek_mla_layer(
         kv_cache: &mut KvCache,
@@ -1678,6 +1564,19 @@ impl InferenceModel {
         let k_nope_dim = layer.mla_k_b.output_dim(kv_lora) / n_heads.max(1);
         let v_head_dim = layer.mla_v_b.output_dim(kv_lora) / n_heads.max(1);
         let q_pe_dim = k_head_dim.saturating_sub(k_nope_dim);
+        let kv_out = layer.mla_kv_a_mqa.output_dim(h);
+        if kv_lora == 0
+            || kv_out < kv_lora
+            || k_nope_dim == 0
+            || k_nope_dim > k_head_dim
+            || v_head_dim == 0
+            || v_head_dim > k_head_dim
+        {
+            // GGUFs with a fused `attn_kv_b` (no k_b/v_b split) land here.
+            return Err(ModelError::InferenceFailed(
+                "mla: missing or mis-sized attn_k_b / attn_v_b".to_owned(),
+            ));
+        }
 
         let normed = &mut ws.hidden_b[..h];
         normed.fill(0.0_f32);
@@ -1701,7 +1600,6 @@ impl InferenceModel {
         gemv_weight(&layer.mla_q_b, q_len, q_lora, c_q, q)
             .map_err(|e| ModelError::InferenceFailed(format!("mla q_b: {:?}", e)))?;
 
-        let kv_out = layer.mla_kv_a_mqa.output_dim(h);
         let kv_pe = &mut ws.intermediate_c[..kv_out];
         kv_pe.fill(0.0_f32);
         gemv_weight(&layer.mla_kv_a_mqa, kv_out, h, normed, kv_pe)
@@ -1730,7 +1628,7 @@ impl InferenceModel {
 
         for head in 0..n_heads {
             let k_off = head * k_head_dim;
-            Self::gemv_weight_head(
+            gemv_weight_head(
                 &layer.mla_k_b,
                 k_nope_dim,
                 kv_lora,
@@ -1747,10 +1645,10 @@ impl InferenceModel {
             k_store[rope_off..rope_off + copy].copy_from_slice(&k_pe_rope[..copy]);
 
             let v_off = head * v_head_dim;
-            Self::mla_v_b_head(
+            gemv_weight_head(
                 &layer.mla_v_b,
-                kv_lora,
                 v_head_dim,
+                kv_lora,
                 head,
                 n_heads,
                 c_kv,
@@ -1826,20 +1724,17 @@ impl InferenceModel {
             }
         }
 
-        let attn_in_len = layer.attn_output.output_dim(h);
-        let attn_input = if attn_in_len > 0 && attn_result.len() >= attn_in_len {
-            &attn_result[..attn_in_len]
-        } else {
-            &attn_result[..total_k.min(attn_result.len())]
-        };
-        gemv_weight(
-            &layer.attn_output,
-            h,
-            attn_input.len(),
-            attn_input,
-            attn_out,
-        )
-        .map_err(|e| ModelError::InferenceFailed(format!("mla attn_out: {:?}", e)))?;
+        // Heads sit `k_head_dim` apart but attn_output wants them packed.
+        let mut attn_input = vec![0.0_f32; total_v];
+        pack_head_outputs(
+            attn_result,
+            n_heads,
+            k_head_dim,
+            v_head_dim,
+            &mut attn_input,
+        );
+        gemv_weight(&layer.attn_output, h, total_v, &attn_input, attn_out)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla attn_out: {:?}", e)))?;
         Ok(())
     }
 }
