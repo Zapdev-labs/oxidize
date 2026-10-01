@@ -1174,34 +1174,32 @@ pub(crate) fn gemv_weight_head(
     if n_heads == 0 || head >= n_heads {
         return Err(format!("head {head} out of range for {n_heads} heads"));
     }
+    // Dimensions come from GGUF metadata, so overflow must be an error, not a
+    // wrapped range that slips past the bounds check.
+    let head_range = |per_head: Option<usize>, len: usize, unit: &str| {
+        per_head
+            .and_then(|per_head| {
+                let start = head.checked_mul(per_head)?;
+                Some((start, start.checked_add(per_head)?))
+            })
+            .filter(|(_, end)| *end <= len)
+            .ok_or_else(|| format!("head {head} of {rows}x{cols} past {len} {unit}"))
+    };
     let mut quantized_head = |qtype: GgufQuantizationType, data: &[u8]| {
         let (block_width, block_size) = weight_block_info(qtype);
         if block_width == 0 || !cols.is_multiple_of(block_width) {
             return Err(format!("{cols} columns not a multiple of {block_width}"));
         }
-        let per_head = rows * (cols / block_width) * block_size;
-        let start = head * per_head;
-        let end = start + per_head;
-        if end > data.len() {
-            return Err(format!(
-                "head slice {start}..{end} past {} bytes",
-                data.len()
-            ));
-        }
+        let per_head = rows
+            .checked_mul(cols / block_width)
+            .and_then(|n| n.checked_mul(block_size));
+        let (start, end) = head_range(per_head, data.len(), "bytes")?;
         gemv_quantized_f32(qtype, &data[start..end], rows, cols, input, output)
             .map_err(|e| format!("{:?}", e))
     };
     match storage {
         WeightStorage::F32(data) => {
-            let per_head = rows * cols;
-            let start = head * per_head;
-            let end = start + per_head;
-            if end > data.len() {
-                return Err(format!(
-                    "head slice {start}..{end} past {} floats",
-                    data.len()
-                ));
-            }
+            let (start, end) = head_range(rows.checked_mul(cols), data.len(), "floats")?;
             gemv_f32(&data[start..end], rows, cols, input, output).map_err(|e| format!("{:?}", e))
         }
         WeightStorage::Quantized(qtype, data) => quantized_head(*qtype, data),

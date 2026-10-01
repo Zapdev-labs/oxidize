@@ -273,6 +273,8 @@ pub fn train_ppo_on_model(
     score_buffer_len(1, vocab, "logits")?;
     ppo_config.validate()?;
     let max_new = max_new_tokens.max(1);
+    // Each rollout keeps one frozen base-logit row per generated token.
+    score_buffer_len(max_new, vocab, "rollout base logits")?;
     let max_len = finetune.max_seq_len.max(2);
     let started = Instant::now();
     let mut steps = 0usize;

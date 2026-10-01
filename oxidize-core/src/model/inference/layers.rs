@@ -1564,7 +1564,14 @@ impl InferenceModel {
         let k_nope_dim = layer.mla_k_b.output_dim(kv_lora) / n_heads.max(1);
         let v_head_dim = layer.mla_v_b.output_dim(kv_lora) / n_heads.max(1);
         let q_pe_dim = k_head_dim.saturating_sub(k_nope_dim);
-        if kv_lora == 0 || k_nope_dim == 0 || v_head_dim == 0 || v_head_dim > k_head_dim {
+        let kv_out = layer.mla_kv_a_mqa.output_dim(h);
+        if kv_lora == 0
+            || kv_out < kv_lora
+            || k_nope_dim == 0
+            || k_nope_dim > k_head_dim
+            || v_head_dim == 0
+            || v_head_dim > k_head_dim
+        {
             // GGUFs with a fused `attn_kv_b` (no k_b/v_b split) land here.
             return Err(ModelError::InferenceFailed(
                 "mla: missing or mis-sized attn_k_b / attn_v_b".to_owned(),
@@ -1593,7 +1600,6 @@ impl InferenceModel {
         gemv_weight(&layer.mla_q_b, q_len, q_lora, c_q, q)
             .map_err(|e| ModelError::InferenceFailed(format!("mla q_b: {:?}", e)))?;
 
-        let kv_out = layer.mla_kv_a_mqa.output_dim(h);
         let kv_pe = &mut ws.intermediate_c[..kv_out];
         kv_pe.fill(0.0_f32);
         gemv_weight(&layer.mla_kv_a_mqa, kv_out, h, normed, kv_pe)

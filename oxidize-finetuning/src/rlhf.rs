@@ -140,14 +140,24 @@ pub struct PpoConfig {
 }
 
 impl PpoConfig {
-    /// Reject hyper-parameters that would make the update undefined; a
-    /// negative `clip_eps` inverts the `clamp` bounds and panics.
+    /// Reject hyper-parameters that would make the update undefined: a
+    /// negative `clip_eps` inverts the `clamp` bounds and panics, and a
+    /// non-finite or out-of-range coefficient poisons GAE or the gradients.
     pub fn validate(&self) -> Result<()> {
-        if !self.clip_eps.is_finite() || self.clip_eps < 0.0 {
-            return Err(FinetuneError::Model(format!(
-                "clip_eps must be a finite value >= 0, got {}",
-                self.clip_eps
-            )));
+        let checks = [
+            ("clip_eps", self.clip_eps, 0.0, f32::MAX),
+            ("value_coef", self.value_coef, 0.0, f32::MAX),
+            ("entropy_coef", self.entropy_coef, 0.0, f32::MAX),
+            ("kl_penalty", self.kl_penalty, 0.0, f32::MAX),
+            ("gae_lambda", self.gae_lambda, 0.0, 1.0),
+            ("gamma", self.gamma, 0.0, 1.0),
+        ];
+        for (name, value, lo, hi) in checks {
+            if !value.is_finite() || value < lo || value > hi {
+                return Err(FinetuneError::Model(format!(
+                    "{name} must be finite and in [{lo}, {hi}], got {value}"
+                )));
+            }
         }
         Ok(())
     }
@@ -468,10 +478,18 @@ impl PpoTrainer {
         // Policy logits = frozen base logits + LoRA residual.  The base rows
         // are constant w.r.t. the LoRA parameters but still shape the softmax,
         // so new_log_prob / entropy / gradient must see them to match the
-        // behaviour policy that produced `old_log_prob`.  Buffers without base
-        // rows (or with a mismatched count) fall back to zero base logits.
+        // behaviour policy that produced `old_log_prob`.  Buffers built with
+        // plain `add` carry no base rows and use zero base logits.
         let mut logits = vec![0.0_f32; n * vocab];
-        if buffer.base_logits.len() == n && buffer.base_logits.iter().all(|r| r.len() == vocab) {
+        if !buffer.base_logits.is_empty() {
+            // Silently dropping malformed rows would score a different policy
+            // than the one that produced `old_log_prob`; fail loudly instead.
+            assert!(
+                buffer.base_logits.len() == n
+                    && buffer.base_logits.iter().all(|r| r.len() == vocab),
+                "rollout base logits must have one {vocab}-wide row per transition ({n}); \
+                 do not mix `add` and `add_with_base`"
+            );
             for (dst, row) in logits.chunks_exact_mut(vocab).zip(&buffer.base_logits) {
                 dst.copy_from_slice(row);
             }
@@ -938,6 +956,35 @@ mod tests {
                 .any(|(a, b)| (a - b).abs() > 1e-12),
             "LoRA A weights did not change after train_step"
         );
+    }
+
+    #[test]
+    fn ppo_config_validate_rejects_bad_coefficients() {
+        assert!(PpoConfig::default().validate().is_ok());
+        for bad in [
+            PpoConfig {
+                gamma: 1.5,
+                ..PpoConfig::default()
+            },
+            PpoConfig {
+                gae_lambda: -0.1,
+                ..PpoConfig::default()
+            },
+            PpoConfig {
+                entropy_coef: f32::NAN,
+                ..PpoConfig::default()
+            },
+            PpoConfig {
+                kl_penalty: f32::INFINITY,
+                ..PpoConfig::default()
+            },
+            PpoConfig {
+                clip_eps: -0.2,
+                ..PpoConfig::default()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]
