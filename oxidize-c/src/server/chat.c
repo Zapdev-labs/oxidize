@@ -5,8 +5,12 @@
  */
 #include "oxidize/chat.h"
 
+#include "oxidize/tokenizer.h"
+
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static size_t append_str(char *out, size_t *pos, size_t cap, const char *s)
@@ -34,6 +38,9 @@ static size_t append_fmt(char *out, size_t *pos, size_t cap, const char *fmt, ..
 OcChatTemplate oc_chat_detect(const char *arch_str)
 {
     if (!arch_str) return OC_CHAT_CHATML;
+    if (strcmp(arch_str, "k2-horizon") == 0 ||
+        strcmp(arch_str, "k2_horizon") == 0)
+        return OC_CHAT_K2;
     if (strncmp(arch_str, "gemma", 5) == 0) return OC_CHAT_GEMMA;
     if (strncmp(arch_str, "llama", 5) == 0) {
         return OC_CHAT_LLAMA3;
@@ -69,14 +76,20 @@ OcChatTemplate oc_chat_detect_full(const char *arch_str, const char *name,
                                     const char *chat_template)
 {
     if (chat_template && *chat_template) {
-        if (strstr(chat_template, "[INST]") != NULL)
-            return OC_CHAT_LLAMA2;
-        if (strstr(chat_template, "<|start_header_id|>") != NULL)
-            return OC_CHAT_LLAMA3;
-        if (strstr(chat_template, "<start_of_turn>") != NULL)
-            return OC_CHAT_GEMMA;
-        if (strstr(chat_template, "<|im_start|>") != NULL)
-            return OC_CHAT_CHATML;
+        const int k2 = strstr(chat_template, "<|ifm|im_start|>") != NULL;
+        const int llama2 = strstr(chat_template, "[INST]") != NULL;
+        const int llama3 = strstr(chat_template, "<|start_header_id|>") != NULL;
+        const int gemma = strstr(chat_template, "<start_of_turn>") != NULL;
+        const int chatml = strstr(chat_template, "<|im_start|>") != NULL;
+        /* K2's tool template can mention other markers. Trust the arch when
+         * it is K2, and the marker alone only when no other format matches. */
+        if (k2 && (oc_chat_detect(arch_str) == OC_CHAT_K2 ||
+                   (!llama2 && !llama3 && !gemma && !chatml)))
+            return OC_CHAT_K2;
+        if (llama2) return OC_CHAT_LLAMA2;
+        if (llama3) return OC_CHAT_LLAMA3;
+        if (gemma) return OC_CHAT_GEMMA;
+        if (chatml) return OC_CHAT_CHATML;
     }
     OcChatTemplate t = oc_chat_detect(arch_str);
     if (t != OC_CHAT_LLAMA3) return t;
@@ -137,6 +150,24 @@ size_t oc_chat_render_message(OcChatTemplate template,
             ok = append_str(out, &pos, out_cap, "<start_of_turn>model\n") != 0;
         break;
 
+    case OC_CHAT_K2: {
+        /* Same rendering as the tokenizer's K2 template (no newline between
+         * turns; an assistant turn always carries a think block, split out
+         * of the content when it embeds one). The generation prompt opens a
+         * high-effort think block, as the GGUF template's default does. */
+        OcChatMessage msg = { role, content };
+        char *text = NULL;
+        bool empty = false;
+        ok = oc_tokenizer_apply_chat_template(&msg, 1, OC_TEMPLATE_K2,
+                                              is_last, &text) == OC_OK &&
+             text != NULL;
+        if (ok && text[0] == '\0') empty = true;
+        else if (ok) ok = append_str(out, &pos, out_cap, text) != 0;
+        free(text);
+        if (ok && empty) return OC_CHAT_RENDER_SKIP;
+        break;
+    }
+
     case OC_CHAT_PLAIN:
         ok = append_str(out, &pos, out_cap, content) != 0 || content[0] == '\0';
         if (ok) ok = append_str(out, &pos, out_cap, "\n") != 0;
@@ -164,6 +195,7 @@ size_t oc_chat_render_messages(OcChatTemplate template,
         size_t n = oc_chat_render_message(template, roles[i], contents[i],
                                           msg, sizeof(msg),
                                           i == 0, i + 1 == n_msgs);
+        if (n == OC_CHAT_RENDER_SKIP) continue;
         if (n == 0) return 0;
         if (total + n + 1 > out_cap) return 0;
         memcpy(out + total, msg, n);

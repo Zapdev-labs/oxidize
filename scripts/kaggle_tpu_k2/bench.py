@@ -3,12 +3,17 @@
 Runs inside the vllm-tpu venv on a Kaggle TPU v5e-8 (TP=8). Prints one
 `RESULT {json}` line per measurement so the runner can forward them.
 
+The correctness gates (finite perplexity under K2_MAX_PPL, expected keywords in the
+greedy chat answers) exit non-zero before the speed benchmark when they fail.
+
 Env overrides: K2_MODEL (path), K2_MAX_LEN, K2_MAX_SEQS, K2_BATCHES ("1,8,32,64"),
-K2_OUT_TOKENS, K2_IN_TOKENS, K2_EXTRA_LLM_KWARGS (json).
+K2_OUT_TOKENS, K2_IN_TOKENS, K2_EXTRA_LLM_KWARGS (json), K2_MAX_PPL (default 50),
+K2_SKIP_GATES=1 (report gate failures but keep going).
 """
 import json
 import math
 import os
+import sys
 import time
 
 from vllm import LLM, SamplingParams
@@ -20,10 +25,19 @@ BATCHES = [int(b) for b in os.environ.get("K2_BATCHES", "1,8,32,64").split(",")]
 OUT_TOK = int(os.environ.get("K2_OUT_TOKENS", "256"))
 IN_TOK = int(os.environ.get("K2_IN_TOKENS", "128"))
 EXTRA = json.loads(os.environ.get("K2_EXTRA_LLM_KWARGS", "{}"))
+MAX_PPL = float(os.environ.get("K2_MAX_PPL", "50"))
+SKIP_GATES = os.environ.get("K2_SKIP_GATES") == "1"
 
 
 def result(kind, **kw):
     print("RESULT " + json.dumps({"kind": kind, **kw}), flush=True)
+
+
+def gate(name, ok, **kw):
+    result("gate", gate=name, ok=bool(ok), **kw)
+    if not ok and not SKIP_GATES:
+        result("done", failed_gate=name)
+        sys.exit(2)
 
 
 PPL_TEXT = (
@@ -50,21 +64,33 @@ tok = llm.get_tokenizer()
 # ---- correctness gate 1: perplexity on neutral factual text (README: wikitext ppl ~15)
 out = llm.generate([PPL_TEXT], SamplingParams(max_tokens=1, prompt_logprobs=0))[0]
 lps = [next(iter(d.values())).logprob for d in out.prompt_logprobs[1:] if d]
-ppl = math.exp(-sum(lps) / len(lps))
-result("ppl", ppl=round(ppl, 3), tokens=len(lps))
+ppl = math.exp(min(-sum(lps) / len(lps), 700.0)) if lps else float("inf")
+result("ppl", ppl=round(ppl, 3) if math.isfinite(ppl) else str(ppl), tokens=len(lps))
+gate("ppl", lps and math.isfinite(ppl) and ppl <= MAX_PPL,
+     ppl=ppl if math.isfinite(ppl) else str(ppl), max_ppl=MAX_PPL)
 
 # ---- correctness gate 2: greedy chat answers
-qs = ["What is the capital of Australia? Answer in one sentence.",
-      "Write a Python function that returns the n-th Fibonacci number.",
-      "Explain in two sentences why the sky is blue."]
+# (question, keywords: at least one must appear, case-insensitive, in the greedy answer)
+CHAT_CHECKS = [
+    ("What is the capital of Australia? Answer in one sentence.", ["canberra"]),
+    ("Write a Python function that returns the n-th Fibonacci number.", ["def "]),
+    ("Explain in two sentences why the sky is blue.", ["scatter", "rayleigh"]),
+]
+qs = [q for q, _ in CHAT_CHECKS]
 chats = [[{"role": "user", "content": q}] for q in qs]
 try:
     outs = llm.chat(chats, SamplingParams(temperature=0, max_tokens=384),
                     chat_template_kwargs={"reasoning_effort": "low"})
 except TypeError:
     outs = llm.chat(chats, SamplingParams(temperature=0, max_tokens=384))
-for q, o in zip(qs, outs):
-    result("chat", q=q, a=o.outputs[0].text[-1200:])
+chat_fail = []
+for (q, keys), o in zip(CHAT_CHECKS, outs):
+    a = o.outputs[0].text
+    ok = any(k in a.lower() for k in keys)
+    result("chat", q=q, ok=ok, a=a[-1200:])
+    if not ok:
+        chat_fail.append(q)
+gate("chat", len(outs) == len(qs) and not chat_fail, failed=chat_fail)
 
 # ---- speed: fixed-length synthetic prompts, ignore_eos so every request decodes OUT_TOK
 base = tok.encode(PPL_TEXT * 8, add_special_tokens=False)

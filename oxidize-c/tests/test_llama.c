@@ -603,6 +603,9 @@ Test(llama, kv_cache_bytes_long_context_saving_is_gigabytes)
     size_t f32 = oc_llama_kv_cache_bytes(&m, OC_KV_F32);
     size_t q8  = oc_llama_kv_cache_bytes(&m, OC_KV_Q8);
     cr_assert_gt(f32 - q8, 10ull * 1024 * 1024 * 1024);
+    size_t rq = oc_llama_kv_cache_bytes(&m, OC_KV_RQ);
+    cr_assert_lt(rq, q8);
+    cr_assert_gt(rq, 0);
 }
 
 Test(llama, select_kv_type_explicit)

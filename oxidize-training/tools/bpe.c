@@ -7,16 +7,29 @@
  * for merges id>=256. Bytes 0-255 are identity. 256=BOS 257=EOS.
  * out.bin: uint32 ntok, then ntok uint16 ids.
  */
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
-enum { BOS = 256, EOS = 257, FIRST_MERGE = 258 };
+/* Merge ids are uint16, so ids run FIRST_MERGE..65535 and no more can exist. */
+enum { BOS = 256, EOS = 257, FIRST_MERGE = 258, MAX_VOCAB = 65536, MAX_MERGES = MAX_VOCAB - FIRST_MERGE };
 
 static void die(const char *m) {
     fprintf(stderr, "%s\n", m);
     exit(1);
+}
+
+/* atoi cannot report malformed or overflowing input; reject both. */
+static long parse_long(const char *s, long lo, long hi, const char *what) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno == ERANGE || !end || end == s || *end) die(what);
+    if (v < lo || v > hi) die(what);
+    return v;
 }
 
 static uint8_t *read_all(const char *path, size_t *n) {
@@ -42,9 +55,10 @@ static void save_vocab(const char *path, Merge *m, int nmerge) {
     FILE *f = fopen(path, "wb");
     if (!f) die("open vocab");
     uint32_t n = (uint32_t)nmerge;
-    fwrite(&n, 4, 1, f);
-    fwrite(m, sizeof(Merge), (size_t)nmerge, f);
-    fclose(f);
+    int ok = fwrite(&n, 4, 1, f) == 1;
+    if (ok && nmerge) ok = fwrite(m, sizeof(Merge), (size_t)nmerge, f) == (size_t)nmerge;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) die("write vocab");
 }
 
 static Merge *load_vocab(const char *path, int *nmerge) {
@@ -52,7 +66,9 @@ static Merge *load_vocab(const char *path, int *nmerge) {
     if (!f) die("open vocab");
     uint32_t n = 0;
     if (fread(&n, 4, 1, f) != 1) die("vocab header");
+    if (n > MAX_MERGES) die("vocab count out of range");
     Merge *m = calloc(n ? n : 1, sizeof(Merge));
+    if (!m) die("oom vocab");
     if (n && fread(m, sizeof(Merge), n, f) != n) die("vocab body");
     fclose(f);
     *nmerge = (int)n;
@@ -78,10 +94,10 @@ static int apply_merges(uint16_t *s, int n, const Merge *merges, int nmerge) {
 }
 
 static int train_cmd(int argc, char **argv) {
+    if (argc < 2) die("bpe train <corpus.txt> <vocab.bin> [vocab_size]");
     const char *corpus = argv[0];
     const char *out = argv[1];
-    int vocab = argc > 2 ? atoi(argv[2]) : 4096;
-    if (vocab < FIRST_MERGE + 32) vocab = 512;
+    int vocab = argc > 2 ? (int)parse_long(argv[2], FIRST_MERGE + 32, MAX_VOCAB, "bad vocab_size") : 4096;
     size_t nbytes = 0;
     uint8_t *raw = read_all(corpus, &nbytes);
     /* start as bytes */
@@ -112,7 +128,8 @@ static int train_cmd(int argc, char **argv) {
             uint16_t a = s[i], b = s[i + 1];
             uint32_t h = ((uint32_t)a * 2246822519u) ^ ((uint32_t)b * 3266489917u);
             int j = (int)(h & (uint32_t)(nb - 1));
-            for (;;) {
+            for (int probes = 0;; probes++) {
+                if (probes >= nb) die("pair table full");
                 if (bk[j].c == 0) {
                     bk[j].a = a;
                     bk[j].b = b;
@@ -171,8 +188,9 @@ static int encode_cmd(int argc, char **argv) {
     uint8_t *raw = read_all(argv[0], &nbytes);
     int nmerge = 0;
     Merge *merges = load_vocab(argv[1], &nmerge);
-    /* encode line by line with EOS */
-    size_t cap = nbytes + nbytes / 8 + 1024;
+    /* Encode line by line with EOS. A corpus of one-byte lines emits BOS+byte+EOS
+     * per two input bytes, so the worst case is 2 tokens per byte. */
+    size_t cap = nbytes * 2 + 1024;
     uint16_t *out = malloc(cap * 2);
     if (!out) die("oom out");
     uint32_t ntok = 0;
@@ -193,9 +211,10 @@ static int encode_cmd(int argc, char **argv) {
     }
     FILE *f = fopen(argv[2], "wb");
     if (!f) die("open out");
-    fwrite(&ntok, 4, 1, f);
-    fwrite(out, 2, ntok, f);
-    fclose(f);
+    int ok = fwrite(&ntok, 4, 1, f) == 1;
+    if (ok && ntok) ok = fwrite(out, 2, ntok, f) == ntok;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) die("write tokens");
     fprintf(stderr, "encoded %u tokens\n", ntok);
     free(raw);
     free(merges);

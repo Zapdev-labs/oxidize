@@ -21,7 +21,7 @@ typedef struct OcCliArgs {
      * row is 515 GB of f32 cache, so the default allocation cannot succeed on
      * any machine. 0 = use the model's own value. */
     uint32_t   n_ctx;
-    const char *kv_type;       /* --kv f32|q8; NULL = auto (q8 if ctx>=8192) */
+    const char *kv_type;       /* --kv f32|q8|rq; NULL = auto               */
     const char *kv_compress;   /* --kv-compress none|rotor|helix; NULL = none */
     int        threads;
     const char *numa;
@@ -43,12 +43,16 @@ typedef struct OcCliArgs {
     const char *draft_model;       /* path to draft model GGUF            */
     int        draft_tokens;       /* K draft tokens per step (0=default 4) */
     const char *spec_type;         /* none|mtp|dspark (NULL = auto)       */
+    const char *mtp_model;         /* --mtp-model: K2 nextn sidecar GGUF  */
+    bool       mtp;                /* --mtp: K2 MTP speculative decoding  */
     /* Quantization mode. */
     const char *quantize_input;   /* input GGUF path                      */
     const char *quantize_output;  /* output GGUF path                     */
     const char *quantize_type;   /* target quant type string (Q4_0, etc.) */
     /* Streaming. */
     bool       stream;
+    /* Wrap --prompt as one user turn with the GGUF's chat template. */
+    bool       chat;
     /* Backend selection. */
     const char *backend;         /* "cpu" (default) or "cuda"             */
     /* Benchmark mode. */
@@ -96,6 +100,11 @@ int oc_cli_cuda_conflicts_kv_compress(const char *backend,
  * name ("serve", "serve-realtime") or "--serve-api". */
 int oc_cli_kv_compress_reject(const char *backend, const char *kv_compress,
                               const char *server_label);
+
+/* Set when the last oc_cli_parse_args / oc_cli_context_parse saw a value
+ * it refused (bad RQ bit width, sink, or window). Cleared at the start of
+ * each parse. */
+int oc_cli_parse_failed(void);
 
 /* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext.
  * Returns true when argv[1] names a known subcommand (ctx is filled in and

@@ -1,6 +1,6 @@
 """Modal GPU deployment for oxidize-c (Qwythos-9B, qwen3.5 hybrid).
 
-Deploy:  modal deploy modal_oxidize.py
+Deploy:  modal deploy scripts/modal_oxidize.py
 Serves the oxidize-c HTTP/WebSocket server on an L40S with FP16 weights
 resident on the GPU (cuBLAS gemv offload). Model GGUF is cached in a Volume.
 """

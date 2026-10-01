@@ -67,11 +67,20 @@ OcError oc_finetune_generate_synthetic(OcLlamaModel *model, OcTokenizer *tok,
 OcError oc_finetune_format_sft(const char *system, const char *user,
                                const char *assistant, char *out, size_t out_cap);
 
-/* Rewrite mixed JSONL (chat or alpaca keys) into messages JSONL.
- * Drops requests that ask for exploit or malware construction.
- * `kept` and `dropped` may be NULL. */
+/* Rewrite mixed JSONL into messages JSONL. Each row is read as
+ * {"messages":[{"role","content"}...]}, else flat system/user/assistant
+ * keys, else Alpaca instruction/input/output. Rows whose user text
+ * oc_finetune_request_blocked() flags, rows missing a user or assistant
+ * turn, and rows with a field over 1 MiB (logged) are dropped. The output
+ * is written to a 0600 temp file and renamed into place on success, so
+ * input_path == output_path is safe and errors leave no partial file.
+ * Returns OC_ERR_IO on a read or write error. `kept`/`dropped` may be NULL. */
 OcError oc_finetune_mold_dataset(const char *input_path, const char *output_path,
                                  uint32_t *kept, uint32_t *dropped);
+
+/* Nonzero when decoded `text` matches the mold step's blocked-request
+ * table (case, punctuation and whitespace are normalized first). */
+int oc_finetune_request_blocked(const char *text);
 
 /* Get the name of a fine-tuning strategy. */
 const char *oc_ft_strategy_name(OcFtStrategy s);

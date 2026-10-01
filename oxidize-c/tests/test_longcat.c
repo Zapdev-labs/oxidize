@@ -674,6 +674,10 @@ Test(longcat, mla_forces_f32_kv)
     cr_assert_eq(oc_llama_session_init_kv(&m, &s, OC_KV_Q8), OC_OK, "session");
     cr_assert_eq(s.kv_type, OC_KV_F32, "MLA must fall back to f32 KV");
     cr_assert_not_null(s.kv_k, "f32 fallback must allocate kv_k");
+    oc_llama_session_free(&s);
+    cr_assert_eq(oc_llama_session_init_kv(&m, &s, OC_KV_RQ), OC_OK, "rq session");
+    cr_assert_eq(s.kv_type, OC_KV_F32, "RQ on MLA must fall back to f32, not q8");
+    cr_assert_not_null(s.kv_k, "RQ fallback must not leave kv_k NULL");
 
     oc_llama_session_free(&s);
     oc_llama_free(&m);

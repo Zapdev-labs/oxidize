@@ -3,6 +3,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# out/ and data/ are gitignored; tee opens out/weather-train.log before the
+# trainer runs, so both must exist up front on a fresh checkout.
+mkdir -p out data
+
 python3 tools/fetch_climate.py --out-dir data/climate
 python3 tools/gen_weather_corpus.py --climate-dir data/climate --out-dir data/weather
 

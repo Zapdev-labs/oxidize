@@ -77,10 +77,29 @@ typedef enum {
 /* Chat template kinds. `OC_TEMPLATE_CHATML` is the fast-path ChatML renderer
  * (mirrors Rust `process_chat_template` when the template contains
  * `<|im_start|>`). The raw Jinja2 path is NOT implemented — callers that
- * need it should use the Rust reference. */
+ * need it should use the Rust reference.
+ *
+ * `OC_TEMPLATE_K2` renders the K2-Horizon template (selected when the GGUF
+ * `tokenizer.chat_template` contains `<|ifm|im_start|>`):
+ *
+ *   <|ifm|im_start|>{role}\n{content}<|ifm|im_end|>          (system/user/tool)
+ *   <|ifm|im_start|>assistant\n<ifm|think>\n[{thinking}\n]</ifm|think>\n
+ *       {content}<|ifm|im_end|>                                (assistant)
+ *   <|ifm|im_start|>assistant\n<ifm|think>\n                 (generation prompt)
+ *
+ * with no separator between messages. `OC_TEMPLATE_K2_NO_THINK` is the
+ * `enable_thinking=false` variant whose generation prompt closes the think
+ * block (`...<ifm|think>\n</ifm|think>\n`). The template's leading
+ * `bos_token` is NOT rendered — encode with OC_TOK_ADD_BOS (the K2 GGUF sets
+ * `tokenizer.ggml.add_bos_token`). */
 typedef enum {
-    OC_TEMPLATE_CHATML = 0,
+    OC_TEMPLATE_CHATML       = 0,
+    OC_TEMPLATE_K2           = 1,
+    OC_TEMPLATE_K2_NO_THINK  = 2,
 } OcTemplateKind;
+
+/* Max extra end-of-generation ids tracked per tokenizer. */
+#define OC_TOK_MAX_EOG 8
 
 /* A single chat message (role + content). Mirrors Rust `ChatMessage`. */
 typedef struct OcChatMessage {
@@ -144,6 +163,10 @@ typedef struct OcTokenizer {
      * models do not add BOS by default; SP models do). */
     bool add_bos_token;
     bool has_add_bos_token;
+    /* Extra end-of-generation ids besides `eos_id` (e.g. K2's
+     * `<|ifm|im_end|>` turn terminator). See oc_tokenizer_is_eog(). */
+    uint32_t eog_ids[OC_TOK_MAX_EOG];
+    size_t   n_eog;
 } OcTokenizer;
 
 /* ─── Lifecycle ────────────────────────────────────────────────────────── */
@@ -197,6 +220,11 @@ OcError oc_tokenizer_apply_chat_template(const OcChatMessage *messages,
                                          OcTemplateKind kind,
                                          bool add_generation_prompt,
                                          char **out_text);
+
+/* Pick the chat template for a GGUF from `tokenizer.chat_template`:
+ * OC_TEMPLATE_K2 when it contains `<|ifm|im_start|>`, else OC_TEMPLATE_CHATML
+ * (the historical default). NULL gguf → OC_TEMPLATE_CHATML. */
+OcTemplateKind oc_tokenizer_detect_template(const OcGgufFile *gguf);
 
 /* ─── Streaming detokenizer ──────────────────────────────────────────────
  *
@@ -284,6 +312,11 @@ OcError oc_bpe_with_unknown_token(OcBpeTokenizer *bpe, OcArena *arena,
  * tests. Returns a malloc'd id array. */
 OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
                       uint32_t **out_ids, size_t *out_count);
+
+/* Look up the id of an exact vocab string (GPT-2-encoded form). Returns
+ * false when absent. */
+bool oc_bpe_token_to_id(const OcBpeTokenizer *bpe, const char *text,
+                        uint32_t *out_id);
 
 /* Decode via BPE without going through the OcTokenizer wrapper. */
 OcError oc_bpe_decode(const OcBpeTokenizer *bpe, const uint32_t *ids,
@@ -415,6 +448,9 @@ void oc_tiktoken_free(OcTiktokenTokenizer *t);
 
 /* Whether a token id is a special token (bos/eos/pad/unk/sep/cls/mask). */
 bool oc_tokenizer_is_special(const OcTokenizer *t, uint32_t id);
+
+/* Whether `id` ends generation: the EOS id or one of `eog_ids`. */
+bool oc_tokenizer_is_eog(const OcTokenizer *t, uint32_t id);
 
 /* Whether a BOS token should be prepended by default for this tokenizer.
  * Mirrors Rust `LoadedTokenizer::add_bos_default()`. */

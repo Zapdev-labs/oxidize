@@ -5,11 +5,11 @@ Why: builds/tests run on Modal's fast multi-core boxes with a persistent
 cargo cache, so repeated runs are incremental instead of cold every time.
 
 Usage:
-    modal run modal_app.py                      # smoke-build the CLI + run `oxidize --help`
-    modal run modal_app.py --action test        # cargo test for the default package
-    modal run modal_app.py --action test --package oxidize-kernels
-    modal run modal_app.py --action test --package workspace   # whole workspace (slow)
-    modal run modal_app.py --action smoke        # build oxidize-cli release + smoke run
+    modal run scripts/modal_app.py                      # smoke-build the CLI + run `oxidize --help`
+    modal run scripts/modal_app.py --action test        # cargo test for the default package
+    modal run scripts/modal_app.py --action test --package oxidize-kernels
+    modal run scripts/modal_app.py --action test --package workspace   # whole workspace (slow)
+    modal run scripts/modal_app.py --action smoke        # build oxidize-cli release + smoke run
 
 The source tree is mounted read-only at /workspace; `target/` and the cargo
 registry live in named Volumes so compiles are cached across runs.

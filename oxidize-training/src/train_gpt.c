@@ -1,18 +1,26 @@
 /* From-scratch GPT-2 trainer. C + OpenBLAS SGEMM. Tied embeddings. */
 #include <alloca.h>
 #include <cblas.h>
+#include <errno.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-enum { BOS = 256, EOS = 257, FIRST_MERGE = 258 };
+/* Merge ids are uint16, so ids run FIRST_MERGE..65535 and no more can exist. */
+enum { BOS = 256, EOS = 257, FIRST_MERGE = 258, MAX_MERGES = 65536 - FIRST_MERGE };
+
+/* Fixed prompt-encoding buffers. Every caller must bound its capacity argument
+ * by these, not by the model context, which the checkpoint can set larger. */
+enum { MAX_PROMPT_BYTES = 4096, MAX_PROMPT_IDS = 4096 };
 
 typedef struct {
     uint16_t left, right, id;
@@ -56,6 +64,28 @@ static void *xmalloc(size_t n) {
 }
 
 static float *falloc(size_t n) { return (float *)xmalloc(n * sizeof(float)); }
+
+/* Create every parent directory of `path`, like `mkdir -p $(dirname path)`. */
+static void mkdir_parents(const char *path) {
+    char buf[1024];
+    if (snprintf(buf, sizeof buf, "%s", path) >= (int)sizeof buf) die("path too long");
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        if (buf[0] && mkdir(buf, 0777) != 0 && errno != EEXIST) die("mkdir");
+        *p = '/';
+    }
+}
+
+/* Reject date-like arguments that could escape the news directory. */
+static int safe_day_component(const char *day) {
+    if (!day || !day[0] || strlen(day) > 32) return 0;
+    for (const char *p = day; *p; p++) {
+        int ok = (*p >= '0' && *p <= '9') || *p == '-';
+        if (!ok) return 0;
+    }
+    return 1;
+}
 
 static unsigned rng_state = 1u;
 static unsigned rngu(void) {
@@ -424,6 +454,8 @@ typedef struct {
     float *lnf, *lnf_mean, *lnf_rstd;
     float *logits;
     float *dencoded;
+    float *dlnf;
+    float *dcur;
     float *dlogits;
     LayerAct *dL;
 } Acts;
@@ -435,6 +467,8 @@ static Acts acts_alloc(Shape s) {
     int BT = B * T;
     a.encoded = falloc((size_t)BT * C);
     a.dencoded = falloc((size_t)BT * C);
+    a.dlnf = falloc((size_t)BT * C);
+    a.dcur = falloc((size_t)BT * C);
     a.lnf = falloc((size_t)BT * C);
     a.lnf_mean = falloc((size_t)BT);
     a.lnf_rstd = falloc((size_t)BT);
@@ -503,14 +537,13 @@ static float gpt_forward_backward(GPT *g, Acts *a, const int *inputs, const int 
 
     memset(g->grads, 0, g->nparams * sizeof(float));
     memset(a->dencoded, 0, (size_t)BT * C * sizeof(float));
-    float *dlnf = falloc((size_t)BT * C);
+    float *dlnf = a->dlnf;
     memset(dlnf, 0, (size_t)BT * C * sizeof(float));
     matmul_backward(a->lnf, P(g, g->wte), a->dlogits, dlnf, G(g, g->wte), NULL, BT, C, V);
-    float *dcur = falloc((size_t)BT * C);
+    float *dcur = a->dcur;
     memset(dcur, 0, (size_t)BT * C * sizeof(float));
     layernorm_backward(dcur, G(g, g->lnfw), G(g, g->lnfb), dlnf, x, P(g, g->lnfw), a->lnf_mean, a->lnf_rstd,
                        BT, C);
-    free(dlnf);
     for (int l = L - 1; l >= 0; l--) {
         LayerAct *la = &a->L[l];
         LayerAct *da = &a->dL[l];
@@ -551,7 +584,6 @@ static float gpt_forward_backward(GPT *g, Acts *a, const int *inputs, const int 
                            la->ln1_mean, la->ln1_rstd, BT, C);
         if (l == 0) encoder_backward(G(g, g->wte), G(g, g->wpe), a->dencoded, inputs, B, T, C);
     }
-    free(dcur);
     return loss;
 }
 
@@ -577,6 +609,12 @@ static uint16_t *load_tokens(const char *path, uint32_t *n) {
     FILE *f = fopen(path, "rb");
     if (!f) die("open tokens");
     if (fread(n, 4, 1, f) != 1) die("tokens header");
+    /* Check the claimed count against the file before allocating, so a crafted
+     * header cannot ask for gigabytes. */
+    if (fseek(f, 0, SEEK_END) != 0) die("tokens seek");
+    long sz = ftell(f);
+    if (sz < 4 || (uint64_t)(sz - 4) < (uint64_t)*n * 2) die("tokens truncated");
+    if (fseek(f, 4, SEEK_SET) != 0) die("tokens seek");
     uint16_t *t = (uint16_t *)xmalloc((size_t)*n * 2);
     if (fread(t, 2, *n, f) != *n) die("tokens body");
     fclose(f);
@@ -588,6 +626,7 @@ static Merge *load_merges(const char *path, int *nmerge, int *vocab) {
     if (!f) die("open vocab");
     uint32_t n = 0;
     if (fread(&n, 4, 1, f) != 1) die("vocab header");
+    if (n > MAX_MERGES) die("vocab count out of range");
     Merge *m = (Merge *)xmalloc((n ? n : 1) * sizeof(Merge));
     if (n && fread(m, sizeof(Merge), n, f) != n) die("vocab body");
     fclose(f);
@@ -611,16 +650,34 @@ static void decode_id(int id, const Merge *merges, int nmerge, FILE *out) {
     }
 }
 
+/* decode_id into a bounded buffer; output past cap - 1 bytes is dropped. */
+static void decode_buf(int id, const Merge *merges, int nmerge, char *buf, size_t cap, size_t *len, int depth) {
+    if (depth > 64 || *len + 1 >= cap) return;
+    if (id < 256) {
+        buf[(*len)++] = (char)id;
+        return;
+    }
+    if (id == BOS || id == EOS) return;
+    for (int i = 0; i < nmerge; i++) {
+        if (merges[i].id == (uint16_t)id) {
+            decode_buf(merges[i].left, merges, nmerge, buf, cap, len, depth + 1);
+            decode_buf(merges[i].right, merges, nmerge, buf, cap, len, depth + 1);
+            return;
+        }
+    }
+}
+
 static int encode_prompt(const char *p, const Merge *merges, int nmerge, int *ids, int cap) {
     int n = 0;
     ids[n++] = BOS;
-    int tmp[4096];
-    int tn = 0;
-    for (const unsigned char *s = (const unsigned char *)p; *s && tn < 4000; s++) tmp[tn++] = *s;
+    /* Prompts end in `ACTION=`, so keep the tail whenever one has to be cut. */
+    size_t plen = strlen(p);
+    const unsigned char *s = (const unsigned char *)p;
+    if (plen > MAX_PROMPT_BYTES) s += plen - MAX_PROMPT_BYTES;
+    uint16_t buf[MAX_PROMPT_BYTES];
+    int m = 0;
+    for (; *s; s++) buf[m++] = *s;
     /* apply merges like bpe.c */
-    uint16_t buf[4096];
-    for (int i = 0; i < tn; i++) buf[i] = (uint16_t)tmp[i];
-    int m = tn;
     for (int mi = 0; mi < nmerge; mi++) {
         uint16_t a = merges[mi].left, b = merges[mi].right, id = merges[mi].id;
         int w = 0;
@@ -633,8 +690,18 @@ static int encode_prompt(const char *p, const Merge *merges, int nmerge, int *id
         }
         m = w;
     }
-    for (int i = 0; i < m && n < cap - 1; i++) ids[n++] = buf[i];
+    int room = cap - 1 - n;
+    if (room < 0) room = 0;
+    for (int i = m > room ? m - room : 0; i < m; i++) ids[n++] = buf[i];
     return n;
+}
+
+/* Encode bounded by both the caller's fixed MAX_PROMPT_IDS buffer and the
+ * model context, which can be larger than that buffer. */
+static int encode_prompt_ctx(const char *p, const Merge *merges, int nmerge, int *ids, int seq) {
+    int cap = seq < MAX_PROMPT_IDS ? seq : MAX_PROMPT_IDS;
+    if (cap < 2) cap = 2;
+    return encode_prompt(p, merges, nmerge, ids, cap);
 }
 
 static int argi(int argc, char **argv, const char *k, int def) {
@@ -653,19 +720,22 @@ static int has(int argc, char **argv, const char *k) {
     return 0;
 }
 
+enum { CKPT_VERSION = 1, CKPT_MAX_DIM = 1 << 20 };
+
 static void save_ckpt(const char *path, GPT *g) {
+    mkdir_parents(path);
     FILE *f = fopen(path, "wb");
     if (!f) die("ckpt write");
     char mag[4] = {'O', 'X', 'T', 'R'};
-    fwrite(mag, 1, 4, f);
-    uint32_t v = 1;
-    fwrite(&v, 4, 1, f);
+    if (fwrite(mag, 1, 4, f) != 4) die("ckpt magic");
+    uint32_t v = CKPT_VERSION;
+    if (fwrite(&v, 4, 1, f) != 1) die("ckpt version");
     int32_t sh[6] = {g->s.n_layer, g->s.n_head, g->s.n_embd, g->s.vocab, g->s.seq, g->s.batch};
-    fwrite(sh, 4, 6, f);
+    if (fwrite(sh, 4, 6, f) != 6) die("ckpt shape");
     uint64_t np = g->nparams;
-    fwrite(&np, 8, 1, f);
-    fwrite(g->params, 4, g->nparams, f);
-    fclose(f);
+    if (fwrite(&np, 8, 1, f) != 1) die("ckpt nparams");
+    if (fwrite(g->params, 4, g->nparams, f) != g->nparams) die("ckpt body");
+    if (fclose(f) != 0) die("ckpt close");
 }
 
 static void load_ckpt(const char *path, GPT *g) {
@@ -674,13 +744,17 @@ static void load_ckpt(const char *path, GPT *g) {
     char mag[4];
     if (fread(mag, 1, 4, f) != 4 || memcmp(mag, "OXTR", 4) != 0) die("bad magic");
     uint32_t v = 0;
-    fread(&v, 4, 1, f);
+    if (fread(&v, 4, 1, f) != 1) die("ckpt version");
+    if (v != CKPT_VERSION) die("unsupported ckpt version");
     int32_t sh[6];
-    fread(sh, 4, 6, f);
+    if (fread(sh, 4, 6, f) != 6) die("ckpt shape");
+    for (int i = 0; i < 6; i++)
+        if (sh[i] < 1 || sh[i] > CKPT_MAX_DIM) die("bad ckpt shape");
+    if (sh[2] % sh[1]) die("bad ckpt shape");
     Shape s = {sh[0], sh[1], sh[2], sh[3], sh[4], sh[5]};
     gpt_init(g, s, 1);
     uint64_t np = 0;
-    fread(&np, 8, 1, f);
+    if (fread(&np, 8, 1, f) != 1) die("ckpt nparams");
     if (np != g->nparams) die("ckpt param mismatch");
     if (fread(g->params, 4, g->nparams, f) != g->nparams) die("ckpt body");
     fclose(f);
@@ -706,65 +780,45 @@ static int sample_token(const float *logits, int V, float temp) {
     return V - 1;
 }
 
-static int encode_str_last(const char *p, const Merge *merges, int nmerge) {
-    int ids[2048];
-    int n = encode_prompt(p, merges, nmerge, ids, 2048);
-    return n > 0 ? ids[n - 1] : 0;
-}
+#define ACTION_PREFIX "ACTION="
 
 typedef struct {
     int b, s, h;
 } ActTok;
 
+/* The id the model must emit immediately after a prompt ending in `ACTION=`.
+ * Encoding the whole action literal and taking its last piece picks `Y`/`L`/`D`
+ * under an unmerged vocabulary, so diff the prefix and full encodings and take
+ * the first piece the continuation adds. That stays correct when a merge spans
+ * the `=` boundary. */
+static int first_continuation_token(const char *prefix, const char *full, const Merge *merges, int nmerge) {
+    int pids[MAX_PROMPT_IDS], fids[MAX_PROMPT_IDS];
+    int pn = encode_prompt(prefix, merges, nmerge, pids, MAX_PROMPT_IDS);
+    int fn = encode_prompt(full, merges, nmerge, fids, MAX_PROMPT_IDS);
+    int k = 0;
+    while (k < pn && k < fn && pids[k] == fids[k]) k++;
+    return k < fn ? fids[k] : -1;
+}
+
 static ActTok make_act_tok(const Merge *merges, int nmerge) {
     ActTok a;
-    a.b = encode_str_last("ACTION=BUY", merges, nmerge);
-    a.s = encode_str_last("ACTION=SELL", merges, nmerge);
-    a.h = encode_str_last("ACTION=HOLD", merges, nmerge);
+    a.b = first_continuation_token(ACTION_PREFIX, ACTION_PREFIX "BUY", merges, nmerge);
+    a.s = first_continuation_token(ACTION_PREFIX, ACTION_PREFIX "SELL", merges, nmerge);
+    a.h = first_continuation_token(ACTION_PREFIX, ACTION_PREFIX "HOLD", merges, nmerge);
+    if (a.b < 0 || a.s < 0 || a.h < 0 || a.b == a.s || a.b == a.h || a.s == a.h)
+        die("vocab cannot distinguish BUY/SELL/HOLD after " ACTION_PREFIX);
     return a;
 }
 
-/* ACTION= next piece may be a merged BUY/SELL/HOLD token, not the bytes B/S/H. */
+/* Returns -1 when no candidate is representable in this model's vocabulary. */
 static int sample_action_token(const float *logits, int V, ActTok t) {
     int cands[3] = {t.b, t.s, t.h};
-    int best = cands[0];
+    int best = -1;
     float bv = -1e30f;
     for (int i = 0; i < 3; i++) {
         int id = cands[i];
         if (id < 0 || id >= V) continue;
-        if (logits[id] > bv) {
-            bv = logits[id];
-            best = id;
-        }
-    }
-    return best;
-}
-
-static const char *WINTER_CLS[9] = {
-    "ACTION=1", "ACTION=2", "ACTION=3",
-    "ACTION=4", "ACTION=5", "ACTION=6",
-    "ACTION=7", "ACTION=8", "ACTION=9",
-};
-
-typedef struct {
-    int id[9];
-} WinterTok;
-
-static WinterTok make_winter_tok(const Merge *merges, int nmerge) {
-    WinterTok w;
-    for (int i = 0; i < 9; i++)
-        w.id[i] = encode_str_last(WINTER_CLS[i], merges, nmerge);
-    return w;
-}
-
-static int sample_winter_token(const float *logits, int V, WinterTok t) {
-    int best = t.id[0];
-    float bv = -1e30f;
-    for (int i = 0; i < 9; i++) {
-        int id = t.id[i];
-        if (id < 0 || id >= V)
-            continue;
-        if (logits[id] > bv) {
+        if (best < 0 || logits[id] > bv) {
             bv = logits[id];
             best = id;
         }
@@ -789,9 +843,8 @@ static void cmd_sample(int argc, char **argv) {
     g.s.batch = 1;
     int T = g.s.seq, C = g.s.n_embd, V = g.s.vocab;
     Acts a = acts_alloc(g.s);
-    int ids[4096];
-    int n = encode_prompt(prompt, merges, nmerge, ids, T);
-    if (n >= T) n = T - 1;
+    int ids[MAX_PROMPT_IDS];
+    int n = encode_prompt_ctx(prompt, merges, nmerge, ids, T);
     printf("prompt: %s\n---\n", prompt);
     for (int t = 0; t < n; t++) decode_id(ids[t], merges, nmerge, stdout);
     fflush(stdout);
@@ -834,20 +887,61 @@ static void cmd_sample(int argc, char **argv) {
             }
             fflush(stdout);
         }
-        int tok;
-        if (k == 0 && force_action && strstr(prompt, "ACTION="))
-            tok = sample_action_token(lg, V, atok);
-        else
-            tok = sample_token(lg, V, temp);
+        int tok = -1;
+        if (k == 0 && force_action && strstr(prompt, ACTION_PREFIX)) tok = sample_action_token(lg, V, atok);
+        if (tok < 0) tok = sample_token(lg, V, temp);
         if (tok == EOS) break;
         decode_id(tok, merges, nmerge, stdout);
         fflush(stdout);
-        if (n < 4000) ids[n++] = tok;
+        if (n < MAX_PROMPT_IDS) ids[n++] = tok;
         (void)C;
     }
     printf("\n");
 }
 
+/* Winter outlook classes (tools/gen_weather_corpus.py): `ACTION=<1..9>` encodes
+ * the 3x3 temperature x precipitation tercile grid. */
+enum { N_WINTER = 9 };
+static const char *const WINTER_CLS[N_WINTER] = {
+    ACTION_PREFIX "1", ACTION_PREFIX "2", ACTION_PREFIX "3", ACTION_PREFIX "4", ACTION_PREFIX "5",
+    ACTION_PREFIX "6", ACTION_PREFIX "7", ACTION_PREFIX "8", ACTION_PREFIX "9",
+};
+
+typedef struct {
+    int id[N_WINTER];
+} WinterTok;
+
+/* Same boundary rule as make_act_tok: score the first piece each class adds
+ * after `ACTION=`, and refuse a vocab that maps two classes to one id. */
+static WinterTok make_winter_tok(const Merge *merges, int nmerge) {
+    WinterTok w;
+    for (int i = 0; i < N_WINTER; i++) {
+        w.id[i] = first_continuation_token(ACTION_PREFIX, WINTER_CLS[i], merges, nmerge);
+        if (w.id[i] < 0) die("vocab has no continuation for a winter class after " ACTION_PREFIX);
+        for (int j = 0; j < i; j++)
+            if (w.id[j] == w.id[i]) die("vocab cannot distinguish winter classes after " ACTION_PREFIX);
+    }
+    return w;
+}
+
+/* Returns -1 when no class is representable in this model's vocabulary. */
+static int sample_winter_token(const float *logits, int V, WinterTok t) {
+    int best = -1;
+    float bv = -1e30f;
+    for (int i = 0; i < N_WINTER; i++) {
+        int id = t.id[i];
+        if (id < 0 || id >= V) continue;
+        if (best < 0 || logits[id] > bv) {
+            bv = logits[id];
+            best = id;
+        }
+    }
+    return best;
+}
+
+/* One completion per stdin line. When the line contains `ACTION=`, the first
+ * generated token is forced to a winter class (pass --no-force-action to
+ * sample freely). Output lines hold only the generated text. */
 static void cmd_complete(int argc, char **argv) {
     const char *ckpt = args(argc, argv, "--ckpt", "out/model.bin");
     const char *vocab = args(argc, argv, "--vocab", "data/vocab.bin");
@@ -855,15 +949,10 @@ static void cmd_complete(int argc, char **argv) {
     float temp = (float)atof(args(argc, argv, "--temp", "0.4"));
     unsigned seed = (unsigned)argi(argc, argv, "--seed", 1);
     rng_state = seed ? seed : 1u;
+    int force_class = !has(argc, argv, "--no-force-action");
     int nmerge = 0, vocab_sz = 0;
     Merge *merges = load_merges(vocab, &nmerge, &vocab_sz);
     WinterTok wtok = make_winter_tok(merges, nmerge);
-    for (int i = 0; i < 9; i++) {
-        for (int j = i + 1; j < 9; j++) {
-            if (wtok.id[i] == wtok.id[j])
-                die("winter class token collision");
-        }
-    }
     GPT g;
     load_ckpt(ckpt, &g);
     g.s.batch = 1;
@@ -871,46 +960,46 @@ static void cmd_complete(int argc, char **argv) {
     Acts a = acts_alloc(g.s);
     int *inp = (int *)xmalloc((size_t)T * sizeof(int));
     int *tgt = (int *)xmalloc((size_t)T * sizeof(int));
-    char line[4096];
+    char line[MAX_PROMPT_BYTES + 2];
     while (fgets(line, (int)sizeof line, stdin)) {
         size_t L = strlen(line);
-        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r'))
-            line[--L] = 0;
-        if (!L)
-            continue;
-        int ids[4096];
-        int n = encode_prompt(line, merges, nmerge, ids, T);
-        if (n >= T)
-            n = T - 1;
+        /* A partial read would split one prompt into two and score the head. */
+        if (L == sizeof line - 1 && line[L - 1] != '\n' && !feof(stdin)) die("prompt line too long");
+        while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
+        if (!L) continue;
+        int ids[MAX_PROMPT_IDS];
+        int n = encode_prompt_ctx(line, merges, nmerge, ids, T);
         int n0 = n;
+        int force = force_class && strstr(line, ACTION_PREFIX) != NULL;
         for (int k = 0; k < ntok; k++) {
             memset(inp, 0, (size_t)T * sizeof(int));
             memset(tgt, 0, (size_t)T * sizeof(int));
             int start = n > T ? n - T : 0;
             int used = n - start;
-            for (int i = 0; i < used; i++)
-                inp[i] = ids[start + i];
+            for (int i = 0; i < used; i++) inp[i] = ids[start + i];
             gpt_forward_backward(&g, &a, inp, tgt, 0);
             int pos = used - 1;
-            if (pos < 0)
-                pos = 0;
+            if (pos < 0) pos = 0;
             const float *lg = a.logits + (size_t)pos * (size_t)V;
-            int tok;
-            if (k == 0)
-                tok = sample_winter_token(lg, V, wtok);
-            else
-                tok = sample_token(lg, V, temp);
-            if (tok == EOS)
-                break;
-            if (n < 4000)
-                ids[n++] = tok;
+            int tok = -1;
+            if (k == 0 && force) tok = sample_winter_token(lg, V, wtok);
+            if (tok < 0) tok = sample_token(lg, V, temp);
+            if (tok == EOS) break;
+            if (n >= MAX_PROMPT_IDS) break;
+            ids[n++] = tok;
         }
-        for (int t = n0; t < n; t++)
-            decode_id(ids[t], merges, nmerge, stdout);
-        printf("\n");
+        /* The corpus is one ticket per line, so the model emits a newline once
+         * the class is out. Cut there: callers pair output lines with input
+         * lines, and an embedded newline would shift every later answer. */
+        char outb[1024];
+        size_t ol = 0;
+        for (int t = n0; t < n; t++) decode_buf(ids[t], merges, nmerge, outb, sizeof outb, &ol, 0);
+        outb[ol] = 0;
+        outb[strcspn(outb, "\r\n")] = 0;
+        printf("%s\n", outb);
         fflush(stdout);
-        (void)vocab_sz;
     }
+    (void)vocab_sz;
 }
 
 static int action_from_logits(const float *lg, int V, ActTok t, float *lb, float *ls, float *lh) {
@@ -925,9 +1014,8 @@ static int action_from_logits(const float *lg, int V, ActTok t, float *lb, float
 static int score_prompt(GPT *g, Acts *a, const Merge *merges, int nmerge, const char *prompt, int *inp,
                         int *tgt, ActTok t) {
     int T = g->s.seq, V = g->s.vocab;
-    int ids[4096];
-    int n = encode_prompt(prompt, merges, nmerge, ids, T);
-    if (n >= T) n = T - 1;
+    int ids[MAX_PROMPT_IDS];
+    int n = encode_prompt_ctx(prompt, merges, nmerge, ids, T);
     if (n < 1) n = 1;
     memset(inp, 0, (size_t)T * sizeof(int));
     memset(tgt, 0, (size_t)T * sizeof(int));
@@ -957,9 +1045,8 @@ static void cmd_score(int argc, char **argv) {
         size_t L = strlen(line);
         while (L && (line[L - 1] == '\n' || line[L - 1] == '\r')) line[--L] = 0;
         if (!L) continue;
-        int ids[4096];
-        int n = encode_prompt(line, merges, nmerge, ids, T);
-        if (n >= T) n = T - 1;
+        int ids[MAX_PROMPT_IDS];
+        int n = encode_prompt_ctx(line, merges, nmerge, ids, T);
         memset(inp, 0, (size_t)T * sizeof(int));
         memset(tgt, 0, (size_t)T * sizeof(int));
         for (int i = 0; i < n; i++) inp[i] = ids[i];
@@ -981,40 +1068,56 @@ typedef struct {
     double o, h, l, c;
 } Bar;
 
+/* Loads at most `cap` bars in ascending date order. When the file holds more,
+ * the newest `cap` are kept whatever order the CSV is sorted in, so callers
+ * that default to the last bar never land on a stale date. */
 static int load_ohlc(const char *path, Bar *b, int cap) {
     FILE *f = fopen(path, "r");
     if (!f) die("open csv");
     char line[512];
     if (!fgets(line, (int)sizeof line, f)) die("empty csv");
-    int n = 0;
-    while (fgets(line, (int)sizeof line, f) && n < cap) {
+    int n = 0, have = 0;
+    Bar *all = NULL;
+    while (fgets(line, (int)sizeof line, f)) {
         char d[12];
         double o, h, l, c, v;
         if (sscanf(line, " %11[^,],%lf,%lf,%lf,%lf,%lf", d, &o, &h, &l, &c, &v) != 6) {
             if (sscanf(line, " %11[^,],%lf,%lf,%lf,%lf", d, &o, &h, &l, &c) != 5) continue;
         }
         if (!(c > 0.0 && h >= l && o > 0.0)) continue;
-        snprintf(b[n].d, sizeof b[n].d, "%s", d);
-        b[n].o = o;
-        b[n].h = h;
-        b[n].l = l;
-        b[n].c = c;
+        if (n == have) {
+            if (have > (1 << 24)) die("csv too long");
+            have = have ? have * 2 : 1024;
+            Bar *nb = (Bar *)realloc(all, (size_t)have * sizeof(Bar));
+            if (!nb) die("oom");
+            all = nb;
+        }
+        snprintf(all[n].d, sizeof all[n].d, "%s", d);
+        all[n].o = o;
+        all[n].h = h;
+        all[n].l = l;
+        all[n].c = c;
         n++;
     }
     fclose(f);
     if (n < 50) die("csv too short");
-    if (strcmp(b[0].d, b[n - 1].d) > 0) {
+    if (strcmp(all[0].d, all[n - 1].d) > 0) {
         for (int i = 0; i < n / 2; i++) {
-            Bar t = b[i];
-            b[i] = b[n - 1 - i];
-            b[n - 1 - i] = t;
+            Bar t = all[i];
+            all[i] = all[n - 1 - i];
+            all[n - 1 - i] = t;
         }
     }
-    return n;
+    int keep = n < cap ? n : cap;
+    if (keep < n) fprintf(stderr, "%s: keeping newest %d of %d bars\n", path, keep, n);
+    memcpy(b, all + (n - keep), (size_t)keep * sizeof(Bar));
+    free(all);
+    return keep;
 }
 
 static void load_news_day(const char *dir, const char *day, char *out, int cap) {
-    if (!dir || !dir[0] || !day || !day[0]) {
+    /* `day` reaches the filesystem, so keep it to digits and dashes. */
+    if (!dir || !dir[0] || !safe_day_component(day)) {
         snprintf(out, cap, "Quiet political tape.");
         return;
     }
@@ -1178,24 +1281,30 @@ static int hit_stop_target(const Book *k, double h, double l) {
     return 0;
 }
 
+/* A bar that gaps through a resting order fills at the open, not at the order
+ * price; only an intrabar touch fills at the stop or target. */
+static double exit_px(const Book *k, int ht, double o) {
+    double order = ht < 0 ? k->stop : k->tgt;
+    int sell = k->pos > 0 ? (ht < 0) : (ht > 0);
+    if (sell) return o < order ? o : order;
+    return o > order ? o : order;
+}
+
 static void apply_bar(Book *k, double o, double h, double l, double c, int want, double atr, double fee) {
-    if (k->pos) {
+    int carried = k->pos != 0;
+    if (carried) {
         int ht = hit_stop_target(k, h, l);
-        if (ht < 0)
-            flatten(k, k->stop, fee);
-        else if (ht > 0)
-            flatten(k, k->tgt, fee);
+        if (ht) flatten(k, exit_px(k, ht, o), fee);
     }
+    /* A position carried into this bar can only be replaced on the next one:
+     * this bar's open had already passed by the time it exited intraday. */
     int side = want == 'B' ? 1 : want == 'S' ? -1 : 0;
-    if (!k->pos && side) {
+    if (!carried && side) {
         double eq = k->eq > 1.0 ? k->eq : k->cash;
         enter(k, side, o, atr, fee, eq);
         if (k->pos) {
             int ht = hit_stop_target(k, h, l);
-            if (ht < 0)
-                flatten(k, k->stop, fee);
-            else if (ht > 0)
-                flatten(k, k->tgt, fee);
+            if (ht) flatten(k, exit_px(k, ht, o), fee);
         }
     }
     k->eq = mark(k, c);
@@ -1208,6 +1317,7 @@ static void cmd_backtest(int argc, char **argv) {
     const char *ckpt = args(argc, argv, "--ckpt", "out/trader.bin");
     const char *vocab = args(argc, argv, "--vocab", "data/vocab.bin");
     const char *csv = args(argc, argv, "--csv", "data/spy.csv");
+    const char *datadir = args(argc, argv, "--data-dir", "data");
     const char *sym = args(argc, argv, "--symbol", "SPY");
     const char *outp = args(argc, argv, "--out", "");
     const char *newsdir = args(argc, argv, "--news-dir", "data/news");
@@ -1246,16 +1356,22 @@ static void cmd_backtest(int argc, char **argv) {
     enter(&bh, 1, bars[start].o, bars[start].c * 0.01, fee, cash0);
     Bar *spy = NULL;
     int nspy = 0;
+    /* --csv names one symbol's file, so the SPY reference comes from --data-dir. */
     if (strcmp(sym, "SPY") != 0) {
-        spy = (Bar *)xmalloc((size_t)16384 * sizeof(Bar));
-        FILE *sf = fopen("data/spy.csv", "r");
+        char spypath[512];
+        snprintf(spypath, sizeof spypath, "%s/spy.csv", datadir);
+        FILE *sf = fopen(spypath, "r");
         if (sf) {
             fclose(sf);
-            nspy = load_ohlc("data/spy.csv", spy, 16384);
+            spy = (Bar *)xmalloc((size_t)16384 * sizeof(Bar));
+            nspy = load_ohlc(spypath, spy, 16384);
+        } else {
+            fprintf(stderr, "no %s: vsSPY will be 0\n", spypath);
         }
     }
     FILE *tf = NULL;
     if (outp[0]) {
+        mkdir_parents(outp);
         tf = fopen(outp, "w");
         if (!tf) die("open trades");
         fprintf(tf, "date\tclose\trsi\tatr\tsetup\tmodel\trsi_rule\teq_model\teq_rsi\teq_bh\n");
@@ -1320,9 +1436,21 @@ static void cmd_backtest(int argc, char **argv) {
             fflush(stderr);
         }
     }
-    flatten(&m, bars[nall - 1].c, fee);
-    flatten(&r, bars[nall - 1].c, fee);
-    flatten(&bh, bars[nall - 1].c, fee);
+    /* Re-mark after the closing fee so the reported return includes it. */
+    double last = bars[nall - 1].c;
+    flatten(&m, last, fee);
+    m.eq = mark(&m, last);
+    flatten(&r, last, fee);
+    r.eq = mark(&r, last);
+    flatten(&bh, last, fee);
+    bh.eq = mark(&bh, last);
+    /* Close the trades file before reporting: buffered writes can fail as late
+     * as fclose, and the summary must not claim a run the file does not hold. */
+    if (tf) {
+        int bad = ferror(tf);
+        if (fclose(tf) != 0) bad = 1;
+        if (bad) die("write trades");
+    }
     double dt = wall_now() - t0;
     double mp = (m.eq - cash0) / cash0 * 100.0;
     double rp = (r.eq - cash0) / cash0 * 100.0;
@@ -1335,7 +1463,6 @@ static void cmd_backtest(int argc, char **argv) {
            r.ntr ? 100.0 * r.nw / r.ntr : 0, r.maxdd * 100.0, r.eq);
     printf("bh     ret %+.2f%%  maxdd %.1f%%  end %.0f\n", bp, bh.maxdd * 100.0, bh.eq);
     printf("agree_rsi %.1f%%\n", scored ? 100.0 * agree / scored : 0);
-    if (tf) fclose(tf);
     (void)vocab_sz;
 }
 
@@ -1355,11 +1482,13 @@ static void cmd_picks(int argc, char **argv) {
     const char *datadir = args(argc, argv, "--data-dir", "data");
     const char *newsdir = args(argc, argv, "--news-dir", "data/news");
     const char *day = args(argc, argv, "--date", "");
+    if (day[0] && !safe_day_component(day)) die("--date must be digits and dashes");
     char asof[12];
-    Bar spy[4096];
+    /* Same cap as backtest, so both commands see the same SPY history. */
+    Bar *spy = (Bar *)xmalloc((size_t)16384 * sizeof(Bar));
     char spypath[512];
     snprintf(spypath, sizeof spypath, "%s/spy.csv", datadir);
-    int nspy = load_ohlc(spypath, spy, 4096);
+    int nspy = load_ohlc(spypath, spy, 16384);
     if (!day[0]) {
         snprintf(asof, sizeof asof, "%s", spy[nspy - 1].d);
         day = asof;
@@ -1415,9 +1544,8 @@ static void cmd_picks(int argc, char **argv) {
         snprintf(prompt, sizeof prompt,
                  "%s %s close %d RSI %d ATR %d r5d %+.1f vsSPY %+.1f. NEWS: %s ACTION=",
                  sym, day, iclose, irsi, iatr, r5, vs, news);
-        int ids[4096];
-        int ntok = encode_prompt(prompt, merges, nmerge, ids, T);
-        if (ntok >= T) ntok = T - 1;
+        int ids[MAX_PROMPT_IDS];
+        int ntok = encode_prompt_ctx(prompt, merges, nmerge, ids, T);
         memset(inp, 0, (size_t)T * sizeof(int));
         memset(tgt, 0, (size_t)T * sizeof(int));
         for (int t = 0; t < ntok; t++) inp[t] = ids[t];
@@ -1443,6 +1571,7 @@ static void cmd_picks(int argc, char **argv) {
         free(ema);
     }
     printf("PICKS long %s\nPICKS short %s\n", longs[0] ? longs : "(none)", shorts[0] ? shorts : "(none)");
+    free(spy);
     (void)vocab_sz;
 }
 
@@ -1460,6 +1589,7 @@ static void cmd_train(int argc, char **argv) {
     int overfit = has(argc, argv, "--overfit");
     uint32_t ntok = 0;
     uint16_t *toks = load_tokens(tokpath, &ntok);
+    if (ntok < 2) die("tokens file needs at least 2 tokens");
     int vmax = 0;
     for (uint32_t i = 0; i < ntok; i++)
         if (toks[i] > vmax) vmax = toks[i];
@@ -1516,8 +1646,9 @@ int main(int argc, char **argv) {
                 "  oxidize-training score --ckpt out/trader.bin --vocab data/vocab.bin < prompts.txt\n"
                 "  oxidize-training backtest --ckpt out/trader.bin --vocab data/vocab.bin --csv data/spy.csv --symbol SPY\n"
                 "  oxidize-training picks --ckpt out/trader.bin --vocab data/vocab.bin --date 2026-09-11\n"
-                "  oxidize-training complete --ckpt out/model.bin --vocab data/vocab.bin --tokens 16 < prompts.txt\n"
-                "  If the prompt contains ACTION=, the first token is B, S, or H. Pass --no-force-action to disable.\n");
+                "  oxidize-training complete --ckpt out/weather.bin --vocab data/weather/vocab.bin --tokens 2 < prompts.txt\n"
+                "  If the prompt contains ACTION=, the first token is B, S, or H (complete: a winter class 1-9).\n"
+                "  Pass --no-force-action to disable.\n");
         return 1;
     }
     if (!strcmp(argv[1], "train")) {
