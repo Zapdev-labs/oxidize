@@ -2,15 +2,15 @@
 Cross-engine single-stream decode benchmark on one Modal A100.
 
 Same base model (Mistral-7B-Instruct-v0.3), ~4-bit, batch=1, greedy, 128 tokens:
-  - oxidize    : Q4_K_M GGUF  (run via modal_app.py, gpu-tps --gpu A100)
+  - oxidize    : Q4_K_M GGUF  (run via scripts/modal_app.py, gpu-tps --gpu A100)
   - llama.cpp  : Q4_K_M GGUF  (llama-cpp-python, CUDA)   <- apples-to-apples vs oxidize
   - vLLM       : AWQ 4-bit    (production reference ceiling)
   - sglang     : AWQ 4-bit    (production reference ceiling)
 
 Usage:
-  modal run modal_bench.py --engine llamacpp
-  modal run modal_bench.py --engine vllm
-  modal run modal_bench.py --engine sglang
+  modal run scripts/modal_bench.py --engine llamacpp
+  modal run scripts/modal_bench.py --engine vllm
+  modal run scripts/modal_bench.py --engine sglang
 """
 
 import modal
