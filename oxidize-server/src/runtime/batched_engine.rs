@@ -58,11 +58,25 @@ impl BatchedEngineHandle {
         if std::env::var("OX_BATCHED_DECODE").is_err() {
             return None;
         }
-        // Only the Inference backend exposes forward_batch.
+        // Only the Inference backend exposes forward_batch, and only for
+        // architectures whose semantics that path can express. K2 Horizon
+        // (grouped RMSNorm, MoVA value experts, softplus attention gate) is
+        // rejected by `batched_decode_enabled`; asking anyway must disable the
+        // engine rather than emit silently wrong logits.
         let (supported, ctx) = {
             let mut guard = runtime.model.blocking_lock();
             match guard.as_inference_mut() {
-                Some(inf) => (true, inf.config().context_size),
+                Some(inf) => {
+                    let enabled = inf.batched_decode_enabled();
+                    if !enabled {
+                        tracing::warn!(
+                            architecture = ?inf.config().architecture,
+                            "OX_BATCHED_DECODE set but this model's batched path cannot express \
+                             its semantics; continuous batching disabled"
+                        );
+                    }
+                    (enabled, inf.config().context_size)
+                }
                 None => (false, 0),
             }
         };

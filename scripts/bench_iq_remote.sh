@@ -46,8 +46,10 @@ if ! command -v cargo >/dev/null 2>&1; then
   if [[ -x "$HOME/.cargo/bin/cargo" ]]; then
     export PATH="$HOME/.cargo/bin:$PATH"
   else
-    echo "==> installing Rust (rustup) on remote"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+    echo "==> installing pinned Rust toolchain on remote"
+    # shellcheck source=lib/pinned-install.sh
+    . "$REPO/scripts/lib/pinned-install.sh"
+    install_rust_pinned
     export PATH="$HOME/.cargo/bin:$PATH"
   fi
 fi

@@ -216,6 +216,27 @@ size_t oc_audit_format(const OcAuditLog *log, char *buf, size_t cap);
  * the rate limit is exceeded. Thread-safe. */
 bool oc_rate_limiter_allow(OcRateLimiter *rl, const char *client_ip);
 
+/* ─── Auth / bind-posture helpers ─────────────────────────────────────────
+ *
+ * oc_ct_streq: constant-time string equality. Runtime depends only on
+ * strlen(expected), never on where `given` first differs or on its length,
+ * so a remote caller cannot recover the API key byte-by-byte from response
+ * timing. NULL on either side compares unequal. */
+bool oc_ct_streq(const char *given, const char *expected);
+
+/* True when `host` names a loopback address: "localhost", 127.0.0.0/8, or
+ * ::1 (bracketed or not). NULL, "", "0.0.0.0", "::" and every routable
+ * address return false — NULL binds INADDR_ANY in oc_http_server_start. */
+bool oc_host_is_loopback(const char *host);
+
+/* Startup bind-posture check for the HTTP server. When auth is disabled and
+ * `host` is not loopback, logs an OC_LOG_WARN naming what is exposed.
+ * With `require_auth` set (--require-auth-on-public-bind) that combination
+ * is refused instead: logs an OC_LOG_ERROR and returns OC_ERR_AUTH, which
+ * callers turn into exit code 2. Returns OC_OK otherwise. */
+OcError oc_server_check_bind_auth(const char *host, bool auth_enabled,
+                                  bool require_auth);
+
 #ifdef __cplusplus
 }
 #endif

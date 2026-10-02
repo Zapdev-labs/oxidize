@@ -6,16 +6,19 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use axum::{
     extract::{ConnectInfo, Request},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     middleware::Next,
     response::Response,
 };
+use hmac::{Hmac, Mac};
 use serde::Serialize;
 use serde_json::json;
+use sha2::Sha256;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -109,12 +112,10 @@ impl AuditEvent {
         self
     }
 
+    /// Record a keyed HMAC-SHA256 fingerprint of the API key (see
+    /// [`api_key_fingerprint`]); the raw key is never stored.
     pub fn with_api_key(mut self, key: &str) -> Self {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        self.api_key_hash = Some(format!("{:x}", hasher.finish()));
+        self.api_key_hash = Some(api_key_fingerprint(audit_hmac_key(), key));
         self
     }
 
@@ -170,6 +171,42 @@ impl AuditEvent {
         serde_json::to_string(self)
             .unwrap_or_else(|_| json!({"error": "failed to serialize audit event"}).to_string())
     }
+}
+
+/// Env var holding the audit HMAC key. Set it to correlate key fingerprints
+/// across restarts; when unset a random per-process key is used.
+pub const AUDIT_HMAC_KEY_ENV: &str = "OXIDIZE_AUDIT_HMAC_KEY";
+
+/// Response header carrying the audit request id.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+fn audit_hmac_key() -> &'static [u8] {
+    static KEY: OnceLock<Vec<u8>> = OnceLock::new();
+    KEY.get_or_init(|| {
+        std::env::var(AUDIT_HMAC_KEY_ENV)
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(String::into_bytes)
+            .unwrap_or_else(|| {
+                use rand::RngCore;
+                let mut key = vec![0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut key);
+                key
+            })
+    })
+}
+
+/// Hex HMAC-SHA256 of `api_key` under `hmac_key`. Without the HMAC key a log
+/// reader cannot test guessed API keys against logged fingerprints.
+pub fn api_key_fingerprint(hmac_key: &[u8], api_key: &str) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(hmac_key).expect("HMAC accepts keys of any length");
+    mac.update(api_key.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Audit logger that buffers and flushes events.
@@ -230,34 +267,49 @@ impl RequestIdExt for Request {
 }
 
 /// Middleware that assigns a unique request ID and captures audit data.
-pub async fn audit_middleware(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    mut request: Request,
-    next: Next,
-) -> Response {
+///
+/// The client address comes from `ConnectInfo<SocketAddr>`, present when the
+/// router is served via `into_make_service_with_connect_info` (see
+/// [`crate::shutdown::serve_with_graceful_shutdown`]); it is omitted otherwise.
+/// The request id is echoed in the `x-request-id` response header.
+pub async fn audit_middleware(mut request: Request, next: Next) -> Response {
     let request_id = Uuid::new_v4().to_string();
     let start = Instant::now();
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    let client_ip = addr.ip().to_string();
+    let client_ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip().to_string());
 
     request.extensions_mut().insert(request_id.clone());
 
     let api_key = request
         .headers()
         .get("x-api-key")
-        .or_else(|| request.headers().get("authorization"))
         .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.strip_prefix("Bearer ").unwrap_or(v))
+        })
         .map(|s| s.to_string());
 
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
     let duration = start.elapsed();
     let status = response.status();
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
 
     let mut event = AuditEvent::new(request_id.clone(), "http_request")
-        .with_client_ip(&client_ip)
         .with_duration(duration)
         .with_status(status);
+    if let Some(client_ip) = client_ip {
+        event = event.with_client_ip(&client_ip);
+    }
 
     event.method = method.to_string();
     event.path = path;
@@ -358,6 +410,29 @@ mod tests {
         let event2 = AuditEvent::new("req-2".to_string(), "test").with_api_key("secret-key-123");
         assert_eq!(event1.api_key_hash, event2.api_key_hash);
         assert_ne!(event1.api_key_hash, Some("secret-key-123".to_string()));
+    }
+
+    /// RFC 4231 HMAC-SHA256 test cases 1 and 2.
+    #[test]
+    fn api_key_fingerprint_matches_rfc4231_vectors() {
+        assert_eq!(
+            api_key_fingerprint(&[0x0b; 20], "Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            api_key_fingerprint(b"Jefe", "what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn api_key_fingerprint_depends_on_hmac_key() {
+        assert_ne!(
+            api_key_fingerprint(b"key-a", "secret"),
+            api_key_fingerprint(b"key-b", "secret")
+        );
+        let event = AuditEvent::new("req-1".to_string(), "test").with_api_key("secret");
+        assert_eq!(event.api_key_hash.as_ref().map(String::len), Some(64));
     }
 
     #[test]

@@ -15,6 +15,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-oxidize-core = { path = "../oxidize-core" }
-oxidize-kernels = { path = "../oxidize-kernels" }
+oxidize-core = { version = "0.1.0", path = "../oxidize-core" }
+oxidize-kernels = { version = "0.1.0", path = "../oxidize-kernels" }
 rayon = "1"

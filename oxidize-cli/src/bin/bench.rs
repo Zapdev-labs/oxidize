@@ -432,6 +432,10 @@ fn inference_config_from_dflash(
         expert_weights_scale: 1.0,
         expert_group_count: 0,
         expert_group_used_count: 0,
+        layer_norm_group_count: 1,
+        value_expert_count: 0,
+        value_expert_used_count: 0,
+        attention_gate_softplus: false,
     }
 }
 

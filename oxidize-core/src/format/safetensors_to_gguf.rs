@@ -80,19 +80,14 @@ pub fn quantize_gguf_to_target(input: &[u8], target: GgufQuantizationType) -> Re
     let parsed = parse_gguf(input).map_err(|e| anyhow!("{e:?}"))?;
     let mut metadata = parsed.metadata.clone();
 
-    // Map GgufQuantizationType → ggml_type ID used in file_type metadata.
-    let file_type_id: u32 = match target {
-        GgufQuantizationType::Q8_0 => 7,
-        GgufQuantizationType::Q4_0 => 2,
-        GgufQuantizationType::Q4_1 => 3,
-        GgufQuantizationType::Q5_0 => 8,
-        GgufQuantizationType::Q5_1 => 9,
-        _ => u32::MAX,
-    };
-    if file_type_id != u32::MAX {
+    // `general.file_type` uses llama.cpp's file-preset namespace, which is
+    // distinct from the per-tensor `ggml_type` namespace. Mixed K-quant
+    // presets (for example Q4_K_M) live only in this metadata field; their
+    // individual tensors are encoded with the canonical K-quant type IDs.
+    if let Some(file_type) = gguf_file_type_id(target) {
         metadata.insert(
             "general.file_type".to_owned(),
-            GgufMetadataValue::Uint32(file_type_id),
+            GgufMetadataValue::Uint32(file_type),
         );
     }
 
@@ -117,32 +112,7 @@ pub fn quantize_gguf_to_target(input: &[u8], target: GgufQuantizationType) -> Re
             let mut out = vec![0_u8; out_size];
             quantize_scalar(source, target, tensor_bytes, &mut out)
                 .map_err(|e| anyhow!("quantize {}: {e:?}", info.name))?;
-            let type_id: u32 = match target {
-                GgufQuantizationType::F32 => 0,
-                GgufQuantizationType::F16 => 1,
-                GgufQuantizationType::Q4_0 => 2,
-                GgufQuantizationType::Q4_1 => 3,
-                GgufQuantizationType::Q5_0 => 6,
-                GgufQuantizationType::Q5_1 => 7,
-                GgufQuantizationType::Q8_0 => 8,
-                GgufQuantizationType::Q2_K => 10,
-                GgufQuantizationType::Q3_K_S => 11,
-                GgufQuantizationType::Q3_K_M => 12,
-                GgufQuantizationType::Q3_K_L => 13,
-                GgufQuantizationType::Q4_K_S => 14,
-                GgufQuantizationType::Q4_K_M => 15,
-                GgufQuantizationType::Q5_K_S => 16,
-                GgufQuantizationType::Q5_K_M => 17,
-                GgufQuantizationType::Q6_K => 18,
-                GgufQuantizationType::AL5 => 240,
-                GgufQuantizationType::AL8 => 241,
-                GgufQuantizationType::AL6 => 242,
-                GgufQuantizationType::AL5_XS => 243,
-                other => {
-                    bail!("unsupported GGUF target type {other:?}")
-                }
-            };
-            (type_id, out)
+            (ggml_type_id(target)?, out)
         } else {
             (info.ggml_type, tensor_bytes.to_vec())
         };
@@ -272,6 +242,7 @@ fn normalize_hf_arch(model_type: &str) -> String {
         "hy_v3" | "hyv3" | "hunyuan_v3" | "hunyuan" | "hunyuan_moe" | "hunyuanmoe" => {
             "hunyuan-moe".to_owned()
         }
+        "k2_horizon" | "k2-horizon" | "k2horizon" => "k2-horizon".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -592,6 +563,45 @@ fn merge_hf_config_metadata(
         &prefix("leading_dense_block_count"),
         "first_k_dense_replace",
     );
+    if !meta.contains_key(&prefix("leading_dense_block_count"))
+        && let Some(layers) = cfg.get("mlp_only_layers").and_then(|v| v.as_array())
+    {
+        let mut dense = 0_u32;
+        while layers
+            .get(dense as usize)
+            .and_then(|v| v.as_u64())
+            .is_some_and(|layer| layer == dense as u64)
+        {
+            dense += 1;
+        }
+        if dense > 0 {
+            meta.insert(
+                prefix("leading_dense_block_count"),
+                GgufMetadataValue::Uint32(dense),
+            );
+        }
+    }
+    insert_u32(
+        meta,
+        &prefix("attention.value_expert_count"),
+        "mova_num_experts",
+    );
+    insert_u32(
+        meta,
+        &prefix("attention.value_expert_used_count"),
+        "mova_num_experts_per_tok",
+    );
+    insert_u32(
+        meta,
+        &prefix("layer_norm_group_count"),
+        "layernorm_num_groups",
+    );
+    if let Some(gate) = cfg.get("attention_gate_func").and_then(|v| v.as_str()) {
+        meta.insert(
+            prefix("attention.gate_function"),
+            GgufMetadataValue::String(gate.to_owned()),
+        );
+    }
     // Routed-expert output scale (Hunyuan `router_scaling_factor`,
     // DeepSeek `routed_scaling_factor`).
     if !insert_f32(
@@ -613,6 +623,12 @@ fn merge_hf_config_metadata(
         .unwrap_or(false)
         || cfg
             .get("scoring_func")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("sigmoid"))
+            .unwrap_or(false);
+    let sigmoid_router = sigmoid_router
+        || cfg
+            .get("router_score_func")
             .and_then(|v| v.as_str())
             .map(|s| s.eq_ignore_ascii_case("sigmoid"))
             .unwrap_or(false);
@@ -1073,6 +1089,11 @@ fn parse_unfused_expert(name: &str) -> Option<(usize, &'static str, usize)> {
         .or_else(|| name.strip_prefix("model.layers."))?;
     let (layer_str, rest) = rest.split_once('.')?;
     let layer: usize = layer_str.parse().ok()?;
+    if let Some(rest) = rest.strip_prefix("self_attn.v_experts.") {
+        let (expert_str, weight) = rest.split_once('.')?;
+        let expert: usize = expert_str.parse().ok()?;
+        return (weight == "weight").then_some((layer, "attn_v_exps", expert));
+    }
     let rest = rest.strip_prefix("mlp.experts.")?;
     let (expert_str, proj) = rest.split_once('.')?;
     let expert: usize = expert_str.parse().ok()?;
@@ -1340,14 +1361,14 @@ fn ggml_type_id(target: GgufQuantizationType) -> Result<u32> {
         GgufQuantizationType::Q5_1 => 7,
         GgufQuantizationType::Q8_0 => 8,
         GgufQuantizationType::Q2_K => 10,
-        GgufQuantizationType::Q3_K_S => 11,
-        GgufQuantizationType::Q3_K_M => 12,
-        GgufQuantizationType::Q3_K_L => 13,
-        GgufQuantizationType::Q4_K_S => 14,
-        GgufQuantizationType::Q4_K_M => 15,
-        GgufQuantizationType::Q5_K_S => 16,
-        GgufQuantizationType::Q5_K_M => 17,
-        GgufQuantizationType::Q6_K => 18,
+        // ggml has one ID for each K-quant block format. S/M/L file presets
+        // differ only in tensor selection, not in the tensor encoding.
+        GgufQuantizationType::Q3_K_S
+        | GgufQuantizationType::Q3_K_M
+        | GgufQuantizationType::Q3_K_L => 11,
+        GgufQuantizationType::Q4_K_S | GgufQuantizationType::Q4_K_M => 12,
+        GgufQuantizationType::Q5_K_S | GgufQuantizationType::Q5_K_M => 13,
+        GgufQuantizationType::Q6_K => 14,
         GgufQuantizationType::AL5 => 240,
         GgufQuantizationType::AL8 => 241,
         GgufQuantizationType::AL6 => 242,
@@ -1684,6 +1705,79 @@ mod tests {
     }
 
     #[test]
+    fn k_quant_type_ids_are_canonical_and_distinct_from_file_presets() {
+        let cases = [
+            (GgufQuantizationType::Q3_K_S, 11),
+            (GgufQuantizationType::Q3_K_M, 11),
+            (GgufQuantizationType::Q3_K_L, 11),
+            (GgufQuantizationType::Q4_K_S, 12),
+            (GgufQuantizationType::Q4_K_M, 12),
+            (GgufQuantizationType::Q5_K_S, 13),
+            (GgufQuantizationType::Q5_K_M, 13),
+            (GgufQuantizationType::Q6_K, 14),
+        ];
+
+        for (quantization, expected_tensor_type) in cases {
+            assert_eq!(
+                ggml_type_id(quantization).unwrap(),
+                expected_tensor_type,
+                "wrong tensor ggml_type for {quantization:?}"
+            );
+        }
+
+        // general.file_type uses llama.cpp's separate file-preset enum.
+        assert_eq!(gguf_file_type_id(GgufQuantizationType::Q4_K_M), Some(15));
+        assert_eq!(
+            GgufQuantizationType::from_llama_ftype(15),
+            GgufQuantizationType::Q4_K_M
+        );
+        // Raw ggml type 15 is Q8_K, which Oxidize currently rejects as unsupported.
+        assert_eq!(
+            GgufQuantizationType::from_ggml_type(15),
+            GgufQuantizationType::Unknown(15)
+        );
+    }
+
+    #[test]
+    fn quantize_gguf_writes_canonical_k_quant_tensor_headers() {
+        let source = write_gguf(
+            3,
+            &BTreeMap::new(),
+            &[OutputTensor {
+                name: "weight".to_owned(),
+                dimensions: vec![256, 1],
+                ggml_type: 0,
+                data: vec![0_u8; 256 * 4],
+            }],
+            32,
+        )
+        .unwrap();
+
+        let cases = [
+            (GgufQuantizationType::Q3_K_S, 11, None),
+            (GgufQuantizationType::Q3_K_M, 11, None),
+            (GgufQuantizationType::Q3_K_L, 11, None),
+            (GgufQuantizationType::Q4_K_S, 12, Some(14)),
+            (GgufQuantizationType::Q4_K_M, 12, Some(15)),
+            (GgufQuantizationType::Q5_K_S, 13, None),
+            (GgufQuantizationType::Q5_K_M, 13, None),
+            (GgufQuantizationType::Q6_K, 14, Some(18)),
+        ];
+
+        for (target, expected_tensor_type, expected_file_type) in cases {
+            let bytes = quantize_gguf_to_target(&source, target).unwrap();
+            let parsed = parse_gguf(&bytes).unwrap();
+            assert_eq!(parsed.tensor_infos[0].ggml_type, expected_tensor_type);
+            let expected_metadata =
+                expected_file_type.map(|value| GgufMetadataValue::Uint32(value));
+            assert_eq!(
+                parsed.metadata.get("general.file_type"),
+                expected_metadata.as_ref()
+            );
+        }
+    }
+
+    #[test]
     fn maps_hf_tensor_names() {
         let input = tmp_path(".safetensors");
         let output = tmp_path(".gguf");
@@ -1757,6 +1851,10 @@ mod tests {
         assert_eq!(
             parse_unfused_expert("model.layers.2.mlp.experts.5.up_proj.weight"),
             Some((2, "ffn_up_exps", 5))
+        );
+        assert_eq!(
+            parse_unfused_expert("model.layers.3.self_attn.v_experts.63.weight"),
+            Some((3, "attn_v_exps", 63))
         );
         // Dense / shared / non-expert weights must not match.
         assert_eq!(

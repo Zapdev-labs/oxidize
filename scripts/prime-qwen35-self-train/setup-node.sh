@@ -12,6 +12,8 @@ F16="$OUT_DIR/qwen35-9b-instruct-f16.gguf"
 Q8="$OUT_DIR/qwen35-9b-instruct-q8_0.gguf"
 DATASET="$OUT_DIR/seed_coding_agent.jsonl"
 THREADS="${TRAIN_THREADS:-$(nproc)}"
+# shellcheck source=../lib/pinned-install.sh
+. "$SCRIPT_DIR/../lib/pinned-install.sh"
 
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -25,12 +27,12 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq build-essential pkg-config libssl-dev git curl python3 python3-pip
 
 if ! command -v cargo >/dev/null 2>&1; then
-  echo "==> installing Rust stable"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  echo "==> installing pinned Rust toolchain"
+  install_rust_pinned
 fi
 
 if ! command -v uv >/dev/null 2>&1; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  install_uv_pinned
 fi
 UV="${UV:-$HOME/.local/bin/uv}"
 VENV="${OXIDIZE_SETUP_VENV:-$HOME/.venvs/oxidize-setup}"

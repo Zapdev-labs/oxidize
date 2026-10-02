@@ -9,7 +9,7 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::audit::AuditLogger;
+use crate::audit::{AuditLogger, audit_middleware};
 use crate::auth::{AuthConfig, enforce_api_key};
 #[cfg(test)]
 use crate::limits::RequestLimitConfig;
@@ -74,6 +74,8 @@ pub fn build_app_with_state(state: AppState) -> Router {
             metrics_middleware,
         ))
         .layer(middleware::from_fn(log_request_response))
+        // Outermost so 401/429 decisions from the inner layers are audited.
+        .layer(middleware::from_fn(audit_middleware))
         .with_state(state)
 }
 
@@ -671,7 +673,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/healthz")
+                    .uri("/v1/models")
                     .body(Body::empty())
                     .expect("valid request"),
             )
@@ -680,7 +682,7 @@ mod tests {
         let second = app
             .oneshot(
                 Request::builder()
-                    .uri("/healthz")
+                    .uri("/v1/models")
                     .body(Body::empty())
                     .expect("valid request"),
             )
@@ -689,6 +691,105 @@ mod tests {
 
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// server-005: probes bypass the rate limiter so load cannot flap health.
+    #[tokio::test]
+    async fn health_probes_are_not_rate_limited() {
+        let app = build_app_with_limits(RequestLimitConfig {
+            requests_per_second: 1,
+            max_in_flight: 1,
+            max_queue: 0,
+        });
+        for uri in ["/healthz", "/healthz", "/livez", "/livez", "/healthz"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+        for _ in 0..3 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/readyz")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
+    /// server-005: `/metrics` is behind the API key when auth is enabled.
+    #[tokio::test]
+    async fn metrics_requires_api_key_when_auth_enabled() {
+        let app = build_app_with_config(RequestLimitConfig::default(), Some("secret".into()), None);
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("x-api-key", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+    }
+
+    /// server-002: the query-string key is only honored on the WS upgrade route.
+    #[tokio::test]
+    async fn query_api_key_rejected_outside_realtime() {
+        let response =
+            build_app_with_config(RequestLimitConfig::default(), Some("secret".into()), None)
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/models?api_key=secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// server-004: audit middleware is layered into the served router.
+    #[tokio::test]
+    async fn audit_middleware_tags_responses_with_request_id() {
+        let app = build_app_with_config(RequestLimitConfig::default(), Some("secret".into()), None);
+        for (uri, status) in [
+            ("/healthz", StatusCode::OK),
+            ("/v1/models", StatusCode::UNAUTHORIZED),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            let id = response
+                .headers()
+                .get(crate::audit::REQUEST_ID_HEADER)
+                .expect("x-request-id header")
+                .to_str()
+                .unwrap();
+            assert_eq!(id.len(), 36, "uuid v4 request id: {id}");
+        }
     }
 
     /// VAL-SEC-001: Request body size limit (10MB default).

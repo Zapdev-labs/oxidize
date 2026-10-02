@@ -239,6 +239,18 @@ impl InferenceModel {
                         ("attn_v", Some("bias")) => {
                             layers[layer_idx].attn_v_bias = load_bias(qtype, qdata, value_count)?
                         }
+                        ("attn_v_exps", _) => {
+                            layers[layer_idx].attn_v_exps =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("attn_v_gate", Some("weight")) => {
+                            layers[layer_idx].attn_v_gate =
+                                load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("attn_v_gate", Some("bias")) => {
+                            layers[layer_idx].attn_v_gate_bias =
+                                load_bias(qtype, qdata, value_count)?
+                        }
                         ("attn_output", Some("weight")) => {
                             layers[layer_idx].attn_output =
                                 load_tensor(name, qtype, qdata, value_count)?
@@ -312,9 +324,13 @@ impl InferenceModel {
                             layers[layer_idx].ffn_down_exps =
                                 load_tensor(name, qtype, qdata, value_count)?
                         }
-                        ("ffn_gate_inp", _) => {
+                        ("ffn_gate_inp", Some("weight")) | ("ffn_gate_inp", None) => {
                             layers[layer_idx].ffn_gate_inp =
                                 load_tensor(name, qtype, qdata, value_count)?
+                        }
+                        ("ffn_gate_inp", Some("bias")) => {
+                            layers[layer_idx].ffn_exp_probs_b =
+                                load_bias(qtype, qdata, value_count)?
                         }
                         ("ssm_a", _) => {
                             let mut f32_data = vec![0.0_f32; value_count];

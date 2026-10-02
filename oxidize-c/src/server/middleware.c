@@ -1,7 +1,8 @@
 /*
  * middleware.c — server middleware stack implementation.
  *
- * Auth: Bearer token check against the configured API key.
+ * Auth: Bearer token check against the configured API key (constant-time
+ *       compare, oc_ct_streq), plus the startup bind-posture check.
  * Rate limit: token-bucket per IP (or global), refilled at a steady rate.
  * Metrics: atomic counters + a simple latency histogram.
  * Audit: fixed-size ring buffer of the most recent N entries (newest-first
@@ -20,7 +21,9 @@
 
 #include "oxidize/log.h"
 
+#include <arpa/inet.h>
 #include <math.h>
+#include <netinet/in.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,8 +68,70 @@ static int auth_check(const OcAuthConfig *auth, const char *auth_header)
     if (strncasecmp(p, "Bearer", 6) != 0) return 401;
     p += 6;
     while (*p == ' ' || *p == '\t') p++;
-    if (strcmp(p, auth->api_key) != 0) return 401;
+    if (!oc_ct_streq(p, auth->api_key)) return 401;
     return 0;
+}
+
+bool oc_ct_streq(const char *given, const char *expected)
+{
+    if (given == NULL || expected == NULL) return false;
+    size_t gl = strlen(given);
+    size_t el = strlen(expected);
+    /* Fold the length mismatch into the same accumulator as the byte diff
+     * and always walk all of `expected`; past the end of `given` the index
+     * is pinned at its NUL so every read stays in bounds. */
+    volatile unsigned char diff = (unsigned char)((gl ^ el) != 0);
+    for (size_t i = 0; i < el; i++) {
+        size_t j = (i < gl) ? i : gl;
+        diff |= (unsigned char)((unsigned char)given[j] ^
+                                (unsigned char)expected[i]);
+    }
+    return diff == 0;
+}
+
+bool oc_host_is_loopback(const char *host)
+{
+    if (host == NULL || host[0] == '\0') return false;
+    if (strcasecmp(host, "localhost") == 0) return true;
+    struct in_addr v4;
+    if (inet_pton(AF_INET, host, &v4) == 1) {
+        return (ntohl(v4.s_addr) >> 24) == 127u;
+    }
+    char buf[INET6_ADDRSTRLEN + 2];
+    size_t hl = strlen(host);
+    if (hl >= 2 && host[0] == '[' && host[hl - 1] == ']' &&
+        hl - 2 < sizeof(buf)) {
+        memcpy(buf, host + 1, hl - 2);
+        buf[hl - 2] = '\0';
+        host = buf;
+    }
+    struct in6_addr v6;
+    if (inet_pton(AF_INET6, host, &v6) == 1) {
+        return memcmp(&v6, &in6addr_loopback, sizeof(v6)) == 0;
+    }
+    return false;
+}
+
+OcError oc_server_check_bind_auth(const char *host, bool auth_enabled,
+                                  bool require_auth)
+{
+    if (auth_enabled || oc_host_is_loopback(host)) return OC_OK;
+    const char *shown = (host != NULL && host[0] != '\0') ? host : "0.0.0.0";
+    if (require_auth) {
+        oc_log(OC_LOG_ERROR,
+               "server: refusing to start — authentication is disabled and "
+               "bind address %s is not loopback (--require-auth-on-public-bind); "
+               "pass --api-key KEY or bind --host 127.0.0.1", shown);
+        return OC_ERR_AUTH;
+    }
+    oc_log(OC_LOG_WARN,
+           "server: authentication is DISABLED on non-loopback bind %s — any "
+           "host that can reach it may call /v1/completions, "
+           "/v1/chat/completions, /v1/embeddings, /v1/responses, "
+           "/v1/realtime, /v1/models, /metrics and /openapi.json without a "
+           "credential; pass --api-key KEY, bind --host 127.0.0.1, or add "
+           "--require-auth-on-public-bind to refuse this", shown);
+    return OC_OK;
 }
 
 /* ─── Rate limiter ─────────────────────────────────────────────────────────── */

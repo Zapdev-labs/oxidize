@@ -70,6 +70,7 @@ pub(super) fn run_profiled_inference(
 pub(super) fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::Result<()> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|error| io::Error::other(format!("tokio runtime: {error}")))?;
+    let auth = enforce_bind_policy(&server_args);
     rt.block_on(async move {
         let (effective_backend, warning) = server_args.backend.to_core_backend().effective();
         if let Some(msg) = warning {
@@ -89,17 +90,12 @@ pub(super) fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::
         let model = oxidize_server::load_model_runtime(&server_args).map_err(|error| {
             io::Error::other(format!("failed to initialize server model: {error}"))
         })?;
-        let api_key = std::env::var("OXIDIZE_API_KEY")
-            .ok()
-            .filter(|value| !value.is_empty());
         let state = oxidize_server::AppState {
             limiter: Arc::new(oxidize_server::RequestLimiter::new(
                 oxidize_server::RequestLimitConfig::default(),
             )),
             batcher: Arc::new(oxidize_server::ContinuousBatcher::default()),
-            auth: api_key
-                .map(|key| oxidize_server::AuthConfig::from_keys([key]))
-                .unwrap_or_else(oxidize_server::AuthConfig::disabled),
+            auth,
             model,
             paged: None,
             mesh: None,
@@ -125,11 +121,38 @@ pub(super) fn run_api_server_blocking(server_args: oxidize_server::Args) -> io::
     })
 }
 
+/// Warn when the API server would be unauthenticated on a routable address;
+/// exit with status 2 instead under `--require-auth-on-public-bind`. Returns
+/// the auth config (OXIDIZE_API_KEYS or OXIDIZE_API_KEY) to serve with.
+pub(super) fn enforce_bind_policy(
+    server_args: &oxidize_server::Args,
+) -> oxidize_server::AuthConfig {
+    use oxidize_server::auth::{BindExposure, check_bind_exposure};
+    let auth = oxidize_server::AuthConfig::from_env();
+    match check_bind_exposure(
+        server_args.host,
+        &auth,
+        server_args.require_auth_on_public_bind,
+    ) {
+        BindExposure::Ok => {}
+        BindExposure::Warn(message) => eprintln!("warning: {message}"),
+        BindExposure::Refuse(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    }
+    auth
+}
+
 pub(super) fn spawn_api_server_background(args: &Args) -> io::Result<()> {
     if args.model.is_none() {
         return Ok(());
     }
     let server_args = server_args_from_cli(args)?;
+    // Refuse on the main thread so the exit status reflects the policy.
+    if server_args.require_auth_on_public_bind {
+        enforce_bind_policy(&server_args);
+    }
     let host = server_args.host;
     let port = server_args.port;
     std::thread::Builder::new()
@@ -173,11 +196,13 @@ pub(super) fn server_args_from_cli(args: &Args) -> io::Result<oxidize_server::Ar
     Ok(oxidize_server::Args {
         host,
         port: args.api_port,
+        require_auth_on_public_bind: args.require_auth_on_public_bind,
         model: args.model.clone(),
         backend: server_backend_from_cli(args.backend),
         batch_mode: oxidize_server::BatchMode::Sequential,
         model_id,
         max_tokens: args.max_tokens,
+        max_tokens_cap: args.api_max_tokens_cap,
         temperature: args.temperature,
         top_p: args.top_p,
         top_k: args.top_k,

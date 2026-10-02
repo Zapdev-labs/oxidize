@@ -388,3 +388,28 @@ Test(cli, context_prefill_chunk_size_is_append_only)
                    + _Alignof(OcCliContext) - 1)
                   / _Alignof(OcCliContext)) * _Alignof(OcCliContext));
 }
+
+Test(cli, parses_require_auth_on_public_bind)
+{
+    char *argv[] = {"oxidize-c", "--serve-api", "--host", "0.0.0.0",
+                    "--require-auth-on-public-bind"};
+    OcCliArgs a;
+    oc_cli_parse_args(5, argv, &a);
+    cr_assert(a.serve_api);
+    cr_assert_str_eq(a.host, "0.0.0.0");
+    cr_assert(a.require_auth_on_public_bind);
+
+    char *off[] = {"oxidize-c", "--serve-api"};
+    oc_cli_parse_args(2, off, &a);
+    cr_assert(!a.require_auth_on_public_bind, "default off");
+}
+
+Test(cli, context_parses_require_auth_on_public_bind)
+{
+    char *argv[] = {"oxidize-c", "serve", "--host", "0.0.0.0",
+                    "--require-auth-on-public-bind"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(5, argv, &ctx));
+    cr_assert_eq(ctx.command, OC_CLI_CMD_SERVE);
+    cr_assert(ctx.require_auth_on_public_bind);
+}

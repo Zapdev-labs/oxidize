@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run Kimi K2.6 + DFlash speculative generation on the ai host (Tailscale: ai@100.126.251.122).
-# Requires: sshpass, SSH access (password or key). Do not commit credentials.
+# Requires: SSH key access. Password auth is opt-in via SSH_PASS (needs sshpass); never commit credentials.
 set -euo pipefail
 
 AI_HOST="${AI_HOST:-ai@100.126.251.122}"
@@ -30,7 +30,7 @@ EOF
 )
 
 if [[ -n "${SSH_PASS}" ]]; then
-  exec sshpass -p "${SSH_PASS}" ssh -o StrictHostKeyChecking=no "${AI_HOST}" "${REMOTE_CMD}"
+  SSHPASS="${SSH_PASS}" exec sshpass -e ssh -o StrictHostKeyChecking=accept-new "${AI_HOST}" "${REMOTE_CMD}"
 else
-  exec ssh -o StrictHostKeyChecking=no "${AI_HOST}" "${REMOTE_CMD}"
+  exec ssh -o StrictHostKeyChecking=accept-new "${AI_HOST}" "${REMOTE_CMD}"
 fi

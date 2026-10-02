@@ -173,7 +173,22 @@ pub fn plan(inv: &HardwareInventory, model: &ModelFingerprint) -> TuningPlan {
 
 fn tier0_hard_rules(inv: &HardwareInventory, model: &ModelFingerprint, plan: &mut TuningPlan) {
     let ram_budget = effective_ram_bytes(inv);
-    if ram_budget < model.file_size_bytes.saturating_mul(12) / 10 {
+    // K2 Horizon cannot run through the layer-wise runtime (no MoVA value
+    // experts, no grouped RMSNorm, no attention gate), so the RAM-pressure
+    // rule must not turn it on. Report that explicitly instead of failing
+    // later at load time.
+    let layer_wise_supported = !matches!(model.architecture.as_str(), "k2horizon");
+    if !layer_wise_supported {
+        plan.mmap = true;
+        plan.mlock = false;
+        plan.rationale.push(format!(
+            "K2 Horizon → layer_wise=OFF, mmap=ON, mlock=OFF (MoVA value experts, grouped RMSNorm, \
+             and the softplus attention gate are only implemented in the dense per-token CPU path; \
+             model is {:.1} GiB vs 1.2× effective RAM {:.1} GiB)",
+            model.file_size_bytes as f64 / (1u64 << 30) as f64,
+            ram_budget as f64 / (1u64 << 30) as f64
+        ));
+    } else if ram_budget < model.file_size_bytes.saturating_mul(12) / 10 {
         plan.mmap = true;
         plan.mlock = false;
         plan.layer_wise = true;
@@ -780,6 +795,66 @@ mod tests {
         assert!(matches!(p.oxk_isa, OxkIsa::Scalar)); // no Neon oxk yet
         assert!(matches!(inv.simd, SimdBackend::Neon));
         assert!(!inv.has_gpu, "no discrete GPU on macbook");
+    }
+
+    /// K2 Horizon is a 36B MoE: on a RAM-constrained box the 1.2× rule would
+    /// normally turn on layer_wise, which cannot execute K2. The plan must keep
+    /// it off and say why.
+    #[test]
+    fn k2_horizon_never_enables_layer_wise() {
+        let mut inv = inv_desktop();
+        inv.total_ram_bytes = 24u64 << 30;
+        let mut m = fingerprint_from_parts(
+            "k2horizon",
+            48,
+            2560,
+            32,
+            8,
+            128,
+            6144,
+            131_072,
+            20_000_000_000, // ~19 GiB, well past 1.2× of 24 GiB? no: fits.
+            GgufQuantizationType::Q4_K_M,
+        );
+        m.is_moe = true;
+        m.expert_count = 100;
+        // Force the RAM-pressure branch by making the model larger than 1.2× RAM.
+        m.file_size_bytes = 60_000_000_000;
+        let p = plan(&inv, &m);
+        assert!(!p.layer_wise, "K2 must never be routed to layer_wise");
+        assert!(p.mmap);
+        assert!(!p.mlock);
+        assert!(
+            p.rationale.iter().any(|r| r.contains("K2 Horizon")),
+            "rationale must explain the K2 layer_wise exclusion: {:?}",
+            p.rationale
+        );
+    }
+
+    /// The same exclusion must hold when the model comfortably fits in RAM
+    /// (layer_wise would be off anyway) — this is a guard against a later rule
+    /// re-enabling it.
+    #[test]
+    fn k2_horizon_stays_on_dense_path_when_ram_is_sufficient() {
+        let inv = inv_desktop();
+        let mut m = fingerprint_from_parts(
+            "k2horizon",
+            48,
+            2560,
+            32,
+            8,
+            128,
+            6144,
+            131_072,
+            20_000_000_000,
+            GgufQuantizationType::Q4_K_M,
+        );
+        m.is_moe = true;
+        m.expert_count = 100;
+        let p = plan(&inv, &m);
+        assert!(!p.layer_wise);
+        // No group-limited/DFlash speculation is valid for K2.
+        assert!(matches!(p.speculative, SpeculativeSpec::None));
     }
 
     #[test]

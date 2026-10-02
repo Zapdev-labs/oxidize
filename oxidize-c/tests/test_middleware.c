@@ -15,6 +15,7 @@
 #include "oxidize/middleware.h"
 
 #include <string.h>
+#include <time.h>
 
 /* ─── Auth ────────────────────────────────────────────────────────────────── */
 
@@ -267,4 +268,130 @@ Test(middleware, cors_disabled_writes_nothing)
     cr_assert_eq(oc_middleware_cors_headers(&mw, buf, sizeof(buf)), 0u,
                  "CORS disabled should write nothing");
     oc_middleware_free(&mw);
+}
+
+/* ─── Constant-time compare (FINDING-c-engine-001) ───────────────────────── */
+
+Test(middleware, ct_streq_equal)
+{
+    cr_assert(oc_ct_streq("secret123", "secret123"));
+    cr_assert(oc_ct_streq("", ""));
+}
+
+Test(middleware, ct_streq_equal_length_mismatch)
+{
+    cr_assert(!oc_ct_streq("secret124", "secret123"));
+    cr_assert(!oc_ct_streq("Xecret123", "secret123"));
+}
+
+Test(middleware, ct_streq_length_mismatch)
+{
+    cr_assert(!oc_ct_streq("secret12", "secret123"));
+    cr_assert(!oc_ct_streq("secret1234", "secret123"));
+    /* A prefix of the key must not match. */
+    cr_assert(!oc_ct_streq("", "secret123"));
+    cr_assert(!oc_ct_streq("secret123", ""));
+}
+
+Test(middleware, ct_streq_null_is_unequal)
+{
+    cr_assert(!oc_ct_streq(NULL, "k"));
+    cr_assert(!oc_ct_streq("k", NULL));
+    cr_assert(!oc_ct_streq(NULL, NULL));
+}
+
+Test(middleware, auth_wrong_length_key_rejected)
+{
+    OcMiddleware mw;
+    OcRateLimitConfig rl = { .requests_per_minute = 0, .burst_size = 0,
+                             .per_ip = false };
+    cr_assert_eq(oc_middleware_init(&mw, OC_MW_AUTH, "secret123", &rl, "*"),
+                 OC_OK);
+    OcRequestContext req = {
+        .method = OC_HTTP_POST, .path = "/v1/chat",
+        .auth_header = "Bearer secret12", .client_ip = "1.2.3.4",
+    };
+    cr_assert_eq(oc_middleware_process_request(&mw, &req), 401);
+    req.auth_header = "Bearer secret1234";
+    cr_assert_eq(oc_middleware_process_request(&mw, &req), 401);
+    oc_middleware_free(&mw);
+}
+
+/* Loose timing sanity: a mismatch at byte 0 and a full match must take the
+ * same order of time. A strcmp early-exit makes the first-byte mismatch
+ * orders of magnitude faster on a long key; allow a generous 4x band so
+ * scheduler noise under ASan never flakes. */
+static double ct_time_ns(const char *given, const char *key, int iters)
+{
+    struct timespec a, b;
+    volatile bool sink = false;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    for (int i = 0; i < iters; i++) sink ^= oc_ct_streq(given, key);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    (void)sink;
+    return (double)(b.tv_sec - a.tv_sec) * 1e9 + (double)(b.tv_nsec - a.tv_nsec);
+}
+
+Test(middleware, ct_streq_timing_independent_of_mismatch_position)
+{
+    char key[4097], first[4097];
+    memset(key, 'k', 4096); key[4096] = '\0';
+    memcpy(first, key, sizeof(key)); first[0] = 'X';
+    const int iters = 2000;
+    double best_match = 1e30, best_first = 1e30;
+    for (int r = 0; r < 5; r++) {
+        double m = ct_time_ns(key, key, iters);
+        double f = ct_time_ns(first, key, iters);
+        if (m < best_match) best_match = m;
+        if (f < best_first) best_first = f;
+    }
+    cr_expect(best_first * 4.0 > best_match,
+              "first-byte mismatch %.0fns vs match %.0fns: early exit?",
+              best_first, best_match);
+}
+
+/* ─── Bind posture (FINDING-server-001) ──────────────────────────────────── */
+
+Test(middleware, host_loopback_detected)
+{
+    cr_assert(oc_host_is_loopback("127.0.0.1"));
+    cr_assert(oc_host_is_loopback("127.1.2.3"));
+    cr_assert(oc_host_is_loopback("localhost"));
+    cr_assert(oc_host_is_loopback("LOCALHOST"));
+    cr_assert(oc_host_is_loopback("::1"));
+    cr_assert(oc_host_is_loopback("[::1]"));
+}
+
+Test(middleware, host_non_loopback_detected)
+{
+    cr_assert(!oc_host_is_loopback(NULL));
+    cr_assert(!oc_host_is_loopback(""));
+    cr_assert(!oc_host_is_loopback("0.0.0.0"));
+    cr_assert(!oc_host_is_loopback("::"));
+    cr_assert(!oc_host_is_loopback("192.168.1.15"));
+    cr_assert(!oc_host_is_loopback("128.0.0.1"));
+    cr_assert(!oc_host_is_loopback("10.127.0.1"));
+    cr_assert(!oc_host_is_loopback("example.com"));
+    cr_assert(!oc_host_is_loopback("[::1"));
+}
+
+Test(middleware, bind_check_warns_but_allows_by_default)
+{
+    cr_assert_eq(oc_server_check_bind_auth("0.0.0.0", false, false), OC_OK);
+    cr_assert_eq(oc_server_check_bind_auth(NULL, false, false), OC_OK);
+}
+
+Test(middleware, bind_check_refuses_when_required)
+{
+    cr_assert_eq(oc_server_check_bind_auth("0.0.0.0", false, true), OC_ERR_AUTH);
+    cr_assert_eq(oc_server_check_bind_auth("192.168.1.15", false, true),
+                 OC_ERR_AUTH);
+    cr_assert_eq(oc_server_check_bind_auth(NULL, false, true), OC_ERR_AUTH);
+}
+
+Test(middleware, bind_check_allows_auth_or_loopback)
+{
+    cr_assert_eq(oc_server_check_bind_auth("0.0.0.0", true, true), OC_OK);
+    cr_assert_eq(oc_server_check_bind_auth("127.0.0.1", false, true), OC_OK);
+    cr_assert_eq(oc_server_check_bind_auth("::1", false, true), OC_OK);
 }

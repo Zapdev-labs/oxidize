@@ -1,8 +1,15 @@
 //! API-key auth middleware.
 //!
 //! Two header forms accepted: `x-api-key: <key>` or `Authorization: Bearer <key>`.
+//! The `api_key=<key>` query parameter is honored only on the WebSocket upgrade
+//! route ([`QUERY_KEY_ROUTES`]), since browsers cannot set headers there.
 //! Comparison is constant-time (see [`request_has_api_key`]).
+//!
+//! When no key is configured every route is open. [`check_bind_exposure`] is
+//! run at startup to warn (or, with `--require-auth-on-public-bind`, refuse)
+//! when that open server is bound to a non-loopback address.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::{
@@ -81,19 +88,66 @@ impl AuthConfig {
     }
 }
 
+/// Routes where the `api_key` query parameter is accepted in place of a header.
+pub const QUERY_KEY_ROUTES: &[&str] = &["/v1/realtime"];
+
+/// Whether `path` requires an API key (when auth is enabled). Health probes and
+/// the OpenAPI document stay open; `/metrics` is gated with the API.
+pub fn path_requires_auth(path: &str) -> bool {
+    path.starts_with("/v1/") || path == "/metrics"
+}
+
+/// Outcome of the startup bind/auth posture check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindExposure {
+    /// Auth is enabled or the bind is loopback-only.
+    Ok,
+    /// Auth disabled on a routable bind; serve, but log this warning.
+    Warn(String),
+    /// Auth disabled on a routable bind under `--require-auth-on-public-bind`.
+    Refuse(String),
+}
+
+/// Classify the bind address against the auth posture. Pure; callers log the
+/// warning or exit with status 2 on [`BindExposure::Refuse`].
+pub fn check_bind_exposure(
+    host: IpAddr,
+    auth: &AuthConfig,
+    require_auth_on_public_bind: bool,
+) -> BindExposure {
+    if auth.is_enabled() || host.is_loopback() {
+        return BindExposure::Ok;
+    }
+    let message = format!(
+        "API auth is disabled (OXIDIZE_API_KEY/OXIDIZE_API_KEYS unset) and the server is bound to \
+         non-loopback address {host}: /v1/* inference, /v1/realtime, /v1/mesh/* and /metrics are \
+         reachable without credentials by any host that can route to it"
+    );
+    if require_auth_on_public_bind {
+        BindExposure::Refuse(format!(
+            "{message}; refusing to start (--require-auth-on-public-bind). Set OXIDIZE_API_KEY or bind 127.0.0.1"
+        ))
+    } else {
+        BindExposure::Warn(message)
+    }
+}
+
 pub async fn enforce_api_key(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Response {
     let path = request.uri().path();
-    if !path.starts_with("/v1/") {
+    if !path_requires_auth(path) {
         return next.run(request).await;
     }
     if !state.auth.is_enabled() {
         return next.run(request).await;
     };
-    let query = request.uri().query().map(str::to_owned);
+    let query = QUERY_KEY_ROUTES
+        .contains(&path)
+        .then(|| request.uri().query().map(str::to_owned))
+        .flatten();
     if state.auth.keys().into_iter().any(|expected_key| {
         request_has_api_key(request.headers(), expected_key)
             || query_has_api_key(query.as_deref(), expected_key)
@@ -171,6 +225,40 @@ mod tests {
         ));
         assert!(!query_has_api_key(Some("api_key=wrong"), "secret"));
         assert!(!query_has_api_key(None, "secret"));
+    }
+
+    #[test]
+    fn metrics_is_gated_and_probes_are_not() {
+        assert!(path_requires_auth("/metrics"));
+        assert!(path_requires_auth("/v1/models"));
+        assert!(!path_requires_auth("/healthz"));
+        assert!(!path_requires_auth("/livez"));
+        assert!(!path_requires_auth("/readyz"));
+    }
+
+    #[test]
+    fn bind_exposure_warns_only_on_open_public_bind() {
+        let open = AuthConfig::disabled();
+        let keyed = AuthConfig::from_keys(["k".to_string()]);
+        let any: IpAddr = "0.0.0.0".parse().unwrap();
+        let lan: IpAddr = "192.168.1.15".parse().unwrap();
+        let lo4: IpAddr = "127.0.0.1".parse().unwrap();
+        let lo6: IpAddr = "::1".parse().unwrap();
+
+        assert!(
+            matches!(check_bind_exposure(any, &open, false), BindExposure::Warn(m) if m.contains("0.0.0.0"))
+        );
+        assert!(matches!(
+            check_bind_exposure(lan, &open, false),
+            BindExposure::Warn(_)
+        ));
+        assert!(matches!(
+            check_bind_exposure(any, &open, true),
+            BindExposure::Refuse(_)
+        ));
+        assert_eq!(check_bind_exposure(lo4, &open, true), BindExposure::Ok);
+        assert_eq!(check_bind_exposure(lo6, &open, false), BindExposure::Ok);
+        assert_eq!(check_bind_exposure(any, &keyed, true), BindExposure::Ok);
     }
 
     #[test]

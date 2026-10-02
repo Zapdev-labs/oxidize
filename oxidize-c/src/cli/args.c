@@ -173,6 +173,7 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
         if (match(arg, "--no-auto"))         { a->no_auto = true; continue; }
         if (match(arg, "--print-plan"))     { a->print_plan = true; continue; }
         if (match(arg, "--serve-api"))       { a->serve_api = true; continue; }
+        if (match(arg, "--require-auth-on-public-bind")) { a->require_auth_on_public_bind = true; continue; }
         if (match(arg, "--stream"))          { a->stream = true; continue; }
         if (match(arg, "--chat"))            { a->chat = true; continue; }
         if (match(arg, "--mtp"))             { a->mtp = true; continue; }
@@ -226,6 +227,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         if (match(arg, "--json"))       { ctx->output_format = OC_CLI_OUTPUT_JSON; continue; }
         if (match(arg, "--no-special")) { ctx->tokens_no_special = true; continue; }
         if (match(arg, "--bench-no-eos")) { ctx->bench_no_eos = true; continue; }
+        if (match(arg, "--require-auth-on-public-bind")) { ctx->require_auth_on_public_bind = true; continue; }
         if (match(arg, "--lm-materialize")) { ctx->bench_lm_materialize = true; continue; }
         if (match(arg, "--verbose") || match(arg, "-v")) { ctx->verbose = true; continue; }
         if (match(arg, "--stream-experts")) { ctx->stream_experts = true; continue; }

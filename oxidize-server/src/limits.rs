@@ -196,6 +196,10 @@ pub async fn enforce_request_limits(
     request: Request,
     next: Next,
 ) -> Response {
+    // Probes must answer under load, or orchestrators eject a busy-but-healthy pod.
+    if is_probe_route(request.uri().path()) {
+        return next.run(request).await;
+    }
     if is_generation_route(request.uri().path()) {
         state.batcher.wait_turn().await;
     }
@@ -212,6 +216,10 @@ pub async fn enforce_request_limits(
         )
             .into_response(),
     }
+}
+
+fn is_probe_route(path: &str) -> bool {
+    matches!(path, "/healthz" | "/livez" | "/readyz")
 }
 
 fn is_generation_route(path: &str) -> bool {

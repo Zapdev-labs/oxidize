@@ -50,6 +50,10 @@ static OcError openai_session_init(OcOpenaiState *st, OcLlamaSession *sess)
 {
     if (st != NULL && st->kv_set)
         return oc_llama_session_init_kv(st->model, sess, st->kv_type);
+    if (st != NULL && st->model != NULL) {
+        OcKvCacheType kv = oc_llama_select_kv_type(st->model->cfg.n_ctx, NULL);
+        return oc_llama_session_init_kv(st->model, sess, kv);
+    }
     return oc_llama_session_init(st->model, sess);
 }
 
@@ -64,7 +68,8 @@ static bool kv_override_recognized(const char *s)
 {
     return s != NULL &&
            (strcmp(s, "q8") == 0 || strcmp(s, "Q8") == 0 ||
-            strcmp(s, "f32") == 0 || strcmp(s, "F32") == 0);
+            strcmp(s, "f32") == 0 || strcmp(s, "F32") == 0 ||
+            strncmp(s, "rq", 2) == 0 || strncmp(s, "RQ", 2) == 0);
 }
 
 OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
@@ -645,6 +650,17 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
                                  ids, n_hist);
         if (oc_tokenizer_is_eog(st->tokenizer, tok)) break;
         ids[n_hist++] = tok;
+        if (n_hist >= 16) {
+            uint32_t seen[16];
+            size_t n_seen = 0;
+            for (size_t i = n_hist - 16; i < n_hist; i++) {
+                size_t j;
+                for (j = 0; j < n_seen; j++)
+                    if (seen[j] == ids[i]) break;
+                if (j == n_seen) seen[n_seen++] = ids[i];
+            }
+            if (n_seen <= 4) break;
+        }
         char *piece = NULL;
         if (oc_tokenizer_decode(st->tokenizer, &tok, 1, &piece) == OC_OK && piece) {
             size_t plen = strlen(piece);
@@ -839,6 +855,40 @@ static void handle_completion(OcOpenaiState *st, const OcHttpRequest *req,
     *out_body = buf;
 }
 
+static bool k2_wants_open_think(const char *json)
+{
+    const char *e;
+    const char *q;
+    if (json == NULL) return false;
+    if (strstr(json, "\"enable_thinking\":true") != NULL ||
+        strstr(json, "\"enable_thinking\": true") != NULL)
+        return true;
+    e = strstr(json, "\"reasoning_effort\"");
+    if (e == NULL) return false;
+    q = strchr(e, ':');
+    if (q == NULL) return false;
+    q = strchr(q, '"');
+    if (q == NULL) return false;
+    q++;
+    return strncmp(q, "high", 4) == 0 || strncmp(q, "medium", 6) == 0 ||
+           strncmp(q, "low", 3) == 0;
+}
+
+static void k2_close_think_if_needed(char *prompt, size_t cap, const char *json)
+{
+    static const char open[] = "<|ifm|im_start|>assistant\n<ifm|think>\n";
+    static const char closed[] =
+        "<|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>\n";
+    size_t n;
+    size_t open_len = sizeof(open) - 1;
+    size_t closed_len = sizeof(closed) - 1;
+    if (k2_wants_open_think(json)) return;
+    n = strlen(prompt);
+    if (n < open_len || n + (closed_len - open_len) + 1 > cap) return;
+    if (memcmp(prompt + n - open_len, open, open_len) != 0) return;
+    memcpy(prompt + n - open_len, closed, closed_len + 1);
+}
+
 static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
                                    int *out_status, const char **out_body)
 {
@@ -864,6 +914,7 @@ static void handle_chat_completion(OcOpenaiState *st, const OcHttpRequest *req,
         *out_status = 400;
         return;
     }
+    k2_close_think_if_needed(prompt, OC_OPENAI_MAX_PROMPT_BYTES, req->body);
     if (!st->model_loaded || !st->model || st->tokenizer == NULL) {
         free(prompt);
         *out_body = oc_openai_error_json("no model loaded", "server_error");

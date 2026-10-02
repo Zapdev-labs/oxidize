@@ -9,8 +9,11 @@ use clap::Parser;
 
 use oxidize_server::{
     AppState, Args, AuthConfig, BatchMode, ContinuousBatcher, RequestLimitConfig, RequestLimiter,
-    audit::AuditLogger, build_app_with_state, build_paged_runtime, load_model_runtime,
-    mesh_cluster::MeshClusterState, metrics::MetricsRegistry,
+    audit::AuditLogger,
+    auth::{BindExposure, check_bind_exposure},
+    build_app_with_state, build_paged_runtime, load_model_runtime,
+    mesh_cluster::MeshClusterState,
+    metrics::MetricsRegistry,
     shutdown::serve_with_graceful_shutdown,
 };
 
@@ -33,6 +36,16 @@ async fn main() {
         "starting oxidize-server"
     );
 
+    let auth = AuthConfig::from_env();
+    match check_bind_exposure(args.host, &auth, args.require_auth_on_public_bind) {
+        BindExposure::Ok => {}
+        BindExposure::Warn(message) => tracing::warn!("{message}"),
+        BindExposure::Refuse(message) => {
+            tracing::error!("{message}");
+            std::process::exit(2);
+        }
+    }
+
     let model = match load_model_runtime(&args) {
         Ok(m) => m,
         Err(error) => {
@@ -40,7 +53,6 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let auth = AuthConfig::from_env();
 
     let (model_opt, paged_opt) = if args.batch_mode == BatchMode::Paged {
         if let Some(runtime) = model {

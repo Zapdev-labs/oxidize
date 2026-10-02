@@ -6,6 +6,17 @@ impl LayerWiseModel {
         config: InferenceConfig,
         layer_cache_size: usize,
     ) -> Result<Self, String> {
+        // The layer-wise `LayerWeights` / forward path has no MoVA value
+        // experts, no K2 attention gate, and only plain RMSNorm. Loading a K2
+        // GGUF here would produce silently wrong output, so refuse it.
+        if config.architecture == ModelArchitecture::K2Horizon {
+            return Err(
+                "layer-wise execution does not support K2 Horizon (MoVA value experts, \
+                 grouped RMSNorm, and the softplus attention gate are only implemented in the \
+                 dense per-token CPU path); run without --layer-wise"
+                    .to_owned(),
+            );
+        }
         let mut tok_embeddings: Option<WeightStorage> = None;
         let mut tok_embeddings_cols: usize = config.hidden_size;
         let mut norm_weight: Option<Vec<f32>> = None;

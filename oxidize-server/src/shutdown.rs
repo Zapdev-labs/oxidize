@@ -111,7 +111,8 @@ pub async fn shutdown_guard_middleware(
     response
 }
 
-/// Run the server with graceful shutdown support.
+/// Run the server with graceful shutdown support. The router is served with
+/// `ConnectInfo<SocketAddr>` so the audit middleware can record client IPs.
 pub async fn serve_with_graceful_shutdown(
     listener: tokio::net::TcpListener,
     app: axum::Router,
@@ -123,10 +124,13 @@ pub async fn serve_with_graceful_shutdown(
         signal.trigger();
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_future)
-        .await
-        .expect("server runtime error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_future)
+    .await
+    .expect("server runtime error");
 }
 
 #[cfg(test)]

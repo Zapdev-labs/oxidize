@@ -23,7 +23,7 @@
 //! Both nodes mmap the full GGUF (true per-shard loading is a follow-up).
 
 use oxidize_core::gguf::MappedGgufFile;
-use oxidize_core::inference::{InferenceConfig, InferenceModel};
+use oxidize_core::inference::{InferenceConfig, InferenceModel, ModelArchitecture};
 use oxidize_core::model::{Model, Session};
 use oxidize_core::model_loader::{GgufModelLoader, ModelLoader};
 use oxidize_core::tokenizer::{EncodeOptions, load_tokenizer_from_gguf_metadata};
@@ -74,6 +74,18 @@ fn load_model(model_path: &Path, use_mmap: bool) -> Result<InferenceModel, Strin
     let mapped = loader
         .load(model_path)
         .map_err(|e| format!("load gguf: {e}"))?;
+    // Pipeline splits the layer range across two processes and ships raw hidden
+    // states between them. K2 Horizon is not supported here: `config_from_metadata`
+    // parses only the classic dense metadata, so grouped RMSNorm, MoVA value
+    // experts, and the softplus attention gate would be silently dropped.
+    if ModelArchitecture::from_gguf(&mapped) == ModelArchitecture::K2Horizon {
+        return Err(
+            "pipeline head/tail execution does not support K2 Horizon (MoVA value experts, \
+             grouped RMSNorm, and the softplus attention gate); run the single-process \
+             --model path instead"
+                .to_owned(),
+        );
+    }
     let config = config_from_metadata(&mapped);
     InferenceModel::load_from_gguf(&mapped, config, use_mmap)
 }

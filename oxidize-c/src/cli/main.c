@@ -136,6 +136,9 @@ static void print_help(void)
 "  --api-key KEY          Require `Authorization: Bearer KEY` (default off)\n"
 "  --rate-limit N         Per-IP request/minute cap (default off)\n"
 "  --cors-origin ORIGIN   Send CORS headers for ORIGIN (default off)\n"
+"  --require-auth-on-public-bind\n"
+"                         Refuse to serve without --api-key on a non-loopback\n"
+"                         --host (exit 2); default is a startup warning\n"
 "  --temperature T        Sampling temperature (0 = greedy, default 0)\n"
 "  --top-k K              Top-K sampling (default 40, 0 = disabled)\n"
 "  --top-p P              Top-P / nucleus (default 0.95)\n"
@@ -700,6 +703,14 @@ int main(int argc, char **argv)
             server = oc_cli_command_name(ctx.command);
         if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
             return 1;
+        /* Bind posture before any model load: serve-realtime has no auth
+         * layer at all, so only `serve` with --api-key counts as authed. */
+        if (server != NULL &&
+            oc_server_check_bind_auth(ctx.host,
+                                      ctx.command == OC_CLI_CMD_SERVE &&
+                                          ctx.api_key != NULL,
+                                      ctx.require_auth_on_public_bind) != OC_OK)
+            return 2;
         if (ctx.command == OC_CLI_CMD_PROMPT) {
             OcCliArgs args;
             oc_cli_args_defaults(&args);
@@ -790,6 +801,9 @@ int main(int argc, char **argv)
     }
 
     if (args.serve_api) {
+        if (oc_server_check_bind_auth(args.host, args.api_key != NULL,
+                                      args.require_auth_on_public_bind) != OC_OK)
+            return 2;
         /* Start the OpenAI-compatible HTTP server. If --model is given,
          * load it; otherwise serve placeholder responses. */
         OcOpenaiState st;

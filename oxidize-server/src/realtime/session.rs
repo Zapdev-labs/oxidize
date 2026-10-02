@@ -1,4 +1,14 @@
 //! Socket-independent realtime session state. Unit-tested directly.
+//!
+//! The transcript is bounded ([`MAX_SESSION_ITEMS`], [`MAX_TRANSCRIPT_BYTES`]):
+//! a long-lived WebSocket is not covered by the HTTP body limit, so the oldest
+//! items are evicted (and counted in `evicted_items`) instead of growing forever.
+//!
+//! Trust model: `session.update` instructions and tool schemas are rendered
+//! verbatim into the system prompt ([`RealtimeSession::build_messages`]). That
+//! is by design for local single-tenant inference, where the client already
+//! controls every message. A multi-tenant proxy in front of this server must
+//! not let one tenant supply instructions/tools for another tenant's session.
 
 use crate::realtime::protocol::{ConversationItemInput, RealtimeTool, SessionUpdate, ToolChoice};
 
@@ -19,16 +29,79 @@ pub enum ConversationItem {
     FunctionCallOutput { call_id: String, output: String },
 }
 
+/// Maximum transcript items kept per session; older items are evicted.
+pub const MAX_SESSION_ITEMS: usize = 1024;
+/// Maximum transcript text bytes kept per session; older items are evicted.
+pub const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
+
+impl ConversationItem {
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Message { role, text } => role.len() + text.len(),
+            Self::FunctionCallOutput { call_id, output } => call_id.len() + output.len(),
+        }
+    }
+}
+
 /// The full session: config + transcript. No socket dependency.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RealtimeSession {
     pub config: SessionConfig,
     pub items: Vec<ConversationItem>,
+    /// Items dropped from the front of the transcript to honor the caps.
+    pub evicted_items: usize,
+    transcript_bytes: usize,
+    max_items: usize,
+    max_bytes: usize,
+}
+
+impl Default for RealtimeSession {
+    fn default() -> Self {
+        Self::with_limits(MAX_SESSION_ITEMS, MAX_TRANSCRIPT_BYTES)
+    }
 }
 
 impl RealtimeSession {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Session with custom transcript caps (each clamped to at least 1).
+    pub fn with_limits(max_items: usize, max_bytes: usize) -> Self {
+        Self {
+            config: SessionConfig::default(),
+            items: Vec::new(),
+            evicted_items: 0,
+            transcript_bytes: 0,
+            max_items: max_items.max(1),
+            max_bytes: max_bytes.max(1),
+        }
+    }
+
+    /// Total text bytes currently held in the transcript.
+    pub fn transcript_bytes(&self) -> usize {
+        self.transcript_bytes
+    }
+
+    /// Append an item, evicting the oldest until both caps hold. The newest
+    /// item is always kept (truncation of a single oversized item is left to
+    /// the generation path's context limit).
+    pub fn push_item(&mut self, item: ConversationItem) {
+        self.transcript_bytes += item.byte_len();
+        self.items.push(item);
+        let mut evict = 0;
+        let mut bytes = self.transcript_bytes;
+        while self.items.len() - evict > 1
+            && (self.items.len() - evict > self.max_items || bytes > self.max_bytes)
+        {
+            bytes -= self.items[evict].byte_len();
+            evict += 1;
+        }
+        if evict > 0 {
+            self.items.drain(..evict);
+            self.transcript_bytes = bytes;
+            self.evicted_items += evict;
+        }
     }
 
     /// Merge a partial `session.update` into the config. Only present fields
@@ -64,14 +137,14 @@ impl RealtimeSession {
                     .filter_map(|part| part.text)
                     .collect::<Vec<_>>()
                     .join("");
-                self.items.push(ConversationItem::Message { role, text });
+                self.push_item(ConversationItem::Message { role, text });
                 true
             }
             "function_call_output" => {
                 let Some(call_id) = item.call_id else {
                     return false;
                 };
-                self.items.push(ConversationItem::FunctionCallOutput {
+                self.push_item(ConversationItem::FunctionCallOutput {
                     call_id,
                     output: item.output.unwrap_or_default(),
                 });
@@ -234,7 +307,7 @@ mod tests {
             description: Some("Get weather".to_owned()),
             parameters: Some(serde_json::json!({"type": "object"})),
         }];
-        session.items.push(ConversationItem::Message {
+        session.push_item(ConversationItem::Message {
             role: "user".to_owned(),
             text: "weather?".to_owned(),
         });
@@ -250,6 +323,61 @@ mod tests {
                 .iter()
                 .any(|m| m.role == "user" && m.content == "weather?")
         );
+    }
+
+    fn user_message(text: &str) -> ConversationItemInput {
+        ConversationItemInput {
+            item_type: "message".to_owned(),
+            role: Some("user".to_owned()),
+            content: Some(vec![ContentPart {
+                part_type: "input_text".to_owned(),
+                text: Some(text.to_owned()),
+            }]),
+            call_id: None,
+            output: None,
+        }
+    }
+
+    /// server-006: N > cap appends keep item count and bytes bounded.
+    #[test]
+    fn transcript_is_bounded_by_item_cap() {
+        let mut session = RealtimeSession::with_limits(8, usize::MAX);
+        for i in 0..1000 {
+            assert!(session.add_item(user_message(&format!("m{i}"))));
+            assert!(session.items.len() <= 8);
+        }
+        assert_eq!(session.items.len(), 8);
+        assert_eq!(session.evicted_items, 992);
+        assert_eq!(
+            session.items.last(),
+            Some(&ConversationItem::Message {
+                role: "user".to_owned(),
+                text: "m999".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn transcript_is_bounded_by_byte_cap() {
+        let mut session = RealtimeSession::with_limits(usize::MAX, 1000);
+        let chunk = "x".repeat(96); // 100 bytes with role "user"
+        for _ in 0..500 {
+            session.add_item(user_message(&chunk));
+            assert!(session.transcript_bytes() <= 1000);
+            let actual: usize = session.items.iter().map(ConversationItem::byte_len).sum();
+            assert_eq!(actual, session.transcript_bytes());
+        }
+        assert_eq!(session.items.len(), 10);
+        assert_eq!(session.evicted_items, 490);
+    }
+
+    #[test]
+    fn oversized_single_item_is_kept_alone() {
+        let mut session = RealtimeSession::with_limits(16, 10);
+        session.add_item(user_message("short"));
+        session.add_item(user_message(&"y".repeat(64)));
+        assert_eq!(session.items.len(), 1);
+        assert_eq!(session.evicted_items, 1);
     }
 
     #[test]

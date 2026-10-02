@@ -172,6 +172,10 @@ typedef struct OcCliContext {
     /* Append-only: --prefill-chunk-size N (0 = unset). Kept last so the
      * Server / Benchmark / … offsets stay stable for older callers. */
     uint32_t           prefill_chunk_size;
+
+    /* Append-only: --require-auth-on-public-bind refuses to start serve /
+     * serve-realtime when auth is off and the bind is not loopback. */
+    bool               require_auth_on_public_bind;
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.

@@ -16,7 +16,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 
-use crate::app::AppState;
+use crate::app::{AppState, MAX_BODY_SIZE_BYTES};
 use crate::realtime::protocol::{ClientEvent, ServerEvent};
 use crate::realtime::session::{RealtimeSession, RenderedMessage, parse_tool_call};
 use crate::runtime::generate::{
@@ -25,9 +25,12 @@ use crate::runtime::generate::{
 };
 use crate::schema::ChatMessageInput;
 
-/// `GET /v1/realtime` — upgrade to a Realtime websocket session.
+/// `GET /v1/realtime` — upgrade to a Realtime websocket session. Frames are
+/// capped at the HTTP body limit, and the transcript by the session caps.
 pub async fn realtime_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.max_message_size(MAX_BODY_SIZE_BYTES)
+        .max_frame_size(MAX_BODY_SIZE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {

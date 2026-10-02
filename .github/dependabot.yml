@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Keeps SHA-pinned actions current; Dependabot rewrites the SHA and the `# vX.Y.Z` comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # Refreshes the digest-pinned base images in Dockerfile.cli / Dockerfile.server.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

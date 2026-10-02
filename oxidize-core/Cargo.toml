@@ -37,7 +37,7 @@ libp2p = { version = "0.56", features = ["gossipsub", "tcp", "tokio", "noise", "
 libc = "0.2"
 libloading = { version = "0.8", optional = true }
 memmap2 = "0.9"
-oxidize-kernels = { path = "../oxidize-kernels", optional = true }
+oxidize-kernels = { version = "0.1.0", path = "../oxidize-kernels", optional = true }
 rayon = "1"
 safetensors = "0.4"
 serde.workspace = true

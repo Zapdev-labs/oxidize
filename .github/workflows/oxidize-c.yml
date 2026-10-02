@@ -24,7 +24,7 @@ jobs:
       run:
         working-directory: oxidize-c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install build tools
         run: |
@@ -51,7 +51,7 @@ jobs:
       run:
         working-directory: oxidize-c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install build tools
         run: brew install criterion pkgconf
@@ -75,7 +75,7 @@ jobs:
       run:
         working-directory: oxidize-c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Build static library
         run: make clean && make lib
@@ -94,7 +94,7 @@ jobs:
       run:
         working-directory: oxidize-c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install build tools
         run: |
@@ -115,10 +115,10 @@ jobs:
       run:
         working-directory: oxidize-c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
         with:
           cuda: "12.9.1"
           method: network
@@ -140,7 +140,7 @@ jobs:
     needs: [cpu-build-test]
     if: github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Python + Modal
         run: |
@@ -176,7 +176,7 @@ jobs:
       run:
         working-directory: oxidize-c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install clang-tools
         run: |
@@ -213,7 +213,7 @@ jobs:
       run:
         working-directory: oxidize-c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install cross-compiler
         run: |

@@ -133,10 +133,28 @@ impl InferenceModel {
         if self.layers.is_empty() {
             return false;
         }
+        // K2 Horizon needs grouped RMSNorm, MoVA routed value experts, and a
+        // softplus attention gate. `forward_batched` implements none of those,
+        // so the whole model is ineligible rather than only the routed layers.
+        if self.config.architecture == ModelArchitecture::K2Horizon
+            || self.config.layer_norm_group_count > 1
+            || self.config.value_expert_count > 0
+            || self.config.attention_gate_softplus
+        {
+            return false;
+        }
         let mut attention_widths: Option<(usize, usize, usize)> = None;
         for layer in &self.layers {
             let is_mamba = !layer.attn_qkv.is_empty() && layer.attn_q.is_empty();
             if is_mamba {
+                return false;
+            }
+            // MoVA value experts and the attention output gate are not modeled
+            // by the batched path's plain QKV GEMM / RMSNorm.
+            if !layer.attn_v_exps.is_empty()
+                || !layer.attn_v_gate.is_empty()
+                || !layer.attn_gate.is_empty()
+            {
                 return false;
             }
             let is_moe = !layer.ffn_gate_exps.is_empty()
@@ -1639,6 +1657,7 @@ impl InferenceModel {
     }
 
     /// RMSNorm on `hidden` using the model's final norm weights (for LoRA / training).
+    /// Uses the same grouping as the model's forward pass (K2 Horizon: 2 groups).
     pub fn apply_final_norm(&self, hidden: &[f32], out: &mut [f32]) -> Result<(), ModelError> {
         let h = self.config.hidden_size;
         if hidden.len() != h || out.len() != h {
@@ -1648,8 +1667,13 @@ impl InferenceModel {
                 out.len()
             )));
         }
-        rms_norm_f32(hidden, &self.norm_weight, self.config.rms_norm_eps, out)
-            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))
+        layers::grouped_rms_norm(
+            hidden,
+            &self.norm_weight,
+            self.config.rms_norm_eps,
+            self.config.layer_norm_group_count,
+            out,
+        )
     }
 
     /// Final norm weights (read-only) for external training loops.
@@ -1737,11 +1761,16 @@ impl InferenceModel {
         let h = self.config.hidden_size;
         let vocab_size = self.config.vocab_size;
         let rms_norm_eps = self.config.rms_norm_eps;
-
+        // K2 Horizon's final norm is grouped RMSNorm. `gpu_final_head_device_resident`
+        // below normalizes internally with a *single* RMSNorm, so it must not serve a
+        // grouped model; `gpu_lm_head_quantized` receives an already-normalized vector
+        // and only does the GEMV, so it stays valid for every architecture.
+        #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
+        let grouped_final_norm = self.config.layer_norm_group_count > 1;
         let ws = &mut self.workspace;
 
         #[cfg(feature = "cuda")]
-        {
+        if !grouped_final_norm {
             if crate::cuda::gpu_activation_ready() {
                 if let Some(w_bytes) = Self::q4k_or_q6k_bytes(&self.output_weight) {
                     let logits = &mut ws.logits[..vocab_size];
@@ -1771,11 +1800,18 @@ impl InferenceModel {
         // CPU final norm + lm_head (fallback when gpu_native inactive).
         let normed = &mut ws.hidden_a[..h];
         normed.fill(0.0_f32);
-        rms_norm_f32(&ws.x[..h], &self.norm_weight, rms_norm_eps, normed)
-            .map_err(|e| ModelError::InferenceFailed(format!("final_norm: {:?}", e)))?;
+        layers::grouped_rms_norm(
+            &ws.x[..h],
+            &self.norm_weight,
+            rms_norm_eps,
+            self.config.layer_norm_group_count,
+            normed,
+        )?;
         let last_hidden = normed.to_vec();
 
-        // lm_head GEMV: try GPU for Q4K/Q6K weights (avoids ~6–16 ms/token CPU bottleneck).
+        // lm_head GEMV on GPU for Q4K/Q6K weights (avoids ~6–16 ms/token on the CPU
+        // for a 128k-vocab head). `normed` already went through the grouped norm
+        // above, so this kernel is semantics-preserving for every architecture.
         #[cfg(feature = "cuda")]
         {
             if let Some(w_bytes) = Self::q4k_or_q6k_bytes(&self.output_weight) {

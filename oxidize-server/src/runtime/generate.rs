@@ -160,6 +160,9 @@ pub fn render_chat_prompt(runtime: &ModelRuntime, messages: &[ChatMessageInput])
             for message in messages {
                 prompt.push_str(&message.role);
                 prompt.push_str(": ");
+                // image_url strings are inlined as prompt text and never
+                // fetched (no SSRF surface); they are as client-controlled as
+                // `content` itself, so this adds no new injection channel.
                 if let Some(images) = &message.images {
                     for image_url in images {
                         prompt.push_str("[IMAGE: ");
@@ -203,7 +206,7 @@ fn generate_text_blocking(
             pad_to: None,
         },
     );
-    let max_tokens = request.max_tokens.unwrap_or(runtime.defaults.max_tokens);
+    let max_tokens = runtime.defaults.resolve_max_tokens(request.max_tokens);
     let temperature = request.temperature.unwrap_or(runtime.defaults.temperature);
     let top_p = request.top_p.or(runtime.defaults.top_p);
     let top_k = request.top_k.or(runtime.defaults.top_k);
@@ -327,7 +330,7 @@ fn generate_text_streaming_inner(
             pad_to: None,
         },
     );
-    let max_tokens = request.max_tokens.unwrap_or(runtime.defaults.max_tokens);
+    let max_tokens = runtime.defaults.resolve_max_tokens(request.max_tokens);
     let temperature = request.temperature.unwrap_or(runtime.defaults.temperature);
     let top_p = request.top_p.or(runtime.defaults.top_p);
     let top_k = request.top_k.or(runtime.defaults.top_k);
@@ -429,9 +432,10 @@ pub fn generate_with_scheduler_blocking(
         },
     );
 
-    let max_tokens = request
-        .max_tokens
-        .unwrap_or(paged.runtime.defaults.max_tokens);
+    let max_tokens = paged
+        .runtime
+        .defaults
+        .resolve_max_tokens(request.max_tokens);
     let temperature = request
         .temperature
         .unwrap_or(paged.runtime.defaults.temperature);
@@ -583,9 +587,10 @@ fn generate_with_scheduler_streaming_inner(
         },
     );
 
-    let max_tokens = request
-        .max_tokens
-        .unwrap_or(paged.runtime.defaults.max_tokens);
+    let max_tokens = paged
+        .runtime
+        .defaults
+        .resolve_max_tokens(request.max_tokens);
     let temperature = request
         .temperature
         .unwrap_or(paged.runtime.defaults.temperature);

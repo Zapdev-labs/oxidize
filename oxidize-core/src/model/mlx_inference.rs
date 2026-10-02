@@ -168,10 +168,22 @@ impl MlxInferenceModel {
         mapped: &MappedGgufFile,
         mut config: InferenceConfig,
     ) -> Result<Self, String> {
-        let backend = MlxComputeBackend::new();
-
         // Architecture detection from GGUF metadata
         config.architecture = ModelArchitecture::from_gguf(mapped);
+
+        // `MlxLayerWeights` / `forward_single` implement plain RMSNorm, a dense
+        // V projection, and no attention output gate, so K2's MoVA value
+        // experts, two-group norms, and softplus gate cannot be reproduced.
+        if config.architecture == ModelArchitecture::K2Horizon {
+            return Err(
+                "MLX backend does not support K2 Horizon (MoVA value experts, grouped RMSNorm, \
+                 and the softplus attention gate are only implemented in the dense per-token CPU \
+                 path); use the CPU backend"
+                    .to_owned(),
+            );
+        }
+
+        let backend = MlxComputeBackend::new();
         if config.alibi_num_heads == 0 {
             config.alibi_num_heads = config.num_attention_heads;
         }

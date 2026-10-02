@@ -9,5 +9,5 @@ name = "oxidize"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-oxidize-core = { path = "../oxidize-core" }
+oxidize-core = { version = "0.1.0", path = "../oxidize-core" }
 pyo3.workspace = true

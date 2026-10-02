@@ -1,9 +1,14 @@
 """Assemble runner.py + plugin + bench.py into a private Kaggle TPU notebook.
 
-    HF_TOKEN=hf_... python build_notebook.py [--push]
+    python build_notebook.py [--push]
 
-Secrets (HF token, ntfy topics, HMAC key) go to .state.json / build/ (gitignored).
+The notebook and payload contain no credentials. The HF token and the job HMAC key
+are attached as Kaggle Secrets (`K2_HF_TOKEN`, `K2_HMAC_KEY`) and read at runtime;
+the HMAC key and ntfy topics persist in .state.json (gitignored) for job.py.
+The secret-free runner is also written to k2_runner_payload.py so it can be
+reviewed in-repo; build/bootstrap_cell.py execs it only after a sha256 check.
 """
+import hashlib
 import base64
 import io
 import json
@@ -33,13 +38,11 @@ with tarfile.open(fileobj=buf, mode="w:gz") as tf:
             tf.add(p, arcname=str(p.relative_to(src)))
 
 cfg = {
-    "hf_token": os.environ.get("HF_TOKEN", ""),
     "hf_model_id": "InfinimindCreations/K2-Horizon-MoVA-36B-A4B-uncensored",
     "vllm_tpu_version": "0.29.0",
     "keepalive_min": 510,
     "in_topic": state["in_topic"],
     "out_topic": state["out_topic"],
-    "hmac_key": state["hmac_key"],
     "plugin_b64": base64.b64encode(buf.getvalue()).decode(),
     "bench_b64": base64.b64encode((HERE / "bench.py").read_bytes()).decode(),
 }
@@ -51,6 +54,17 @@ nb = {"cells": [{"cell_type": "code", "execution_count": None, "metadata": {}, "
                    "language_info": {"name": "python"}},
       "nbformat": 4, "nbformat_minor": 5}
 BUILD.mkdir(exist_ok=True)
+PAYLOAD = HERE / "k2_runner_payload.py"
+PAYLOAD.write_text(code)
+digest = hashlib.sha256(code.encode()).hexdigest()
+(BUILD / "bootstrap_cell.py").write_text(
+    "# Paste after publishing k2_runner_payload.py at a revision-pinned raw URL.\n"
+    "import hashlib, urllib.request\n"
+    "PAYLOAD_URL = ''  # e.g. https://gist.githubusercontent.com/<user>/<id>/raw/<rev>/k2_runner_payload.py\n"
+    f"PAYLOAD_SHA256 = '{digest}'\n"
+    "src = urllib.request.urlopen(PAYLOAD_URL).read()\n"
+    "assert hashlib.sha256(src).hexdigest() == PAYLOAD_SHA256, 'payload sha256 mismatch'\n"
+    "exec(src.decode())\n")
 (BUILD / f"{SLUG}.ipynb").write_text(json.dumps(nb))
 user = os.environ.get("KAGGLE_USER", "otdoges")
 (BUILD / "kernel-metadata.json").write_text(json.dumps({
@@ -60,5 +74,7 @@ user = os.environ.get("KAGGLE_USER", "otdoges")
     "dataset_sources": [], "kernel_sources": [], "competition_sources": [],
     "model_sources": [], "machine_shape": "TpuV5E8"}))
 print("built", BUILD / f"{SLUG}.ipynb", f"({len(code) // 1024} KB)")
+print("payload", PAYLOAD, "sha256", digest)
+print("Kaggle Secrets required: K2_HF_TOKEN (HF read token), K2_HMAC_KEY (from .state.json)")
 if "--push" in sys.argv:
     subprocess.run(["kaggle", "kernels", "push", "-p", str(BUILD)], check=True)

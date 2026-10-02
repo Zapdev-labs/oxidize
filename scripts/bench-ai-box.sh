@@ -4,17 +4,28 @@
 set -euo pipefail
 
 HOST="${OXIDIZE_AI_HOST:-ai@192.168.1.132}"
-PASS="${OXIDIZE_AI_PASS:-machine}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CMAKE_REMOTE='/home/ai/.local/lib/python3.14/site-packages/cmake/data/bin/cmake'
 
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
+
+# Key-based auth by default. Password auth is an explicit opt-in: export
+# OXIDIZE_AI_PASS (never committed, no default) and install sshpass.
+ssh_wrap() {
+  if [[ -n "${OXIDIZE_AI_PASS:-}" ]]; then
+    SSHPASS="$OXIDIZE_AI_PASS" sshpass -e "$@"
+  else
+    "$@"
+  fi
+}
+
 run_remote() {
-  sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no "$HOST" "$@"
+  ssh_wrap ssh "${SSH_OPTS[@]}" "$HOST" "$@"
 }
 
 sync_cpp() {
   run_remote "mkdir -p ~/oxidize/oxidize-cpp"
-  sshpass -p "$PASS" rsync -az --delete -e "ssh -o StrictHostKeyChecking=no" \
+  ssh_wrap rsync -az --delete -e "ssh ${SSH_OPTS[*]}" \
     "$ROOT/oxidize-cpp/" "$HOST:~/oxidize/oxidize-cpp/"
 }
 

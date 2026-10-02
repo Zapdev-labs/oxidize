@@ -4827,7 +4827,9 @@ static void prefill_out_gate(const AttnJob *j, size_t tok, uint32_t h,
 
 /* Flash prefill: one task = one kv head x a block of FP_TQ query tokens.
  * All G query heads of the kv head share each K/V tile read. */
-#define FP_TQ 16u
+/* One kv-head task streams the cache for this many query tokens. 16 re-read
+ * a long prefix dozens of times per chunk; matching the chunk scans it once. */
+#define FP_TQ 512u
 
 typedef struct {
     const AttnJob *aj;
@@ -5803,12 +5805,40 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
         return OC_ERR_INVALID_ARG;
     if (dst->kv_compress || src->kv_compress)
         return OC_ERR_INVALID_ARG;
-    if (dst->kv_rq || src->kv_rq)
-        return OC_ERR_INVALID_ARG;
 
     const OcLlamaConfig *c = &src->model->cfg;
     const size_t cache_layers = c->is_qwen35
                               ? c->n_full_attention_layers : c->n_layer;
+    if (src->kv_type == OC_KV_RQ || dst->kv_type == OC_KV_RQ) {
+        OcKvRqCache *s = src->kv_rq;
+        OcKvRqCache *d = dst->kv_rq;
+        if (src->kv_type != OC_KV_RQ || d == NULL || s == NULL ||
+            s->n_layers != d->n_layers || s->n_kv != d->n_kv ||
+            s->d != d->d || s->n_slots != d->n_slots ||
+            s->kc.block_bytes != d->kc.block_bytes ||
+            s->vc.block_bytes != d->vc.block_bytes ||
+            s->n_pages != d->n_pages)
+            return OC_ERR_INVALID_ARG;
+        const size_t npos = (size_t)src->pos;
+        for (size_t layer = 0; layer < s->n_layers; layer++)
+            oc_kvrq_flush(s, layer);
+        for (size_t layer = 0; layer < s->n_layers; layer++) {
+            for (size_t h = 0; h < s->n_kv; h++) {
+                memcpy((uint8_t *)oc_kvrq_kblocks(d, layer, h),
+                       oc_kvrq_kblocks(s, layer, h),
+                       npos * s->kc.block_bytes);
+                memcpy((uint8_t *)oc_kvrq_vblocks(d, layer, h),
+                       oc_kvrq_vblocks(s, layer, h),
+                       npos * s->vc.block_bytes);
+            }
+        }
+        if (s->xq_bytes > 0) memcpy(d->xq, s->xq, s->xq_bytes);
+        if (s->xs_bytes > 0) memcpy(d->xs, s->xs, s->xs_bytes);
+        if (s->tag_bytes > 0) memcpy(d->tag, s->tag, s->tag_bytes);
+        if (s->mu_bytes > 0) memcpy(d->mu, s->mu, s->mu_bytes);
+        if (s->mu_fixed != NULL && d->mu_fixed != NULL && s->n_pages > 0)
+            memcpy(d->mu_fixed, s->mu_fixed, s->n_layers * s->n_pages);
+    } else {
     size_t rows, elems;
     if (!size_mul(cache_layers, (size_t)src->pos, &rows) ||
         !size_mul(rows, src->kv_row_floats, &elems))
@@ -5826,6 +5856,7 @@ OcError oc_llama_session_copy_prefix(OcLlamaSession *dst,
         memcpy(dst->kv_k, src->kv_k, elems * sizeof(*src->kv_k));
         if (!c->uses_mla)
             memcpy(dst->kv_v, src->kv_v, elems * sizeof(*src->kv_v));
+    }
     }
 
     if (c->is_qwen35) {

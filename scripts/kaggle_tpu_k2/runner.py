@@ -9,7 +9,9 @@ batch runs on this account land on a CPU box). It:
   5. then serves as a job runner: HMAC-signed scripts posted to an ntfy topic are
      executed in the venv and their logs are posted back, until `stop` or the
      deadline. Progress lines + logs go to the OUT topic.
-Filled in by build_notebook.py: CFG below.
+Filled in by build_notebook.py: CFG below (non-secret config only).
+Secrets are read at runtime, never embedded: Kaggle Secrets (Add-ons -> Secrets)
+`K2_HF_TOKEN` and `K2_HMAC_KEY`, falling back to the HF_TOKEN / K2_HMAC_KEY env vars.
 """
 import base64
 import hashlib
@@ -26,7 +28,23 @@ import urllib.request
 from pathlib import Path
 
 CFG = {}  # __CFG__
-CFG = {**CFG, **globals().get("K2_SECRETS", {})}
+
+
+def _secret(kaggle_name, env_name):
+    val = os.environ.get(env_name, "")
+    if not val:
+        try:
+            from kaggle_secrets import UserSecretsClient
+            val = UserSecretsClient().get_secret(kaggle_name)
+        except Exception:  # noqa: BLE001
+            val = ""
+    return val
+
+
+CFG["hf_token"] = _secret("K2_HF_TOKEN", "HF_TOKEN")
+CFG["hmac_key"] = _secret("K2_HMAC_KEY", "K2_HMAC_KEY")
+if not CFG["hmac_key"]:
+    raise SystemExit("K2_HMAC_KEY secret missing: add it under Kaggle Add-ons -> Secrets")
 
 VENV = "/tmp/venv"
 PY = f"{VENV}/bin/python"

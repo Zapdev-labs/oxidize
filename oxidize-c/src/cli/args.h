@@ -34,6 +34,7 @@ typedef struct OcCliArgs {
     const char *api_key;        /* --api-key KEY; NULL leaves auth off     */
     int        rate_limit_rpm;  /* --rate-limit N; 0 leaves it off         */
     const char *cors_origin;    /* --cors-origin ORIGIN; NULL leaves it off */
+    bool       require_auth_on_public_bind; /* refuse no-auth non-loopback bind */
     float      temperature;
     uint32_t   top_k;
     float      top_p;

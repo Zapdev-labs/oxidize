@@ -55,6 +55,9 @@ pub enum ModelArchitecture {
     /// Tencent Hunyuan (hy_v3): GQA + qk_norm attention, sigmoid-routed MoE
     /// with a shared expert and leading dense blocks. Standard attention (no MLA).
     HunyuanMoe,
+    /// IFM K2 Horizon: grouped RMSNorm, MoVA routed value experts, gated GQA,
+    /// and sigmoid-routed sparse FFN experts.
+    K2Horizon,
 }
 
 impl ModelArchitecture {
@@ -88,6 +91,7 @@ impl ModelArchitecture {
                 "hunyuan" | "hunyuan_moe" | "hunyuanmoe" | "hy_v3" | "hyv3" | "hunyuan_v3" => {
                     Self::HunyuanMoe
                 }
+                "k2_horizon" | "k2horizon" => Self::K2Horizon,
                 _ => Self::Llama,
             }
         } else {
@@ -115,6 +119,7 @@ impl ModelArchitecture {
                 | Self::DeepSeek
                 | Self::GlmMoeDsa
                 | Self::HunyuanMoe
+                | Self::K2Horizon
         )
     }
 
@@ -207,6 +212,13 @@ pub struct InferenceConfig {
     /// DeepSeek-V3 group-limited routing: groups kept per token (`topk_group`).
     /// Only consulted when `expert_group_count > 1`.
     pub expert_group_used_count: usize,
+    /// Number of independent RMSNorm groups. K2 Horizon uses two groups.
+    pub layer_norm_group_count: usize,
+    /// MoVA value experts and active experts per token.
+    pub value_expert_count: usize,
+    pub value_expert_used_count: usize,
+    /// K2 attention gate uses softplus(beta=ln(2)); otherwise SiLU.
+    pub attention_gate_softplus: bool,
     /// YaRN rope extension factor (0 = disabled). GGUF `rope.scaling.factor`.
     pub yarn_factor: f32,
     /// Training context length before YaRN extension. GGUF
@@ -249,6 +261,10 @@ impl Default for InferenceConfig {
             expert_weights_scale: 1.0,
             expert_group_count: 0,
             expert_group_used_count: 0,
+            layer_norm_group_count: 1,
+            value_expert_count: 0,
+            value_expert_used_count: 0,
+            attention_gate_softplus: false,
             yarn_factor: 0.0,
             yarn_orig_ctx: 0.0,
         }
@@ -584,6 +600,18 @@ impl InferenceConfig {
             .or_else(|| metadata_u32_lookup(metadata, "expert_group_used_count"))
             .map(|v| v as usize)
             .unwrap_or(0);
+        let layer_norm_group_count = arch_u32("layer_norm_group_count")
+            .map(|v| v as usize)
+            .filter(|&v| v > 0)
+            .unwrap_or(1);
+        let value_expert_count = arch_u32("attention.value_expert_count")
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let value_expert_used_count = arch_u32("attention.value_expert_used_count")
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let attention_gate_softplus =
+            arch_str("attention.gate_function").as_deref() == Some("softplus");
 
         // Partial RoPE: number of head dimensions that receive rotation.
         // 0 means "use full kv_head_dim" (standard). MiniMax-M2 uses 64 of 128.
@@ -691,6 +719,10 @@ impl InferenceConfig {
             expert_weights_scale,
             expert_group_count,
             expert_group_used_count,
+            layer_norm_group_count,
+            value_expert_count,
+            value_expert_used_count,
+            attention_gate_softplus,
             yarn_factor,
             yarn_orig_ctx,
         }
@@ -1260,6 +1292,10 @@ pub(crate) struct LayerWeights {
     pub(super) attn_k_bias: Vec<f32>,
     pub(super) attn_v: WeightStorage,
     pub(super) attn_v_bias: Vec<f32>,
+    /// K2 MoVA routed value experts and selection router.
+    pub(super) attn_v_exps: WeightStorage,
+    pub(super) attn_v_gate: WeightStorage,
+    pub(super) attn_v_gate_bias: Vec<f32>,
     pub(super) attn_output: WeightStorage,
     pub(super) attn_output_bias: Vec<f32>,
     pub(super) ffn_norm: Vec<f32>,
@@ -1439,12 +1475,24 @@ impl InferenceModel {
         self.kv_cache.config().layer_count
     }
 
-    /// Whether continuous-batching decode is enabled (env `OX_BATCHED_DECODE`).
+    /// Whether continuous-batching decode is enabled (env `OX_BATCHED_DECODE`)
+    /// *and* the model can actually run on [`InferenceModel::forward_batch`].
     /// The paged runtime / batched-decode bench consult this before routing N
-    /// decode tokens through [`InferenceModel::forward_batch`]; OFF by default so
-    /// every existing path stays byte-identical.
+    /// decode tokens through the batched path; OFF by default so every existing
+    /// path stays byte-identical.
+    ///
+    /// K2 Horizon always reports `false` here: `forward_batch` implements plain
+    /// RMSNorm and a dense QKV projection, so it would silently drop the grouped
+    /// norms, the MoVA value experts, and the softplus attention gate.
     pub fn batched_decode_enabled(&self) -> bool {
-        layers::ox_batched_decode_enabled()
+        if self.config.architecture == ModelArchitecture::K2Horizon
+            || self.config.layer_norm_group_count > 1
+            || self.config.value_expert_count > 0
+            || self.config.attention_gate_softplus
+        {
+            return false;
+        }
+        layers::ox_batched_decode_enabled() && self.layers_supported_for_batched()
     }
 
     /// KV row width (`num_key_value_heads * kv_head_dim`) used to size a
@@ -2002,6 +2050,185 @@ mod tests {
     use crate::gguf::{GgufFile, GgufMetadataValue, GgufTensorInfo, MappedGgufFile};
     use std::collections::BTreeMap;
 
+    /// K2 Horizon metadata → `InferenceConfig`. Layers 0-2 are dense
+    /// (`mlp_only_layers: [0,1,2]`), so `leading_dense_block_count` must be 3
+    /// and the MoE flags must be set for the routed layers that follow.
+    fn k2_horizon_config_from_metadata() -> InferenceConfig {
+        let metadata = BTreeMap::from([
+            (
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("k2-horizon".to_owned()),
+            ),
+            (
+                "k2-horizon.block_count".to_owned(),
+                GgufMetadataValue::Uint32(48),
+            ),
+            (
+                "k2-horizon.embedding_length".to_owned(),
+                GgufMetadataValue::Uint32(2560),
+            ),
+            (
+                "k2-horizon.feed_forward_length".to_owned(),
+                GgufMetadataValue::Uint32(6144),
+            ),
+            (
+                "k2-horizon.attention.head_count".to_owned(),
+                GgufMetadataValue::Uint32(32),
+            ),
+            (
+                "k2-horizon.attention.head_count_kv".to_owned(),
+                GgufMetadataValue::Uint32(8),
+            ),
+            (
+                "k2-horizon.attention.key_length".to_owned(),
+                GgufMetadataValue::Uint32(128),
+            ),
+            (
+                "k2-horizon.expert_count".to_owned(),
+                GgufMetadataValue::Uint32(100),
+            ),
+            (
+                "k2-horizon.expert_used_count".to_owned(),
+                GgufMetadataValue::Uint32(8),
+            ),
+            (
+                "k2-horizon.expert_feed_forward_length".to_owned(),
+                GgufMetadataValue::Uint32(768),
+            ),
+            (
+                "k2-horizon.leading_dense_block_count".to_owned(),
+                GgufMetadataValue::Uint32(3),
+            ),
+            (
+                "k2-horizon.expert_gating_func".to_owned(),
+                GgufMetadataValue::Uint32(2),
+            ),
+            (
+                "k2-horizon.expert_weights_scale".to_owned(),
+                GgufMetadataValue::Float32(2.5),
+            ),
+            (
+                "k2-horizon.attention.value_expert_count".to_owned(),
+                GgufMetadataValue::Uint32(64),
+            ),
+            (
+                "k2-horizon.attention.value_expert_used_count".to_owned(),
+                GgufMetadataValue::Uint32(4),
+            ),
+            (
+                "k2-horizon.layer_norm_group_count".to_owned(),
+                GgufMetadataValue::Uint32(2),
+            ),
+            (
+                "k2-horizon.attention.gate_function".to_owned(),
+                GgufMetadataValue::String("softplus".to_owned()),
+            ),
+            (
+                "k2-horizon.attention.layer_norm_rms_epsilon".to_owned(),
+                GgufMetadataValue::Float32(1e-6),
+            ),
+        ]);
+        let parsed = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata,
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+        InferenceConfig::from_gguf(&MappedGgufFile::from_parsed_for_test(parsed))
+    }
+
+    #[test]
+    fn k2_horizon_config_from_gguf_metadata() {
+        let cfg = k2_horizon_config_from_metadata();
+
+        assert_eq!(cfg.architecture, ModelArchitecture::K2Horizon);
+        assert!(cfg.architecture.uses_moe());
+        // MoVA is routed-value attention, not MLA: q/k/v are plain GQA projections.
+        assert!(!cfg.architecture.uses_mla());
+        assert_eq!(cfg.layer_count, 48);
+        assert_eq!(cfg.hidden_size, 2560);
+        assert_eq!(cfg.intermediate_size, 6144);
+        assert_eq!(cfg.expert_intermediate_size, 768);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_key_value_heads, 8);
+        assert_eq!(cfg.kv_head_dim(), 128);
+        assert!((cfg.rms_norm_eps - 1e-6).abs() < 1e-12);
+
+        // Grouped RMSNorm over 2 × 1280.
+        assert_eq!(cfg.layer_norm_group_count, 2);
+        assert_eq!(cfg.hidden_size % cfg.layer_norm_group_count, 0);
+
+        // MoVA value routing: 64 experts, top 4.
+        assert_eq!(cfg.value_expert_count, 64);
+        assert_eq!(cfg.value_expert_used_count, 4);
+
+        // FFN routing: sigmoid scores, selection-only bias, renormalized
+        // top-8 selection scaled by router_scaling_factor 2.5.
+        assert_eq!(cfg.num_experts, 100);
+        assert_eq!(cfg.num_experts_per_tok, 8);
+        assert!(cfg.expert_gating_sigmoid);
+        assert!((cfg.expert_weights_scale - 2.5).abs() < 1e-6);
+        // K2 has no DeepSeek group-limited routing.
+        assert_eq!(cfg.expert_group_count, 0);
+        // mlp_only_layers [0,1,2] → 3 leading dense FFN blocks.
+        assert_eq!(cfg.leading_dense_layers, 3);
+
+        assert!(cfg.attention_gate_softplus);
+    }
+
+    /// `batched_decode_enabled` gates the server's continuous-batching engine.
+    /// It must refuse K2 even when the env flag is set, otherwise the engine
+    /// would drive `forward_batch` on a model that path cannot express.
+    #[test]
+    fn k2_horizon_disables_batched_decode_regardless_of_env() {
+        let mut model = tiny_inference_model();
+        model.config = k2_horizon_config_from_metadata();
+        model.config.layer_count = 0;
+        model.config.vocab_size = 3;
+        model.config.context_size = 8;
+        model.config.hidden_size = 2;
+        model.config.num_attention_heads = 1;
+        model.config.num_key_value_heads = 1;
+        model.config.key_value_head_dim = 2;
+        model.config.kv_cache_dtype = DType::F32;
+        model.config.intermediate_size = 0;
+        model.kv_cache = KvCache::new(KvCacheConfig {
+            layer_count: 0,
+            context_size: 8,
+            head_count: 1,
+            head_dim: 2,
+            dtype: DType::F32,
+            quantization: Default::default(),
+        })
+        .expect("tiny kv cache should be valid");
+        model.workspace = Workspace::for_config(&model.config);
+
+        // The env gate is a process-wide OnceLock, so only assert the K2
+        // rejection; the enabled/disabled env behavior is covered elsewhere.
+        assert!(!model.batched_decode_enabled());
+        assert!(!model.layers_supported_for_batched());
+    }
+
+    #[test]
+    fn k2_horizon_layer_norm_group_count_defaults_to_one() {
+        let parsed = GgufFile {
+            version: 3,
+            tensor_count: 0,
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                GgufMetadataValue::String("k2-horizon".to_owned()),
+            )]),
+            tensor_infos: Vec::new(),
+            alignment: 32,
+            data_section_start: 0,
+        };
+        let cfg = InferenceConfig::from_gguf(&MappedGgufFile::from_parsed_for_test(parsed));
+        // Absent metadata must not silently request grouped norms.
+        assert_eq!(cfg.layer_norm_group_count, 1);
+    }
+
     #[test]
     fn qwen35_mtp_metadata_subtracts_nextn_layers() {
         let mapped = MappedGgufFile::from_parsed_for_test(GgufFile {
@@ -2536,6 +2763,48 @@ mod tests {
             ..Default::default()
         };
         model.layers.push(layer);
+
+        assert!(!model.layers_supported_for_batched());
+    }
+
+    /// K2's MoVA value experts and its softplus attention gate are implemented
+    /// only in the per-token CPU path. `forward_batched` uses ordinary RMSNorm
+    /// and a plain dense QKV GEMM, so it would silently run K2 without grouped
+    /// norms, routed value experts, or the gate. Reject it explicitly.
+    #[test]
+    fn batched_prefill_rejects_k2_mova_value_experts() {
+        let mut model = tiny_inference_model();
+        model.config.architecture = ModelArchitecture::K2Horizon;
+        model.config.value_expert_count = 64;
+        model.config.layer_norm_group_count = 2;
+        model.config.attention_gate_softplus = true;
+        model.layers = vec![LayerWeights {
+            attn_q: WeightStorage::F32(vec![0.0; 4]),
+            attn_k: WeightStorage::F32(vec![0.0; 4]),
+            attn_v: WeightStorage::F32(vec![0.0; 4]),
+            attn_v_exps: WeightStorage::F32(vec![0.0; 4]),
+            attn_v_gate: WeightStorage::F32(vec![0.0; 1]),
+            ..Default::default()
+        }];
+
+        assert!(!model.layers_supported_for_batched());
+    }
+
+    /// The attention gate alone is enough to disqualify a layer even when the
+    /// value-expert tensors are absent (e.g. dense K2 layers 0-2, which are
+    /// still gated).
+    #[test]
+    fn batched_prefill_rejects_k2_attention_gate() {
+        let mut model = tiny_inference_model();
+        model.config.architecture = ModelArchitecture::K2Horizon;
+        model.config.attention_gate_softplus = true;
+        model.layers = vec![LayerWeights {
+            attn_q: WeightStorage::F32(vec![0.0; 4]),
+            attn_k: WeightStorage::F32(vec![0.0; 4]),
+            attn_v: WeightStorage::F32(vec![0.0; 4]),
+            attn_gate: WeightStorage::F32(vec![0.0; 4]),
+            ..Default::default()
+        }];
 
         assert!(!model.layers_supported_for_batched());
     }

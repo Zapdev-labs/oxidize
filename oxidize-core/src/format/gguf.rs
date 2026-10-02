@@ -375,7 +375,9 @@ impl GgufQuantizationType {
             12 => Self::Q4_K_M, // ggml Q4_K (S/M distinction is metadata-level, not type-level)
             13 => Self::Q5_K_M, // ggml Q5_K
             14 => Self::Q6_K,   // ggml Q6_K
-            15 => Self::Q4_K_M, // ggml Q8_K — no Q8_K enum variant; closest supported type
+            // Oxidize has no Q8_K weight storage variant. Preserve the raw type
+            // as unsupported instead of misinterpreting Q8_K payload bytes as Q4_K.
+            15 => Self::Unknown(ggml_type),
             16 => Self::IQ2_XXS,
             17 => Self::IQ2_XS,
             18 => Self::IQ3_XXS,
@@ -486,6 +488,10 @@ pub enum GgufParseError {
     InvalidAlignment(u64),
     #[error("integer overflow while parsing")]
     IntegerOverflow,
+    #[error("invalid gguf header: {0}")]
+    InvalidHeader(&'static str),
+    #[error("tensor has {0} dimensions (max {max})", max = GGUF_MAX_DIMS)]
+    TooManyDimensions(u32),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -500,6 +506,8 @@ impl PartialEq for GgufParseError {
             (Self::UnknownMetadataType(a), Self::UnknownMetadataType(b)) => a == b,
             (Self::InvalidAlignment(a), Self::InvalidAlignment(b)) => a == b,
             (Self::IntegerOverflow, Self::IntegerOverflow) => true,
+            (Self::InvalidHeader(a), Self::InvalidHeader(b)) => a == b,
+            (Self::TooManyDimensions(a), Self::TooManyDimensions(b)) => a == b,
             (Self::Io(a), Self::Io(b)) => a.kind() == b.kind(),
             _ => false,
         }
@@ -595,6 +603,10 @@ fn load_mapped_gguf_shards(shards: &[PathBuf]) -> Result<MappedGgufFile, GgufPar
     })
 }
 
+/// Maximum tensor rank accepted by the parser. Mirrors `OC_GGUF_MAX_DIMS` in
+/// `oxidize-c/include/oxidize/gguf.h` so both parsers reject the same files.
+pub const GGUF_MAX_DIMS: u32 = 8;
+
 pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
     let mut reader = ByteReader::new(bytes);
 
@@ -610,6 +622,14 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
 
     let tensor_count = reader.read_u64()?;
     let metadata_count = reader.read_u64()?;
+    // Every metadata/tensor entry consumes at least one byte, so a count larger
+    // than the file is necessarily corrupt. Mirrors oxidize-c gguf.c and keeps
+    // hostile u64 counts from driving `Vec::with_capacity` into an abort.
+    if tensor_count > bytes.len() as u64 || metadata_count > bytes.len() as u64 {
+        return Err(GgufParseError::InvalidHeader(
+            "header counts exceed file size",
+        ));
+    }
 
     let mut metadata = BTreeMap::new();
     for _ in 0..metadata_count {
@@ -623,6 +643,9 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
     for _ in 0..tensor_count {
         let name = reader.read_string()?;
         let n_dimensions = reader.read_u32()?;
+        if n_dimensions > GGUF_MAX_DIMS {
+            return Err(GgufParseError::TooManyDimensions(n_dimensions));
+        }
         let mut dimensions = Vec::with_capacity(n_dimensions as usize);
         for _ in 0..n_dimensions {
             dimensions.push(reader.read_u64()?);
@@ -710,6 +733,7 @@ fn detect_architecture_from_metadata_keys(
             | "deepseek" | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe"
             | "gemma" | "phi" | "falcon" | "gpt2" | "gptj" | "gptneox" | "dflash"
             | "dflash-draft" | "glm-dsa" | "glm_dsa" | "glm_moe_dsa" => Some(namespace),
+            "k2-horizon" | "k2_horizon" | "k2horizon" => Some(namespace),
             _ => None,
         };
         if architecture.is_some() {
@@ -733,6 +757,7 @@ fn map_tensor_name(architecture: &str, name: &str) -> String {
         "llama" | "mistral" | "mixtral" | "qwen" | "qwen2" | "qwen2moe" | "qwen35" | "deepseek"
         | "deepseek2" | "deepseek_v2" | "deepseek_v3" | "deepseek_moe" | "gemma" | "phi"
         | "glm-dsa" | "glm_dsa" | "glm_moe_dsa" => map_hf_decoder_name(name),
+        "k2-horizon" | "k2_horizon" | "k2horizon" => map_hf_decoder_name(name),
         "falcon" => map_falcon_name(name),
         "gpt2" => map_gpt2_name(name),
         "gptj" => map_gptj_name(name),
@@ -785,14 +810,21 @@ fn map_hf_decoder_name(name: &str) -> Option<String> {
                 "self_attn.q_b_proj.weight" => "attn_q_b.weight",
                 "self_attn.kv_a_proj_with_mqa.weight" => "attn_kv_a_mqa.weight",
                 "self_attn.kv_a_layernorm.weight" => "attn_kv_a_norm.weight",
+                "self_attn.gate_proj.weight" => "attn_gate.weight",
+                "self_attn.v_router.weight" => "attn_v_gate.weight",
+                "self_attn.v_router.bias" => "attn_v_gate.bias",
                 "mlp.up_proj.weight" => "ffn_up.weight",
                 "mlp.gate_proj.weight" => "ffn_gate.weight",
                 "mlp.down_proj.weight" => "ffn_down.weight",
                 "mlp.gate.weight" => "ffn_gate_inp.weight",
+                "mlp.gate.bias" => "ffn_gate_inp.bias",
                 "mlp.shared_expert.gate_proj.weight" => "ffn_gate_shexp.weight",
                 "mlp.shared_expert.up_proj.weight" => "ffn_up_shexp.weight",
                 "mlp.shared_expert.down_proj.weight" => "ffn_down_shexp.weight",
                 "mlp.shared_expert_gate.weight" => "ffn_gate_inp_shexp.weight",
+                "mlp.shared_experts.gate_proj.weight" => "ffn_gate_shexp.weight",
+                "mlp.shared_experts.up_proj.weight" => "ffn_up_shexp.weight",
+                "mlp.shared_experts.down_proj.weight" => "ffn_down_shexp.weight",
                 "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
                 _ => return None,
             };
@@ -924,8 +956,15 @@ impl<'a> ByteReader<'a> {
         Ok(self.read_u8()? != 0)
     }
 
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.cursor
+    }
+
     fn read_string(&mut self) -> Result<String, GgufParseError> {
         let len = self.read_u64()?;
+        if len > self.remaining() as u64 {
+            return Err(GgufParseError::UnexpectedEof);
+        }
         let len: usize = len
             .try_into()
             .map_err(|_| GgufParseError::IntegerOverflow)?;
@@ -949,7 +988,16 @@ impl<'a> ByteReader<'a> {
             GgufMetadataType::String => Ok(GgufMetadataValue::String(self.read_string()?)),
             GgufMetadataType::Array => {
                 let element_type = GgufMetadataType::try_from(self.read_u32()?)?;
+                // GGUF only permits arrays of scalar/string types; nested arrays
+                // would allow unbounded recursion. Matches oxidize-c read_array.
+                if element_type == GgufMetadataType::Array {
+                    return Err(GgufParseError::InvalidHeader("nested metadata array"));
+                }
                 let len = self.read_u64()?;
+                // Each element consumes at least one byte of the remaining input.
+                if len > self.remaining() as u64 {
+                    return Err(GgufParseError::UnexpectedEof);
+                }
                 let mut values = Vec::with_capacity(len as usize);
                 for _ in 0..len {
                     values.push(self.read_value_of_type(element_type)?);
@@ -1542,7 +1590,7 @@ mod tests {
             (12, GgufQuantizationType::Q4_K_M),
             (13, GgufQuantizationType::Q5_K_M),
             (14, GgufQuantizationType::Q6_K),
-            (15, GgufQuantizationType::Q4_K_M),
+            (15, GgufQuantizationType::Unknown(15)),
             (30, GgufQuantizationType::BF16),
         ];
         for (id, expected) in cases {
@@ -1615,5 +1663,75 @@ mod tests {
         let mapped = load_mapped_gguf(f.path()).expect("open tmpfile");
         let (_, _, ms) = mapped.prefault_pages_locked(4);
         assert!(ms < 5000, "prefault should be fast (took {ms}ms)");
+    }
+
+    fn gguf_header(tensor_count: u64, metadata_count: u64) -> Vec<u8> {
+        let mut bytes = GGUF_MAGIC.to_vec();
+        bytes.extend_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&tensor_count.to_le_bytes());
+        bytes.extend_from_slice(&metadata_count.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn rejects_hostile_tensor_count_without_allocating() {
+        let bytes = fixture_bytes("invalid-tensor-count.gguf");
+        assert_eq!(
+            parse_gguf(&bytes).unwrap_err(),
+            GgufParseError::InvalidHeader("header counts exceed file size")
+        );
+    }
+
+    #[test]
+    fn rejects_hostile_metadata_count() {
+        let bytes = gguf_header(0, u64::MAX);
+        assert!(matches!(
+            parse_gguf(&bytes),
+            Err(GgufParseError::InvalidHeader(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_tensor_rank_above_max_dims() {
+        let bytes = fixture_bytes("invalid-n-dims.gguf");
+        assert_eq!(
+            parse_gguf(&bytes).unwrap_err(),
+            GgufParseError::TooManyDimensions(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn rejects_hostile_string_and_array_lengths() {
+        let mut string_len = gguf_header(0, 1);
+        string_len.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            parse_gguf(&string_len).unwrap_err(),
+            GgufParseError::UnexpectedEof
+        );
+
+        let mut array_len = gguf_header(0, 1);
+        array_len.extend_from_slice(&1_u64.to_le_bytes());
+        array_len.push(b'k');
+        array_len.extend_from_slice(&(GgufMetadataType::Array as u32).to_le_bytes());
+        array_len.extend_from_slice(&(GgufMetadataType::Uint8 as u32).to_le_bytes());
+        array_len.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            parse_gguf(&array_len).unwrap_err(),
+            GgufParseError::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn rejects_nested_metadata_arrays() {
+        let mut bytes = gguf_header(0, 1);
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        bytes.push(b'k');
+        bytes.extend_from_slice(&(GgufMetadataType::Array as u32).to_le_bytes());
+        bytes.extend_from_slice(&(GgufMetadataType::Array as u32).to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        assert!(matches!(
+            parse_gguf(&bytes),
+            Err(GgufParseError::InvalidHeader(_))
+        ));
     }
 }

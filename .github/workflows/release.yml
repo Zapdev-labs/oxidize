@@ -59,15 +59,15 @@ jobs:
             extension: ".exe"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.validate.outputs.tag }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build CLI
         run: cargo build --release --package oxidize-cli
@@ -91,7 +91,7 @@ jobs:
           Copy-Item target/release/oxidize-server.exe "release/oxidize-server-${{ matrix.artifact-suffix }}.exe"
 
       - name: Upload binary artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-binaries-${{ matrix.artifact-suffix }}
           path: release/*
@@ -110,12 +110,12 @@ jobs:
             dockerfile: Dockerfile.server
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.validate.outputs.tag }}
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -123,21 +123,28 @@ jobs:
 
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.name }}
           tags: |
             type=raw,value=${{ needs.validate.outputs.tag }}
-            type=raw,value=latest
 
       - name: Build and publish image
-        uses: docker/build-push-action@v6
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # No mutable `latest` tag: consumers pin the version tag or this digest.
+      - name: Record image digest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "${IMAGE}@${DIGEST}" | tee -a "$GITHUB_STEP_SUMMARY"
 
   github-release:
     name: Publish GitHub release
@@ -148,14 +155,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: release-binaries-*
           merge-multiple: true
           path: release
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.validate.outputs.tag }}
           generate_release_notes: true

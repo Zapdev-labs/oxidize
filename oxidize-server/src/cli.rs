@@ -75,6 +75,10 @@ pub struct Args {
     pub host: IpAddr,
     #[arg(long, default_value_t = 8080)]
     pub port: u16,
+    /// Refuse to start when API auth is disabled and --host is not loopback.
+    /// Without it the server only logs a warning (LAN serving is supported).
+    #[arg(long, default_value_t = false)]
+    pub require_auth_on_public_bind: bool,
     #[arg(long)]
     pub model: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = Backend::Cpu)]
@@ -85,6 +89,9 @@ pub struct Args {
     pub model_id: String,
     #[arg(long, default_value_t = 512)]
     pub max_tokens: usize,
+    /// Upper bound on per-request `max_tokens` (unset = unlimited).
+    #[arg(long)]
+    pub max_tokens_cap: Option<usize>,
     #[arg(long, default_value_t = 0.8)]
     pub temperature: f32,
     #[arg(long)]
@@ -161,6 +168,8 @@ mod tests {
         let args = Args::parse_from(["oxidize-server"]);
         assert_eq!(args.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(args.port, 8080);
+        assert!(!args.require_auth_on_public_bind);
+        assert_eq!(args.max_tokens_cap, None);
     }
 
     #[test]

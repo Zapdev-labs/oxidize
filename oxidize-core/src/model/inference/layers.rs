@@ -29,6 +29,151 @@ pub fn ox_batched_decode_enabled() -> bool {
     })
 }
 
+/// RMSNorm over `groups` equal slices of the last dimension. `groups == 1` is
+/// exactly plain `rms_norm_f32` (so every other architecture is byte-identical).
+/// K2 Horizon splits its 2560 hidden state into 2 groups of 1280, each with its
+/// own mean square.
+pub(super) fn grouped_rms_norm(
+    input: &[f32],
+    weight: &[f32],
+    eps: f32,
+    groups: usize,
+    output: &mut [f32],
+) -> Result<(), ModelError> {
+    let groups = groups.max(1);
+    if groups == 1 {
+        return rms_norm_f32(input, weight, eps, output)
+            .map_err(|e| ModelError::InferenceFailed(format!("rms_norm: {e:?}")));
+    }
+    if input.len() != weight.len()
+        || input.len() != output.len()
+        || !input.len().is_multiple_of(groups)
+    {
+        return Err(ModelError::InferenceFailed(format!(
+            "grouped RMSNorm shape mismatch: input={}, weight={}, output={}, groups={groups}",
+            input.len(),
+            weight.len(),
+            output.len()
+        )));
+    }
+    let width = input.len() / groups;
+    for group in 0..groups {
+        let start = group * width;
+        let end = start + width;
+        rms_norm_f32(
+            &input[start..end],
+            &weight[start..end],
+            eps,
+            &mut output[start..end],
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("grouped rms_norm: {e:?}")))?;
+    }
+    Ok(())
+}
+
+/// Scale the attention output elementwise by its gate projection.
+///
+/// K2 Horizon gates *every* attention layer (dense and MoVA alike) with
+/// `softplus_{beta=ln 2}`; every other architecture that ships a gate
+/// projection (GLM-4.x style `[o,h]` × `[h,h]`) uses plain SiLU. The
+/// threshold branch matches `torch.nn.functional.softplus(..., threshold=20)`
+/// so large gate logits stay linear instead of overflowing.
+pub(super) fn apply_attention_output_gate(attn_out: &mut [f32], gate: &[f32], softplus: bool) {
+    debug_assert_eq!(attn_out.len(), gate.len());
+    if softplus {
+        let beta = std::f32::consts::LN_2;
+        for (value, gate_value) in attn_out.iter_mut().zip(gate.iter()) {
+            let z = beta * *gate_value;
+            *value *= if z > 20.0 {
+                *gate_value
+            } else {
+                z.exp().ln_1p() / beta
+            };
+        }
+    } else {
+        for (value, gate_value) in attn_out.iter_mut().zip(gate.iter()) {
+            *value *= *gate_value / (1.0 + (-*gate_value).exp());
+        }
+    }
+}
+
+fn mova_value_forward(
+    layer: &LayerWeights,
+    cfg: &InferenceConfig,
+    input: &[f32],
+    output: &mut [f32],
+    router_logits: &mut [f32],
+    expert_scores: &mut [(usize, f32)],
+    expert_outputs: &mut [f32],
+) -> Result<(), ModelError> {
+    let n_experts = cfg.value_expert_count;
+    let n_selected = cfg.value_expert_used_count.max(1).min(n_experts);
+    if n_experts == 0 || layer.attn_v_gate.is_empty() || layer.attn_v_exps.is_empty() {
+        return Err(ModelError::InferenceFailed(
+            "K2 MoVA layer is missing value router or experts".to_string(),
+        ));
+    }
+    let value_width = cfg.num_key_value_heads * cfg.kv_head_dim();
+    if output.len() != value_width
+        || router_logits.len() < n_experts
+        || expert_scores.len() < n_experts
+        || expert_outputs.len() < n_selected * value_width
+    {
+        return Err(ModelError::InferenceFailed(
+            "K2 MoVA scratch buffer is too small".to_string(),
+        ));
+    }
+
+    output.fill(0.0);
+    let logits = &mut router_logits[..n_experts];
+    logits.fill(0.0);
+    gemv_weight(
+        &layer.attn_v_gate,
+        n_experts,
+        cfg.hidden_size,
+        input,
+        logits,
+    )
+    .map_err(|e| ModelError::InferenceFailed(format!("K2 value router: {e:?}")))?;
+
+    let scores = &mut expert_scores[..n_experts];
+    for (expert, score) in scores.iter_mut().enumerate() {
+        let probability = 1.0 / (1.0 + (-logits[expert]).exp());
+        let bias = layer.attn_v_gate_bias.get(expert).copied().unwrap_or(0.0);
+        *score = (expert, probability + bias);
+    }
+    scores.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+
+    let normalizer: f32 = scores
+        .iter()
+        .take(n_selected)
+        .map(|(expert, _)| 1.0 / (1.0 + (-logits[*expert]).exp()))
+        .sum::<f32>()
+        .max(f32::MIN_POSITIVE);
+    let scale = cfg.expert_weights_scale / normalizer;
+
+    for (slot, &(expert, _)) in scores.iter().take(n_selected).enumerate() {
+        let expert_output = &mut expert_outputs[slot * value_width..(slot + 1) * value_width];
+        expert_output.fill(0.0);
+        gemv_expert_weight(
+            &layer.attn_v_exps,
+            expert,
+            n_experts,
+            value_width,
+            cfg.hidden_size,
+            input,
+            expert_output,
+        )
+        .map_err(|e| ModelError::InferenceFailed(format!("K2 value expert: {e}")))?;
+        let route_weight = (1.0 / (1.0 + (-logits[expert]).exp())) * scale;
+        for (mixed, value) in output.iter_mut().zip(expert_output.iter()) {
+            let silu = *value / (1.0 + (-*value).exp());
+            *mixed += route_weight * silu;
+        }
+    }
+    Ok(())
+}
+
 impl InferenceModel {
     /// Return the raw quantized byte slice of a Q4K weight matrix, or `None`
     /// if the storage variant is not Q4K (S or M) quantised.
@@ -80,6 +225,20 @@ impl InferenceModel {
         if !layer.shortconv_in_proj.is_empty()
             || !layer.attn_qkv.is_empty()
             || !layer.mla_kv_a_mqa.is_empty()
+        {
+            return false;
+        }
+        // K2 Horizon layers are not plain: the device path does a single
+        // RMSNorm (K2 needs 2 groups), a dense V projection (K2 routes value
+        // through MoVA experts), and no attention output gate. Route every K2
+        // layer to the CPU path, which implements all three.
+        if cfg.architecture == ModelArchitecture::K2Horizon
+            || cfg.layer_norm_group_count > 1
+            || cfg.value_expert_count > 0
+            || cfg.attention_gate_softplus
+            || !layer.attn_v_exps.is_empty()
+            || !layer.attn_v_gate.is_empty()
+            || !layer.attn_gate.is_empty()
         {
             return false;
         }
@@ -686,10 +845,13 @@ impl InferenceModel {
                         if !used_gpu_qkv {
                             let normed = &mut ws.hidden_b[..h];
                             normed.fill(0.0_f32);
-                            rms_norm_f32(&ws.x[..h], &layer.attn_norm, cfg.rms_norm_eps, normed)
-                                .map_err(|e| {
-                                    ModelError::InferenceFailed(format!("rms_norm: {:?}", e))
-                                })?;
+                            grouped_rms_norm(
+                                &ws.x[..h],
+                                &layer.attn_norm,
+                                cfg.rms_norm_eps,
+                                cfg.layer_norm_group_count,
+                                normed,
+                            )?;
                             // Run Q, K, V projections as ONE fused parallel region —
                             // they share the same normed input and write to
                             // non-overlapping buffers (q_full, k_vec, v_vec).
@@ -713,6 +875,28 @@ impl InferenceModel {
                             .map_err(|e| {
                                 ModelError::InferenceFailed(format!("attn_qkv: {:?}", e))
                             })?;
+                            if !layer.attn_v_exps.is_empty() {
+                                mova_value_forward(
+                                    layer,
+                                    cfg,
+                                    normed,
+                                    v_vec,
+                                    &mut ws.moe_router_logits,
+                                    &mut ws.moe_expert_scores,
+                                    &mut ws.moe_down_all,
+                                )?;
+                            }
+                            if !layer.attn_gate.is_empty() {
+                                let gate = &mut ws.intermediate_a[..q_len];
+                                gate.fill(0.0);
+                                gemv_weight(&layer.attn_gate, q_len, h, normed, gate).map_err(
+                                    |e| {
+                                        ModelError::InferenceFailed(format!(
+                                            "K2 attention gate: {e:?}"
+                                        ))
+                                    },
+                                )?;
+                            }
                         }
                         let glue_t0 =
                             crate::tensor::decode_profile_enabled().then(std::time::Instant::now);
@@ -975,18 +1159,13 @@ impl InferenceModel {
                             let attn_dump_cpu: Option<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> =
                                 if crate::attn_dump::should_dump() {
                                     let mut norm_in = vec![0.0_f32; h];
-                                    rms_norm_f32(
+                                    grouped_rms_norm(
                                         &ws.x[..h],
                                         &layer.attn_norm,
                                         cfg.rms_norm_eps,
+                                        cfg.layer_norm_group_count,
                                         &mut norm_in,
-                                    )
-                                    .map_err(|e| {
-                                        ModelError::InferenceFailed(format!(
-                                            "attn_dump rms_norm: {:?}",
-                                            e
-                                        ))
-                                    })?;
+                                    )?;
                                     Some((norm_in, q.to_vec(), k_vec.to_vec(), v_vec.to_vec()))
                                 } else {
                                     None
@@ -1255,6 +1434,14 @@ impl InferenceModel {
                         } // end `if !used_gpu_attn` (CPU attention island)
 
                         // Reconcile attention result size with attn_output expected input
+                        if !layer.attn_gate.is_empty() {
+                            let gate = &mut ws.intermediate_a[..attn_result.len()];
+                            apply_attention_output_gate(
+                                attn_result,
+                                gate,
+                                cfg.attention_gate_softplus,
+                            );
+                        }
                         let attn_input = if attn_output_input_len > 0
                             && attn_result.len() != attn_output_input_len
                         {
@@ -1404,8 +1591,13 @@ impl InferenceModel {
                 {
                     let normed = &mut ws.hidden_b[..h];
                     normed.fill(0.0_f32);
-                    rms_norm_f32(&ws.x[..h], ffn_norm_weight, cfg.rms_norm_eps, normed)
-                        .map_err(|e| ModelError::InferenceFailed(format!("ffn_norm: {:?}", e)))?;
+                    grouped_rms_norm(
+                        &ws.x[..h],
+                        ffn_norm_weight,
+                        cfg.rms_norm_eps,
+                        cfg.layer_norm_group_count,
+                        normed,
+                    )?;
 
                     if has_moe {
                         let moe_i = if cfg.expert_intermediate_size > 0 {
@@ -1841,5 +2033,194 @@ impl InferenceModel {
         )
         .map_err(|e| ModelError::InferenceFailed(format!("mla attn_out: {:?}", e)))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-5, "expected {a} to be close to {b}");
+    }
+
+    /// `groups == 1` must be the plain RMSNorm, and K2's two groups must each
+    /// normalize over their own 1280-wide slice — not over the whole 2560 state.
+    #[test]
+    fn grouped_rms_norm_matches_plain_norm_for_single_group() {
+        let input: Vec<f32> = (0..8).map(|i| (i as f32 + 1.0) * 0.5).collect();
+        let weight = vec![1.0_f32; 8];
+        let mut grouped = vec![0.0_f32; 8];
+        let mut plain = vec![0.0_f32; 8];
+
+        grouped_rms_norm(&input, &weight, 1e-6, 1, &mut grouped).expect("single group");
+        rms_norm_f32(&input, &weight, 1e-6, &mut plain).expect("plain norm");
+
+        assert_eq!(grouped, plain);
+    }
+
+    #[test]
+    fn grouped_rms_norm_normalizes_each_group_independently() {
+        let eps = 1e-6;
+        // Group 0 has a much larger scale than group 1. A single global RMSNorm
+        // would leave group 0 far from unit RMS; two independent norms must not.
+        let input = vec![4.0_f32, -8.0, 4.0, 4.0, 0.5, -1.0, 0.5, 0.5];
+        let weight = vec![1.0_f32; 8];
+        let mut out = vec![0.0_f32; 8];
+
+        grouped_rms_norm(&input, &weight, eps, 2, &mut out).expect("two groups");
+
+        for slice in out.chunks(4) {
+            let mean_sq: f32 = slice.iter().map(|v| v * v).sum::<f32>() / slice.len() as f32;
+            approx(mean_sq, 1.0);
+            // Both groups land at unit RMS despite an 8× input scale difference,
+            // which a single global norm could not produce.
+            assert!(slice.iter().all(|v| v.is_finite()));
+        }
+        // Signs are preserved within each group.
+        assert!(out[1].is_sign_negative());
+        assert!(out[5].is_sign_negative());
+    }
+
+    #[test]
+    fn grouped_rms_norm_rejects_indivisible_width() {
+        let input = vec![1.0_f32; 6];
+        let weight = vec![1.0_f32; 6];
+        let mut out = vec![0.0_f32; 6];
+        assert!(grouped_rms_norm(&input, &weight, 1e-6, 4, &mut out).is_err());
+    }
+
+    /// K2 gates every attention layer with `softplus_{beta=ln 2}`, not SiLU.
+    /// At x=0 both give ln2, but they diverge as x grows: softplus(x) ≈ x for
+    /// large x while SiLU(x) ≈ x as well — so compare against the closed form
+    /// rather than eyeballing.
+    #[test]
+    fn attention_gate_softplus_matches_reference() {
+        let gate: Vec<f32> = vec![-3.0, -1.0, 0.0, 0.5, 2.0, 5.0];
+        let mut attn = vec![1.0_f32; gate.len()];
+        apply_attention_output_gate(&mut attn, &gate, true);
+
+        let beta = std::f32::consts::LN_2;
+        for (i, g) in gate.iter().enumerate() {
+            let z = beta * g;
+            let expected = if z > 20.0 { *g } else { z.exp().ln_1p() / beta };
+            approx(attn[i], expected);
+        }
+    }
+
+    #[test]
+    fn attention_gate_silu_matches_reference() {
+        let gate: Vec<f32> = vec![-3.0, -1.0, 0.0, 0.5, 2.0, 5.0];
+        let mut attn = vec![1.0_f32; gate.len()];
+        apply_attention_output_gate(&mut attn, &gate, false);
+
+        for (i, g) in gate.iter().enumerate() {
+            approx(attn[i], g / (1.0 + (-g).exp()));
+        }
+    }
+
+    /// K2's MoVA value path is `sum_e w_e * silu(W_e x)`. With identity expert
+    /// weights the selected expert's SiLU must dominate, and the route weights
+    /// must be the sigmoid scores renormalized over the selected set then scaled
+    /// by `expert_weights_scale` (2.5) — the bias affects selection only.
+    #[test]
+    fn mova_value_forward_applies_sigmoid_routing_and_silu() {
+        let hidden = 2usize;
+        let value_width = 2usize;
+        let n_experts = 3usize;
+        let n_selected = 1usize;
+
+        // Router weight is expert-major `[n_experts, hidden]`. For x = [0, 1]
+        // expert 1 gets logit 3 (the highest raw score); experts 0 and 2 get 0.
+        let mut router = vec![0.0_f32; n_experts * hidden];
+        router[hidden + 1] = 3.0;
+        let mut router_bias = vec![0.0_f32; n_experts];
+        // Selection-only bias: it promotes expert 2 past expert 1, but must NOT
+        // enter the route weight (which renormalizes the raw sigmoid scores).
+        router_bias[2] = 10.0;
+
+        // Expert-major stack `[n_experts, value_width, hidden]`, row stride =
+        // `hidden`. Expert 2 is the identity (rows [1,0] and [0,1]); 0/1 are zero.
+        let mut experts = vec![0.0_f32; n_experts * value_width * hidden];
+        let e2 = 2 * value_width * hidden;
+        experts[e2] = 1.0; // row 0, col 0
+        experts[e2 + hidden] = 0.0; // row 0, col 1
+        experts[e2 + hidden + 1] = 1.0; // row 1, col 1
+
+        let cfg = InferenceConfig {
+            hidden_size: hidden,
+            num_key_value_heads: 1,
+            key_value_head_dim: value_width,
+            value_expert_count: n_experts,
+            value_expert_used_count: n_selected,
+            expert_weights_scale: 1.0,
+            layer_norm_group_count: 1,
+            ..Default::default()
+        };
+        let layer = LayerWeights {
+            attn_v_exps: WeightStorage::F32(experts),
+            attn_v_gate: WeightStorage::F32(router),
+            attn_v_gate_bias: router_bias,
+            ..Default::default()
+        };
+
+        let input = vec![0.0_f32, 1.0];
+        let mut output = vec![0.0_f32; value_width];
+        let mut router_logits = vec![0.0_f32; n_experts];
+        let mut expert_scores = vec![(0usize, 0.0_f32); n_experts];
+        let mut expert_outputs = vec![0.0_f32; n_selected * value_width];
+
+        mova_value_forward(
+            &layer,
+            &cfg,
+            &input,
+            &mut output,
+            &mut router_logits,
+            &mut expert_scores,
+            &mut expert_outputs,
+        )
+        .expect("mova value forward");
+
+        // With top-1 the renormalized route weight is 1.0 × scale.
+        // x = [0, 1] through the identity gives W·x = [0, 1];
+        // silu(0) = 0 and silu(1) = 1/(1+e^-1).
+        let silu_one = 1.0 / (1.0 + (-1.0f32).exp());
+        approx(output[0], 0.0);
+        approx(output[1], silu_one);
+    }
+
+    /// A layer without the value router or experts must fail loudly rather than
+    /// silently falling back to a plain dense V projection.
+    #[test]
+    fn mova_value_forward_rejects_missing_weights() {
+        let cfg = InferenceConfig {
+            hidden_size: 2,
+            num_key_value_heads: 1,
+            key_value_head_dim: 2,
+            value_expert_count: 4,
+            value_expert_used_count: 2,
+            ..Default::default()
+        };
+        let layer = LayerWeights::default();
+        let mut output = vec![0.0_f32; 2];
+        let mut router_logits = vec![0.0_f32; 4];
+        let mut expert_scores = vec![(0usize, 0.0_f32); 4];
+        let mut expert_outputs = vec![0.0_f32; 4];
+
+        let error = mova_value_forward(
+            &layer,
+            &cfg,
+            &[0.0, 1.0],
+            &mut output,
+            &mut router_logits,
+            &mut expert_scores,
+            &mut expert_outputs,
+        )
+        .expect_err("missing value experts must be rejected");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("value router or experts"),
+            "unexpected error: {message}"
+        );
     }
 }

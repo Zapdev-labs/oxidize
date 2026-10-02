@@ -16,7 +16,9 @@ mkdir -p "$HF_HOME"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "CUDA image should include docker; installing..."
-  curl -fsSL https://get.docker.com | sh
+  # shellcheck source=../lib/pinned-install.sh
+  . "$SCRIPT_DIR/../lib/pinned-install.sh"
+  install_docker_apt
 fi
 
 echo "==> Pulling vLLM Gemma4 image (Hopper / CUDA 12.9)"

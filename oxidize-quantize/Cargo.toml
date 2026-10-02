@@ -7,5 +7,5 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-oxidize-core = { path = "../oxidize-core" }
+oxidize-core = { version = "0.1.0", path = "../oxidize-core" }
 rayon = "1"

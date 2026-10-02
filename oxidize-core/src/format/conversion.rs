@@ -11,6 +11,7 @@ pub enum ModelArchitecture {
     Mistral,
     Qwen,
     DeepSeek,
+    K2Horizon,
     Gemma,
     Phi,
     Unknown(String),
@@ -36,6 +37,7 @@ pub fn detect_architecture(metadata: &BTreeMap<String, String>) -> ModelArchitec
         | Some("qwen35moe") => ModelArchitecture::Qwen,
         Some("deepseek") | Some("deepseek2") | Some("deepseek_v2") | Some("deepseek_v3")
         | Some("deepseek_moe") => ModelArchitecture::DeepSeek,
+        Some("k2_horizon") | Some("k2-horizon") | Some("k2horizon") => ModelArchitecture::K2Horizon,
         Some("gemma") => ModelArchitecture::Gemma,
         Some("phi") => ModelArchitecture::Phi,
         Some(other) => ModelArchitecture::Unknown(other.to_string()),
@@ -242,6 +244,9 @@ pub fn map_hf_tensor_name(name: &str) -> String {
                 "self_attn.o_proj.bias" => "attn_output.bias",
                 "self_attn.q_norm.weight" => "attn_q_norm.weight",
                 "self_attn.k_norm.weight" => "attn_k_norm.weight",
+                "self_attn.gate_proj.weight" => "attn_gate.weight",
+                "self_attn.v_router.weight" => "attn_v_gate.weight",
+                "self_attn.v_router.bias" => "attn_v_gate.bias",
                 "linear_attn.in_proj_qkv.weight" => "attn_qkv.weight",
                 "linear_attn.in_proj_z.weight" => "attn_gate.weight",
                 "linear_attn.in_proj_b.weight" => "ssm_beta.weight",
@@ -257,11 +262,15 @@ pub fn map_hf_tensor_name(name: &str) -> String {
                 "mlp.gate_proj.bias" => "ffn_gate.bias",
                 "mlp.down_proj.bias" => "ffn_down.bias",
                 "mlp.gate.weight" => "ffn_gate_inp.weight",
+                "mlp.gate.bias" => "ffn_gate_inp.bias",
                 "mlp.experts.down_proj" => "ffn_down_exps.weight",
                 "mlp.shared_expert.gate_proj.weight" => "ffn_gate_shexp.weight",
                 "mlp.shared_expert.up_proj.weight" => "ffn_up_shexp.weight",
                 "mlp.shared_expert.down_proj.weight" => "ffn_down_shexp.weight",
                 "mlp.shared_expert_gate.weight" => "ffn_gate_inp_shexp.weight",
+                "mlp.shared_experts.gate_proj.weight" => "ffn_gate_shexp.weight",
+                "mlp.shared_experts.up_proj.weight" => "ffn_up_shexp.weight",
+                "mlp.shared_experts.down_proj.weight" => "ffn_down_shexp.weight",
                 "block_sparse_moe.gate.weight" => "ffn_gate_inp.weight",
                 // Hunyuan (hy_v3): sigmoid router, per-expert selection bias,
                 // and a single always-on shared expert (`shared_mlp`).
@@ -486,6 +495,33 @@ mod tests {
 
         metadata.insert("model_type".into(), "deepseek2".into());
         assert_eq!(detect_architecture(&metadata), ModelArchitecture::DeepSeek);
+    }
+
+    #[test]
+    fn conversion_detects_and_maps_k2_horizon() {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("model_type".into(), "k2_horizon".into());
+        assert_eq!(detect_architecture(&metadata), ModelArchitecture::K2Horizon);
+        assert_eq!(
+            map_hf_tensor_name("model.layers.3.self_attn.v_router.weight"),
+            "blk.3.attn_v_gate.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.3.self_attn.v_router.bias"),
+            "blk.3.attn_v_gate.bias"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.3.self_attn.gate_proj.weight"),
+            "blk.3.attn_gate.weight"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.3.mlp.gate.bias"),
+            "blk.3.ffn_gate_inp.bias"
+        );
+        assert_eq!(
+            map_hf_tensor_name("model.layers.3.mlp.shared_experts.down_proj.weight"),
+            "blk.3.ffn_down_shexp.weight"
+        );
     }
 
     #[test]

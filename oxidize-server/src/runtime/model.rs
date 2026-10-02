@@ -35,10 +35,21 @@ pub struct ModelRuntime {
 #[derive(Debug, Clone, Copy)]
 pub struct GenerationDefaults {
     pub max_tokens: usize,
+    /// Upper bound applied to every request's `max_tokens` (`None` = unlimited).
+    pub max_tokens_cap: Option<usize>,
     pub temperature: f32,
     pub top_p: Option<f32>,
     pub top_k: Option<usize>,
     pub prefill_batch_size: usize,
+}
+
+impl GenerationDefaults {
+    /// The request's `max_tokens` (or the default), clamped to `max_tokens_cap`.
+    pub fn resolve_max_tokens(&self, requested: Option<usize>) -> usize {
+        let max_tokens = requested.unwrap_or(self.max_tokens);
+        self.max_tokens_cap
+            .map_or(max_tokens, |cap| max_tokens.min(cap))
+    }
 }
 
 pub enum LoadedModel {
@@ -309,6 +320,18 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         if args.turboquant_kv {
             config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
         }
+        // K2 Horizon cannot run on the layer-wise runtime (no MoVA value
+        // experts, grouped RMSNorm, or softplus attention gate). Autotune already
+        // clears `layer_wise` for K2, but an explicit --layer-wise must fail
+        // loudly rather than serve silently wrong logits.
+        if config.architecture == oxidize_core::inference::ModelArchitecture::K2Horizon {
+            return Err(
+                "--layer-wise is not supported for K2 Horizon (MoVA value experts, grouped \
+                 RMSNorm, and the softplus attention gate are only implemented in the dense \
+                 per-token CPU path)"
+                    .to_string(),
+            );
+        }
         let mut layer_wise = LayerWiseModel::load_from_gguf(&mapped, config, args.layer_cache)
             .map_err(|error| format!("failed to load layer-wise model: {error}"))?;
         layer_wise
@@ -320,31 +343,19 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         if args.turboquant_kv {
             config.kv_quantization = oxidize_core::kv_cache::KvQuantization::TurboQuant;
         }
-        #[cfg(all(target_os = "macos", feature = "mlx"))]
-        {
-            match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(&mapped, config) {
-                Ok(m) => {
-                    tracing::info!("MLX backend: loaded model into unified memory");
-                    LoadedModel::Mlx(Box::new(m))
-                }
-                Err(error) => {
-                    tracing::warn!("MLX initialization failed: {error}; falling back to CPU");
-                    LoadedModel::Inference(Box::new(
-                        InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
-                            .map_err(|error| format!("failed to load model weights: {error}"))?,
-                    ))
-                }
-            }
-        }
-        #[cfg(not(all(target_os = "macos", feature = "mlx")))]
-        {
+        // The MLX layer/forward structures cannot express K2's MoVA value
+        // experts, grouped RMSNorm, or the softplus attention gate. Load it on
+        // the CPU path instead of silently degrading the semantics.
+        if config.architecture == oxidize_core::inference::ModelArchitecture::K2Horizon {
             tracing::warn!(
-                "MLX backend requested but unavailable in this build; falling back to CPU"
+                "K2 Horizon is not supported on the MLX backend; falling back to the CPU path"
             );
             LoadedModel::Inference(Box::new(
                 InferenceModel::load_from_gguf(&mapped, config, args.cpu_optimized)
                     .map_err(|error| format!("failed to load model weights: {error}"))?,
             ))
+        } else {
+            load_mlx_or_cpu(&mapped, args, config)?
         }
     } else {
         let mut config = inference_config_from_gguf(&mapped, args);
@@ -384,12 +395,43 @@ pub fn load_model_runtime(args: &Args) -> Result<Option<Arc<ModelRuntime>>, Stri
         draft_tokens,
         defaults: GenerationDefaults {
             max_tokens: args.max_tokens,
+            max_tokens_cap: args.max_tokens_cap,
             temperature: args.temperature,
             top_p: args.top_p,
             top_k: args.top_k,
             prefill_batch_size: args.prefill_batch_size,
         },
     })))
+}
+
+/// Attempt the MLX backend, falling back to the CPU dense path when the model
+/// cannot be loaded there (unavailable build, unsupported architecture, or a
+/// load-time error).
+fn load_mlx_or_cpu(
+    mapped: &MappedGgufFile,
+    args: &Args,
+    config: InferenceConfig,
+) -> Result<LoadedModel, String> {
+    #[cfg(all(target_os = "macos", feature = "mlx"))]
+    {
+        match oxidize_core::mlx_inference::MlxInferenceModel::load_from_gguf(mapped, config) {
+            Ok(model) => {
+                tracing::info!("MLX backend: loaded model into unified memory");
+                return Ok(LoadedModel::Mlx(Box::new(model)));
+            }
+            Err(error) => {
+                tracing::warn!("MLX initialization failed: {error}; falling back to CPU");
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "macos", feature = "mlx")))]
+    {
+        tracing::warn!("MLX backend requested but unavailable in this build; falling back to CPU");
+    }
+    Ok(LoadedModel::Inference(Box::new(
+        InferenceModel::load_from_gguf(mapped, config, args.cpu_optimized)
+            .map_err(|error| format!("failed to load model weights: {error}"))?,
+    )))
 }
 
 fn optimize_mapped_model_memory(mapped: &MappedGgufFile, args: &Args) {
@@ -485,6 +527,18 @@ fn load_speculative_draft(
     let Some(draft_path) = args.draft_model.as_deref() else {
         return Ok((None, args.draft_tokens.max(1)));
     };
+    // A DFlash draft layer runs plain dense attention + dense FFN over the
+    // target's hidden state. K2 Horizon's hidden state is produced by grouped
+    // RMSNorm and its value path is MoVA-routed, so draft tokens would be
+    // scored against a different function than the target computes. Reject
+    // rather than accept a systematically low accept rate / wrong output.
+    if matches!(target_mapped.parsed().architecture(), Some("k2horizon")) {
+        return Err(
+            "--draft-model (DFlash speculative decoding) is not supported for K2 Horizon; the \
+             draft layer uses plain dense attention/FFN and would diverge from the MoVA target"
+                .to_string(),
+        );
+    }
 
     let draft_mapped = loader.load(draft_path).map_err(|error| {
         format!(
@@ -578,4 +632,33 @@ pub fn first_layer_tensor_dims(mapped: &MappedGgufFile, suffix: &str) -> Option<
         .iter()
         .find(|tensor| tensor.name.starts_with("blk.") && tensor.name.ends_with(suffix))
         .map(|tensor| tensor.dimensions.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn defaults(max_tokens_cap: Option<usize>) -> GenerationDefaults {
+        GenerationDefaults {
+            max_tokens: 512,
+            max_tokens_cap,
+            temperature: 0.8,
+            top_p: None,
+            top_k: None,
+            prefill_batch_size: 512,
+        }
+    }
+
+    /// server-010: requests are clamped only when a cap is configured.
+    #[test]
+    fn max_tokens_clamp_is_opt_in() {
+        let unlimited = defaults(None);
+        assert_eq!(unlimited.resolve_max_tokens(None), 512);
+        assert_eq!(unlimited.resolve_max_tokens(Some(1_000_000)), 1_000_000);
+
+        let capped = defaults(Some(256));
+        assert_eq!(capped.resolve_max_tokens(None), 256);
+        assert_eq!(capped.resolve_max_tokens(Some(64)), 64);
+        assert_eq!(capped.resolve_max_tokens(Some(usize::MAX)), 256);
+    }
 }

@@ -12,7 +12,7 @@ use oxidize_core::generation::{
     SpeculativeGenerationConfig, SpeculativeGenerationStream,
 };
 use oxidize_core::gguf::MappedGgufFile;
-use oxidize_core::inference::{InferenceConfig, InferenceModel};
+use oxidize_core::inference::{InferenceConfig, InferenceModel, ModelArchitecture};
 use oxidize_core::lora::{AdapterKind, LoraPlan, plan_lora_application};
 use oxidize_core::model::{Model, Session};
 use oxidize_core::model_loader::{GgufModelLoader, LoadProgress, ModelLoader};
@@ -161,6 +161,13 @@ struct Args {
     api_host: String,
     #[arg(long, hide = true, default_value_t = 8080)]
     api_port: u16,
+    /// Refuse to start the API server when auth is disabled (no
+    /// OXIDIZE_API_KEY/OXIDIZE_API_KEYS) and --api-host is not loopback.
+    #[arg(long, default_value_t = false)]
+    require_auth_on_public_bind: bool,
+    /// Upper bound on per-request `max_tokens` for the API server (unset = unlimited).
+    #[arg(long)]
+    api_max_tokens_cap: Option<usize>,
     /// External GGUF file that contains the tokenizer metadata.
     /// Useful for draft models (e.g. DFlash) that do not embed a tokenizer.
     #[arg(long)]
@@ -521,6 +528,31 @@ fn main() {
                 return;
             }
             let mut config = InferenceConfig::from_gguf(&mapped);
+            // K2 Horizon (MoVA value experts, grouped RMSNorm, softplus attention
+            // gate) is implemented only in the dense per-token CPU path. Refuse
+            // the execution modes that cannot reproduce it instead of producing
+            // silently wrong logits.
+            if config.architecture == ModelArchitecture::K2Horizon {
+                if args.layer_wise {
+                    eprintln!(
+                        "K2 Horizon does not support --layer-wise; run without it (the dense \
+                         per-token CPU path is the only validated K2 execution mode)"
+                    );
+                    return;
+                }
+                if effective_backend == oxidize_core::backend::Backend::Mlx {
+                    eprintln!("K2 Horizon does not support the MLX backend; use --backend cpu");
+                    return;
+                }
+                if args.quantspec {
+                    eprintln!(
+                        "K2 Horizon does not support --quantspec speculative decoding; the MTP \
+                         draft layer uses plain dense attention and FFN, which would diverge from \
+                         the target"
+                    );
+                    return;
+                }
+            }
             config.kv_cache_dtype = args.kv_cache_dtype.dtype();
             if args.no_turboquant {
                 config.kv_quantization = oxidize_core::kv_cache::KvQuantization::Asymmetric;
