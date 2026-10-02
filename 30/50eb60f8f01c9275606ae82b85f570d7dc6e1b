@@ -1,0 +1,105 @@
+oxidize-core/src/model/layer_wise/loading.rs
+  s_f00e2a58aa88a6::t_bc42a8d19b3ba3 9-19
+oxidize-c/src/model/llama.c
+  s_d5de9490b8cfed::t_dd93fc74d06ff5 5812-5841
+  s_d5de9490b8cfed::t_366736fc0cf2f6 4830-4832
+SPEC.md
+  s_0693d3f73e3e48::t_c1d6d8da7e9340 1-122
+oxidize-cli/src/main.rs
+  s_f00e2a58aa88a6::t_a2fddf4ed061c0 15
+  s_f00e2a58aa88a6::t_41b040b60c03a2 531-555
+oxidize-core/src/autotune/rules.rs
+  s_f00e2a58aa88a6::t_864b9d9fdf8f08 184,188-190
+  s_f00e2a58aa88a6::t_3338813435bb5d 182-183,185-187
+  s_f00e2a58aa88a6::t_778fc381d192fe 800-859
+  s_f00e2a58aa88a6::t_833f5ed3262565 176-181,191
+AGENTS.md
+  s_0295341014d01b::t_bfcc232b26288a 230
+  s_0295341014d01b::t_07dbc6d0e52fcf 243
+oxidize-cli/src/pipeline.rs
+  s_f00e2a58aa88a6::t_c0c3d8a0345e44 26
+  s_f00e2a58aa88a6::t_9dc04d76f65eba 77-88
+oxidize-core/src/model/inference/layers.rs
+  s_f00e2a58aa88a6::t_a050be67593d46 74-80,82-99
+  s_f00e2a58aa88a6::t_8b4f8971c33a2c 1439-1443
+  s_f00e2a58aa88a6::t_cd17ad50ec583a 2220,2222-2223
+  s_f00e2a58aa88a6::t_666870fe32daec 231-244
+  s_f00e2a58aa88a6::t_2ed7d314aa8a0b 32-35
+  s_f00e2a58aa88a6::t_970f01be6cabf7 2133-2134,2136,2138-2140,2146
+  s_f00e2a58aa88a6::t_faea8356a7aabb 2038-2072,2074-2075,2078-2132,2135,2137,2141,2144-2145,2149-2219,2221,2224-2226
+  s_f00e2a58aa88a6::t_978e3094740dbd 2142-2143,2147-2148
+  s_f00e2a58aa88a6::t_0f46e15af0cea8 81
+  s_f00e2a58aa88a6::t_4c5d21fd6388cf 2073,2076-2077
+oxidize-c/src/server/openai.c
+  s_d5de9490b8cfed::t_8814aabffc6ba0 917
+  s_d5de9490b8cfed::t_76411c9cee8874 71-72
+  s_d5de9490b8cfed::t_b7c8519d587389 653-663
+  s_d5de9490b8cfed::t_9031403d144374 53-56
+  s_d5de9490b8cfed::t_39c21cd6b7fcf3 858-867,869,871-891
+  s_d5de9490b8cfed::t_55e4caa254be98 868,870
+oxidize-server/src/runtime/model.rs
+  s_f00e2a58aa88a6::t_740e43fa2241a9 358
+  s_f00e2a58aa88a6::t_667972970c2c28 323-334
+  s_f00e2a58aa88a6::t_e00a996ec02fbb 346,349,351,357
+  s_f00e2a58aa88a6::t_c1147a4c7cc9c1 530-541
+  s_f00e2a58aa88a6::t_4564e841a813a2 407-436
+  s_f00e2a58aa88a6::t_ef453e3c569a1e 347-348
+oxidize-server/src/runtime/batched_engine.rs
+  s_f00e2a58aa88a6::t_428c402efa3ce1 61-65,69-79
+oxidize-core/src/model/mlx_inference.rs
+  s_f00e2a58aa88a6::t_ea21a52473f9b7 173-186
+oxidize-core/src/model/inference.rs
+  s_f00e2a58aa88a6::t_c62489207b1c4e 2770-2811
+  s_f00e2a58aa88a6::t_f785785a14773b 2053-2180,2214-2231
+  s_f00e2a58aa88a6::t_e8d9ebc46ba795 2181-2213
+  s_f00e2a58aa88a6::t_e92ac25e70dbef 1478-1479,1481-1486,1488-1495
+oxidize-core/src/model/inference/forward.rs
+  s_f00e2a58aa88a6::t_c34853c26fb654 1769
+  s_f00e2a58aa88a6::t_74f1235faae33f 136-145,152-157
+  s_f00e2a58aa88a6::t_fe2f2172146339 1764-1767,1812-1814
+  s_f00e2a58aa88a6::t_5870adcbf7a0b8 1660,1670-1676
+  s_f00e2a58aa88a6::t_93663f9fba2224 1773
+  s_f00e2a58aa88a6::t_3b650af5b13301 1768
+oxidize-core/src/model/layer_wise.rs
+  s_f00e2a58aa88a6::t_41e09431d1f1a5 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "3050eb60f8f01c9275606ae82b85f570d7dc6e1b",
+  "prompts": {},
+  "sessions": {
+    "s_0295341014d01b": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d386b79d-e379-4bfc-a63c-193ca609b5aa",
+        "model": "grok-4.7-high"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_0693d3f73e3e48": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "7be98684-1bda-4246-bd94-9300f17e6f3a",
+        "model": "custom:runpod-frost"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_d5de9490b8cfed": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "8a643161-090c-4036-98d5-9e45d0de0dd3",
+        "model": "grok-4.7"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    },
+    "s_f00e2a58aa88a6": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "5e7f7660-4ad0-4d27-bc64-0b1fd31ef19e",
+        "model": "custom:space-bunny-alpha-(OpenRouter)-0"
+      },
+      "human_author": "Jackson57279 <otdoges@proton.me>"
+    }
+  }
+}
