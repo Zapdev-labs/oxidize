@@ -180,6 +180,7 @@ impl LayerWiseModel {
                 cfg.effective_rope_dim().min(q_head_dim),
             );
         }
+        let theta = cfg.layer_rope_theta(layer_idx);
         for head in 0..q_heads {
             let off = head * q_head_dim;
             if off + q_head_dim > q.len() {
@@ -187,21 +188,15 @@ impl LayerWiseModel {
             }
             let q_rope_len = cfg.effective_rope_dim().min(q_head_dim);
             let mut rotated = vec![0.0_f32; q_rope_len];
-            apply_rope_f32(
+            cfg.apply_rope_head(
                 &q[off..off + q_rope_len],
                 pos,
                 q_rope_len,
-                cfg.rope_theta,
+                theta,
                 &mut rotated,
             )
             .map_err(|e| ModelError::InferenceFailed(format!("rope q: {:?}", e)))?;
             q[off..off + q_rope_len].copy_from_slice(&rotated);
-        }
-        if layer_idx == 3 && pos == 0 && crate::inference::trace_vals_enabled() {
-            eprintln!(
-                "ATTN L3 h0 pos0: q_postrope[0..6]={:?}",
-                &q[..6.min(q.len())]
-            );
         }
         for head in 0..kv_heads {
             let off = head * kv_head_dim;
@@ -210,15 +205,21 @@ impl LayerWiseModel {
             }
             let k_rope_len = cfg.effective_rope_dim().min(kv_head_dim);
             let mut rotated = vec![0.0_f32; k_rope_len];
-            apply_rope_f32(
+            cfg.apply_rope_head(
                 &k_vec[off..off + k_rope_len],
                 pos,
                 k_rope_len,
-                cfg.rope_theta,
+                theta,
                 &mut rotated,
             )
             .map_err(|e| ModelError::InferenceFailed(format!("rope k: {:?}", e)))?;
             k_vec[off..off + k_rope_len].copy_from_slice(&rotated);
+        }
+        if layer_idx == 3 && pos == 0 && crate::inference::trace_vals_enabled() {
+            eprintln!(
+                "ATTN L3 h0 pos0: q_postrope[0..6]={:?}",
+                &q[..6.min(q.len())]
+            );
         }
 
         self.kv_cache
@@ -256,6 +257,16 @@ impl LayerWiseModel {
         };
         let key_cache = key_cache.as_slice();
         let value_cache = value_cache.as_slice();
+        let layer_window = cfg.layer_sliding_window(layer_idx);
+        let skip_tokens = if layer_window > 0 && seq_len > layer_window {
+            seq_len - layer_window
+        } else {
+            0
+        };
+        let eff_seq_len = seq_len - skip_tokens;
+        let kv_skip = skip_tokens.saturating_mul(kv_len);
+        let key_cache = &key_cache[kv_skip.min(key_cache.len())..];
+        let value_cache = &value_cache[kv_skip.min(value_cache.len())..];
 
         let mut attn_result = vec![0.0_f32; q_len_used];
         let actual_kv_group_size = q_heads
@@ -265,55 +276,50 @@ impl LayerWiseModel {
         // Heads are independent; this loop grows linearly with context and
         // serializes ~tens of ms/token at long sequences, so dispatch it
         // through the spin pool. Per-head output slices are disjoint.
-        {
-            let attn_failed = std::sync::atomic::AtomicBool::new(false);
-            let out_base = attn_result.as_mut_ptr() as usize;
-            let attn_len = attn_result.len();
-            let q_ref = &q;
-            crate::spinpool::run_chunks(q_heads, |head| {
-                let kv_head = head / actual_kv_group_size;
-                let q_head_start = head * q_head_dim;
-                let q_head_end = q_head_start + q_head_dim;
-                if q_head_end > q_ref.len() {
-                    return;
-                }
-                let q_head = &q_ref[q_head_start..q_head_end];
-                let q_head_for_attn = if q_head_dim > kv_head_dim {
-                    &q_head[..kv_head_dim]
-                } else {
-                    q_head
-                };
-                let write_start = head * kv_head_dim;
-                if write_start + kv_head_dim > attn_len {
-                    return;
-                }
-                // SAFETY: per-head output ranges are disjoint; attn_result outlives dispatch.
-                let out_head = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        (out_base as *mut f32).add(write_start),
-                        kv_head_dim,
-                    )
-                };
-                if flash_attention_decode_f32(
-                    q_head_for_attn,
-                    key_cache,
-                    value_cache,
-                    seq_len,
-                    kv_head_dim,
-                    kv_len,
-                    kv_head,
-                    out_head,
-                )
-                .is_err()
-                {
-                    attn_failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-            if attn_failed.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(ModelError::InferenceFailed(
-                    "flash attention failed".to_owned(),
-                ));
+        let attn_failed = std::sync::atomic::AtomicBool::new(false);
+        let out_base = attn_result.as_mut_ptr() as usize;
+        let attn_len = attn_result.len();
+        let q_ref = &q;
+        crate::spinpool::run_chunks(q_heads, |head| {
+            let kv_head = head / actual_kv_group_size;
+            let q_head_start = head * q_head_dim;
+            let q_head_end = q_head_start + q_head_dim;
+            if q_head_end > q_ref.len() {
+                return;
             }
+            let q_head = &q_ref[q_head_start..q_head_end];
+            let q_head_for_attn = if q_head_dim > kv_head_dim {
+                &q_head[..kv_head_dim]
+            } else {
+                q_head
+            };
+            let write_start = head * kv_head_dim;
+            if write_start + kv_head_dim > attn_len {
+                return;
+            }
+            // SAFETY: per-head output ranges are disjoint; attn_result outlives dispatch.
+            let out_head = unsafe {
+                std::slice::from_raw_parts_mut((out_base as *mut f32).add(write_start), kv_head_dim)
+            };
+            if flash_attention_decode_f32(
+                q_head_for_attn,
+                key_cache,
+                value_cache,
+                eff_seq_len,
+                kv_head_dim,
+                kv_len,
+                kv_head,
+                out_head,
+            )
+            .is_err()
+            {
+                attn_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+        if attn_failed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ModelError::InferenceFailed(
+                "flash attention failed".to_owned(),
+            ));
         }
 
         let mut attn_input =
@@ -352,5 +358,293 @@ impl LayerWiseModel {
         }
 
         Ok(attn_out)
+    }
+}
+
+impl LayerWiseModel {
+    /// DeepSeek / GLM-DSA multi-head latent attention.
+    /// Returns the attention residual (not yet added to `x`).
+    pub(super) fn run_mla_layer(
+        &mut self,
+        layer_idx: usize,
+        layer: &LayerWeights,
+        x: &[f32],
+        pos: usize,
+        cfg: &InferenceConfig,
+    ) -> Result<Vec<f32>, ModelError> {
+        let h = cfg.hidden_size;
+        let n_heads = cfg.num_attention_heads.max(1);
+        let kv_lora = layer.mla_kv_a_norm.len();
+        let q_lora = layer.mla_q_a.output_dim(h);
+        let q_len = layer.mla_q_b.output_dim(q_lora);
+        let k_head_dim = cfg.kv_head_dim();
+        let kv_out = layer.mla_kv_a_mqa.output_dim(h);
+        let kv_pe_dim = kv_out.saturating_sub(kv_lora);
+        let k_nope_dim = layer.mla_k_b.output_dim(kv_lora) / n_heads;
+        let v_head_dim = layer.mla_v_b.output_dim(kv_lora) / n_heads;
+        let q_pe_dim = k_head_dim.saturating_sub(k_nope_dim);
+        if kv_lora == 0
+            || q_lora == 0
+            || q_len == 0
+            || k_head_dim == 0
+            || kv_out < kv_lora
+            || k_nope_dim == 0
+            || v_head_dim == 0
+        {
+            // GGUFs with a fused `attn_kv_b` (no k_b/v_b split) land here.
+            return Err(ModelError::InferenceFailed(
+                "mla: missing latent projections".to_owned(),
+            ));
+        }
+        if v_head_dim > k_head_dim || k_nope_dim > k_head_dim {
+            return Err(ModelError::InferenceFailed(
+                "mla: k_b/v_b head wider than the KV cache slot".to_owned(),
+            ));
+        }
+
+        let mut normed = vec![0.0_f32; h];
+        rms_norm_model(x, &layer.attn_norm, cfg.rms_norm_eps, &mut normed, cfg)?;
+
+        let mut c_q = vec![0.0_f32; q_lora];
+        gemv_weight(&layer.mla_q_a, q_lora, h, &normed, &mut c_q)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla q_a: {e}")))?;
+        if !layer.mla_q_a_norm.is_empty() {
+            let src = c_q.clone();
+            rms_norm_model(&src, &layer.mla_q_a_norm, cfg.rms_norm_eps, &mut c_q, cfg)?;
+        }
+
+        let mut q = vec![0.0_f32; q_len];
+        gemv_weight(&layer.mla_q_b, q_len, q_lora, &c_q, &mut q)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla q_b: {e}")))?;
+
+        let mut kv_pe = vec![0.0_f32; kv_out];
+        gemv_weight(&layer.mla_kv_a_mqa, kv_out, h, &normed, &mut kv_pe)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla kv_a: {e}")))?;
+
+        let mut c_kv = vec![0.0_f32; kv_lora];
+        rms_norm_model(
+            &kv_pe[..kv_lora],
+            &layer.mla_kv_a_norm,
+            cfg.rms_norm_eps,
+            &mut c_kv,
+            cfg,
+        )?;
+
+        let mut k_pe_rope = vec![0.0_f32; kv_pe_dim];
+        if kv_pe_dim > 0 {
+            cfg.apply_rope_head(
+                &kv_pe[kv_lora..kv_lora + kv_pe_dim],
+                pos,
+                kv_pe_dim,
+                cfg.rope_theta,
+                &mut k_pe_rope,
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("mla k_pe rope: {e:?}")))?;
+        }
+
+        let total_k = n_heads * k_head_dim;
+        let mut k_store = vec![0.0_f32; total_k];
+        let mut v_store = vec![0.0_f32; n_heads * v_head_dim];
+        for head in 0..n_heads {
+            let k_off = head * k_head_dim;
+            gemv_weight_head(
+                &layer.mla_k_b,
+                k_nope_dim,
+                kv_lora,
+                head,
+                n_heads,
+                &c_kv,
+                &mut k_store[k_off..k_off + k_nope_dim],
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("mla k_b h{head}: {e}")))?;
+            let copy = q_pe_dim
+                .min(kv_pe_dim)
+                .min(k_head_dim.saturating_sub(k_nope_dim));
+            if copy > 0 {
+                let rope_off = k_off + k_nope_dim;
+                k_store[rope_off..rope_off + copy].copy_from_slice(&k_pe_rope[..copy]);
+            }
+            let v_off = head * v_head_dim;
+            gemv_weight_head(
+                &layer.mla_v_b,
+                v_head_dim,
+                kv_lora,
+                head,
+                n_heads,
+                &c_kv,
+                &mut v_store[v_off..v_off + v_head_dim],
+            )
+            .map_err(|e| ModelError::InferenceFailed(format!("mla v_b h{head}: {e}")))?;
+            let q_off = head * k_head_dim;
+            if q_pe_dim > 0 && q_off + k_head_dim <= q.len() {
+                let mut rotated = vec![0.0_f32; q_pe_dim];
+                cfg.apply_rope_head(
+                    &q[q_off + k_nope_dim..q_off + k_head_dim],
+                    pos,
+                    q_pe_dim,
+                    cfg.rope_theta,
+                    &mut rotated,
+                )
+                .map_err(|e| ModelError::InferenceFailed(format!("mla q_pe: {e:?}")))?;
+                let q_pe = &mut q[q_off + k_nope_dim..q_off + k_head_dim];
+                q_pe.copy_from_slice(&rotated[..q_pe.len()]);
+            }
+        }
+
+        let mut v_padded = vec![0.0_f32; total_k];
+        for head in 0..n_heads {
+            let v_off = head * v_head_dim;
+            let k_off = head * k_head_dim;
+            v_padded[k_off..k_off + v_head_dim]
+                .copy_from_slice(&v_store[v_off..v_off + v_head_dim]);
+        }
+        self.kv_cache
+            .set(layer_idx, pos, &k_store, &v_padded)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla kv set: {e:?}")))?;
+
+        let seq_len = pos + 1;
+        let borrowed_keys = self
+            .kv_cache
+            .f32_layer_key_prefix(layer_idx, seq_len)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla kv keys: {e:?}")))?;
+        let borrowed_values = self
+            .kv_cache
+            .f32_layer_value_prefix(layer_idx, seq_len)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla kv values: {e:?}")))?;
+        let (key_cache, value_cache) = match (borrowed_keys, borrowed_values) {
+            (Some(keys), Some(values)) => (
+                AttentionCacheSlice::Borrowed(keys),
+                AttentionCacheSlice::Borrowed(values),
+            ),
+            _ => {
+                let mut keys = vec![0.0_f32; seq_len * total_k];
+                let mut values = vec![0.0_f32; seq_len * total_k];
+                self.kv_cache
+                    .copy_layer_keys(layer_idx, seq_len, &mut keys)
+                    .map_err(|e| ModelError::InferenceFailed(format!("mla copy keys: {e:?}")))?;
+                self.kv_cache
+                    .copy_layer_values(layer_idx, seq_len, &mut values)
+                    .map_err(|e| ModelError::InferenceFailed(format!("mla copy values: {e:?}")))?;
+                (
+                    AttentionCacheSlice::Owned(keys),
+                    AttentionCacheSlice::Owned(values),
+                )
+            }
+        };
+        let key_cache = key_cache.as_slice();
+        let value_cache = value_cache.as_slice();
+
+        let mut attn_result = vec![0.0_f32; total_k];
+        let scale = 1.0_f32 / (k_head_dim as f32).sqrt();
+        for head in 0..n_heads {
+            let off = head * k_head_dim;
+            if off + k_head_dim > q.len() {
+                break;
+            }
+            let q_h = &q[off..off + k_head_dim];
+            let mut scores = vec![0.0_f32; seq_len];
+            let mut max_s = f32::NEG_INFINITY;
+            for t in 0..seq_len {
+                let row = t * total_k + off;
+                if row + k_head_dim > key_cache.len() {
+                    scores[t] = f32::NEG_INFINITY;
+                    continue;
+                }
+                let mut dot = 0.0_f32;
+                let k_t = &key_cache[row..row + k_head_dim];
+                for i in 0..k_head_dim {
+                    dot += q_h[i] * k_t[i];
+                }
+                let score = dot * scale;
+                scores[t] = score;
+                if score > max_s {
+                    max_s = score;
+                }
+            }
+            if !max_s.is_finite() {
+                continue;
+            }
+            let mut sum = 0.0_f32;
+            for s in &mut scores {
+                if !s.is_finite() {
+                    *s = 0.0;
+                    continue;
+                }
+                *s = (*s - max_s).exp();
+                sum += *s;
+            }
+            let inv = 1.0_f32 / sum.max(1e-12);
+            for i in 0..v_head_dim {
+                let mut acc = 0.0_f32;
+                for t in 0..seq_len {
+                    let row = t * total_k + off + i;
+                    if row < value_cache.len() {
+                        acc += scores[t] * inv * value_cache[row];
+                    }
+                }
+                attn_result[off + i] = acc;
+            }
+        }
+
+        // Heads sit `k_head_dim` apart but attn_output wants them packed.
+        let total_v = n_heads * v_head_dim;
+        let mut attn_input = vec![0.0_f32; total_v];
+        pack_head_outputs(
+            &attn_result,
+            n_heads,
+            k_head_dim,
+            v_head_dim,
+            &mut attn_input,
+        );
+        let mut attn_out = vec![0.0_f32; h];
+        gemv_weight(&layer.attn_output, h, total_v, &attn_input, &mut attn_out)
+            .map_err(|e| ModelError::InferenceFailed(format!("mla attn_out: {e}")))?;
+        Ok(attn_out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mla_v_b_reads_head_major_rows() {
+        // attn_v_b is [n_heads][v_dim][kv_lora]; head 1's rows are 3*l and 4*l.
+        let (n_heads, kv_lora, v_dim) = (2, 2, 2);
+        let mut data = vec![0.0_f32; n_heads * v_dim * kv_lora];
+        for v in 0..v_dim {
+            for l in 0..kv_lora {
+                data[v_dim * kv_lora + v * kv_lora + l] = (v + 3) as f32 * (l + 1) as f32;
+            }
+        }
+        let mut out = [0.0_f32; 2];
+        gemv_weight_head(
+            &WeightStorage::F32(data),
+            v_dim,
+            kv_lora,
+            1,
+            n_heads,
+            &[1.0, 1.0],
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out, [9.0, 12.0]);
+    }
+
+    #[test]
+    fn mla_head_outputs_pack_densely() {
+        // k_head_dim 3, v_head_dim 2: the third slot of each head is padding.
+        let strided = [1.0, 2.0, 0.0, 3.0, 4.0, 0.0];
+        let mut packed = [0.0_f32; 4];
+        pack_head_outputs(&strided, 2, 3, 2, &mut packed);
+        assert_eq!(packed, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn quantized_head_slice_out_of_range_is_an_error() {
+        let storage = WeightStorage::Quantized(GgufQuantizationType::Q8_0, vec![0_u8; 34]);
+        let mut out = [0.0_f32; 1];
+        assert!(gemv_weight_head(&storage, 1, 32, 1, 2, &[0.0; 32], &mut out).is_err());
+        assert!(gemv_weight_head(&storage, 1, 33, 0, 2, &[0.0; 33], &mut out).is_err());
     }
 }

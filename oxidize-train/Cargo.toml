@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+oxidize-finetuning = { path = "../oxidize-finetuning" }
 serde.workspace = true
 thiserror.workspace = true
 rand = "0.8"
