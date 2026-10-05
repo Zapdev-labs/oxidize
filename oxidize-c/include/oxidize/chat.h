@@ -23,6 +23,7 @@ typedef enum {
     OC_CHAT_LLAMA2,              /* Llama-2: [INST] ... [/INST]           */
     OC_CHAT_GEMMA,              /* Gemma: <start_of_turn>role\n...        */
     OC_CHAT_PLAIN,              /* Plain text concatenation              */
+    OC_CHAT_K2,                 /* K2-Horizon: <|ifm|im_start|>role\n...  */
 } OcChatTemplate;
 
 /* Render a single message into the template buffer.
@@ -36,7 +37,10 @@ typedef enum {
  *   is_last   : true if this is the last message (adds generation prompt)
  *
  * Returns the number of bytes written (excluding NUL). Returns 0 on error
- * or truncation. */
+ * or truncation. Returns OC_CHAT_RENDER_SKIP when the template drops the
+ * message (K2 roles other than system/user/assistant/tool) and there is
+ * nothing to append; that is not an error. */
+#define OC_CHAT_RENDER_SKIP ((size_t)-1)
 size_t oc_chat_render_message(OcChatTemplate template,
                               const char *role, const char *content,
                               char *out, size_t out_cap,

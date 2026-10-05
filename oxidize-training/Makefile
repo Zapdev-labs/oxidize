@@ -9,7 +9,7 @@ else
 LDFLAGS_OB = -lopenblas -lm -lpthread
 endif
 
-.PHONY: all bench corpus clean train-bin train eval backtest news market-corpus picks tokens smoke
+.PHONY: all bench corpus clean train-bin train eval backtest news market-corpus picks tokens smoke weather
 
 all: bin/gen_corpus bin/gemm_bench bin/bpe bin/oxidize-training
 
@@ -74,6 +74,10 @@ news: | data
 
 picks: bin/oxidize-training data/vocab.bin
 	./bin/oxidize-training picks --ckpt out/trader.bin --vocab data/vocab.bin --data-dir data --news-dir data/news
+
+weather: bin/oxidize-training
+	chmod +x tools/run_weather.sh tools/fetch_climate.py tools/gen_weather_corpus.py tools/eval_weather.py
+	./tools/run_weather.sh
 
 clean:
 	rm -rf bin

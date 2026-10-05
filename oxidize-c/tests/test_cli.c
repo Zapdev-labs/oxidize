@@ -374,6 +374,9 @@ Test(cli, context_prefill_chunk_size_is_append_only)
         offsetof(OcCliContext, experts_per_tok),
         offsetof(OcCliContext, prerouter_prefetch),
         offsetof(OcCliContext, prefill_chunk_size),
+        offsetof(OcCliContext, mtp_model),
+        offsetof(OcCliContext, mtp),
+        offsetof(OcCliContext, chat),
     };
     for (size_t i = 1; i < sizeof(order) / sizeof(order[0]); i++) {
         cr_assert(order[i] > order[i - 1],
@@ -381,10 +384,36 @@ Test(cli, context_prefill_chunk_size_is_append_only)
                   i);
     }
     cr_assert_eq(order[sizeof(order) / sizeof(order[0]) - 1],
-                 offsetof(OcCliContext, prefill_chunk_size));
+                 offsetof(OcCliContext, chat));
     /* Only alignment padding may follow the last field. */
     cr_assert_eq(sizeof(OcCliContext),
-                 ((offsetof(OcCliContext, prefill_chunk_size) + sizeof(uint32_t)
+                 ((offsetof(OcCliContext, chat) + sizeof(bool)
                    + _Alignof(OcCliContext) - 1)
                   / _Alignof(OcCliContext)) * _Alignof(OcCliContext));
+}
+
+Test(cli, context_parses_mtp_and_chat)
+{
+    char *argv[] = {"oxidize-c", "prompt", "--mtp", "--chat",
+                    "--mtp-model", "head.gguf", "--prompt", "hi"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(8, argv, &ctx));
+    cr_assert(ctx.mtp);
+    cr_assert(ctx.chat);
+    cr_assert_str_eq(ctx.mtp_model, "head.gguf");
+    cr_assert_str_eq(ctx.prompt, "hi");
+    cr_assert_not(oc_cli_parse_failed());
+}
+
+Test(cli, rejects_malformed_rq_counts)
+{
+    char *argv[] = {"oxidize-c", "--kv-k-bits", "abc"};
+    OcCliArgs a;
+    oc_cli_parse_args(3, argv, &a);
+    cr_assert(oc_cli_parse_failed());
+
+    char *sinks[] = {"oxidize-c", "serve", "--kv-sinks", "12abc"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(4, sinks, &ctx));
+    cr_assert(oc_cli_parse_failed());
 }

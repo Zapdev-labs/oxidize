@@ -5,6 +5,7 @@
 
 #include "oxidize/chat.h"
 
+#include <stdint.h>
 #include <string.h>
 
 Test(chat, chatml_user_message)
@@ -102,4 +103,63 @@ Test(chat, render_message_reports_overflow)
     cr_assert_eq(oc_chat_render_message(OC_CHAT_CHATML, "user",
                                         "this does not fit", out, sizeof(out),
                                         true, true), 0);
+}
+
+/* K2-Horizon: detected from the GGUF template's turn marker or the arch, and
+ * rendered like the GGUF Jinja template (no newline between turns, think
+ * block on assistant turns, high-effort think opener as the generation
+ * prompt). */
+Test(chat, k2_detect_and_render)
+{
+    cr_assert_eq(oc_chat_detect("k2-horizon"), OC_CHAT_K2);
+    cr_assert_eq(oc_chat_detect_full("llama", "x.gguf",
+                                     "{{- '<|ifm|im_start|>' + role }}"),
+                 OC_CHAT_K2);
+    cr_assert_eq(oc_chat_detect_full("llama", "x.gguf",
+                                     "<|ifm|im_start|> in a note\n[INST]"),
+                 OC_CHAT_LLAMA2);
+    cr_assert_eq(oc_chat_detect_full("k2-horizon", "x.gguf",
+                                     "<|ifm|im_start|> and [INST]"),
+                 OC_CHAT_K2);
+
+    const char *roles[] = {"system", "user", "assistant", "user"};
+    const char *contents[] = {"Be brief.", "Hi", "Hello!", "Bye"};
+    char out[4096];
+    size_t n = oc_chat_render_messages(OC_CHAT_K2, roles, contents, 4,
+                                       out, sizeof(out));
+    cr_assert_gt(n, 0);
+    cr_assert_str_eq(out,
+        "<|ifm|im_start|>system\nBe brief.<|ifm|im_end|>"
+        "<|ifm|im_start|>user\nHi<|ifm|im_end|>"
+        "<|ifm|im_start|>assistant\n<ifm|think>\n</ifm|think>\nHello!"
+        "<|ifm|im_end|>"
+        "<|ifm|im_start|>user\nBye<|ifm|im_end|>"
+        "<|ifm|im_start|>assistant\n<ifm|think>\n");
+}
+
+Test(chat, k2_render_message_reports_overflow)
+{
+    char out[16];
+    cr_assert_eq(oc_chat_render_message(OC_CHAT_K2, "user",
+                                        "this does not fit", out, sizeof(out),
+                                        true, true), 0);
+}
+
+Test(chat, k2_dropped_role_is_skip_and_keeps_generation_prompt)
+{
+    char one[256];
+    cr_assert_eq(oc_chat_render_message(OC_CHAT_K2, "developer", "secret",
+                                        one, sizeof(one), false, false),
+                 OC_CHAT_RENDER_SKIP);
+
+    const char *roles[] = {"user", "developer", "user"};
+    const char *contents[] = {"Hi", "secret", "Bye"};
+    char out[4096];
+    size_t n = oc_chat_render_messages(OC_CHAT_K2, roles, contents, 3,
+                                       out, sizeof(out));
+    cr_assert_gt(n, 0);
+    cr_assert_null(strstr(out, "secret"));
+    cr_assert_not_null(strstr(out, "<|ifm|im_start|>user\nHi<|ifm|im_end|>"));
+    cr_assert_not_null(strstr(out, "<|ifm|im_start|>user\nBye<|ifm|im_end|>"));
+    cr_assert_not_null(strstr(out, "<|ifm|im_start|>assistant\n<ifm|think>\n"));
 }

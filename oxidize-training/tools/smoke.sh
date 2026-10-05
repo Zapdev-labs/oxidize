@@ -41,6 +41,12 @@ printf '%s\n' "$PROMPT" | OMP_NUM_THREADS=2 "$BIN/oxidize-training" score \
     --ckpt "$WORK/out/model.bin" --vocab "$WORK/data/vocab.bin" |
     grep -qE '^(BUY|SELL|HOLD) ' || fail "score did not emit an action"
 
+# complete: one output line per prompt, each opening with a forced winter class.
+comp=$(printf '%s\n%s\n' "$PROMPT" "$PROMPT" | OMP_NUM_THREADS=2 "$BIN/oxidize-training" complete \
+    --ckpt "$WORK/out/model.bin" --vocab "$WORK/data/vocab.bin" --tokens 3 --temp 0.2 --seed 1)
+[ "$(printf '%s\n' "$comp" | wc -l)" -eq 2 ] || fail "complete did not emit one line per prompt"
+printf '%s\n' "$comp" | grep -qvE '^[1-9]' && fail "complete did not force a winter class"
+
 expect_fail() {
     what=$1
     shift
