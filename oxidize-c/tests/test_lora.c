@@ -1,6 +1,13 @@
+#define _POSIX_C_SOURCE 200809L
 /* test_lora.c — LoRA adapter inference tests. */
 #include <criterion/criterion.h>
 #include "oxidize/lora.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 Test(lora, model_init_free)
 {
@@ -252,4 +259,60 @@ Test(lora_plan, no_adapters_on_base)
     cr_assert_eq(e, OC_LORA_PLAN_OK);
     cr_assert_eq(plan.n_targets, 0);
     oc_lora_plan_free(&plan);
+}
+
+Test(lora, extra_adapter_names)
+{
+    OcLoraModel lm;
+    cr_assert_eq(oc_lora_model_init(&lm, 1), OC_OK);
+
+    float *a = calloc(2u * 4u, sizeof(float));
+    float *b = calloc(3u * 2u, sizeof(float));
+    cr_assert(a && b);
+    cr_assert_eq(oc_lora_set_adapter(&lm, 0, "shexp_gate", a, b, 2, 3, 4, 2.0f),
+                 OC_OK);
+    cr_assert_eq(lm.shexp_gate_adapters[0].rank, 2);
+    cr_assert_eq(lm.max_rank, 2);
+    cr_assert_float_eq(lm.scale, 2.0f, 1e-6f);
+
+    float *a2 = calloc(2u * 4u, sizeof(float));
+    float *b2 = calloc(8u * 2u, sizeof(float));
+    cr_assert(a2 && b2);
+    cr_assert_eq(oc_lora_set_adapter(&lm, 0, "in_proj_qkv", a2, b2, 2, 8, 4, 2.0f),
+                 OC_OK);
+    cr_assert_eq(lm.ssm_qkv_adapters[0].rows, 8);
+    oc_lora_model_free(&lm);
+}
+
+Test(lora, load_safetensors_q_proj)
+{
+    float a[8] = {1, 0, 0, 0, 0, 1, 0, 0};
+    float b[6] = {1, 0, 0, 1, 1, 1};
+    char path[] = "/tmp/oc_lora_XXXXXX";
+    int fd = mkstemp(path);
+    cr_assert(fd >= 0);
+    FILE *fp = fdopen(fd, "wb");
+    cr_assert_not_null(fp);
+    const char *json =
+        "{\"language_model.model.layers.0.self_attn.q_proj.lora_A.weight\":"
+        "{\"dtype\":\"F32\",\"shape\":[2,4],\"data_offsets\":[0,32]},"
+        "\"language_model.model.layers.0.self_attn.q_proj.lora_B.weight\":"
+        "{\"dtype\":\"F32\",\"shape\":[3,2],\"data_offsets\":[32,56]}}";
+    uint64_t hdr = (uint64_t)strlen(json);
+    cr_assert_eq(fwrite(&hdr, 1, 8, fp), 8);
+    cr_assert_eq(fwrite(json, 1, (size_t)hdr, fp), (size_t)hdr);
+    cr_assert_eq(fwrite(a, sizeof(float), 8, fp), 8);
+    cr_assert_eq(fwrite(b, sizeof(float), 6, fp), 6);
+    fclose(fp);
+
+    OcLoraModel lm;
+    cr_assert_eq(oc_lora_model_init(&lm, 2), OC_OK);
+    cr_assert_eq(oc_lora_load_safetensors(&lm, path, 0.0f), OC_OK);
+    cr_assert(oc_lora_is_active(&lm));
+    cr_assert_eq(lm.q_adapters[0].rank, 2);
+    cr_assert_eq(lm.q_adapters[0].rows, 3);
+    cr_assert_eq(lm.q_adapters[0].cols, 4);
+    cr_assert_float_eq(lm.q_adapters[0].alpha, 2.0f, 1e-6f);
+    oc_lora_model_free(&lm);
+    unlink(path);
 }

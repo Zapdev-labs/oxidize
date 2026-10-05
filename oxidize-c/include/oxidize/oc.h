@@ -25,6 +25,9 @@
 #include "activation.h"
 #include "matvec.h"
 #include "llama.h"
+#include "expert_stream.h"
+#include "prerouter.h"
+#include "lora.h"
 #include "sampling.h"
 
 #endif /* OXIDIZE_OC_H */

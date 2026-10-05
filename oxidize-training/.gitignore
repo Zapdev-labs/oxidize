@@ -1,0 +1,9 @@
+bin/
+out/
+data/*.txt
+data/*.bin
+data/*.csv
+data/news/
+__pycache__/
+*.pyc
+*.log

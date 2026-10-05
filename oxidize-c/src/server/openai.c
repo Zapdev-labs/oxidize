@@ -50,7 +50,14 @@ static OcError openai_session_init(OcOpenaiState *st, OcLlamaSession *sess)
 {
     if (st != NULL && st->kv_set)
         return oc_llama_session_init_kv(st->model, sess, st->kv_type);
-    return oc_llama_session_init(st->model, sess);
+    /* Same resolution as the CLI: OX_KV_TYPE, else Q8 at 8K and RQ at 128K.
+     * session_init() only reads the environment and would allocate a dense
+     * f32 cache for a long-context server. */
+    if (st != NULL && st->model != NULL) {
+        OcKvCacheType kv = oc_llama_select_kv_type(st->model->cfg.n_ctx, NULL);
+        return oc_llama_session_init_kv(st->model, sess, kv);
+    }
+    return oc_llama_session_init(st != NULL ? st->model : NULL, sess);
 }
 
 static size_t openai_prefill_chunk(const OcOpenaiState *st)
@@ -62,9 +69,8 @@ static size_t openai_prefill_chunk(const OcOpenaiState *st)
 
 static bool kv_override_recognized(const char *s)
 {
-    return s != NULL &&
-           (strcmp(s, "q8") == 0 || strcmp(s, "Q8") == 0 ||
-            strcmp(s, "f32") == 0 || strcmp(s, "F32") == 0);
+    OcKvOptions o;
+    return oc_llama_parse_kv_type(s, &o);
 }
 
 OcError oc_openai_apply_tuning_plan(OcOpenaiState *st, const OcTuningPlan *plan,
@@ -330,6 +336,7 @@ static bool extract_messages_content(const char *json, OcChatTemplate template,
                                                 out + out_i, out_cap - out_i,
                                                 message_count == 0,
                                                 is_last);
+        if (written == OC_CHAT_RENDER_SKIP) continue;
         if (written == 0) {
             free(content);
             return false;
@@ -643,7 +650,7 @@ static char *generate_completion_unlocked(OcOpenaiState *st,
     for (int t = 0; t < max_tokens; t++) {
         uint32_t tok = oc_sample(sess.logits, st->model->cfg.vocab_size, &scfg,
                                  ids, n_hist);
-        if (st->tokenizer->has_eos && tok == st->tokenizer->eos_id) break;
+        if (oc_tokenizer_is_eog(st->tokenizer, tok)) break;
         ids[n_hist++] = tok;
         char *piece = NULL;
         if (oc_tokenizer_decode(st->tokenizer, &tok, 1, &piece) == OC_OK && piece) {

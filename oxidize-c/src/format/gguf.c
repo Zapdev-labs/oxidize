@@ -892,11 +892,11 @@ static char *extract_split_base_and_dir(const char *path, uint64_t *out_total)
  * `shard->bytes` and `shard->len` are populated, and `shard->parsed` is
  * parsed from the mmap'd bytes. Returns OC_OK or an error; on error, the
  * shard is left zeroed. */
-static OcError open_shard(const char *path, OcGgufShard *shard)
+static OcError open_shard(const char *path, OcGgufShard *shard, unsigned flags)
 {
     memset(shard, 0, sizeof(*shard));
     OcMmap *m = NULL;
-    OcError e = oc_mmap_open_readonly(path, &m);
+    OcError e = oc_mmap_open_readonly_flags(path, flags, &m);
     if (e != OC_OK) return e;
 
     /* Parse the mmap'd bytes. oc_gguf_parse dups the bytes it needs into the
@@ -935,6 +935,12 @@ static void close_shard(OcGgufShard *shard)
 }
 
 OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
+{
+    return oc_gguf_map_open_flags(path, 0u, out);
+}
+
+OcError oc_gguf_map_open_flags(const char *path, unsigned flags,
+                               OcGgufMmappedFile *out)
 {
     if (!path || !out) return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
@@ -988,7 +994,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
                     free(base_path);
                     return OC_ERR_OOM;
                 }
-                OcError e = open_shard(shard_path, &shards[i]);
+                OcError e = open_shard(shard_path, &shards[i], flags);
                 free(shard_path);
                 if (e != OC_OK) {
                     uint64_t shard_num = i + 1;
@@ -1179,7 +1185,7 @@ OcError oc_gguf_map_open(const char *path, OcGgufMmappedFile *out)
         OcGgufShard *shards = (OcGgufShard *)calloc(1, sizeof(OcGgufShard));
         if (!shards) return OC_ERR_OOM;
 
-        OcError e = open_shard(path, &shards[0]);
+        OcError e = open_shard(path, &shards[0], flags);
         if (e != OC_OK) {
             free(shards);
             return e;

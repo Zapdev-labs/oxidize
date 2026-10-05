@@ -1157,6 +1157,79 @@ pub(super) fn gemv_weight(
     }
 }
 
+/// GEMV against one head of a head-major `[n_heads][rows][cols]` weight —
+/// the GGUF layout of the MLA `attn_k_b` / `attn_v_b` splits (the converter
+/// takes each head's rows of HF `kv_b_proj`). Shared by CPU decode and the
+/// layer-wise trainer so both read the tensor the same way; mirrors
+/// `oc_gemv_weight_head` in oxidize-c.
+pub(crate) fn gemv_weight_head(
+    storage: &WeightStorage,
+    rows: usize,
+    cols: usize,
+    head: usize,
+    n_heads: usize,
+    input: &[f32],
+    output: &mut [f32],
+) -> Result<(), String> {
+    if n_heads == 0 || head >= n_heads {
+        return Err(format!("head {head} out of range for {n_heads} heads"));
+    }
+    // Dimensions come from GGUF metadata, so overflow must be an error, not a
+    // wrapped range that slips past the bounds check.
+    let head_range = |per_head: Option<usize>, len: usize, unit: &str| {
+        per_head
+            .and_then(|per_head| {
+                let start = head.checked_mul(per_head)?;
+                Some((start, start.checked_add(per_head)?))
+            })
+            .filter(|(_, end)| *end <= len)
+            .ok_or_else(|| format!("head {head} of {rows}x{cols} past {len} {unit}"))
+    };
+    let mut quantized_head = |qtype: GgufQuantizationType, data: &[u8]| {
+        let (block_width, block_size) = weight_block_info(qtype);
+        if block_width == 0 || !cols.is_multiple_of(block_width) {
+            return Err(format!("{cols} columns not a multiple of {block_width}"));
+        }
+        let per_head = rows
+            .checked_mul(cols / block_width)
+            .and_then(|n| n.checked_mul(block_size));
+        let (start, end) = head_range(per_head, data.len(), "bytes")?;
+        gemv_quantized_f32(qtype, &data[start..end], rows, cols, input, output)
+            .map_err(|e| format!("{:?}", e))
+    };
+    match storage {
+        WeightStorage::F32(data) => {
+            let (start, end) = head_range(rows.checked_mul(cols), data.len(), "floats")?;
+            gemv_f32(&data[start..end], rows, cols, input, output).map_err(|e| format!("{:?}", e))
+        }
+        WeightStorage::Quantized(qtype, data) => quantized_head(*qtype, data),
+        WeightStorage::MmapQuantized(qtype, mmap, offset, size) => {
+            let end = offset
+                .checked_add(*size)
+                .filter(|end| *end <= mmap.len())
+                .ok_or_else(|| {
+                    format!("tensor {offset}+{size} past {} mapped bytes", mmap.len())
+                })?;
+            quantized_head(*qtype, &mmap[*offset..end])
+        }
+    }
+}
+
+/// Pack per-head outputs strided by `stride` (MLA keeps V in `k_head_dim`
+/// slots) into the dense `n_heads * width` vector `attn_output` expects.
+pub(crate) fn pack_head_outputs(
+    strided: &[f32],
+    n_heads: usize,
+    stride: usize,
+    width: usize,
+    packed: &mut [f32],
+) {
+    for head in 0..n_heads {
+        packed[head * width..(head + 1) * width]
+            .copy_from_slice(&strided[head * stride..head * stride + width]);
+    }
+}
+
 /// Run several same-input projections (q/k/v, gate/up) as ONE fused parallel
 /// region via [`gemv_quantized_multi_f32`]. Entries with `rows == 0` are
 /// skipped; F32-stored weights run as sequential [`gemv_weight`] calls after

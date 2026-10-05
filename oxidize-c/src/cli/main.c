@@ -25,6 +25,7 @@
 #include "oxidize/cuda.h"
 #include "oxidize/dspark.h"
 #include "oxidize/error.h"
+#include "oxidize/expert_stream.h"
 #include "oxidize/gguf.h"
 #include "oxidize/http.h"
 #include "oxidize/llama.h"
@@ -116,7 +117,13 @@ static void print_help(void)
 "  --prompt-file PATH     Read prompt from a file\n"
 "  --n-predict N          Max tokens to generate (default 128)\n"
 "  --ctx N                Cap KV context below the model's advertised length\n"
-"  --kv f32|q8            KV cache dtype (default: q8 when ctx>=8192)\n"
+"  --kv, --kv-type T      f32 | q8 | rq | rq:K,V  KV cache type (default:\n"
+"                         q8 when ctx>=8192, rq when ctx>=131072)\n"
+"  --kv-k-bits N          RQ key bits 2..4 (default 3)\n"
+"  --kv-v-bits N          RQ value bits 2..4 (default 3)\n"
+"  --kv-window N          RQ exact int8 window of recent tokens (default 1024, 0 = off)\n"
+"  --kv-sinks N           RQ exact int8 attention-sink tokens (0 = off)\n"
+"  --kv-compress MODE     none | rotor | helix (default none)\n"
 "  --prefill-chunk-size N Prefill chunk (0 = unset; --auto may fill this)\n"
 "  --threads N            CPU thread hint (0 = auto)\n"
 "  --numa MODE            single | interleave | none (default none)\n"
@@ -132,12 +139,22 @@ static void print_help(void)
 "  --temperature T        Sampling temperature (0 = greedy, default 0)\n"
 "  --top-k K              Top-K sampling (default 40, 0 = disabled)\n"
 "  --top-p P              Top-P / nucleus (default 0.95)\n"
-"  --repeat-penalty P     Repeat penalty (default 1.1)\n"
+"  --repeat-penalty P     Repeat penalty (default 1.1; --mtp forces 1)\n"
 "  --seed N               RNG seed (0 = deterministic default)\n"
 "  --spec-type TYPE       none | mtp | dspark (default: dspark if GGUF has MTP)\n"
-"  --draft-tokens N       MTP/DSpark draft block size (default 4)\n"
+"  --draft-tokens N       MTP/DSpark draft block size (default 4; K2 MTP 1)\n"
+"  --mtp                  K2-Horizon: MTP speculative decoding (greedy, opt-in;\n"
+"                         forces --repeat-penalty 1, needs --temperature 0)\n"
+"  --mtp-model PATH       K2-Horizon: load an mtp-*.gguf nextn head sidecar\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
+"  --stream-experts       SSD expert offload (no whole-file readahead/mlock)\n"
+"  --expert-cache-mb N    Expert working set budget (default 3072)\n"
+"  --prerouter PATH       Edge0 prerouter.safetensors (prediction is routing)\n"
+"  --prerouter-prefetch   Load prerouter heads but keep native router\n"
+"  --lora PATH            Edge0 Recover-LoRA safetensors (unmerged, scale α/r=2)\n"
+"  --experts-per-tok K    Override MoE top-k (Edge0 adapters were trained at 4)\n"
+"  --chat                 Wrap the prompt as a user turn (GGUF chat template)\n"
 "  -v, --verbose          Verbose logging\n"
 "  -h, --help             Show this help\n"
 "  --version              Print version and exit\n",
@@ -145,6 +162,13 @@ static void print_help(void)
 }
 
 /* ─── Generation ──────────────────────────────────────────────────────── */
+
+static uint32_t clamp_experts_per_tok(const OcLlamaModel *model, uint32_t k)
+{
+    uint32_t max = model->cfg.num_experts + model->cfg.zero_expert_count;
+    if (max == 0) return k;
+    return k > max ? max : k;
+}
 
 static OcError run_generation(const OcCliArgs *args)
 {
@@ -175,11 +199,22 @@ static OcError run_generation(const OcCliArgs *args)
 
     oc_log(OC_LOG_INFO, "loading model: %s", args->model_path);
     OcLlamaModel model;
-    OcError e = oc_llama_load(args->model_path, &model);
+    unsigned load_flags = args->stream_experts ? OC_LLAMA_LOAD_STREAM : 0u;
+    OcError e = oc_llama_load_flags(args->model_path, load_flags, &model);
     if (e != OC_OK) {
         fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
         free(file_prompt);
         return e;
+    }
+    if (args->mtp_model != NULL) {
+        e = oc_llama_load_mtp_sidecar(&model, args->mtp_model);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: failed to load MTP head %s (%s)\n",
+                    args->mtp_model, oc_error_msg(e));
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
     }
 
     /* Clamp the context before anything sizes a KV cache off it. Models now
@@ -200,6 +235,12 @@ static OcError run_generation(const OcCliArgs *args)
             model.cfg.n_ctx = want;
         }
     }
+    if (args->experts_per_tok > 0 && model.cfg.num_experts > 0) {
+        uint32_t k = clamp_experts_per_tok(&model, args->experts_per_tok);
+        oc_log(OC_LOG_INFO, "moe: experts-per-tok %u -> %u",
+               model.cfg.num_experts_per_tok, k);
+        model.cfg.num_experts_per_tok = k;
+    }
 
     /* Autotune plan is computed before CUDA so hopper flags can be stored
      * on the CUDA context. Explicit --threads/--numa still win. */
@@ -216,6 +257,15 @@ static OcError run_generation(const OcCliArgs *args)
 
     /* CUDA backend: upload weights to GPU and use GPU forward path. */
     bool use_cuda = (args->backend && strcmp(args->backend, "cuda") == 0);
+    if (use_cuda && (args->stream_experts || args->prerouter_path ||
+                     args->lora_path)) {
+        fprintf(stderr,
+                "error: --stream-experts, --prerouter, and --lora require "
+                "--backend cpu\n");
+        oc_llama_free(&model);
+        free(file_prompt);
+        return OC_ERR_INVALID_ARG;
+    }
     OcCudaContext cuda_ctx;
     memset(&cuda_ctx, 0, sizeof(cuda_ctx));
     if (use_cuda) {
@@ -251,10 +301,27 @@ static OcError run_generation(const OcCliArgs *args)
 
     if (have_plan && (args->auto_tune || args->threads > 0 ||
         (args->numa && strcmp(args->numa, "none") != 0))) {
-        if (args->auto_tune) oc_autotune_apply(&plan, &model.gguf);
-        oc_autotune_apply_thread_numa(&plan, &cpu, &model.gguf,
+        if (args->auto_tune && !args->stream_experts)
+            oc_autotune_apply(&plan, &model.gguf);
+        oc_autotune_apply_thread_numa(&plan, &cpu,
+                                     args->stream_experts ? NULL : &model.gguf,
                                      args->threads, args->numa, args->auto_tune,
                                      true);
+    }
+
+    if (args->stream_experts) {
+        OcExpertStreamConfig scfg;
+        oc_expert_stream_config_init(&scfg);
+        if (args->expert_cache_mb > 0)
+            scfg.cache_bytes = (uint64_t)args->expert_cache_mb << 20;
+        e = oc_llama_enable_expert_stream(&model, &scfg);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: expert stream init failed (%s)\n",
+                    oc_error_msg(e));
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
     }
 
     /* Tokenizer (loaded from the same GGUF metadata). */
@@ -269,10 +336,11 @@ static OcError run_generation(const OcCliArgs *args)
 
     OcLlamaSession sess;
     OcKvCacheType kv = oc_llama_select_kv_type(model.cfg.n_ctx, args->kv_type);
-    if (args->auto_tune && args->kv_type == NULL && have_plan &&
+    if (!oc_cli_kv_compress_enabled(args->kv_compress) &&
+        args->auto_tune && args->kv_type == NULL && have_plan &&
         plan.kv_turboquant)
         kv = plan.kv_cache;
-    e = oc_llama_session_init_kv(&model, &sess, kv);
+    e = oc_llama_session_init_with_compress(&model, &sess, kv, args->kv_compress);
     if (e != OC_OK) {
         fprintf(stderr, "error: session init failed (%s)\n", oc_error_msg(e));
         oc_tokenizer_free(&tok);
@@ -281,12 +349,73 @@ static OcError run_generation(const OcCliArgs *args)
         return e;
     }
 
+    /* K2-Horizon MTP is opt-in (--mtp or --spec-type mtp): with the current
+     * head it is not faster than plain decode on CPU (see oc_llama_mtp_step
+     * docs). Greedy only. The default repeat penalty is 1.1, which would
+     * otherwise disable MTP; force 1 so --mtp actually runs. Verify compares
+     * raw argmaxes, so a non-zero temperature still opts out. */
+    float repeat_penalty = args->repeat_penalty;
+    bool k2_mtp = false;
+    const bool want_k2_mtp = model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
+        (args->mtp || (args->spec_type && strcmp(args->spec_type, "mtp") == 0));
+    if (want_k2_mtp) {
+        if (use_cuda || args->temperature > 0.0f) {
+            oc_log(OC_LOG_WARN, "mtp: needs CPU greedy decoding "
+                   "(--temperature 0); decoding without it");
+        } else if (oc_llama_mtp_enable(&sess, true) == OC_OK) {
+            k2_mtp = true;
+        } else {
+            oc_log(OC_LOG_WARN, "mtp: could not enable (compressed KV?)");
+        }
+    }
+    /* Only override the user's penalty once MTP is actually on; when it
+     * stays off, plain sampling keeps --repeat-penalty as given. */
+    if (k2_mtp && repeat_penalty != 1.0f) {
+        oc_log(OC_LOG_WARN, "mtp: forcing --repeat-penalty 1 (was %.3f)",
+               repeat_penalty);
+        repeat_penalty = 1.0f;
+    }
+
+    if (args->prerouter_path) {
+        e = oc_llama_session_load_prerouter(&sess, args->prerouter_path,
+                                            !args->prerouter_prefetch);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: prerouter load failed (%s)\n",
+                    oc_error_msg(e));
+            oc_llama_session_free(&sess);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
+    }
+    if (args->lora_path) {
+        e = oc_llama_session_load_lora(&sess, args->lora_path);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: lora load failed (%s)\n", oc_error_msg(e));
+            oc_llama_session_free(&sess);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
+    }
+
     /* Encode prompt. */
     uint32_t *ids = NULL;
     size_t n_ids = 0;
     OcSpecialTokenPolicy policy = tok.has_add_bos_token && tok.add_bos_token
         ? OC_TOK_ADD_BOS : OC_TOK_DEFAULT;
-    e = oc_tokenizer_encode(&tok, prompt, policy, &ids, &n_ids);
+    char *chat_prompt = NULL;
+    if (args->chat) {
+        OcChatMessage msg = { "user", prompt };
+        e = oc_tokenizer_apply_chat_template(
+            &msg, 1, oc_tokenizer_detect_template(&model.gguf.unified), true,
+            &chat_prompt);
+        if (e == OC_OK) prompt = chat_prompt;
+    }
+    if (e == OC_OK) e = oc_tokenizer_encode(&tok, prompt, policy, &ids, &n_ids);
+    free(chat_prompt);
     if (e != OC_OK || n_ids == 0) {
         fprintf(stderr, "error: prompt encode failed (%s)\n", oc_error_msg(e));
         oc_llama_session_free(&sess);
@@ -302,7 +431,7 @@ static OcError run_generation(const OcCliArgs *args)
     /* Build sampler config. */
     OcSamplerConfig scfg = OC_SAMPLER_DEFAULT;
     scfg.temperature    = args->temperature;
-    scfg.repeat_penalty = args->repeat_penalty;
+    scfg.repeat_penalty = repeat_penalty;
     scfg.seed           = args->seed;
     scfg.min_p = args->min_p;
     scfg.tau = args->mirostat_tau;
@@ -393,11 +522,42 @@ static OcError run_generation(const OcCliArgs *args)
         /* Decode + print the prompt's last token context implicitly; generate. */
         size_t emitted = 0;
         bool eos_reached = false;
+        OcMtpStats mtp_stats;
+        memset(&mtp_stats, 0, sizeof mtp_stats);
         double decode_start = wall_now();
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
             uint32_t sampled;
+            if (k2_mtp) {
+                uint32_t toks[8];
+                size_t n = 0;
+                size_t want = (size_t)args->n_predict - emitted;
+                if (want > 8) want = 8;
+                uint32_t k = args->draft_tokens > 0 ? (uint32_t)args->draft_tokens : 1u;
+                e = oc_llama_mtp_step(&sess, k, logits, toks, want, &n, &mtp_stats);
+                if (e != OC_OK || n == 0) {
+                    if (e == OC_ERR_INVALID_ARG) {
+                        oc_log(OC_LOG_WARN, "context window full at position %lld",
+                               (long long)sess.pos);
+                        e = OC_OK;
+                    }
+                    break;
+                }
+                for (size_t i = 0; i < n; i++) {
+                    sampled = toks[i];
+                    if (oc_tokenizer_is_eog(&tok, sampled)) { eos_reached = true; break; }
+                    char *piece = NULL;
+                    if (oc_tokenizer_decode(&tok, &sampled, 1, &piece) == OC_OK && piece) {
+                        fputs(piece, stdout);
+                        fflush(stdout);
+                        free(piece);
+                    }
+                    emitted++;
+                    if (emitted >= (size_t)args->n_predict) break;
+                }
+                continue;
+            }
             if (!use_cuda && scfg.type == OC_SAMPLER_GREEDY &&
-                oc_llama_mtp_present(&model) &&
+                !model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
                 !(args->spec_type && strcmp(args->spec_type, "none") == 0)) {
                 uint32_t toks[8];
                 size_t n = 0;
@@ -413,7 +573,7 @@ static OcError run_generation(const OcCliArgs *args)
                 if (e != OC_OK || n == 0) break;
                 for (size_t i = 0; i < n; i++) {
                     sampled = toks[i];
-                    if (tok.has_eos && sampled == tok.eos_id) {
+                    if (oc_tokenizer_is_eog(&tok, sampled)) {
                         eos_reached = true;
                         break;
                     }
@@ -433,7 +593,7 @@ static OcError run_generation(const OcCliArgs *args)
             sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
             scfg.seed++;
-            if (tok.has_eos && sampled == tok.eos_id) { eos_reached = true; break; }
+            if (oc_tokenizer_is_eog(&tok, sampled)) { eos_reached = true; break; }
 
             /* Decode + print the sampled token. */
             char *piece = NULL;
@@ -464,6 +624,25 @@ static OcError run_generation(const OcCliArgs *args)
         }
         if (emitted > 0) fputs("\n", stdout);
         oc_log(OC_LOG_INFO, "generated %zu tokens", emitted);
+        if (k2_mtp && mtp_stats.steps > 0)
+            oc_log(OC_LOG_INFO, "mtp: %llu steps, %llu/%llu drafts accepted "
+                   "(%.1f%%), %.2f tokens/step",
+                   (unsigned long long)mtp_stats.steps,
+                   (unsigned long long)mtp_stats.accepted,
+                   (unsigned long long)mtp_stats.drafted,
+                   mtp_stats.drafted ? 100.0 * (double)mtp_stats.accepted /
+                                       (double)mtp_stats.drafted : 0.0,
+                   (double)mtp_stats.emitted / (double)mtp_stats.steps);
+        if (model.expert_stream) {
+            oc_log(OC_LOG_INFO,
+                   "expert-stream: resident=%.1f MiB prefetch=%.1f MiB reclaim=%.1f MiB",
+                   oc_expert_stream_resident_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_prefetch_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_reclaim_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0));
+        }
         if (decode_start > 0 && emitted > 0) {
             double elapsed = wall_now() - decode_start;
             if (elapsed > 0) {
@@ -526,6 +705,53 @@ int main(int argc, char **argv)
      * every existing script keep working. */
     OcCliContext ctx;
     if (oc_cli_context_parse(argc, argv, &ctx)) {
+        const char *server = NULL;
+        if (ctx.command == OC_CLI_CMD_SERVE ||
+            ctx.command == OC_CLI_CMD_SERVE_REALTIME)
+            server = oc_cli_command_name(ctx.command);
+        if (oc_cli_parse_failed()) return 2;
+        if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
+            return 1;
+        if (ctx.command == OC_CLI_CMD_PROMPT) {
+            OcCliArgs args;
+            oc_cli_args_defaults(&args);
+            args.model_path = ctx.model_path;
+            args.prompt = ctx.prompt;
+            args.prompt_file = ctx.prompt_file;
+            args.n_predict = ctx.n_predict;
+            args.n_ctx = ctx.n_ctx;
+            args.kv_type = ctx.kv_type;
+            args.kv_compress = ctx.kv_compress;
+            args.threads = ctx.threads;
+            args.numa = ctx.numa;
+            args.auto_tune = ctx.auto_tune;
+            args.no_auto = ctx.no_auto;
+            args.temperature = ctx.temperature;
+            args.top_k = ctx.top_k;
+            args.top_p = ctx.top_p;
+            args.repeat_penalty = ctx.repeat_penalty;
+            args.seed = ctx.seed;
+            args.min_p = ctx.min_p;
+            args.mirostat_tau = ctx.mirostat_tau;
+            args.mirostat_eta = ctx.mirostat_eta;
+            args.backend = ctx.backend;
+            args.verbose = ctx.verbose;
+            args.prefill_chunk_size = ctx.prefill_chunk_size;
+            args.stream_experts = ctx.stream_experts;
+            args.expert_cache_mb = ctx.expert_cache_mb;
+            args.prerouter_path = ctx.prerouter_path;
+            args.lora_path = ctx.lora_path;
+            args.experts_per_tok = ctx.experts_per_tok;
+            args.prerouter_prefetch = ctx.prerouter_prefetch;
+            args.mtp = ctx.mtp;
+            args.mtp_model = ctx.mtp_model;
+            args.chat = ctx.chat;
+            if (args.verbose) oc_log_set_level(OC_LOG_DEBUG);
+            init_compute_threads(args.threads);
+            OcError ge = run_generation(&args);
+            oc_parallel_shutdown();
+            return ge == OC_OK ? 0 : 1;
+        }
         init_compute_threads(ctx.threads);
         OcError ce = oc_cli_command_run(&ctx);
         oc_parallel_shutdown();
@@ -534,11 +760,15 @@ int main(int argc, char **argv)
 
     OcCliArgs args;
     oc_cli_parse_args(argc, argv, &args);
+    if (oc_cli_parse_failed()) return 2;
 
     /* After the early exits: neither help nor --version does any compute, and
      * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
+    if (oc_cli_kv_compress_reject(args.backend, args.kv_compress,
+                                  args.serve_api ? "--serve-api" : NULL))
+        return 1;
     if (args.cuda_selftest) {
         OcError se = oc_cuda_selftest();
         if (se != OC_OK) {
@@ -890,9 +1120,18 @@ int main(int argc, char **argv)
                n_ids, args.bench_iterations, args.n_predict);
         double best_tps = 0.0, sum_tps = 0.0;
         int completed_iterations = 0;
+        int setup_failed = 0;
         for (int iter = 0; iter < args.bench_iterations; iter++) {
             OcLlamaSession sess;
-            if (oc_llama_session_init_kv(&model, &sess, bench_kv) != OC_OK) break;
+            OcError se = oc_llama_session_init_with_compress(&model, &sess,
+                                                             bench_kv,
+                                                             args.kv_compress);
+            if (se != OC_OK) {
+                fprintf(stderr, "error: benchmark session init failed (%s)\n",
+                        oc_error_msg(se));
+                setup_failed = 1;
+                break;
+            }
             float *logits = sess.logits;
             for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++)
                 e = oc_llama_forward(&sess, ids[i], NULL);
@@ -900,13 +1139,14 @@ int main(int argc, char **argv)
             if (e != OC_OK) {
                 fprintf(stderr, "error: benchmark prefill failed (%s)\n", oc_error_msg(e));
                 oc_llama_session_free(&sess);
+                setup_failed = 1;
                 break;
             }
             double start = wall_now();
             size_t emitted = 0;
             while (emitted < (size_t)args.n_predict) {
                 uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
-                if (tok.has_eos && sampled == tok.eos_id) break;
+                if (oc_tokenizer_is_eog(&tok, sampled)) break;
                 emitted++;
                 if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
             }
@@ -916,7 +1156,8 @@ int main(int argc, char **argv)
             double pf_start = wall_now();
             OcLlamaSession pf_sess;
             memset(&pf_sess, 0, sizeof(pf_sess));
-            if (oc_llama_session_init_kv(&model, &pf_sess, bench_kv) == OC_OK) {
+            if (oc_llama_session_init_with_compress(&model, &pf_sess, bench_kv,
+                                                    args.kv_compress) == OC_OK) {
                 for (size_t i = 0; i < n_ids; i++)
                     oc_llama_forward(&pf_sess, ids[i], NULL);
             }
@@ -934,7 +1175,9 @@ int main(int argc, char **argv)
         free(bench_file_prompt);
         oc_tokenizer_free(&tok);
         oc_llama_free(&model);
-        if (completed_iterations == 0) return 1;
+        if (setup_failed || completed_iterations == 0 ||
+            completed_iterations != args.bench_iterations)
+            return 1;
         printf("benchmark: best=%.2f tok/s, avg=%.2f tok/s\n",
                best_tps, sum_tps / completed_iterations);
         return 0;

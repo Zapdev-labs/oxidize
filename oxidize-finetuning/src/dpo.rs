@@ -30,8 +30,12 @@ pub struct DpoExample {
     pub prompt: Vec<u32>,
     pub chosen: Vec<u32>,
     pub rejected: Vec<u32>,
-    /// Reference-policy log-probability of the chosen continuation (required when
-    /// `DpoConfig::reference_free` is false).
+    /// Original prompt text, when the JSONL stored a string rather than ids.
+    pub prompt_text: Option<String>,
+    pub chosen_text: Option<String>,
+    pub rejected_text: Option<String>,
+    /// Reference-policy log-probability of the chosen continuation.
+    /// When absent, a model-backed step uses the frozen LM head as π_ref.
     pub ref_chosen_logprob: Option<f32>,
     /// Reference-policy log-probability of the rejected continuation.
     pub ref_rejected_logprob: Option<f32>,
@@ -64,12 +68,73 @@ enum TokensOrString {
 }
 
 impl TokensOrString {
-    fn into_tokens(self) -> Vec<u32> {
+    fn into_parts(self) -> (Vec<u32>, Option<String>) {
         match self {
-            Self::Tokens(ids) => ids,
-            Self::Text(s) => s.bytes().map(u32::from).collect(),
+            Self::Tokens(ids) => (ids, None),
+            Self::Text(s) => {
+                let ids = s.bytes().map(u32::from).collect();
+                (ids, Some(s))
+            }
         }
     }
+}
+
+impl DpoExample {
+    /// Replace byte-stub tokens with ids from the model's tokenizer.
+    ///
+    /// When the prompt and both continuations are text, `prompt + chosen`
+    /// and `prompt + rejected` are each encoded as one string so BPE merges
+    /// across the prompt/continuation boundary match what the model sees.
+    /// The shared prompt is the longest token prefix common to the
+    /// prompt-alone encoding and both full encodings; each continuation is the
+    /// remainder of its full encoding, so `prompt ++ chosen` (and
+    /// `prompt ++ rejected`) reproduce the joint encodings exactly.
+    pub fn apply_tokenizer(&mut self, encode: impl Fn(&str) -> Vec<u32>) {
+        if let (Some(prompt), Some(chosen), Some(rejected)) =
+            (&self.prompt_text, &self.chosen_text, &self.rejected_text)
+        {
+            let prompt_ids = encode(prompt);
+            let full_c = encode(&format!("{prompt}{chosen}"));
+            let full_r = encode(&format!("{prompt}{rejected}"));
+            if !prompt_ids.is_empty() && !full_c.is_empty() && !full_r.is_empty() {
+                let k = common_prefix_len(&prompt_ids, &full_c)
+                    .min(common_prefix_len(&prompt_ids, &full_r));
+                // A merge across the boundary moved prompt text into the
+                // continuations, so supplied reference scores no longer cover
+                // the spans that get scored; fall back to the frozen head.
+                if k < prompt_ids.len() {
+                    self.ref_chosen_logprob = None;
+                    self.ref_rejected_logprob = None;
+                }
+                self.prompt = full_c[..k].to_vec();
+                self.chosen = full_c[k..].to_vec();
+                self.rejected = full_r[k..].to_vec();
+                return;
+            }
+        }
+        if let Some(text) = &self.prompt_text {
+            let ids = encode(text);
+            if !ids.is_empty() {
+                self.prompt = ids;
+            }
+        }
+        if let Some(text) = &self.chosen_text {
+            let ids = encode(text);
+            if !ids.is_empty() {
+                self.chosen = ids;
+            }
+        }
+        if let Some(text) = &self.rejected_text {
+            let ids = encode(text);
+            if !ids.is_empty() {
+                self.rejected = ids;
+            }
+        }
+    }
+}
+
+fn common_prefix_len(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
 /// Load DPO examples from a JSONL file.
@@ -91,9 +156,9 @@ pub fn load_jsonl_dpo(path: impl AsRef<Path>) -> Result<Vec<DpoExample>> {
         }
         let row: DpoJsonlRow = serde_json::from_str(trimmed)
             .map_err(|e| FinetuneError::Model(format!("dpo jsonl line {}: {e}", line_no + 1)))?;
-        let prompt = row.prompt.into_tokens();
-        let chosen = row.chosen.into_tokens();
-        let rejected = row.rejected.into_tokens();
+        let (prompt, prompt_text) = row.prompt.into_parts();
+        let (chosen, chosen_text) = row.chosen.into_parts();
+        let (rejected, rejected_text) = row.rejected.into_parts();
         if prompt.is_empty() || chosen.is_empty() || rejected.is_empty() {
             continue;
         }
@@ -101,6 +166,9 @@ pub fn load_jsonl_dpo(path: impl AsRef<Path>) -> Result<Vec<DpoExample>> {
             prompt,
             chosen,
             rejected,
+            prompt_text,
+            chosen_text,
+            rejected_text,
             ref_chosen_logprob: row.ref_chosen_logprob,
             ref_rejected_logprob: row.ref_rejected_logprob,
         });
@@ -238,13 +306,7 @@ impl DpoTrainer {
         self.lora.forward_batch(hiddens, logits_buf, len)?;
 
         // Sum log-probabilities over all target positions.
-        let mut log_prob = 0.0_f32;
-        for (t, &tgt) in targets.iter().enumerate() {
-            let row = &logits_buf[t * vocab..(t + 1) * vocab];
-            let tgt_idx = (tgt as usize).min(vocab.saturating_sub(1));
-            log_prob -= softmax_cross_entropy(row, tgt_idx);
-        }
-        Ok(log_prob)
+        sequence_logprob(logits_buf, targets, vocab)
     }
 
     // -----------------------------------------------------------------------
@@ -378,6 +440,86 @@ impl DpoTrainer {
         Ok(loss)
     }
 
+    /// One DPO step on a real frozen forward.
+    ///
+    /// `base_logits_*` are the frozen LM-head logits for the continuation
+    /// positions (shape `[len, vocab]`). The policy is those logits plus the
+    /// LM-head LoRA. The reference is the frozen head, unless the example
+    /// already carries reference log-probs or `reference_free` is set.
+    pub fn train_step_with_base(
+        &mut self,
+        chosen_targets: &[u32],
+        rejected_targets: &[u32],
+        hidden_chosen: &[f32],
+        hidden_rejected: &[f32],
+        base_logits_chosen: &[f32],
+        base_logits_rejected: &[f32],
+        ref_chosen: Option<f32>,
+        ref_rejected: Option<f32>,
+    ) -> Result<f32> {
+        let vocab = self.lora.out_dim;
+        if chosen_targets.is_empty() || rejected_targets.is_empty() {
+            return Err(FinetuneError::EmptyDataset);
+        }
+        let mut logits_c = base_logits_chosen.to_vec();
+        let mut logits_r = base_logits_rejected.to_vec();
+        self.lora
+            .forward_batch(hidden_chosen, &mut logits_c, chosen_targets.len())?;
+        self.lora
+            .forward_batch(hidden_rejected, &mut logits_r, rejected_targets.len())?;
+
+        let log_p_chosen = sequence_logprob(&logits_c, chosen_targets, vocab)?;
+        let log_p_rejected = sequence_logprob(&logits_r, rejected_targets, vocab)?;
+        let (ref_c, ref_r) = if self.dpo_config.reference_free {
+            (0.0, 0.0)
+        } else if let (Some(rc), Some(rr)) = (ref_chosen, ref_rejected) {
+            (rc, rr)
+        } else {
+            (
+                sequence_logprob(base_logits_chosen, chosen_targets, vocab)?,
+                sequence_logprob(base_logits_rejected, rejected_targets, vocab)?,
+            )
+        };
+
+        let policy_margin = (log_p_chosen - ref_c) - (log_p_rejected - ref_r);
+        let loss = log1p_exp(-self.dpo_config.beta * policy_margin);
+        let sigmoid_pos = sigmoid(self.dpo_config.beta * policy_margin);
+        let grad_chosen_coeff = -(1.0 - sigmoid_pos) * self.dpo_config.beta;
+        let grad_rejected_coeff = (1.0 - sigmoid_pos) * self.dpo_config.beta;
+
+        let mut grad_logits_c = Vec::new();
+        Self::logprob_grad(
+            &logits_c,
+            chosen_targets,
+            vocab,
+            -grad_chosen_coeff,
+            &mut grad_logits_c,
+        );
+        self.lora
+            .backward_batch(hidden_chosen, &grad_logits_c, chosen_targets.len())?;
+
+        let mut grad_logits_r = Vec::new();
+        Self::logprob_grad(
+            &logits_r,
+            rejected_targets,
+            vocab,
+            -grad_rejected_coeff,
+            &mut grad_logits_r,
+        );
+        self.lora
+            .backward_batch(hidden_rejected, &grad_logits_r, rejected_targets.len())?;
+
+        self.step += 1;
+        let lr = warmup_lr(
+            self.config.learning_rate,
+            self.step,
+            self.config.warmup_steps,
+        );
+        self.lora.step(lr, self.config.weight_decay, self.step);
+        self.lora.zero_grad();
+        Ok(loss)
+    }
+
     // -----------------------------------------------------------------------
     // Full training loop
     // -----------------------------------------------------------------------
@@ -453,6 +595,31 @@ impl DpoTrainer {
 // Math helpers
 // ---------------------------------------------------------------------------
 
+/// Sum of log-softmax probabilities of `targets` under row-major `logits`.
+///
+/// Errors when a target id is outside `vocab` or `logits` is too short,
+/// rather than silently scoring a different class.
+pub fn sequence_logprob(logits: &[f32], targets: &[u32], vocab: usize) -> Result<f32> {
+    if logits.len() < targets.len() * vocab {
+        return Err(FinetuneError::Adapter(format!(
+            "logits shape mismatch: {} < {} * {vocab}",
+            logits.len(),
+            targets.len()
+        )));
+    }
+    let mut log_prob = 0.0_f32;
+    for (t, &tgt) in targets.iter().enumerate() {
+        if tgt as usize >= vocab {
+            return Err(FinetuneError::Adapter(format!(
+                "target token {tgt} out of range for vocab {vocab}"
+            )));
+        }
+        let row = &logits[t * vocab..(t + 1) * vocab];
+        log_prob -= softmax_cross_entropy(row, tgt as usize);
+    }
+    Ok(log_prob)
+}
+
 /// Numerically stable log(1 + exp(x)).
 #[inline]
 fn log1p_exp(x: f32) -> f32 {
@@ -510,6 +677,9 @@ mod tests {
             prompt: vec![1, 2],
             chosen: vec![3, 4, 5],
             rejected: vec![6, 7],
+            prompt_text: None,
+            chosen_text: None,
+            rejected_text: None,
             ref_chosen_logprob: None,
             ref_rejected_logprob: None,
         }
@@ -635,6 +805,9 @@ mod tests {
             prompt: vec![0],
             chosen: vec![1, 2, 3, 4],
             rejected: vec![5, 6, 7, 8],
+            prompt_text: None,
+            chosen_text: None,
+            rejected_text: None,
             ref_chosen_logprob: None,
             ref_rejected_logprob: None,
         };
@@ -707,8 +880,91 @@ mod tests {
         );
         let examples = load_jsonl_dpo(&p).unwrap();
         assert_eq!(examples.len(), 1);
-        // "hi" UTF-8 bytes = [104, 105]
+        // "hi" UTF-8 bytes = [104, 105] until a real tokenizer is applied.
         assert_eq!(examples[0].prompt, vec![104u32, 105]);
+        assert_eq!(examples[0].prompt_text.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn apply_tokenizer_replaces_byte_stub() {
+        let mut example = toy_example();
+        example.prompt_text = Some("ab".into());
+        example.apply_tokenizer(|text| text.chars().map(|c| u32::from(c) + 1000).collect());
+        assert_eq!(example.prompt, vec![1097, 1098]);
+        assert_eq!(example.chosen, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn apply_tokenizer_encodes_prompt_and_continuation_jointly() {
+        // Toy tokenizer that merges "ab" into one token, so the boundary
+        // between prompt "a" and continuation "b..." changes the encoding.
+        let encode = |text: &str| -> Vec<u32> {
+            let bytes = text.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'a' && bytes.get(i + 1) == Some(&b'b') {
+                    out.push(999);
+                    i += 2;
+                } else {
+                    out.push(u32::from(bytes[i]));
+                    i += 1;
+                }
+            }
+            out
+        };
+        let mut example = toy_example();
+        example.prompt_text = Some("xa".into());
+        example.chosen_text = Some("bc".into());
+        example.rejected_text = Some("d".into());
+        example.apply_tokenizer(encode);
+        // Shared prompt stops before the merged boundary token.
+        assert_eq!(example.prompt, vec![u32::from(b'x')]);
+        let mut full_c = example.prompt.clone();
+        full_c.extend(&example.chosen);
+        assert_eq!(full_c, encode("xabc"));
+        let mut full_r = example.prompt.clone();
+        full_r.extend(&example.rejected);
+        assert_eq!(full_r, encode("xad"));
+    }
+
+    #[test]
+    fn sequence_logprob_rejects_out_of_range_target() {
+        let logits = vec![0.0_f32; 2 * 4];
+        assert!(sequence_logprob(&logits, &[1, 3], 4).is_ok());
+        assert!(matches!(
+            sequence_logprob(&logits, &[1, 4], 4),
+            Err(FinetuneError::Adapter(_))
+        ));
+    }
+
+    #[test]
+    fn train_step_with_base_uses_frozen_reference() {
+        let (cfg, mut dpo) = tiny_config();
+        dpo.reference_free = false;
+        let mut trainer = DpoTrainer::new(4, 8, cfg, dpo);
+        for (i, v) in trainer.lora.b.iter_mut().enumerate() {
+            *v = ((i % 5) as f32 - 2.0) * 0.1;
+        }
+        let chosen = [1u32, 2, 3];
+        let rejected = [4u32, 5];
+        let hidden_c = vec![0.2_f32; chosen.len() * 4];
+        let hidden_r = vec![-0.1_f32; rejected.len() * 4];
+        let base_c = vec![0.05_f32; chosen.len() * 8];
+        let base_r = vec![0.01_f32; rejected.len() * 8];
+        let before = trainer.lora.a.clone();
+        let loss = trainer
+            .train_step_with_base(
+                &chosen, &rejected, &hidden_c, &hidden_r, &base_c, &base_r, None, None,
+            )
+            .unwrap();
+        assert!(loss.is_finite(), "loss={loss}");
+        assert!(
+            before
+                .iter()
+                .zip(trainer.lora.a.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-12)
+        );
     }
 
     #[test]

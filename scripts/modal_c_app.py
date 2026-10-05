@@ -3,19 +3,19 @@ Modal harness for testing the oxidize-c C11 port on CUDA GPUs (T4 by default;
 set OXIDIZE_MODAL_GPU to use a larger card).
 
 Usage:
-    modal run modal_c_app.py --action build      # compile CPU + CUDA builds
-    modal run modal_c_app.py --action test       # run CPU test suite
-    modal run modal_c_app.py --action gpu_test   # compile CUDA + run on GPU
-    modal run modal_c_app.py --action bench      # GPU benchmark on L40S
-    modal run modal_c_app.py --action parity     # CPU vs CUDA output must match
-    OXIDIZE_MODAL_GPU=A10G modal run modal_c_app.py --action qwen27
+    modal run scripts/modal_c_app.py --action build      # compile CPU + CUDA builds
+    modal run scripts/modal_c_app.py --action test       # run CPU test suite
+    modal run scripts/modal_c_app.py --action gpu_test   # compile CUDA + run on GPU
+    modal run scripts/modal_c_app.py --action bench      # GPU benchmark on L40S
+    modal run scripts/modal_c_app.py --action parity     # CPU vs CUDA output must match
+    OXIDIZE_MODAL_GPU=A10G modal run scripts/modal_c_app.py --action qwen27
         # Ampere sm_86 smoke: kernel self-test + Qwen3.6-27B Q4_K load
         # and a few greedy tokens. A10G is 24 GB; FP16 27B will not fit.
 
 If `modal` is not authenticated, create a token at https://modal.com/settings
 and export MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (never print them). Then:
     python3 -m pip install --user modal
-    OXIDIZE_MODAL_GPU=A10G python3 -m modal run modal_c_app.py --action qwen27
+    OXIDIZE_MODAL_GPU=A10G python3 -m modal run scripts/modal_c_app.py --action qwen27
 """
 import os
 import modal
@@ -27,7 +27,7 @@ CUDA_TAG: Final = "12.8.1-devel-ubuntu22.04"
 # T4 (sm_75) is what the free tier allows; larger cards need a payment method
 # on the Modal account ("Please add a payment method to use L40S GPU
 # functions."). Override for a bigger card once billing is set up:
-#   OXIDIZE_MODAL_GPU=L40S modal run modal_c_app.py --action parity
+#   OXIDIZE_MODAL_GPU=L40S modal run scripts/modal_c_app.py --action parity
 # A T4 has 16 GB, enough for the 1.5B parity model with packed weights; a 7B
 # Q4_K_M needs the packed path to fit at all (~4.4 GB vs ~30 GB as f32).
 # A10G (sm_86, 24 GB) holds Qwen3.6-27B Q4_K (~16–18 GB) plus a
@@ -416,7 +416,7 @@ def qwen27_smoke(prompt: str = "Say hello in one short sentence.",
     Auth (never print tokens):
       python3 -m pip install --user modal
       export MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...   # https://modal.com/settings
-      OXIDIZE_MODAL_GPU=A10G python3 -m modal run modal_c_app.py --action qwen27
+      OXIDIZE_MODAL_GPU=A10G python3 -m modal run scripts/modal_c_app.py --action qwen27
     A10G needs a payment method on the Modal account. T4 is 16 GB and cannot
     hold 27B Q4.
     """

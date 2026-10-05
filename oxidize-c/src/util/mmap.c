@@ -5,7 +5,8 @@
  *
  * Lifecycle:
  *   - oc_mmap_open_readonly(): open(path) + mmap(PROT_READ, MAP_PRIVATE)
- *     + MADV_SEQUENTIAL + MADV_WILLNEED (best-effort, Linux).
+ *     + MADV_WILLNEED (best-effort, Linux). Not MADV_SEQUENTIAL: a
+ *     VM_SEQ_READ mapping is ignored when the kernel ages pages.
  *   - oc_mmap_advise_hugepage(): MADV_HUGEPAGE (best-effort). Caller decides
  *     when hugepages are appropriate (Rust enables THP only when the model
  *     fits in RAM with >= 2x headroom — see MappedGgufFile::advise_huge_pages).
@@ -71,6 +72,12 @@ static OcMmap *mmap_alloc(void)
 
 OcError oc_mmap_open_readonly(const char *path, OcMmap **out)
 {
+    return oc_mmap_open_readonly_flags(path, 0u, out);
+}
+
+OcError oc_mmap_open_readonly_flags(const char *path, unsigned flags,
+                                    OcMmap **out)
+{
     if (!path || !out) return OC_ERR_INVALID_ARG;
     *out = NULL;
 
@@ -122,16 +129,30 @@ OcError oc_mmap_open_readonly(const char *path, OcMmap **out)
     m->len  = len;
     m->fd   = fd;
 
-    /* Best-effort: tell the kernel we'll read sequentially + will need the
-     * pages. Matches Rust `load_mapped_gguf`. */
-    oc_mmap_advise_sequential(m);
-    oc_mmap_advise_willneed(m);
+    if (flags & OC_MMAP_F_NO_READAHEAD) {
+        oc_mmap_advise_random(m);
+    } else if (flags & OC_MMAP_F_NORMAL_ADVICE) {
+        if (madvise(m->addr, m->len, MADV_NORMAL) != 0) {
+            oc_log(OC_LOG_WARN, "mmap: MADV_NORMAL failed: %s",
+                   strerror(errno));
+        }
+    } else {
+        /* WILLNEED only. MADV_SEQUENTIAL marks the VMA VM_SEQ_READ, and the
+         * kernel ignores accesses through such a VMA when aging pages: every
+         * weight page stays "unreferenced" and is the first thing reclaimed.
+         * Once anything else holds the page cache (another model, a build)
+         * a dense model then re-reads its whole file from disk per token
+         * (qwen35 27B Q2_K on a 23 GB box: 0.2 tok/s, ~1.9 GB/s of page-in). */
+        oc_mmap_advise_willneed(m);
+    }
     *out = m;
     return OC_OK;
 #else
     /* Non-Linux: fall back to read() into a malloc'd buffer so the API is
      * still usable (tests don't need true mmap). The "mapping" is freed via
-     * oc_mmap_close() -> free(). */
+     * oc_mmap_close() -> free(). There is no madvise here, so the readahead
+     * hint has nothing to act on. */
+    (void)flags;
     FILE *f = fopen(path, "rb");
     if (!f) {
         oc_log(OC_LOG_ERROR, "mmap: fopen(%s) failed: %s", path, strerror(errno));
@@ -196,7 +217,7 @@ OcError oc_mmap_open_fd(int fd, size_t len, OcMmap **out)
     m->addr = addr;
     m->len  = len;
     m->fd   = fd;
-    oc_mmap_advise_sequential(m);
+    /* No MADV_SEQUENTIAL: see oc_mmap_open_readonly_flags. */
     oc_mmap_advise_willneed(m);
     *out = m;
     return OC_OK;
@@ -265,6 +286,72 @@ OcError oc_mmap_advise_willneed(OcMmap *m)
         oc_log(OC_LOG_WARN, "mmap: MADV_WILLNEED failed: %s", strerror(errno));
     }
 #endif
+    return OC_OK;
+}
+
+int oc_mmap_fd(const OcMmap *m)
+{
+    return m ? m->fd : -1;
+}
+
+OcError oc_mmap_advise_range(OcMmap *m, size_t offset, size_t size,
+                             OcMmapAdvice advice)
+{
+    if (!m || !m->addr || size == 0) return OC_ERR_INVALID_ARG;
+    if (offset >= m->len) return OC_ERR_INVALID_ARG;
+#ifdef __linux__
+    long page_l = sysconf(_SC_PAGESIZE);
+    size_t page = page_l > 0 ? (size_t)page_l : 4096u;
+    size_t start = offset & ~(page - 1);
+    size_t end = offset + size;
+    if (end < offset || end > m->len) end = m->len;
+    end = (end + page - 1) & ~(page - 1);
+    if (end > m->len) end = m->len;
+    if (end <= start) return OC_OK;
+    size_t len = end - start;
+    int hint = MADV_NORMAL;
+    switch (advice) {
+    case OC_MMAP_ADVICE_WILLNEED:    hint = MADV_WILLNEED; break;
+    case OC_MMAP_ADVICE_DONTNEED:    hint = MADV_DONTNEED; break;
+    case OC_MMAP_ADVICE_RANDOM:      hint = MADV_RANDOM; break;
+    case OC_MMAP_ADVICE_SEQUENTIAL:  hint = MADV_SEQUENTIAL; break;
+    case OC_MMAP_ADVICE_NORMAL:      hint = MADV_NORMAL; break;
+    }
+    (void)madvise((uint8_t *)m->addr + start, len, hint);
+    if (m->fd >= 0) {
+        if (advice == OC_MMAP_ADVICE_WILLNEED)
+            (void)posix_fadvise(m->fd, (off_t)start, (off_t)len,
+                                POSIX_FADV_WILLNEED);
+        else if (advice == OC_MMAP_ADVICE_DONTNEED)
+            (void)posix_fadvise(m->fd, (off_t)start, (off_t)len,
+                                POSIX_FADV_DONTNEED);
+    }
+#else
+    (void)advice;
+#endif
+    return OC_OK;
+}
+
+OcError oc_mmap_fault_range(OcMmap *m, size_t offset, size_t size)
+{
+    if (!m || !m->addr || size == 0) return OC_ERR_INVALID_ARG;
+    if (offset >= m->len) return OC_ERR_INVALID_ARG;
+    const uint8_t *bytes = (const uint8_t *)m->addr;
+    size_t end = offset + size;
+    if (end < offset || end > m->len) end = m->len;
+#ifdef __linux__
+    long page_l = sysconf(_SC_PAGESIZE);
+    size_t page = page_l > 0 ? (size_t)page_l : 4096u;
+#else
+    size_t page = 4096u;
+#endif
+    size_t start = offset & ~(page - 1);
+    uint8_t checksum = 0;
+    for (size_t off = start; off < end; off += page)
+        checksum ^= oc_read_volatile_byte(bytes, m->len, off);
+    if (end > 0)
+        checksum ^= oc_read_volatile_byte(bytes, m->len, end - 1);
+    (void)checksum;
     return OC_OK;
 }
 
