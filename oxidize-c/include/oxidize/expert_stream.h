@@ -52,6 +52,8 @@ OcError oc_expert_stream_touch_layer(OcExpertStreamPool *pool, uint32_t layer);
 uint64_t oc_expert_stream_resident_bytes(const OcExpertStreamPool *pool);
 uint64_t oc_expert_stream_prefetch_bytes(const OcExpertStreamPool *pool);
 uint64_t oc_expert_stream_reclaim_bytes(const OcExpertStreamPool *pool);
+double   oc_expert_stream_fault_ms(const OcExpertStreamPool *pool);
+uint64_t oc_expert_stream_fault_bytes(const OcExpertStreamPool *pool);
 
 #ifdef __cplusplus
 }

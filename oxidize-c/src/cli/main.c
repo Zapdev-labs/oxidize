@@ -149,7 +149,8 @@ static void print_help(void)
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
 "  --stream-experts       SSD expert offload (no whole-file readahead/mlock)\n"
-"  --expert-cache-mb N    Expert working set budget (default 3072)\n"
+"  --expert-cache-mb N    Expert working set budget; 0/unset = let the kernel\n"
+"                         page cache manage eviction (recommended)\n"
 "  --prerouter PATH       Edge0 prerouter.safetensors (prediction is routing)\n"
 "  --prerouter-prefetch   Load prerouter heads but keep native router\n"
 "  --lora PATH            Edge0 Recover-LoRA safetensors (unmerged, scale α/r=2)\n"
@@ -312,8 +313,16 @@ static OcError run_generation(const OcCliArgs *args)
     if (args->stream_experts) {
         OcExpertStreamConfig scfg;
         oc_expert_stream_config_init(&scfg);
-        if (args->expert_cache_mb > 0)
+        if (args->expert_cache_mb > 0) {
             scfg.cache_bytes = (uint64_t)args->expert_cache_mb << 20;
+        } else {
+            /* No explicit budget: disable the DONTNEED reclaim entirely.
+             * Expert spans are clean file-backed pages — the kernel's LRU
+             * already evicts them under pressure, and it makes strictly
+             * better keep/drop decisions than the pool's FIFO cap (which
+             * measured slower: it discards pages the kernel would keep). */
+            scfg.cache_bytes = UINT64_MAX;
+        }
         e = oc_llama_enable_expert_stream(&model, &scfg);
         if (e != OC_OK) {
             fprintf(stderr, "error: expert stream init failed (%s)\n",
@@ -637,13 +646,16 @@ static OcError run_generation(const OcCliArgs *args)
                    (double)mtp_stats.emitted / (double)mtp_stats.steps);
         if (model.expert_stream) {
             oc_log(OC_LOG_INFO,
-                   "expert-stream: resident=%.1f MiB prefetch=%.1f MiB reclaim=%.1f MiB",
+                   "expert-stream: resident=%.1f MiB prefetch=%.1f MiB reclaim=%.1f MiB fault=%.1f MiB fault_ms=%.0f",
                    oc_expert_stream_resident_bytes(model.expert_stream) /
                        (1024.0 * 1024.0),
                    oc_expert_stream_prefetch_bytes(model.expert_stream) /
                        (1024.0 * 1024.0),
                    oc_expert_stream_reclaim_bytes(model.expert_stream) /
-                       (1024.0 * 1024.0));
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_fault_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_fault_ms(model.expert_stream));
         }
         if (decode_start > 0 && emitted > 0) {
             double elapsed = wall_now() - decode_start;

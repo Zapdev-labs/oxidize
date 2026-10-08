@@ -4034,6 +4034,19 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     if (s->expert_stream && layer != UINT32_MAX)
         (void)oc_expert_stream_touch(s->expert_stream, layer, sel, k, false);
 
+    /* OC_MOE_DUMP=<path>: append "pos layer sel..." per MoE routing — used
+     * offline to measure expert-set overlap across tokens/layers. */
+    if (getenv("OC_MOE_DUMP")) {
+        static FILE *mdf = NULL;
+        if (mdf == NULL) mdf = fopen(getenv("OC_MOE_DUMP"), "ab");
+        if (mdf) {
+            fprintf(mdf, "%lld %u", (long long)s->pos, layer);
+            for (uint32_t i = 0; i < k; i++) fprintf(mdf, " %u", sel[i]);
+            fputc('\n', mdf);
+            fflush(mdf);
+        }
+    }
+
     /* 4. Renormalize top-k weights (norm_topk_prob).
      *
      * NOT for zero-expert models: their softmax already spans every slot and
