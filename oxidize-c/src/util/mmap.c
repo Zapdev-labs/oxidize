@@ -346,6 +346,23 @@ OcError oc_mmap_fault_range(OcMmap *m, size_t offset, size_t size)
     size_t page = 4096u;
 #endif
     size_t start = offset & ~(page - 1);
+#ifdef __linux__
+#ifndef MADV_POPULATE_READ
+#define MADV_POPULATE_READ 23
+#endif
+    /* Fast path: a single syscall that faults in the range with kernel
+     * readahead windows (Linux 5.14+). Byte-per-page touching on a
+     * MADV_RANDOM mapping takes one disk round-trip per 4 KiB; POPULATE_READ
+     * batches the I/O instead. EINVAL/ENOSYS on older kernels falls through
+     * to the manual touch loop. */
+    size_t pop_end = end & ~(page - 1);
+    if (pop_end < end) pop_end += page;
+    if (pop_end > start &&
+        madvise((void *)(bytes + start), pop_end - start,
+                MADV_POPULATE_READ) == 0) {
+        return OC_OK;
+    }
+#endif
     uint8_t checksum = 0;
     for (size_t off = start; off < end; off += page)
         checksum ^= oc_read_volatile_byte(bytes, m->len, off);

@@ -197,7 +197,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--bench-iters"))   { a->bench_iterations = val[0] == '-' ? 0 : atoi(val); *consumed_val = true; }
     else if (match(arg, "--expert-cache-mb")) {
         uint32_t n;
-        if (!oc_parse_u32(val, &n) || n > (UINT32_MAX >> 20)) {
+        if (!oc_parse_u32(val, &n) || n > (1u << 20)) {
             fprintf(stderr, "warning: invalid --expert-cache-mb '%s' (ignored)\n",
                     val ? val : "");
         } else {
@@ -390,7 +390,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--ids"))            { ctx->token_ids_str = val; i++; }
         else if (match(arg, "--expert-cache-mb")) {
             uint32_t n;
-            if (!oc_parse_u32(val, &n) || n > (UINT32_MAX >> 20)) {
+            if (!oc_parse_u32(val, &n) || n > (1u << 20)) {
                 fprintf(stderr, "warning: invalid --expert-cache-mb '%s' (ignored)\n",
                         val ? val : "");
             } else {

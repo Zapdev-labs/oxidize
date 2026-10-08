@@ -5,6 +5,7 @@
 
 #include "oxidize/llama.h"
 #include "oxidize/log.h"
+#include "oxidize/parallel.h"
 #include "oxidize/util/mmap.h"
 
 #include <stdint.h>
@@ -306,6 +307,30 @@ OcError oc_expert_stream_prepare_mapping(OcExpertStreamPool *pool)
     return OC_OK;
 }
 
+typedef struct {
+    OcMmap *mmap;
+    size_t  off;
+    size_t  len;
+} OcExpertFaultJob;
+
+static void fault_jobs(size_t begin, size_t end, size_t tid, void *user)
+{
+    const OcExpertFaultJob *jobs = (const OcExpertFaultJob *)user;
+    (void)tid;
+    for (size_t i = begin; i < end; i++)
+        (void)oc_mmap_fault_range(jobs[i].mmap, jobs[i].off, jobs[i].len);
+}
+
+static void push_fault_job(OcExpertFaultJob *jobs, size_t *n_jobs,
+                           const OcExpertTensorSpan *span, uint32_t expert)
+{
+    if (!span->mmap || span->expert_bytes == 0) return;
+    jobs[*n_jobs].mmap = span->mmap;
+    jobs[*n_jobs].off  = span->mmap_offset + (size_t)expert * span->expert_bytes;
+    jobs[*n_jobs].len  = span->expert_bytes;
+    (*n_jobs)++;
+}
+
 OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
                                const uint32_t *experts, uint32_t n,
                                bool prefetch)
@@ -316,13 +341,31 @@ OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
     const OcExpertLayerLayout *L = &pool->layers[layer];
     uint64_t bytes = expert_bytes(L);
     OcMmapAdvice advice = OC_MMAP_ADVICE_WILLNEED;
+    /* Issue all WILLNEED hints first so the kernel's async readahead pipeline
+     * is primed for every selected expert before we start faulting. */
     for (uint32_t i = 0; i < n; i++) {
         uint32_t idx = experts[i];
         if (idx >= L->n_experts) continue;
         advise_span(&L->gate, idx, advice);
         advise_span(&L->up, idx, advice);
         advise_span(&L->down, idx, advice);
-        if (!prefetch) {
+    }
+    /* Fault-in is spread across the compute pool: each expert's gate/up/down
+     * span populates on a different thread so the SSD's queue depth does the
+     * overlapping instead of serializing on one fault stream. */
+    OcExpertFaultJob *jobs = NULL;
+    if (!prefetch) {
+        jobs = (OcExpertFaultJob *)malloc((size_t)n * 3 * sizeof(*jobs));
+    }
+    size_t n_jobs = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t idx = experts[i];
+        if (idx >= L->n_experts) continue;
+        if (jobs) {
+            push_fault_job(jobs, &n_jobs, &L->gate, idx);
+            push_fault_job(jobs, &n_jobs, &L->up, idx);
+            push_fault_job(jobs, &n_jobs, &L->down, idx);
+        } else if (!prefetch) {
             fault_span(&L->gate, idx);
             fault_span(&L->up, idx);
             fault_span(&L->down, idx);
@@ -330,6 +373,9 @@ OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
         if (prefetch) pool->prefetch_bytes += bytes;
         record_hot(pool, layer, idx, bytes);
     }
+    if (n_jobs > 1) oc_parallel_for(n_jobs, fault_jobs, jobs);
+    else if (n_jobs == 1) (void)oc_mmap_fault_range(jobs[0].mmap, jobs[0].off, jobs[0].len);
+    free(jobs);
     return OC_OK;
 }
 
