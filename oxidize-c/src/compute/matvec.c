@@ -545,15 +545,6 @@ typedef struct {
     /* Precomputed per-block int32 activation sums for the qs kernels
      * (Q4_0/AL5 only), or NULL for the standard path. */
     const int32_t *qsums;
-    /* Prepared-row path: types whose only integer kernel works off a decoded
-     * row (Q2_K / Q3_K). The row is decoded into per-thread scratch and
-     * dotted once — decode has a single activation, so there is nothing to
-     * amortize a wider kernel over, but this still beats dequantizing to f32
-     * and doing the dot in floating point. */
-    size_t         prep_bytes;
-    void         (*prep_fn)(const uint8_t *row, size_t blocks, void *scratch);
-    float        (*prep_dot)(const void *prep, size_t blocks,
-                             const uint8_t *act);
 } QuantJob;
 
 typedef struct {
@@ -621,47 +612,13 @@ static void matvec_fused_slice(size_t begin, size_t end, size_t tid, void *ud)
     }
 }
 
-static void matvec_prep_slice(size_t begin, size_t end, size_t tid, void *ud)
-{
-    const QuantJob *j = (const QuantJob *)ud;
-    void *prep = oc_parallel_scratch(tid, j->prep_bytes);
-    if (prep == NULL) {
-        /* Pre-reserved by the caller; fall back rather than leave this
-         * slice's outputs unwritten. */
-        matvec_fused_slice(begin, end, tid, ud);
-        return;
-    }
-    for (size_t r = begin; r < end; r++) {
-        j->prep_fn(j->data + r * j->row_bytes, j->blocks, prep);
-        j->output[r] = j->prep_dot(prep, j->blocks, j->act);
-    }
-}
-
-/* The prepared-row kernels for a single activation, or all-NULL for types
- * whose packed kernel is already the best single-activation form. */
-static bool prep_kernels_for(OcGgufQuantizationType qtype, size_t blocks,
-                             size_t *prep_bytes,
-                             void (**prep_fn)(const uint8_t *, size_t, void *),
-                             float (**prep_dot)(const void *, size_t,
-                                                const uint8_t *))
-{
-    switch (qtype) {
-    case OC_QUANT_Q2_K:
-        *prep_bytes = oc_oxk_q2_k_prep_bytes(blocks);
-        *prep_fn    = oc_oxk_q2_k_prep_row;
-        *prep_dot   = oc_oxk_dot_q2_k_prepped_1;
-        return true;
-    case OC_QUANT_Q3_K_S:
-    case OC_QUANT_Q3_K_M:
-    case OC_QUANT_Q3_K_L:
-        *prep_bytes = oc_oxk_q6_k_prep_bytes(blocks);
-        *prep_fn    = oc_oxk_q3_k_prep_row;
-        *prep_dot   = oc_oxk_dot_q3_k_prepped_1;
-        return true;
-    default:
-        return false;
-    }
-}
+/* The single-activation decode path used to run Q2_K/Q3_K through a
+ * prepared-row kernel (packed row -> per-thread scratch -> compact dot):
+ * with one activation there is nothing to amortize the decode over, and on
+ * AVX2 hosts the packed dots are now real SIMD kernels, so the scratch
+ * round-trip (~300 B/block) is pure overhead. Every type takes the packed
+ * row dot in matvec_fused_slice. The prepped machinery survives in oxk.c
+ * and below, where the batched-prefill path still earns it. */
 
 static void matvec_fused_multi_slice(size_t begin, size_t end, size_t tid,
                                      void *ud)
@@ -835,13 +792,10 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
          * it assumes; a padded or interleaved row would be read wrong. */
         if (act_kind != ACT_NONE &&
             fused_stride_ok(qtype, blocks, row_bytes)) {
-            /* The activation lives in the caller's dequant buffer, not in
-             * thread 0's scratch: the prepared-row path below hands every
-             * worker — thread 0 included — its scratch for the decoded row,
-             * and there is only one scratch per thread, so sharing it would
-             * let the row decode overwrite the activation mid-region.
-             * `temp` is cols floats, always at least the ~1.14 bytes per
-             * column a Q8_K/Q8_0 encoding needs. */
+            /* The activation lives in the caller's dequant buffer rather
+             * than a fresh allocation: `temp` is cols floats, always at
+             * least the ~1.14 bytes per column a Q8_K/Q8_0 encoding
+             * needs. */
             uint8_t *act = (uint8_t *)temp;
             if (act != NULL && temp_bytes >= act_bytes) {
                 int32_t *qsums = NULL;
@@ -858,24 +812,8 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
                 }
                 QuantJob job = { qtype, data, cols, row_bytes, input, output,
                                  temp, act, blocks, fused_dot_fn(qtype),
-                                 qsums, 0, NULL, NULL };
-                /* Reserve every worker's decode buffer before opening the
-                 * region — an allocation failure inside it could not be
-                 * reported and would drop a slice's outputs. */
-                if (prep_kernels_for(qtype, blocks, &job.prep_bytes,
-                                     &job.prep_fn, &job.prep_dot)) {
-                    const size_t nthreads = oc_parallel_n_threads();
-                    for (size_t t = 0; t < nthreads; t++) {
-                        if (oc_parallel_scratch(t, job.prep_bytes) == NULL) {
-                            job.prep_fn = NULL;
-                            break;
-                        }
-                    }
-                }
-                if (job.prep_fn != NULL)
-                    oc_parallel_for(rows, matvec_prep_slice, &job);
-                else
-                    oc_parallel_for(rows, matvec_fused_slice, &job);
+                                 qsums };
+                oc_parallel_for(rows, matvec_fused_slice, &job);
                 return;
             }
         }
@@ -892,15 +830,14 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
                 /* Fall back to the serial path rather than produce a
                  * partially-written output vector. */
                 QuantJob job = { qtype, data, cols, row_bytes, input,
-                                 output, temp, NULL, 0, NULL, NULL, 0, NULL,
-                                 NULL };
+                                 output, temp, NULL, 0, NULL, NULL };
                 matvec_quant_slice(0, rows, 0, &job);
                 return;
             }
         }
     }
     QuantJob job = { qtype, data, cols, row_bytes, input, output, temp,
-                     NULL, 0, NULL, NULL, 0, NULL, NULL };
+                     NULL, 0, NULL, NULL };
     oc_parallel_for(rows, matvec_quant_slice, &job);
 }
 

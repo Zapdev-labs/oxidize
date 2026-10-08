@@ -1252,25 +1252,30 @@ static inline float q2_k_dot_body(const uint8_t *row, size_t blocks,
             _mm256_loadu_si256((const __m256i *)bsums)));
 
         __m256i pos_v = _mm256_setzero_si256();
-        for (int outer = 0; outer < 2; outer++) {
-            const __m256i qbits = _mm256_loadu_si256(
-                (const __m256i *)(qs + 32 * outer));
-            for (int inner = 0; inner < 4; inner++) {
-                const __m256i c = _mm256_and_si256(
-                    _mm256_srli_epi16(qbits, 2 * inner), two);
-                const __m256i a = _mm256_loadu_si256(
-                    (const __m256i *)(q8v + 32 * (outer * 4 + inner)));
-                const __m256i scv = _mm256_cvtepu8_epi16(
-                    _mm_shuffle_epi8(sc8, _mm_loadu_si128(
-                        (const __m128i *)
-                        oxk_g16_sc_shuf[outer * 4 + inner])));
-                /* 2-bit unsigned code x i8 activation: pair sums are
-                 * <= 2*3*128 < 2^10, and times a 4-bit scale the madd
-                 * lanes stay under 2^15 — int32 is far away. */
-                pos_v = _mm256_add_epi32(pos_v, _mm256_madd_epi16(
-                    _mm256_maddubs_epi16(c, a), scv));
-            }
-        }
+        const __m256i qbits0 = _mm256_loadu_si256((const __m256i *)qs);
+        const __m256i qbits1 = _mm256_loadu_si256((const __m256i *)(qs + 32));
+        /* Step k reads qbits shifted right by 2*(k%4) and covers activation
+         * elements 32k..32k+31 (groups 2k and 2k+1). Literal shift counts:
+         * the srli immediate must be a compile-time constant, so the eight
+         * passes are spelled out rather than looped. Pair sums are
+         * <= 2*3*128 < 2^10, and times a 4-bit scale the madd lanes stay
+         * under 2^15 — int32 is far away. */
+#define OXK_Q2K_STEP(QBITS, K, SHIFT)                                          \
+        pos_v = _mm256_add_epi32(pos_v, _mm256_madd_epi16(                     \
+            _mm256_maddubs_epi16(                                              \
+                _mm256_and_si256(_mm256_srli_epi16((QBITS), (SHIFT)), two),    \
+                _mm256_loadu_si256((const __m256i *)(q8v + 32 * (K)))),        \
+            _mm256_cvtepu8_epi16(_mm_shuffle_epi8(sc8,                         \
+                _mm_loadu_si128((const __m128i *)oxk_g16_sc_shuf[(K)])))))
+        OXK_Q2K_STEP(qbits0, 0, 0);
+        OXK_Q2K_STEP(qbits0, 1, 2);
+        OXK_Q2K_STEP(qbits0, 2, 4);
+        OXK_Q2K_STEP(qbits0, 3, 6);
+        OXK_Q2K_STEP(qbits1, 4, 0);
+        OXK_Q2K_STEP(qbits1, 5, 2);
+        OXK_Q2K_STEP(qbits1, 6, 4);
+        OXK_Q2K_STEP(qbits1, 7, 6);
+#undef OXK_Q2K_STEP
         const int32_t pos = hsum_i32_8(pos_v);
         sum += dq * (dw * (float)pos - dmin * (float)min_acc);
     }
@@ -1337,32 +1342,35 @@ static inline float q3_k_dot_body(const uint8_t *row, size_t blocks,
 
         const __m256i hb = _mm256_loadu_si256((const __m256i *)wb);
         __m256i pos_v = _mm256_setzero_si256();
-        for (int outer = 0; outer < 2; outer++) {
-            const __m256i qbits = _mm256_loadu_si256(
-                (const __m256i *)(qs + 32 * outer));
-            for (int inner = 0; inner < 4; inner++) {
-                const int k = outer * 4 + inner;
-                /* Byte l of step k's code vector takes its third bit from
-                 * bit k of hmask[l]: shift it to bit 0, isolate, shift
-                 * into place — bits bled from the neighbouring byte are
-                 * dropped by the 0x01 mask before the left shift. */
-                const __m256i c = _mm256_or_si256(
-                    _mm256_and_si256(_mm256_srli_epi16(qbits, 2 * inner),
-                                     two),
-                    _mm256_slli_epi16(_mm256_and_si256(
-                        _mm256_srli_epi16(hb, k), one), 2));
-                const __m256i a = _mm256_loadu_si256(
-                    (const __m256i *)(q8v + 32 * k));
-                const __m256i scv = _mm256_cvtepi8_epi16(
-                    _mm_shuffle_epi8(sc8, _mm_loadu_si128(
-                        (const __m128i *)oxk_g16_sc_shuf[k])));
-                /* 3-bit unsigned code x i8: pair sums <= 2*7*128 < 2^11;
-                 * times a signed 6-bit scale the madd lanes stay under
-                 * 2^17. */
-                pos_v = _mm256_add_epi32(pos_v, _mm256_madd_epi16(
-                    _mm256_maddubs_epi16(c, a), scv));
-            }
-        }
+        const __m256i qbits0 = _mm256_loadu_si256((const __m256i *)qs);
+        const __m256i qbits1 = _mm256_loadu_si256((const __m256i *)(qs + 32));
+        /* Byte l of step k's code vector takes its third bit from bit k of
+         * hmask[l]: shift it to bit 0, isolate, shift into place — bits
+         * bled from the neighbouring byte are dropped by the 0x01 mask
+         * before the left shift. Literal srli/slli counts for the same
+         * reason as Q2_K above. 3-bit unsigned code x i8: pair sums
+         * <= 2*7*128 < 2^11; times a signed 6-bit scale the madd lanes stay
+         * under 2^17. */
+#define OXK_Q3K_STEP(QBITS, K, SHIFT)                                          \
+        pos_v = _mm256_add_epi32(pos_v, _mm256_madd_epi16(                     \
+            _mm256_maddubs_epi16(                                              \
+                _mm256_or_si256(                                               \
+                    _mm256_and_si256(_mm256_srli_epi16((QBITS), (SHIFT)),      \
+                                     two),                                     \
+                    _mm256_slli_epi16(_mm256_and_si256(                        \
+                        _mm256_srli_epi16(hb, (K)), one), 2)),                 \
+                _mm256_loadu_si256((const __m256i *)(q8v + 32 * (K)))),        \
+            _mm256_cvtepi8_epi16(_mm_shuffle_epi8(sc8,                         \
+                _mm_loadu_si128((const __m128i *)oxk_g16_sc_shuf[(K)])))))
+        OXK_Q3K_STEP(qbits0, 0, 0);
+        OXK_Q3K_STEP(qbits0, 1, 2);
+        OXK_Q3K_STEP(qbits0, 2, 4);
+        OXK_Q3K_STEP(qbits0, 3, 6);
+        OXK_Q3K_STEP(qbits1, 4, 0);
+        OXK_Q3K_STEP(qbits1, 5, 2);
+        OXK_Q3K_STEP(qbits1, 6, 4);
+        OXK_Q3K_STEP(qbits1, 7, 6);
+#undef OXK_Q3K_STEP
         sum += dw * dq * (float)(hsum_i32_8(pos_v) - 4 * off);
     }
     return sum;

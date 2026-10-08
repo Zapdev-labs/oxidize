@@ -514,3 +514,184 @@ Test(oxk_avx2, dot_rows_iq3_s_multi_bit_exact_vs_single)
     free(w);
     free(a);
 }
+
+/* ─── Q2_K / Q3_K: raw blocks, rows, and prepared-row forms ─────────────
+ *
+ * Q2_K is the dominant weight type in the UD-Q2_K_XL class of models; the
+ * whole point of the AVX2 port is that matvec.c routes every one of those
+ * rows through oc_oxk_dot_q2_k_q8_k. Random bytes exercise every scale,
+ * minimum and hmask bit pattern the packer could emit — the kernel must
+ * match scalar to the bit on all of them. */
+
+Test(oxk_avx2, q2_k_raw_blocks_bit_exact_vs_scalar)
+{
+    if (!host_avx2()) cr_skip("host has no AVX2");
+    uint32_t s = 0xC2B2AE35u;
+    const size_t nb = 12;
+    uint8_t *w = malloc(nb * OC_OXK_BLOCK_Q2_K_SIZE);
+    uint8_t *a = malloc(nb * OC_OXK_BLOCK_Q8_K_SIZE);
+    cr_assert(w && a);
+    for (int t = 0; t < 64; t++) {
+        rand_blocks(w, nb, OC_OXK_BLOCK_Q2_K_SIZE, 80, true, &s);
+        rand_act_q8_k(a, nb, &s);
+        for (size_t blocks = 1; blocks <= nb; blocks += 11) {
+            const float sc = oc_oxk_dot_q2_k_q8_k_scalar(w, blocks, a);
+            const float av = oc_oxk_dot_q2_k_q8_k_avx2(w, blocks, a);
+            cr_assert(memcmp(&sc, &av, sizeof sc) == 0,
+                      "trial %d blocks %zu: avx2 %.9g != scalar %.9g", t,
+                      blocks, (double)av, (double)sc);
+            const float dp = oc_oxk_dot_q2_k_q8_k(w, blocks, a);
+            cr_assert(memcmp(&sc, &dp, sizeof sc) == 0,
+                      "trial %d blocks %zu: dispatched %.9g != scalar %.9g",
+                      t, blocks, (double)dp, (double)sc);
+        }
+    }
+    free(w);
+    free(a);
+}
+
+Test(oxk_avx2, q3_k_raw_blocks_bit_exact_vs_scalar)
+{
+    if (!host_avx2()) cr_skip("host has no AVX2");
+    uint32_t s = 0x27D4EB2Fu;
+    const size_t nb = 12;
+    uint8_t *w = malloc(nb * OC_OXK_BLOCK_Q3_K_SIZE);
+    uint8_t *a = malloc(nb * OC_OXK_BLOCK_Q8_K_SIZE);
+    cr_assert(w && a);
+    for (int t = 0; t < 64; t++) {
+        rand_blocks(w, nb, OC_OXK_BLOCK_Q3_K_SIZE, 108, false, &s);
+        rand_act_q8_k(a, nb, &s);
+        for (size_t blocks = 1; blocks <= nb; blocks += 11) {
+            const float sc = oc_oxk_dot_q3_k_q8_k_scalar(w, blocks, a);
+            const float av = oc_oxk_dot_q3_k_q8_k_avx2(w, blocks, a);
+            cr_assert(memcmp(&sc, &av, sizeof sc) == 0,
+                      "trial %d blocks %zu: avx2 %.9g != scalar %.9g", t,
+                      blocks, (double)av, (double)sc);
+            const float dp = oc_oxk_dot_q3_k_q8_k(w, blocks, a);
+            cr_assert(memcmp(&sc, &dp, sizeof sc) == 0,
+                      "trial %d blocks %zu: dispatched %.9g != scalar %.9g",
+                      t, blocks, (double)dp, (double)sc);
+        }
+    }
+    free(w);
+    free(a);
+}
+
+Test(oxk_avx2, dot_rows_q2_k_bit_exact_vs_single)
+{
+    check_rows(OC_OXK_BLOCK_Q2_K_SIZE, 80, true, oc_oxk_dot_q2_k_q8_k_scalar,
+               oc_oxk_dot_rows_q2_k_q8_k, oc_oxk_dot_rows_q2_k_q8_k_avx2,
+               "q2_k");
+}
+
+Test(oxk_avx2, dot_rows_q3_k_bit_exact_vs_single)
+{
+    check_rows(OC_OXK_BLOCK_Q3_K_SIZE, 108, false,
+               oc_oxk_dot_q3_k_q8_k_scalar, oc_oxk_dot_rows_q3_k_q8_k,
+               oc_oxk_dot_rows_q3_k_q8_k_avx2, "q3_k");
+}
+
+/* Prepared-row parity: the batched-prefill path decodes each weight row
+ * once into scratch and dots it against an activation tile. Both the
+ * single-activation and the 4-at-a-time multi kernels must reproduce the
+ * scalar prepped dot bit for bit — the multi is deliberately bit-exact per
+ * activation, not merely close, because the same activation can hit either
+ * path depending on where it lands in the tile. */
+typedef size_t (*OxkPrepBytes)(size_t);
+typedef void (*OxkPrepRow)(const uint8_t *, size_t, void *);
+typedef float (*OxkDotPrepped)(const void *, size_t, const uint8_t *);
+typedef void (*OxkDotPreppedMulti)(const void *, size_t, const uint8_t *,
+                                   size_t, size_t, float *);
+
+static void check_prepped(size_t bsize, size_t d_off, bool two_scales,
+                          OxkPrepBytes prep_bytes, OxkPrepRow prep_row,
+                          OxkDotPrepped scalar, OxkDotPrepped avx2,
+                          OxkDotPrepped disp1,
+                          OxkDotPreppedMulti multi_disp,
+                          OxkDotPreppedMulti multi_avx2,
+                          const char *name)
+{
+    uint32_t s = 0xB5297A4Du;
+    static const size_t k_blocks[] = { 1, 3, 8 };
+    enum { MAX_BLOCKS = 8, MAX_ACT = 9 };
+    uint8_t *w = malloc(MAX_BLOCKS * bsize);
+    uint8_t *a = malloc(MAX_ACT * MAX_BLOCKS * OC_OXK_BLOCK_Q8_K_SIZE);
+    cr_assert(w && a);
+    for (size_t bi = 0; bi < sizeof k_blocks / sizeof k_blocks[0]; bi++) {
+        const size_t blocks = k_blocks[bi];
+        const size_t as = blocks * OC_OXK_BLOCK_Q8_K_SIZE;
+        rand_blocks(w, blocks, bsize, d_off, two_scales, &s);
+        void *prep = malloc(prep_bytes(blocks));
+        cr_assert(prep);
+        prep_row(w, blocks, prep);
+        for (size_t v = 0; v < MAX_ACT; v++)
+            rand_act_q8_k(a + v * as, blocks, &s);
+        const float sc = scalar(prep, blocks, a);
+        if (host_avx2()) {
+            const float av = avx2(prep, blocks, a);
+            cr_assert(memcmp(&sc, &av, sizeof sc) == 0,
+                      "%s prepped avx2 blocks=%zu: %.9g != %.9g", name,
+                      blocks, (double)av, (double)sc);
+        }
+        if (disp1) {
+            /* Whichever kernel the dispatcher picked (AVX2 here, AVX-512
+             * where available) must agree with scalar. */
+            const float dp = disp1(prep, blocks, a);
+            cr_assert(memcmp(&sc, &dp, sizeof sc) == 0,
+                      "%s prepped dispatched blocks=%zu", name, blocks);
+        }
+        for (size_t na = 1; na <= MAX_ACT; na++) {
+            float ref[MAX_ACT], got[MAX_ACT], gav[MAX_ACT];
+            for (size_t v = 0; v < na; v++)
+                ref[v] = scalar(prep, blocks, a + v * as);
+            multi_disp(prep, blocks, a, as, na, got);
+            cr_assert(memcmp(ref, got, na * sizeof(float)) == 0,
+                      "%s prepped multi dispatch blocks=%zu n_act=%zu", name,
+                      blocks, na);
+            if (host_avx2()) {
+                multi_avx2(prep, blocks, a, as, na, gav);
+                cr_assert(memcmp(ref, gav, na * sizeof(float)) == 0,
+                          "%s prepped multi avx2 blocks=%zu n_act=%zu", name,
+                          blocks, na);
+            }
+        }
+        free(prep);
+    }
+    free(w);
+    free(a);
+}
+
+Test(oxk_avx2, q2_k_prepped_bit_exact_vs_scalar)
+{
+    check_prepped(OC_OXK_BLOCK_Q2_K_SIZE, 80, true,
+                  oc_oxk_q2_k_prep_bytes, oc_oxk_q2_k_prep_row,
+                  oc_oxk_dot_q2_k_prepped, oc_oxk_dot_q2_k_prepped_avx2,
+                  oc_oxk_dot_q2_k_prepped_1,
+                  oc_oxk_dot_q2_k_prepped_multi,
+                  oc_oxk_dot_q2_k_prepped_multi_avx2, "q2_k");
+}
+
+Test(oxk_avx2, q3_k_prepped_bit_exact_vs_scalar)
+{
+    /* Q3_K shares the Q6_K prepared layout (oc_oxk_q3_k_prep_row writes
+     * it), hence oc_oxk_q6_k_prep_bytes. */
+    check_prepped(OC_OXK_BLOCK_Q3_K_SIZE, 108, false,
+                  oc_oxk_q6_k_prep_bytes, oc_oxk_q3_k_prep_row,
+                  oc_oxk_dot_q3_k_prepped, oc_oxk_dot_q3_k_prepped_avx2,
+                  oc_oxk_dot_q3_k_prepped_1,
+                  oc_oxk_dot_q3_k_prepped_multi,
+                  oc_oxk_dot_q3_k_prepped_multi_avx2, "q3_k");
+}
+
+Test(oxk_avx2, q6_k_prepped_bit_exact_vs_scalar)
+{
+    /* The Q6_K multi dispatch moved to the shared Q3/Q6 AVX2 body on AVX2
+     * hosts, so it needs the same coverage; there is no _1 dispatcher for
+     * Q6_K (disp1 = NULL). */
+    check_prepped(OC_OXK_BLOCK_Q6_K_SIZE, 208, false,
+                  oc_oxk_q6_k_prep_bytes, oc_oxk_q6_k_prep_row,
+                  oc_oxk_dot_q6_k_prepped, oc_oxk_dot_q6_k_prepped_avx2,
+                  NULL,
+                  oc_oxk_dot_q6_k_prepped_multi,
+                  oc_oxk_dot_q6_k_prepped_multi_avx2, "q6_k");
+}
