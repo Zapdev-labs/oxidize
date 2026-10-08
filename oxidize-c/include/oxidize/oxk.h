@@ -148,6 +148,11 @@ typedef struct OcOxkContext {
     OcOxkDotQ5_KQ8_K_fn dot_q5_k_q8_k;
     OcOxkDotQ6_KQ8_K_fn dot_q6_k_q8_k;
     OcOxkDotQ8_0Q8_0_fn dot_q8_0_q8_0;
+    /* The remaining Q8_0-activation pairs. Same signature, so they reuse
+     * the Q4_0 typedef. */
+    OcOxkDotQ4_0Q8_0_fn dot_q5_0_q8_0;
+    OcOxkDotQ4_0Q8_0_fn dot_q5_1_q8_0;
+    OcOxkDotQ4_0Q8_0_fn dot_al5_xs_q8_0;
     OcOxkDotQ2_KQ8_K_fn dot_q2_k_q8_k;
     OcOxkDotQ3_KQ8_K_fn dot_q3_k_q8_k;
     OcOxkDotQ4_KPreppedMulti_fn dot_q4_k_prepped_multi;
@@ -309,6 +314,29 @@ void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
                                    size_t n_act, float *out);
 
+/* AVX2 variants of the prepared-row dots (single-activation and
+ * 4-at-a-time multi): bit-exact with the scalar _prepped functions. The
+ * Q3_K kernels read the Q6_K prepared layout, and the shared Q3/Q6 body
+ * also serves oc_oxk_dot_q6_k_prepped_multi on AVX2 hosts. */
+float oc_oxk_dot_q2_k_prepped_avx2(const void *prep, size_t blocks,
+                                   const uint8_t *act);
+float oc_oxk_dot_q3_k_prepped_avx2(const void *prep, size_t blocks,
+                                   const uint8_t *act);
+float oc_oxk_dot_q6_k_prepped_avx2(const void *prep, size_t blocks,
+                                   const uint8_t *act);
+void oc_oxk_dot_q2_k_prepped_multi_avx2(const void *prep, size_t blocks,
+                                        const uint8_t *acts,
+                                        size_t act_stride, size_t n_act,
+                                        float *out);
+void oc_oxk_dot_q3_k_prepped_multi_avx2(const void *prep, size_t blocks,
+                                        const uint8_t *acts,
+                                        size_t act_stride, size_t n_act,
+                                        float *out);
+void oc_oxk_dot_q6_k_prepped_multi_avx2(const void *prep, size_t blocks,
+                                        const uint8_t *acts,
+                                        size_t act_stride, size_t n_act,
+                                        float *out);
+
 /* ─── Rows form (one activation, many consecutive rows) ─────────────────
  *
  * out[r] = oc_oxk_dot_<type>_q8_k(rows + r*row_bytes, blocks, q8) for
@@ -319,7 +347,16 @@ void oc_oxk_dot_q6_k_prepped_multi(const void *scratch, size_t blocks,
 void oc_oxk_dot_rows_q4_k_q8_k(const uint8_t *rows, size_t row_bytes,
                                size_t n_rows, size_t blocks,
                                const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q5_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
 void oc_oxk_dot_rows_q6_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q2_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q3_k_q8_k(const uint8_t *rows, size_t row_bytes,
                                size_t n_rows, size_t blocks,
                                const uint8_t *q8, float *out);
 void oc_oxk_dot_rows_iq3_s_q8_k(const uint8_t *rows, size_t row_bytes,
@@ -328,12 +365,150 @@ void oc_oxk_dot_rows_iq3_s_q8_k(const uint8_t *rows, size_t row_bytes,
 void oc_oxk_dot_rows_q4_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
                                     size_t n_rows, size_t blocks,
                                     const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q5_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
 void oc_oxk_dot_rows_q6_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q2_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q3_k_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
                                     size_t n_rows, size_t blocks,
                                     const uint8_t *q8, float *out);
 void oc_oxk_dot_rows_iq3_s_q8_k_avx2(const uint8_t *rows, size_t row_bytes,
                                      size_t n_rows, size_t blocks,
                                      const uint8_t *q8, float *out);
+/* Rows form for the Q8_0-activation family (Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 and the
+ * AL5/AL6/AL8/AL5_XS aliases): out[r] = oc_oxk_dot_<type>_q8_0(rows +
+ * r*row_bytes, blocks, q8), bit-identical to the single-row dispatch. */
+void oc_oxk_dot_rows_q4_0_q8_0(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q4_1_q8_0(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q5_0_q8_0(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q5_1_q8_0(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q8_0_q8_0(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_al5_xs_q8_0(const uint8_t *rows, size_t row_bytes,
+                                 size_t n_rows, size_t blocks,
+                                 const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q4_0_q8_0_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q4_1_q8_0_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q5_0_q8_0_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q5_1_q8_0_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q8_0_q8_0_avx2(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_al5_xs_q8_0_avx2(const uint8_t *rows, size_t row_bytes,
+                                      size_t n_rows, size_t blocks,
+                                      const uint8_t *q8, float *out);
+/* qs form: qsums[b] = sum of the b-th Q8_0 act block's 32 int8 codes,
+ * precomputed once per matvec so the block loop skips the per-row sad
+ * chain. Bit-identical to oc_oxk_dot_q4_0_q8_0 (also correct for the AL5
+ * alias). The dispatched wrappers fall back to the standard kernels when
+ * the AVX2 variant is not installed. */
+float oc_oxk_dot_q4_0_q8_0_qs(const uint8_t *row, size_t blocks,
+                              const uint8_t *q8, const int32_t *qsums);
+void oc_oxk_dot_rows_q4_0_q8_0_qs(const uint8_t *rows, size_t row_bytes,
+                                  size_t n_rows, size_t blocks,
+                                  const uint8_t *q8, const int32_t *qsums,
+                                  float *out);
+float oc_oxk_dot_q4_0_q8_0_qs_avx2(const uint8_t *row, size_t blocks,
+                                   const uint8_t *q8, const int32_t *qsums);
+void oc_oxk_dot_rows_q4_0_q8_0_qs_avx2(const uint8_t *rows, size_t row_bytes,
+                                       size_t n_rows, size_t blocks,
+                                       const uint8_t *q8,
+                                       const int32_t *qsums, float *out);
+/* facc rows forms for the fused-matvec decode path: per-block integer dots
+ * stay exact but the scaled products accumulate in f32 lanes (one
+ * horizontal sum per row) instead of the reference's block-sequential
+ * scalar chain — a few ulp of reassociation, the same tradeoff packed_multi
+ * makes for prefill. NOT bit-identical to the public dots. The dispatched
+ * wrappers fall back to the standard rows kernels when AVX2 is absent. */
+void oc_oxk_dot_rows_q4_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, const int32_t *qsums,
+                                    float *out);
+void oc_oxk_dot_rows_q8_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_oxk_dot_rows_q4_0_q8_0_facc_avx2(const uint8_t *rows,
+                                         size_t row_bytes, size_t n_rows,
+                                         size_t blocks, const uint8_t *q8,
+                                         const int32_t *qsums, float *out);
+void oc_oxk_dot_rows_q8_0_q8_0_facc_avx2(const uint8_t *rows,
+                                         size_t row_bytes, size_t n_rows,
+                                         size_t blocks, const uint8_t *q8,
+                                         float *out);
+/* Packed multi-activation form: one weight row against `n_act` Q8_0
+ * activations spaced `act_stride` bytes apart, out[v] per activation.
+ * The batched-matvec packed_multi hook for prefill — the integer dots are
+ * exact but accumulate into eight f32 lanes per activation, so results
+ * equal the single-row dot up to float reassociation (a few ulp), NOT
+ * bit-for-bit. The dispatched wrappers fall back to per-activation
+ * single-row calls when the AVX2 kernel is not installed. */
+void oc_oxk_dot_q4_0_q8_0_packed_multi(const uint8_t *row, size_t blocks,
+                                       const uint8_t *acts,
+                                       size_t act_stride, size_t n_act,
+                                       float *out);
+void oc_oxk_dot_q8_0_q8_0_packed_multi(const uint8_t *row, size_t blocks,
+                                       const uint8_t *acts,
+                                       size_t act_stride, size_t n_act,
+                                       float *out);
+void oc_oxk_dot_q4_0_q8_0_packed_multi_avx2(const uint8_t *row,
+                                       size_t blocks, const uint8_t *acts,
+                                       size_t act_stride, size_t n_act,
+                                       float *out);
+void oc_oxk_dot_q8_0_q8_0_packed_multi_avx2(const uint8_t *row,
+                                       size_t blocks, const uint8_t *acts,
+                                       size_t act_stride, size_t n_act,
+                                       float *out);
+/* Quad-blocked form for batched prefill: four rows decoded once into
+ * per-thread scratch (f32 dw[4] + f32 cw[4] + i8 w[4][32] per block), then
+ * a 4-row x 4-act register-blocked loop dots them against n_act Q8_0
+ * activations. Same exact integer dots as packed_multi with the same f32
+ * reassociation; res4[v*4 + r] is the dot of prepped row r against
+ * activation v. res4 must hold round_up(n_act,4)*4 floats — padding
+ * activation slots are computed but always valid. dq_off gives the byte
+ * offset of an f32 per-block scale array inside each activation (the batch
+ * path appends it to the Q8_0 blocks); pass 0 to read the f16 block
+ * headers instead. The dispatched wrappers fall back to scalar versions
+ * when the AVX2 kernel is not installed. */
+/* Bytes per block of the quad-prep scratch: f32 dw[4] + f32 cw[4] +
+ * i8 w[4][32] — the layout oc_oxk_q4_0_quad_prep writes and
+ * oc_oxk_dot_q4_0_q8_0_quad_multi reads. */
+#define OC_OXK_Q4_0_QUAD_BLOCK_BYTES 160u
+size_t oc_oxk_q4_0_quad_prep_bytes(size_t blocks);
+void   oc_oxk_q4_0_quad_prep(const uint8_t *rows, size_t row_bytes,
+                             size_t n_rows, size_t blocks, void *scratch);
+void   oc_oxk_dot_q4_0_q8_0_quad_multi(const void *prep4, size_t blocks,
+                                       const uint8_t *acts,
+                                       size_t act_stride, size_t dq_off,
+                                       size_t n_act, float *res4);
+void   oc_oxk_q4_0_quad_prep_avx2(const uint8_t *rows, size_t row_bytes,
+                                  size_t n_rows, size_t blocks,
+                                  void *scratch);
+void   oc_oxk_dot_q4_0_q8_0_quad_multi_avx2(const void *prep4, size_t blocks,
+                                            const uint8_t *acts,
+                                            size_t act_stride, size_t dq_off,
+                                            size_t n_act, float *res4);
 /* Rows form over several activations: out[a*out_stride + r] for a < n_act.
  * IQ3_S decodes each row once for up to four activations (speculative
  * verify, sparsely routed experts); bit-identical to the rows form. */
@@ -437,8 +612,18 @@ float oc_oxk_dot_q5_k_q8_k_avx2(const uint8_t *row, size_t blocks_per_row,
                                 const uint8_t *q8);
 float oc_oxk_dot_q6_k_q8_k_avx2(const uint8_t *row, size_t blocks_per_row,
                                 const uint8_t *q8);
+float oc_oxk_dot_q2_k_q8_k_avx2(const uint8_t *row, size_t blocks_per_row,
+                                const uint8_t *q8);
+float oc_oxk_dot_q3_k_q8_k_avx2(const uint8_t *row, size_t blocks_per_row,
+                                const uint8_t *q8);
 float oc_oxk_dot_q8_0_q8_0_avx2(const uint8_t *row, size_t blocks_per_row,
                                 const uint8_t *q8);
+float oc_oxk_dot_q5_0_q8_0_avx2(const uint8_t *row, size_t blocks_per_row,
+                                const uint8_t *q8);
+float oc_oxk_dot_q5_1_q8_0_avx2(const uint8_t *row, size_t blocks_per_row,
+                                const uint8_t *q8);
+float oc_oxk_dot_al5_xs_q8_0_avx2(const uint8_t *row, size_t blocks_per_row,
+                                  const uint8_t *q8);
 void oc_oxk_matvec_q4_0_f32_avx2(const uint8_t *w, size_t n_rows,
                                  size_t row_bytes, const float *x, float *out);
 void oc_oxk_matvec_q4_k_f32_avx2(const uint8_t *w, size_t n_rows,

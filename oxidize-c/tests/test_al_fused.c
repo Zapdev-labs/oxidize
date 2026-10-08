@@ -107,7 +107,14 @@ static void matvec_matches_kernel(OcGgufQuantizationType qt,
     oc_matvec_quantized(qt, w, ROWS, COLS, rb, x, out, temp);
     for (size_t r = 0; r < ROWS; r++) {
         float want = dot(w + r * rb, COLS / 32, act);
-        cr_assert_eq(memcmp(&out[r], &want, sizeof(float)), 0,
+        /* The fused path accumulates in f32 lanes (facc kernels), so it is
+         * a few ulp off the block-sequential reference dot — not
+         * bit-identical. The integer dots are exact; relative error stays
+         * orders of magnitude under the quant noise. */
+        /* abs+rel: reassociation drift is ~ulp of the intermediate sums,
+         * which dominates when cancellation leaves a near-zero dot. */
+        cr_assert_lt(fabs((double)out[r] - (double)want),
+                     1e-4 * (1.0 + fabs((double)want)),
                      "row %zu fused %g != kernel %g", r, out[r], want);
     }
 

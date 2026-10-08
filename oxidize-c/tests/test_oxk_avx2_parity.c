@@ -281,6 +281,193 @@ Test(oxk_avx2, dot_rows_iq3_s_bit_exact_vs_single)
                "iq3_s");
 }
 
+/* ─── The Q8_0-activation family: raw bytes, activations, rows ────────── */
+
+/* Q8_0 activation over the encoder's full [-128, 127] range. The 4-bit and
+ * 3-bit weight kernels stay inside their madd bounds there (only the
+ * Q8_0 × Q8_0 pair itself cannot, which is why that kernel is float-lane). */
+static void rand_act_q8_0(uint8_t *act, size_t blocks, uint32_t *s)
+{
+    for (size_t b = 0; b < blocks; b++) {
+        uint8_t *yb = act + b * OC_OXK_BLOCK_Q8_0_SIZE;
+        const float d = 0.001f + (float)(rnd32(s) % 1000u) * 2e-5f;
+        const uint16_t h = oc_f32_to_f16_bits(d);
+        yb[0] = (uint8_t)(h & 0xFF);
+        yb[1] = (uint8_t)(h >> 8);
+        int8_t *q = (int8_t *)(yb + 2);
+        for (int i = 0; i < 32; i++)
+            q[i] = (int8_t)((int32_t)(rnd32(s) % 256u) - 128);
+    }
+}
+
+/* Raw-byte bit-exact check over one Q8_0-activation dot pair. */
+static void check_q80_pair(size_t bsize, size_t d_off, bool two_scales,
+                           OxkDot1 scalar, OxkDot1 avx2, OxkDot1 dispatched,
+                           const char *name)
+{
+    uint32_t s = 0x2545F491u;
+    const size_t nb = 12;
+    uint8_t *w = malloc(nb * bsize);
+    uint8_t *a = malloc(nb * OC_OXK_BLOCK_Q8_0_SIZE);
+    cr_assert(w && a);
+    for (int t = 0; t < 64; t++) {
+        rand_blocks(w, nb, bsize, d_off, two_scales, &s);
+        rand_act_q8_0(a, nb, &s);
+        for (size_t blocks = 1; blocks <= nb; blocks += 11) {
+            const float sc = scalar(w, blocks, a);
+            const float av = avx2(w, blocks, a);
+            cr_assert(memcmp(&sc, &av, sizeof sc) == 0,
+                      "%s trial %d blocks %zu: avx2 %.9g != scalar %.9g", name,
+                      t, blocks, (double)av, (double)sc);
+            const float dp = dispatched(w, blocks, a);
+            cr_assert(memcmp(&sc, &dp, sizeof sc) == 0,
+                      "%s trial %d blocks %zu: dispatched %.9g != scalar %.9g",
+                      name, t, blocks, (double)dp, (double)sc);
+        }
+    }
+    free(w);
+    free(a);
+}
+
+Test(oxk_avx2, q4_1_raw_blocks_bit_exact_vs_scalar)
+{
+    if (!host_avx2()) cr_skip("host has no AVX2");
+    check_q80_pair(OC_OXK_BLOCK_Q4_1_SIZE, 0, true, oc_oxk_dot_q4_1_q8_0_scalar,
+                   oc_oxk_dot_q4_1_q8_0_avx2, oc_oxk_dot_q4_1_q8_0, "q4_1");
+}
+
+Test(oxk_avx2, q5_0_raw_blocks_bit_exact_vs_scalar)
+{
+    if (!host_avx2()) cr_skip("host has no AVX2");
+    check_q80_pair(OC_OXK_BLOCK_Q5_0_SIZE, 0, false, oc_oxk_dot_q5_0_q8_0_scalar,
+                   oc_oxk_dot_q5_0_q8_0_avx2, oc_oxk_dot_q5_0_q8_0, "q5_0");
+}
+
+Test(oxk_avx2, q5_1_raw_blocks_bit_exact_vs_scalar)
+{
+    if (!host_avx2()) cr_skip("host has no AVX2");
+    check_q80_pair(OC_OXK_BLOCK_Q5_1_SIZE, 0, true, oc_oxk_dot_q5_1_q8_0_scalar,
+                   oc_oxk_dot_q5_1_q8_0_avx2, oc_oxk_dot_q5_1_q8_0, "q5_1");
+}
+
+Test(oxk_avx2, al5_xs_raw_blocks_bit_exact_vs_scalar)
+{
+    if (!host_avx2()) cr_skip("host has no AVX2");
+    check_q80_pair(OC_OXK_BLOCK_AL5_XS_SIZE, 0, false,
+                   oc_oxk_dot_al5_xs_q8_0_scalar, oc_oxk_dot_al5_xs_q8_0_avx2,
+                   oc_oxk_dot_al5_xs_q8_0, "al5_xs");
+}
+
+Test(oxk_avx2, q5_k_raw_blocks_bit_exact_vs_scalar)
+{
+    if (!host_avx2()) cr_skip("host has no AVX2");
+    uint32_t s = 0x85EBCA6Bu;
+    const size_t nb = 12;
+    uint8_t *w = malloc(nb * OC_OXK_BLOCK_Q5_K_SIZE);
+    uint8_t *a = malloc(nb * OC_OXK_BLOCK_Q8_K_SIZE);
+    cr_assert(w && a);
+    for (int t = 0; t < 64; t++) {
+        rand_blocks(w, nb, OC_OXK_BLOCK_Q5_K_SIZE, 0, true, &s);
+        rand_act_q8_k(a, nb, &s);
+        for (size_t blocks = 1; blocks <= nb; blocks += 11) {
+            const float sc = oc_oxk_dot_q5_k_q8_k_scalar(w, blocks, a);
+            const float av = oc_oxk_dot_q5_k_q8_k_avx2(w, blocks, a);
+            cr_assert(memcmp(&sc, &av, sizeof sc) == 0,
+                      "trial %d blocks %zu: avx2 %.9g != scalar %.9g", t,
+                      blocks, (double)av, (double)sc);
+            const float dp = oc_oxk_dot_q5_k_q8_k(w, blocks, a);
+            cr_assert(memcmp(&sc, &dp, sizeof sc) == 0,
+                      "trial %d blocks %zu: dispatched %.9g != scalar %.9g",
+                      t, blocks, (double)dp, (double)sc);
+        }
+    }
+    free(w);
+    free(a);
+}
+
+/* Rows forms over the Q8_0-activation family: one call over n consecutive
+ * rows equals n single-row calls to the bit, dispatcher and AVX2 entry. */
+static void check_rows_q80(size_t bsize, size_t d_off, bool two_scales,
+                           OxkDot1 scalar, OxkDotRows rows,
+                           OxkDotRows rows_avx2, const char *name)
+{
+    uint32_t s = 0xD1B54A32u;
+    static const size_t k_blocks[] = { 1, 3, 8 };
+    enum { MAX_ROWS = 9, MAX_BLOCKS = 8 };
+    uint8_t *w = malloc(MAX_ROWS * MAX_BLOCKS * bsize);
+    uint8_t *a = malloc(MAX_BLOCKS * OC_OXK_BLOCK_Q8_0_SIZE);
+    cr_assert(w && a);
+    for (size_t bi = 0; bi < sizeof k_blocks / sizeof k_blocks[0]; bi++) {
+        const size_t blocks = k_blocks[bi];
+        const size_t rb = blocks * bsize;
+        rand_blocks(w, MAX_ROWS * blocks, bsize, d_off, two_scales, &s);
+        rand_act_q8_0(a, blocks, &s);
+        for (size_t n = 1; n <= MAX_ROWS; n++) {
+            float ref[MAX_ROWS], got[MAX_ROWS], gav[MAX_ROWS];
+            for (size_t r = 0; r < n; r++) ref[r] = scalar(w + r * rb, blocks, a);
+            rows(w, rb, n, blocks, a, got);
+            cr_assert(memcmp(ref, got, n * sizeof(float)) == 0,
+                      "%s rows dispatch blocks=%zu n=%zu", name, blocks, n);
+            if (host_avx2()) {
+                rows_avx2(w, rb, n, blocks, a, gav);
+                cr_assert(memcmp(ref, gav, n * sizeof(float)) == 0,
+                          "%s rows avx2 blocks=%zu n=%zu", name, blocks, n);
+            }
+        }
+    }
+    free(w);
+    free(a);
+}
+
+Test(oxk_avx2, dot_rows_q4_0_bit_exact_vs_single)
+{
+    check_rows_q80(OC_OXK_BLOCK_Q4_0_SIZE, 0, false,
+                   oc_oxk_dot_q4_0_q8_0_scalar, oc_oxk_dot_rows_q4_0_q8_0,
+                   oc_oxk_dot_rows_q4_0_q8_0_avx2, "q4_0");
+}
+
+Test(oxk_avx2, dot_rows_q4_1_bit_exact_vs_single)
+{
+    check_rows_q80(OC_OXK_BLOCK_Q4_1_SIZE, 0, true,
+                   oc_oxk_dot_q4_1_q8_0_scalar, oc_oxk_dot_rows_q4_1_q8_0,
+                   oc_oxk_dot_rows_q4_1_q8_0_avx2, "q4_1");
+}
+
+Test(oxk_avx2, dot_rows_q5_0_bit_exact_vs_single)
+{
+    check_rows_q80(OC_OXK_BLOCK_Q5_0_SIZE, 0, false,
+                   oc_oxk_dot_q5_0_q8_0_scalar, oc_oxk_dot_rows_q5_0_q8_0,
+                   oc_oxk_dot_rows_q5_0_q8_0_avx2, "q5_0");
+}
+
+Test(oxk_avx2, dot_rows_q5_1_bit_exact_vs_single)
+{
+    check_rows_q80(OC_OXK_BLOCK_Q5_1_SIZE, 0, true,
+                   oc_oxk_dot_q5_1_q8_0_scalar, oc_oxk_dot_rows_q5_1_q8_0,
+                   oc_oxk_dot_rows_q5_1_q8_0_avx2, "q5_1");
+}
+
+Test(oxk_avx2, dot_rows_q8_0_bit_exact_vs_single)
+{
+    check_rows_q80(OC_OXK_BLOCK_Q8_0_SIZE, 0, false,
+                   oc_oxk_dot_q8_0_q8_0_scalar, oc_oxk_dot_rows_q8_0_q8_0,
+                   oc_oxk_dot_rows_q8_0_q8_0_avx2, "q8_0");
+}
+
+Test(oxk_avx2, dot_rows_al5_xs_bit_exact_vs_single)
+{
+    check_rows_q80(OC_OXK_BLOCK_AL5_XS_SIZE, 0, false,
+                   oc_oxk_dot_al5_xs_q8_0_scalar, oc_oxk_dot_rows_al5_xs_q8_0,
+                   oc_oxk_dot_rows_al5_xs_q8_0_avx2, "al5_xs");
+}
+
+Test(oxk_avx2, dot_rows_q5_k_bit_exact_vs_single)
+{
+    check_rows(OC_OXK_BLOCK_Q5_K_SIZE, 0, true, oc_oxk_dot_q5_k_q8_k_scalar,
+               oc_oxk_dot_rows_q5_k_q8_k, oc_oxk_dot_rows_q5_k_q8_k_avx2,
+               "q5_k");
+}
+
 /* The multi-activation IQ3_S rows kernel (speculative verify, small expert
  * tiles) decodes each row once for up to four activations; every output
  * must equal the scalar single-activation dot bit for bit. */
