@@ -35,6 +35,9 @@ typedef struct {
     const float *norm_weight;
     size_t norm_weight_len;
     float norm_eps;
+    /* Output-gate activation: SiLU for Qwen3.5 (default), sigmoid for
+     * qwen4exp — the models differ only here. */
+    bool sigmoid_gate;
 } OcQwen35DeltaParams;
 
 typedef struct {

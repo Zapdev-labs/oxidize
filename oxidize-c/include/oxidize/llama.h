@@ -42,6 +42,11 @@ typedef enum OcAttnGateKind {
     OC_ATTN_GATE_SOFTPLUS_LN2 = 1,
 } OcAttnGateKind;
 
+/* qwen4exp PLE: llama.cpp's LLAMA_MAX_PLE_NGRAM is 8 and
+ * LLAMA_MAX_PLE_HEADS is 32 (e.g. (3-1)*8 = 16 heads for an n-gram of 3). */
+#define OC_Q4E_PLE_MAX_NGRAM 8
+#define OC_Q4E_PLE_MAX_HEADS 32
+
 /* ─── Config (port of InferenceConfig, Llama-relevant subset) ──────────── */
 typedef struct OcLlamaConfig {
     uint32_t vocab_size;
@@ -216,6 +221,48 @@ typedef struct OcLlamaConfig {
     bool     expert_weights_norm;
     /* First N blocks use a dense FFN + a plain attn_v projection. */
     uint32_t leading_dense_block_count;
+    /* ── qwen4exp (GGUF arch "qwen4exp", e.g. Qwen3.8-Flash-Next) ─────────
+     *
+     * A qwen35-family hybrid — gated delta-net layers plus a full-attention
+     * layer every full_attention_interval blocks — where the residual is
+     * hc_mult streams wide (hyper-connections) instead of a single n_embd
+     * vector, and the ordinary attn_norm/ffn_norm are replaced by per-stream
+     * RMSNorms inside each hc_* block. The delta-net differs from Qwen3.5's
+     * in one place only: the output gate is sigmoid, not SiLU.
+     *
+     * Full-attention layers additionally carry a DeepSeek-DSA-style sparse
+     * indexer (QSA). One early layer (ple_layer) carries PLE n-gram hash
+     * embeddings that add a token-context signal into the wide residual. */
+    bool     is_qwen4exp;
+    uint32_t hc_mult;            /* hyper_connection.count (4)           */
+    uint32_t hc_low_rank;        /* hyper_connection.low_rank            */
+    /* attention.recurrent_layers — explicit per-layer kind map (n_layer
+     * entries, owned by the model and freed in oc_llama_free). NULL means
+     * "derive the kind from full_attention_interval". */
+    uint8_t *recurrent_layers;
+    /* rope.dimension_sections: interleaved MRoPE section boundaries.
+     * For text-only inference all positions are equal, which degenerates
+     * to plain interleaved RoPE over the first rope_dim dims. */
+    uint32_t rope_sections[4];
+    /* QSA sparse-indexer geometry (full-attention layers). The dense
+     * attention path is bit-identical while pos < indexer_top_k. */
+    uint32_t indexer_n_head;
+    uint32_t indexer_head_size;
+    uint32_t indexer_top_k;
+    uint32_t indexer_kpool;
+    /* PLE n-gram hash embeddings (see ple.layers). */
+    bool     ple_enabled;
+    uint32_t ple_layer;          /* the single PLE layer index            */
+    uint32_t ple_ngram;          /* token window (3)                      */
+    uint32_t ple_heads_per_ngram;
+    uint32_t ple_conv_kernel;    /* dilated depthwise conv width (4)      */
+    uint32_t ple_n_heads;        /* (ngram-1) * ple_heads_per_ngram       */
+    uint32_t ple_embd_dim;       /* embedding_length_per_layer_input      */
+    uint32_t ple_eos;            /* ple.eos_token_id                      */
+    uint32_t ple_img;            /* ple.image_token_id                    */
+    uint64_t ple_mult[OC_Q4E_PLE_MAX_NGRAM];
+    uint64_t ple_head_off[OC_Q4E_PLE_MAX_HEADS];
+    uint64_t ple_head_vocab[OC_Q4E_PLE_MAX_HEADS];
 } OcLlamaConfig;
 
 /* Upper bound on LongCat n-gram tables. LongCat-2.0 has
@@ -314,6 +361,30 @@ typedef struct OcLlamaLayer {
     /* Whether RoPE applies in this layer. False only on Muse Glimmer's
      * global (NoPE) layers; true everywhere else. */
     bool     use_rope;
+    /* ── qwen4exp hyper-connections (all layers when cfg.is_qwen4exp) ──
+     * hc_*_norm are owned f32 of length hc_mult*n_embd in stream-major
+     * order: the gamma for stream c element e sits at [c*n_embd + e], and
+     * the GGUF already carries the converter's pre-folded (1+w). The
+     * down/up/inject views are [hc_low_rank, hc_dim], [hc_dim, hc_low_rank]
+     * and [hc_mult, hc_dim]; inject may be absent. */
+    float *hc_attn_norm;
+    OcWeightView hc_attn_down, hc_attn_up, hc_attn_inject;
+    float *hc_ffn_norm;
+    OcWeightView hc_ffn_down, hc_ffn_up, hc_ffn_inject;
+    /* QSA sparse indexer (full-attention layers; bound but unused while
+     * the dense path runs). Norms are owned f32 of indexer_head_size. */
+    OcWeightView indexer_q_proj, indexer_k_proj;
+    float *indexer_q_norm, *indexer_k_norm;
+    /* PLE (present on cfg.ple_layer only). ple_conv_w is the dilated
+     * depthwise kernel dequantized to owned f32, [hc_dim][kernel]
+     * row-major. ple_norm_* are owned f32 of hc_dim. */
+    OcWeightView ple_key, ple_value, ple_conv1d;
+    float *ple_norm_key, *ple_norm_query, *ple_norm_conv, *ple_conv_w;
+    /* Owned f32 copies for recurrent tensors the GGUF quantizes
+     * (CYBER-FROST ships ssm_conv1d as F16): when non-NULL the
+     * corresponding view's data pointer is redirected here and marked
+     * OC_QUANT_F32, so the shared forward code sees plain floats. */
+    float *ssm_conv_f32, *ssm_a_f32, *ssm_dt_f32, *ssm_norm_f32;
 } OcLlamaLayer;
 
 #define OC_MTP_DEFAULT_DRAFT 3u
@@ -351,6 +422,12 @@ typedef struct OcLlamaModel {
      * zeroed. */
     OcWeightView     ngram_embd[OC_LONGCAT_MAX_NGRAM];
     OcWeightView     ngram_proj[OC_LONGCAT_MAX_NGRAM];
+    /* qwen4exp: the PLE n-gram table ([ple_embd_dim, rows], gathered by
+     * row index — never dequantized whole) and the final hyper-connection
+     * head that replaces output_norm. */
+    OcWeightView     per_layer_tok_embd;
+    float           *output_hc_norm;
+    OcWeightView     output_hc_down, output_hc_up;
     unsigned         load_flags;
     OcExpertStreamPool *expert_stream; /* owned; SSD expert offload        */
     uint32_t         live_sessions;
@@ -457,6 +534,30 @@ typedef struct OcLlamaSession {
     float *qwen35_alpha;
     float *qwen35_conv_output;
     float *qwen35_delta_output;
+    /* qwen4exp persistent state and scratch (NULL for other archs).
+     * hc_resid is the real model residual — hc_mult streams of n_embd;
+     * s->x stays n_embd-wide so the shared logits path is untouched.
+     * hc_block is the zeroed accumulator the reused qwen35 sublayer
+     * functions write their output into (they do x += out, so s->x is
+     * swapped for it while they run). */
+    float *hc_resid;             /* hc_mult * n_embd                      */
+    float *hc_xn;                /* hc_mult * n_embd: normed streams      */
+    float *hc_gate;              /* hc_mult * n_embd                      */
+    float *hc_lo;                /* hc_low_rank                           */
+    float *hc_inject;            /* hc_mult                               */
+    float *hc_block;             /* n_embd                                */
+    /* PLE scratch + the dilated conv ring: ple_conv_state holds
+     * (ple_conv_kernel-1)*ngram positions of hc_dim, oldest first.
+     * ple_hist holds the last ple_ngram-1 input token ids (plus pad),
+     * newest first, for the n-gram hash. */
+    float *ple_emb;              /* ple_n_heads * ple_embd_dim            */
+    float *ple_key_buf;          /* hc_mult * n_embd                      */
+    float *ple_val_buf;          /* n_embd                                */
+    float *ple_gated;            /* hc_mult * n_embd                      */
+    float *ple_conv_state;       /* hist * hc_dim                         */
+    float *ple_conv_out;         /* hc_mult * n_embd                      */
+    uint32_t ple_hist[OC_Q4E_PLE_MAX_NGRAM];
+    uint32_t ple_cur;            /* current token id, for the hash        */
     /* Muse Glimmer attention-output gate, n_head * head_dim. Allocated only
      * when cfg.attn_out_gate is set. */
     float *muse_gate;
@@ -487,6 +588,13 @@ typedef struct OcLlamaSession {
     /* K2 MTP speculative state (oc_llama_mtp_enable). NULL when off. While
      * on, mtp_hidden holds h_{pos-1} after output_norm. */
     struct OcK2Mtp *k2mtp;
+    /* Per-position RoPE cos/sin caches for the non-K2 rope paths, keyed by
+     * (rope_dim, theta). Lazily grown to the highest position seen; each
+     * entry pays the trig once per position instead of once per head per
+     * layer per token. Opaque to callers; owned by the session. */
+    struct OcRopeTable *rope_tabs;
+    int                 rope_tabs_n;
+    int                 rope_tabs_cap;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
