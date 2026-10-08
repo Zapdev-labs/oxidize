@@ -203,6 +203,10 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
         return OC_OK;
     }
     pool->n_layers = model->cfg.n_layer;
+    /* The MTP/nextn block carries its own expert pool — give it the slot
+     * one past the last main layer (see moe_layer_index). */
+    if (model->mtp.layer.ffn_gate_exps.data != NULL)
+        pool->n_layers += 1;
     pool->layers = calloc(pool->n_layers, sizeof(*pool->layers));
     if (!pool->layers) {
         free(pool);
@@ -211,7 +215,8 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
     uint32_t n_exp = model->cfg.num_experts;
     pool->n_experts = n_exp;
     for (uint32_t i = 0; i < pool->n_layers; i++) {
-        const OcLlamaLayer *L = &model->layers[i];
+        const OcLlamaLayer *L = (i < model->cfg.n_layer) ? &model->layers[i]
+                                                       : &model->mtp.layer;
         pool->layers[i].n_experts = n_exp;
         size_t n_embd = model->cfg.n_embd;
         size_t inter = model->cfg.expert_intermediate_size;

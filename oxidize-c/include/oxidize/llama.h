@@ -396,8 +396,13 @@ typedef struct OcLlamaMtp {
     OcWeightView embed_tokens;
     OcWeightView shared_head_head;
     float *enorm;
-    float *hnorm;
+    float *hnorm;               /* n_embd; hc_mult*n_embd on qwen4exp */
     float *shared_head_norm;
+    /* qwen4exp: the head's logits come from a third hyper-connection mix
+     * (hc_head_*) instead of shared_head_norm. hc_head_norm is owned f32
+     * of length hc_mult*n_embd. */
+    float *hc_head_norm;
+    OcWeightView hc_head_down, hc_head_up;
 } OcLlamaMtp;
 
 typedef struct OcLlamaModel {
@@ -586,8 +591,16 @@ typedef struct OcLlamaSession {
     float    *rope_cos;      /* rope_dim/2, current position (K2)          */
     float    *rope_sin;
     /* K2 MTP speculative state (oc_llama_mtp_enable). NULL when off. While
-     * on, mtp_hidden holds h_{pos-1} after output_norm. */
+     * on, mtp_hidden holds h_{pos-1} after output_norm. For qwen4exp it
+     * holds the hc_mult-wide residual (the pre-output-mix streams) and is
+     * allocated at hc_mult*n_embd. */
     struct OcK2Mtp *k2mtp;
+    /* qwen4exp MTP speculative state, NULL when off. */
+    struct OcQ4eMtp *q4emtp;
+    /* Non-NULL only inside a qwen4exp MTP verify pass: hooks the batched
+     * layer functions into per-row recurrent/PLE state snapshots so the
+     * rejected-suffix rollback is exact. */
+    struct OcQ4eSnap *q4e_snap;
     /* Per-position RoPE cos/sin caches for the non-K2 rope paths, keyed by
      * (rope_dim, theta). Lazily grown to the highest position seen; each
      * entry pays the trig once per position instead of once per head per

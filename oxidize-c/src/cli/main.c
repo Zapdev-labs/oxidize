@@ -356,7 +356,8 @@ static OcError run_generation(const OcCliArgs *args)
      * raw argmaxes, so a non-zero temperature still opts out. */
     float repeat_penalty = args->repeat_penalty;
     bool k2_mtp = false;
-    const bool want_k2_mtp = model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
+    const bool want_k2_mtp = (model.cfg.is_k2 || model.cfg.is_qwen4exp) &&
+        oc_llama_mtp_present(&model) &&
         (args->mtp || (args->spec_type && strcmp(args->spec_type, "mtp") == 0));
     if (want_k2_mtp) {
         if (use_cuda || args->temperature > 0.0f) {
@@ -557,7 +558,8 @@ static OcError run_generation(const OcCliArgs *args)
                 continue;
             }
             if (!use_cuda && scfg.type == OC_SAMPLER_GREEDY &&
-                !model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
+                !model.cfg.is_k2 && !model.cfg.is_qwen4exp &&
+                oc_llama_mtp_present(&model) &&
                 !(args->spec_type && strcmp(args->spec_type, "none") == 0)) {
                 uint32_t toks[8];
                 size_t n = 0;
