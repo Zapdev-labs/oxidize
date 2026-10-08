@@ -4931,17 +4931,18 @@ static void q4e_norm_streams(const OcLlamaConfig *c, const float *res,
  * xn = norm(res); lo = silu(W_down·xn / hc); gate = W_up·lo;
  * out[e] = (1/hc) Σ_c xn[c][e]·sigmoid(gate[c][e]).
  * When inject_w is present, inject_out gets W_inject·xn for hc_combine. */
-static void q4e_hc_mix(OcLlamaSession *s, const float *norm_w,
-                       const OcWeightView *down, const OcWeightView *up,
-                       const OcWeightView *inject_w, float *inject_out,
-                       float *out)
+static void q4e_hc_mix_row(OcLlamaSession *s, const float *resid,
+                           const float *norm_w, const OcWeightView *down,
+                           const OcWeightView *up,
+                           const OcWeightView *inject_w, float *inject_out,
+                           float *out)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     const size_t D = c->n_embd;
     const uint32_t H = c->hc_mult;
     const float inv_h = 1.0f / (float)H;
 
-    q4e_norm_streams(c, s->hc_resid, norm_w, s->hc_xn);
+    q4e_norm_streams(c, resid, norm_w, s->hc_xn);
     matvec(down, s->hc_xn, s->hc_lo, s->dequant_temp);
     for (uint32_t i = 0; i < c->hc_low_rank; i++) {
         const float lo = s->hc_lo[i] * inv_h;
@@ -4964,25 +4965,44 @@ static void q4e_hc_mix(OcLlamaSession *s, const float *norm_w,
     }
 }
 
-/* hc_combine: res[c][e] += block[e] * (2·sigmoid(inject[c]/hc)). */
-static void q4e_hc_combine(OcLlamaSession *s, const float *block,
-                           const float *inject)
+static void q4e_hc_mix(OcLlamaSession *s, const float *norm_w,
+                       const OcWeightView *down, const OcWeightView *up,
+                       const OcWeightView *inject_w, float *inject_out,
+                       float *out)
 {
-    const OcLlamaConfig *c = &s->model->cfg;
+    q4e_hc_mix_row(s, s->hc_resid, norm_w, down, up, inject_w, inject_out,
+                   out);
+}
+
+/* hc_combine: res[c][e] += block[e] * (2·sigmoid(inject[c]/hc)). */
+static void q4e_hc_combine_row(const OcLlamaConfig *c, float *resid,
+                               const float *block, const float *inject)
+{
     const size_t D = c->n_embd;
     const uint32_t H = c->hc_mult;
     for (uint32_t cc = 0; cc < H; cc++) {
         const float w = 2.0f * qwen35_sigmoid(inject[cc] / (float)H);
-        float *rc = s->hc_resid + (size_t)cc * D;
+        float *rc = resid + (size_t)cc * D;
         for (size_t e = 0; e < D; e++) rc[e] += block[e] * w;
     }
+}
+
+static void q4e_hc_combine(OcLlamaSession *s, const float *block,
+                           const float *inject)
+{
+    q4e_hc_combine_row(&s->model->cfg, s->hc_resid, block, inject);
 }
 
 /* PLE: hash the current token + its predecessors into per-layer-embedding
  * row ids, gather them from the mmap'd table, and add a gated + convolved
  * value into every residual stream. Matches llm_graph_input_qwen4exp_ple
- * and build_ple in llama.cpp. */
-static void q4e_ple(OcLlamaSession *s, const OcLlamaLayer *L)
+ * and build_ple in llama.cpp.
+ *
+ * The caller supplies ctx[0] = current token and ctx[s] = the token s
+ * positions back (already eos-cut), plus the hc_mult-wide residual row to
+ * update — that lets the batched prefill path run this per chunk row. */
+static void q4e_ple_ctx(OcLlamaSession *s, const OcLlamaLayer *L,
+                        float *resid, const uint32_t *ctx)
 {
     const OcLlamaConfig *c = &s->model->cfg;
     const OcWeightView *tbl = &s->model->per_layer_tok_embd;
@@ -4993,24 +5013,6 @@ static void q4e_ple(OcLlamaSession *s, const OcLlamaLayer *L)
     const uint32_t nh = c->ple_n_heads;
     const size_t pd = c->ple_embd_dim;
     const size_t hc_dim = (size_t)H * D;
-
-    /* ctx[0] = current token; ctx[s] = the token s positions back, cut to
-     * ple_eos when it is missing (before the sequence start) or EOS itself
-     * — the cut propagates to all older entries. The current token's own
-     * EOS does not cut its context, matching the reference. */
-    uint32_t ctx[OC_Q4E_PLE_MAX_NGRAM];
-    ctx[0] = s->ple_cur;
-    bool cut = false;
-    for (uint32_t t = 1; t < ngram; t++) {
-        const bool have = (s->pos >= (int64_t)t);
-        const uint32_t tok = have ? s->ple_hist[t - 1] : c->ple_eos;
-        if (cut || !have || tok == c->ple_eos) {
-            ctx[t] = c->ple_eos;
-            cut = true;
-        } else {
-            ctx[t] = tok;
-        }
-    }
 
     /* One gather row per head: heads 0..per-1 hash a bigram, the next per
      * heads a trigram, and so on. */
@@ -5032,7 +5034,7 @@ static void q4e_ple(OcLlamaSession *s, const OcLlamaLayer *L)
     /* key/query are per-stream RMSNorm'd with their own gammas; the query
      * is the residual itself. s[c] = key_n[c]·query_n[c] / sqrt(n_embd). */
     q4e_norm_streams(c, s->ple_key_buf, L->ple_norm_key, s->ple_gated);
-    q4e_norm_streams(c, s->hc_resid, L->ple_norm_query, s->hc_xn);
+    q4e_norm_streams(c, resid, L->ple_norm_query, s->hc_xn);
     const float inv_sqrt_d = 1.0f / sqrtf((float)D);
     for (uint32_t cc = 0; cc < H; cc++) {
         const float *kn = s->ple_gated + (size_t)cc * D;
@@ -5072,13 +5074,39 @@ static void q4e_ple(OcLlamaSession *s, const OcLlamaLayer *L)
         s->ple_conv_out[ch] = co;
     }
     for (size_t i = 0; i < hc_dim; i++)
-        s->hc_resid[i] += s->ple_key_buf[i] + s->ple_conv_out[i];
+        resid[i] += s->ple_key_buf[i] + s->ple_conv_out[i];
 
     /* Shift the conv ring left and append this token's conv input. */
     memmove(s->ple_conv_state, s->ple_conv_state + hc_dim,
             (hist - 1u) * hc_dim * sizeof(float));
     memcpy(s->ple_conv_state + (hist - 1u) * hc_dim, s->ple_gated,
            hc_dim * sizeof(float));
+}
+
+/* Decode-side wrapper: build the n-gram context from the running history
+ * and apply PLE to the session residual. */
+static void q4e_ple(OcLlamaSession *s, const OcLlamaLayer *L)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const uint32_t ngram = c->ple_ngram;
+    /* ctx[0] = current token; ctx[s] = the token s positions back, cut to
+     * ple_eos when it is missing (before the sequence start) or EOS itself
+     * — the cut propagates to all older entries. The current token's own
+     * EOS does not cut its context, matching the reference. */
+    uint32_t ctx[OC_Q4E_PLE_MAX_NGRAM];
+    ctx[0] = s->ple_cur;
+    bool cut = false;
+    for (uint32_t t = 1; t < ngram; t++) {
+        const bool have = (s->pos >= (int64_t)t);
+        const uint32_t tok = have ? s->ple_hist[t - 1] : c->ple_eos;
+        if (cut || !have || tok == c->ple_eos) {
+            ctx[t] = c->ple_eos;
+            cut = true;
+        } else {
+            ctx[t] = tok;
+        }
+    }
+    q4e_ple_ctx(s, L, s->hc_resid, ctx);
 }
 
 static OcError forward_layer_qwen4exp(OcLlamaSession *s, uint32_t layer)
@@ -5483,6 +5511,11 @@ typedef struct {
     float    *rope_cos;     /* [cap][rope_dim/2] K2 angle table          */
     float    *rope_sin;
     size_t    rope_half;
+    /* qwen4exp only: hc_mult-stream residual and the hc_mix temporaries,
+     * all [cap][hc_dim] except hc_lo [cap][hc_low_rank] and hc_inj
+     * [cap][hc_mult]. b->x is reused as the narrow block accumulator. */
+    float    *hcx, *hc_xn, *hc_gate, *hc_lo, *hc_inj;
+    const uint32_t *toks;   /* current chunk's token ids (PLE context)  */
 } PrefillBuf;
 
 static void prefill_buf_free(PrefillBuf *b)
@@ -5498,6 +5531,8 @@ static void prefill_buf_free(PrefillBuf *b)
     free(b->ex_off); free(b->ex_fill);
     oc_k2_mova_batch_free(&b->mova);
     free(b->rope_cos); free(b->rope_sin);
+    free(b->hcx); free(b->hc_xn); free(b->hc_gate);
+    free(b->hc_lo); free(b->hc_inj);
     memset(b, 0, sizeof(*b));
 }
 
@@ -5524,6 +5559,8 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
     if (b->n_qo > max_cols) max_cols = b->n_qo;
     if (b->ffw  > max_cols) max_cols = b->ffw;
     if (c->ssm_inner_size > max_cols) max_cols = c->ssm_inner_size;
+    const size_t hc_dim = (size_t)c->hc_mult * c->n_embd;
+    if (c->is_qwen4exp && hc_dim > max_cols) max_cols = hc_dim;
 
     b->x          = xcalloc(cap * b->n_embd, sizeof(float));
     b->normed     = xcalloc(cap * b->n_embd, sizeof(float));
@@ -5561,7 +5598,7 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
         }
     }
 
-    if (c->is_qwen35) {
+    if (c->is_qwen35 || c->is_qwen4exp) {
         const size_t key_dim = (size_t)c->ssm_group_count * c->ssm_state_size;
         const size_t conv_dim = 2u * key_dim + c->ssm_inner_size;
         b->q35_qgate  = xcalloc(cap * 2u * b->n_qo, sizeof(float));
@@ -5572,6 +5609,18 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
         b->q35_delta  = xcalloc(cap * c->ssm_inner_size, sizeof(float));
         if (!b->q35_qgate || !b->q35_rqkv || !b->q35_rgate ||
             !b->q35_rbeta || !b->q35_ralpha || !b->q35_delta) {
+            prefill_buf_free(b);
+            return OC_ERR_OOM;
+        }
+    }
+
+    if (c->is_qwen4exp) {
+        b->hcx     = xcalloc(cap * hc_dim, sizeof(float));
+        b->hc_xn   = xcalloc(cap * hc_dim, sizeof(float));
+        b->hc_gate = xcalloc(cap * hc_dim, sizeof(float));
+        b->hc_lo   = xcalloc(cap * (size_t)c->hc_low_rank, sizeof(float));
+        b->hc_inj  = xcalloc(cap * (size_t)c->hc_mult, sizeof(float));
+        if (!b->hcx || !b->hc_xn || !b->hc_gate || !b->hc_lo || !b->hc_inj) {
             prefill_buf_free(b);
             return OC_ERR_OOM;
         }
@@ -5725,7 +5774,7 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
             }
             if (nu > 0)
                 (void)oc_expert_stream_touch(s->expert_stream, layer,
-                                             uniq, nu, true);
+                                             uniq, nu, false);
         }
         free(uniq);
         free(seen);
@@ -6260,6 +6309,7 @@ typedef struct {
     uint32_t            rope_len;         /* min(L->rope_dim, hd)          */
     float               yarn_factor;      /* 0 or <=1 means plain RoPE   */
     uint32_t            yarn_orig_ctx;
+    int                 norm_pairs;       /* qwen4exp interleaved RoPE    */
 } Qwen35QkJob;
 
 static void qwen35_qk_slice(size_t begin, size_t end, size_t tid, void *ud)
@@ -6289,23 +6339,31 @@ static void qwen35_qk_slice(size_t begin, size_t end, size_t tid, void *ud)
             memcpy(qh, tmp, hd * sizeof(float));
             /* Same YaRN treatment as the per-token path above, so
              * prefill and decode agree on every position. */
-            if (rc != NULL)
-                rope_apply_pairs(qh, j->rope_len / 2u, rc, rs);
-            else
+            if (rc != NULL) {
+                if (j->norm_pairs)
+                    rope_apply_interleaved(qh, j->rope_len / 2u, rc, rs);
+                else
+                    rope_apply_pairs(qh, j->rope_len / 2u, rc, rs);
+            } else {
                 oc_apply_rope_yarn_scaled_f32(qh, qh, hd, L->rope_dim, pos,
                                               L->rope_theta, j->yarn_factor,
                                               j->yarn_orig_ctx, -1.0f);
+            }
         }
         for (uint32_t h = 0; h < j->n_head_kv; h++) {
             float *kh = k + (size_t)h * hd;
             oc_rms_norm_f32(kh, L->attn_k_norm, tmp, hd, j->eps);
             memcpy(kh, tmp, hd * sizeof(float));
-            if (rc != NULL)
-                rope_apply_pairs(kh, j->rope_len / 2u, rc, rs);
-            else
+            if (rc != NULL) {
+                if (j->norm_pairs)
+                    rope_apply_interleaved(kh, j->rope_len / 2u, rc, rs);
+                else
+                    rope_apply_pairs(kh, j->rope_len / 2u, rc, rs);
+            } else {
                 oc_apply_rope_yarn_scaled_f32(kh, kh, hd, L->rope_dim, pos,
                                               L->rope_theta, j->yarn_factor,
                                               j->yarn_orig_ctx, -1.0f);
+            }
         }
         /* The RQ cache is stored in position order after the parallel
          * region: a store that completes a centering page encodes the whole
@@ -6471,7 +6529,8 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
     Qwen35QkJob qjob = { s, b, L, pos0, hd, kvdim, c->n_head, L->n_head_kv,
                          c->n_head_kv, (size_t)qdim, c->rms_norm_eps,
                          c->n_ctx, qk_rope_len,
-                         c->yarn_factor, c->yarn_orig_ctx };
+                         c->yarn_factor, c->yarn_orig_ctx,
+                         c->rope_norm_pairs };
     const size_t qk_scratch = hd * sizeof(float);
     bool qk_serial = false;
     const size_t nt = oc_parallel_n_threads();
@@ -6506,6 +6565,383 @@ static void prefill_qwen35_attention(OcLlamaSession *s, uint32_t layer,
         for (size_t i = 0; i < b->n_embd; i++) x[i] += p[i];
     }
     prefill_qwen35_ffn(s, L, b, n);
+}
+
+/* Scale + softcap exactly as the per-token lm_head path does. */
+static void logits_post(const OcLlamaConfig *c, float *lg)
+{
+    if (c->logit_scale > 0.0f && c->logit_scale != 1.0f) {
+        const float ls = c->logit_scale;
+        for (size_t i = 0; i < c->vocab_size; i++) lg[i] *= ls;
+    }
+    if (c->logit_softcap > 0.0f) {
+        const float cap = c->logit_softcap;
+        const float inv = 1.0f / cap;
+        for (size_t i = 0; i < c->vocab_size; i++)
+            lg[i] = tanhf(lg[i] * inv) * cap;
+    }
+}
+
+/* Logits for chunk-local tokens of a prefill chunk are emitted in
+ * sub-batches so the lm_head weights are read once per sub-batch. */
+#define PF_LOGIT_BATCH 32u
+
+/* ─── qwen4exp batched prefill ──────────────────────────────────────────
+ *
+ * Same math as forward_layer_qwen4exp(), but every weight read is batched
+ * over the chunk: projections run as one mm_batch over all n rows and the
+ * routed experts are faulted and grouped once per layer — the difference
+ * that matters when the expert weights live on disk. The sequential pieces
+ * (delta-net state step, PLE conv history, the hc residual streams) still
+ * walk tokens in order; only the weight-bound work batches.
+ *
+ * b->x is reused as the narrow block accumulator: hc_mix writes the
+ * sublayer input into b->normed, the sublayer's own "x += out" tail builds
+ * the block output in the zeroed b->x, and hc_combine folds it back into
+ * the hc_mult streams of b->hcx. */
+
+/* Batched hc_mix: b->normed[j] = mix(hcx[j]) and b->hc_inj[j] = inject
+ * logits, for n tokens. */
+static void q4e_hc_mix_batch(OcLlamaSession *s, PrefillBuf *b, size_t n,
+                             const float *norm_w, const OcWeightView *down,
+                             const OcWeightView *up,
+                             const OcWeightView *inject_w)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const size_t D = c->n_embd;
+    const uint32_t H = c->hc_mult;
+    const size_t hc_dim = (size_t)H * D;
+    const size_t lr = c->hc_low_rank;
+    const float inv_h = 1.0f / (float)H;
+
+    for (size_t j = 0; j < n; j++)
+        q4e_norm_streams(c, b->hcx + j * hc_dim, norm_w,
+                         b->hc_xn + j * hc_dim);
+    mm_batch(down, b->hc_xn, hc_dim, b->hc_lo, lr, n, b);
+    for (size_t i = 0; i < n * lr; i++) {
+        const float lo = b->hc_lo[i] * inv_h;
+        b->hc_lo[i] = lo * qwen35_sigmoid(lo);          /* silu */
+    }
+    mm_batch(up, b->hc_lo, lr, b->hc_gate, hc_dim, n, b);
+    for (size_t j = 0; j < n; j++) {
+        float *out = b->normed + j * D;
+        memset(out, 0, D * sizeof(float));
+        for (uint32_t cc = 0; cc < H; cc++) {
+            const float *xn = b->hc_xn + j * hc_dim + (size_t)cc * D;
+            const float *gt = b->hc_gate + j * hc_dim + (size_t)cc * D;
+            for (size_t e = 0; e < D; e++)
+                out[e] += xn[e] * qwen35_sigmoid(gt[e]);
+        }
+        for (size_t e = 0; e < D; e++) out[e] *= inv_h;
+    }
+    if (inject_w != NULL && inject_w->data != NULL)
+        mm_batch(inject_w, b->hc_xn, hc_dim, b->hc_inj, H, n, b);
+    else
+        memset(b->hc_inj, 0, n * H * sizeof(float));
+}
+
+/* Batched hc_combine: hcx[j][c][e] += x[j][e] * 2·sigmoid(hc_inj[j][c]/H). */
+static void q4e_hc_combine_batch(const OcLlamaConfig *c, PrefillBuf *b,
+                                 size_t n)
+{
+    const size_t hc_dim = (size_t)c->hc_mult * c->n_embd;
+    for (size_t j = 0; j < n; j++)
+        q4e_hc_combine_row(c, b->hcx + j * hc_dim, b->x + j * b->n_embd,
+                           b->hc_inj + j * c->hc_mult);
+}
+
+/* Recurrent delta-net sublayer over the chunk: batched projections, then
+ * the sequential state step per token (same order as decode), then the
+ * batched output projection. qwen4exp gates the delta output with sigmoid
+ * where qwen35 uses silu. */
+static OcError prefill_qwen4exp_recurrent(OcLlamaSession *s, uint32_t layer,
+                                          PrefillBuf *b, size_t n)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const OcLlamaLayer *L = &s->model->layers[layer];
+    const size_t key_dim = (size_t)c->ssm_group_count * c->ssm_state_size;
+    const size_t conv_dim = 2u * key_dim + c->ssm_inner_size;
+
+    mm_batch(&L->attn_qkv, b->normed, b->n_embd, b->q35_rqkv, conv_dim, n, b);
+    mm_batch(&L->attn_gate, b->normed, b->n_embd, b->q35_rgate,
+             c->ssm_inner_size, n, b);
+    mm_batch(&L->ssm_beta, b->normed, b->n_embd, b->q35_rbeta,
+             c->ssm_value_heads, n, b);
+    mm_batch(&L->ssm_alpha, b->normed, b->n_embd, b->q35_ralpha,
+             c->ssm_value_heads, n, b);
+
+    const OcQwen35DeltaParams params = {
+        .conv_weight = (const float *)L->ssm_conv1d.data,
+        .conv_weight_len = L->ssm_conv1d.rows * L->ssm_conv1d.cols,
+        .ssm_a = (const float *)L->ssm_a.data,
+        .ssm_a_len = L->ssm_a.rows * L->ssm_a.cols,
+        .dt_bias = (const float *)L->ssm_dt_bias.data,
+        .dt_bias_len = L->ssm_dt_bias.rows * L->ssm_dt_bias.cols,
+        .norm_weight = (const float *)L->ssm_norm.data,
+        .norm_weight_len = L->ssm_norm.rows * L->ssm_norm.cols,
+        .norm_eps = c->rms_norm_eps,
+        .sigmoid_gate = true,
+    };
+    for (size_t j = 0; j < n; j++) {
+        const OcQwen35DeltaInput input = {
+            .qkv = b->q35_rqkv + j * conv_dim,
+            .qkv_len = conv_dim,
+            .gate = b->q35_rgate + j * c->ssm_inner_size,
+            .gate_len = c->ssm_inner_size,
+            .beta = b->q35_rbeta + j * c->ssm_value_heads,
+            .beta_len = c->ssm_value_heads,
+            .alpha = b->q35_ralpha + j * c->ssm_value_heads,
+            .alpha_len = c->ssm_value_heads,
+        };
+        OcError e = oc_qwen35_delta_step(
+            &s->qwen35_delta[layer], &params, &input,
+            s->qwen35_conv_output, conv_dim,
+            b->q35_delta + j * c->ssm_inner_size, c->ssm_inner_size);
+        if (e != OC_OK) return e;
+    }
+    mm_batch(&L->ssm_out, b->q35_delta, c->ssm_inner_size,
+             b->proj, b->n_embd, n, b);
+    for (size_t j = 0; j < n; j++) {
+        float *x = b->x + j * b->n_embd;
+        const float *p = b->proj + j * b->n_embd;
+        for (size_t i = 0; i < b->n_embd; i++) x[i] += p[i];
+    }
+    return OC_OK;
+}
+
+/* Full-attention sublayer over the chunk: fused Q+gate projection, QK-norm
+ * + interleaved RoPE + KV store per token, then flash prefill attention
+ * with the sigmoid output gate riding on the same parallel region. */
+static OcError prefill_qwen4exp_attention(OcLlamaSession *s, uint32_t layer,
+                                          PrefillBuf *b, size_t n,
+                                          int64_t pos0)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const OcLlamaLayer *L = &s->model->layers[layer];
+    const size_t hd = L->head_dim;
+    const size_t qdim = (size_t)c->n_head * hd;
+    const size_t kvdim = (size_t)L->n_head_kv * hd;
+
+    mm_batch(&L->attn_q, b->normed, b->n_embd, b->q35_qgate,
+             2u * qdim, n, b);
+    mm_batch(&L->attn_k, b->normed, b->n_embd, b->k_buf, b->kv_row, n, b);
+    mm_batch(&L->attn_v, b->normed, b->n_embd, b->v_buf, b->kv_row, n, b);
+
+    const uint32_t qk_rope_len =
+        L->rope_dim > hd ? (uint32_t)hd : L->rope_dim;
+    const float *rs0;
+    if (!(c->yarn_factor > 1.0f && c->yarn_orig_ctx > 0))
+        (void)rope_row(s, L->rope_theta, qk_rope_len,
+                       pos0 + (int64_t)n - 1, &rs0);
+    Qwen35QkJob qjob = { s, b, L, pos0, hd, kvdim, c->n_head, L->n_head_kv,
+                         c->n_head_kv, (size_t)qdim, c->rms_norm_eps,
+                         c->n_ctx, qk_rope_len,
+                         c->yarn_factor, c->yarn_orig_ctx,
+                         c->rope_norm_pairs };
+    const size_t qk_scratch = 3 * hd * sizeof(float);
+    bool qk_serial = false;
+    const size_t nt = oc_parallel_n_threads();
+    for (size_t t = 0; t < nt; t++) {
+        if (oc_parallel_scratch(t, qk_scratch) == NULL) {
+            qk_serial = true;
+            break;
+        }
+    }
+    if (qk_serial) qwen35_qk_slice(0, n, 0, &qjob);
+    else           oc_parallel_for(n, qwen35_qk_slice, &qjob);
+    if (s->kv_type == OC_KV_RQ)
+        for (size_t t = 0; t < n; t++)
+            kv_store_pos(s, L->kv_cache_index, pos0 + (int64_t)t,
+                         b->k_buf + t * b->kv_row, b->v_buf + t * b->kv_row,
+                         b->dequant_temp);
+
+    AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, b->q35_qgate, NULL,
+                     OC_OK, OC_ATTN_GATE_SIGMOID };
+    const OcError ae = prefill_attention(&ajob, n);
+    if (ae != OC_OK) return ae;
+    mm_batch(&L->attn_output, b->attn_out, b->n_qo,
+             b->proj, b->n_embd, n, b);
+    for (size_t j = 0; j < n; j++) {
+        float *x = b->x + j * b->n_embd;
+        const float *p = b->proj + j * b->n_embd;
+        for (size_t i = 0; i < b->n_embd; i++) x[i] += p[i];
+    }
+    return OC_OK;
+}
+
+static OcError prefill_qwen4exp_layer(OcLlamaSession *s, uint32_t layer,
+                                      PrefillBuf *b, size_t n, int64_t pos0)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const OcLlamaLayer *L = &s->model->layers[layer];
+    const size_t hc_dim = (size_t)c->hc_mult * c->n_embd;
+
+    if (c->ple_enabled && layer == c->ple_layer) {
+        /* Sequential: the conv ring and the eos-cut context both depend on
+         * token order. Same rule as decode — a predecessor that is missing
+         * or is itself EOS cuts every older entry. */
+        uint32_t ctx[OC_Q4E_PLE_MAX_NGRAM];
+        for (size_t j = 0; j < n; j++) {
+            const int64_t pos = pos0 + (int64_t)j;
+            ctx[0] = b->toks[j];
+            bool cut = false;
+            for (uint32_t t = 1; t < c->ple_ngram; t++) {
+                const bool have = (pos >= (int64_t)t);
+                const uint32_t tok = !have ? c->ple_eos
+                    : ((int64_t)t <= (int64_t)j) ? b->toks[j - t]
+                    : s->ple_hist[t - 1u - j];
+                if (cut || !have || tok == c->ple_eos) {
+                    ctx[t] = c->ple_eos;
+                    cut = true;
+                } else {
+                    ctx[t] = tok;
+                }
+            }
+            q4e_ple_ctx(s, L, b->hcx + j * hc_dim, ctx);
+        }
+    }
+
+    memset(b->x, 0, n * b->n_embd * sizeof(float));
+    q4e_hc_mix_batch(s, b, n, L->hc_attn_norm, &L->hc_attn_down,
+                     &L->hc_attn_up, &L->hc_attn_inject);
+    OcError e = (L->kind == OC_LLAMA_LAYER_QWEN35_RECURRENT)
+              ? prefill_qwen4exp_recurrent(s, layer, b, n)
+              : prefill_qwen4exp_attention(s, layer, b, n, pos0);
+    if (e != OC_OK) return e;
+    q4e_hc_combine_batch(c, b, n);
+
+    memset(b->x, 0, n * b->n_embd * sizeof(float));
+    q4e_hc_mix_batch(s, b, n, L->hc_ffn_norm, &L->hc_ffn_down,
+                     &L->hc_ffn_up, &L->hc_ffn_inject);
+    prefill_moe_ffn(s, L, b, n);
+    q4e_hc_combine_batch(c, b, n);
+    return OC_OK;
+}
+
+/* The output-side hc mix for one hcx row (the output_norm replacement),
+ * into a D-wide vector ready for the lm_head matvec. */
+static void q4e_out_norm_row(OcLlamaSession *s, const float *resid,
+                             float *out)
+{
+    const OcLlamaModel *m = s->model;
+    q4e_hc_mix_row(s, resid, m->output_hc_norm, &m->output_hc_down,
+                   &m->output_hc_up, NULL, NULL, out);
+}
+
+static OcError prefill_qwen4exp(OcLlamaSession *sess,
+                                const uint32_t *tokens, size_t n_tokens,
+                                size_t chunk, float *logits_out,
+                                size_t first_logit, OcLogitsFn cb, void *ud)
+{
+    OcLlamaModel *m = sess->model;
+    const OcLlamaConfig *c = &m->cfg;
+    const size_t D = c->n_embd;
+    const size_t hc_dim = (size_t)c->hc_mult * D;
+    const size_t V = c->vocab_size;
+
+    if (chunk == 0 || chunk > OC_PREFILL_CHUNK) chunk = OC_PREFILL_CHUNK;
+    if (chunk > n_tokens) chunk = n_tokens;
+
+    PrefillBuf buf;
+    OcError e = prefill_buf_init(m, chunk, &buf);
+    if (e != OC_OK) {
+        /* No scratch — the per-token path needs none and is exact. */
+        for (size_t i = 0; i < n_tokens; i++) {
+            float *lg = (i + 1 == n_tokens) ? logits_out : NULL;
+            OcError e2 = oc_llama_forward(sess, tokens[i], lg);
+            if (e2 != OC_OK) return e2;
+        }
+        return OC_OK;
+    }
+
+    float *lg = NULL;
+    if (cb != NULL) {
+        lg = malloc(PF_LOGIT_BATCH * V * sizeof(float));
+        if (lg == NULL) {
+            prefill_buf_free(&buf);
+            return OC_ERR_OOM;
+        }
+    }
+
+    for (size_t base = 0; base < n_tokens; base += chunk) {
+        const size_t n = (n_tokens - base < chunk) ? n_tokens - base : chunk;
+        const int64_t pos0 = sess->pos;
+
+        /* Broadcast each token embedding into every hc stream — the same
+         * init the decode path applies to s->hc_resid. */
+        for (size_t j = 0; j < n; j++) {
+            embed_token_into(sess, tokens[base + j], buf.x + j * buf.n_embd);
+            for (uint32_t cc = 0; cc < c->hc_mult; cc++)
+                memcpy(buf.hcx + j * hc_dim + (size_t)cc * D,
+                       buf.x + j * D, D * sizeof(float));
+        }
+        buf.toks = tokens + base;
+
+        for (uint32_t l = 0; l < c->n_layer; l++) {
+            e = prefill_qwen4exp_layer(sess, l, &buf, n, pos0);
+            if (e != OC_OK) {
+                free(lg);
+                prefill_buf_free(&buf);
+                return e;
+            }
+        }
+
+        sess->pos = pos0 + (int64_t)n;
+
+        /* ple_hist[0] is the newest token; fill from the chunk's tail and
+         * carry the old tail forward. */
+        {
+            uint32_t nh[OC_Q4E_PLE_MAX_NGRAM];
+            for (uint32_t i = 0; i < OC_Q4E_PLE_MAX_NGRAM; i++)
+                nh[i] = (i < n) ? tokens[base + n - 1u - i]
+                                : sess->ple_hist[i - (uint32_t)n];
+            memcpy(sess->ple_hist, nh, sizeof(nh));
+        }
+        sess->last_token = tokens[n_tokens - 1];
+
+        /* Logits for chunk-local tokens [j0, n): the final hc mix replaces
+         * output_norm, then the lm_head weights are read once per
+         * PF_LOGIT_BATCH rows. */
+        if (cb != NULL && base + n > first_logit) {
+            const size_t j0 = first_logit > base ? first_logit - base : 0;
+            for (size_t a = j0; a < n; a += PF_LOGIT_BATCH) {
+                const size_t nb = n - a < PF_LOGIT_BATCH ? n - a
+                                                         : PF_LOGIT_BATCH;
+                for (size_t j = 0; j < nb; j++)
+                    q4e_out_norm_row(sess, buf.hcx + (a + j) * hc_dim,
+                                     buf.normed + j * buf.n_embd);
+                mm_batch(&m->output, buf.normed, buf.n_embd, lg, V, nb,
+                         &buf);
+                for (size_t j = 0; j < nb; j++) {
+                    logits_post(c, lg + j * V);
+                    cb(ud, base + a + j, lg + j * V);
+                }
+            }
+        }
+
+        if (base + n == n_tokens) {
+            q4e_out_norm_row(sess, buf.hcx + (n - 1u) * hc_dim, sess->normed);
+            if (sess->last_hidden != NULL)
+                memcpy(sess->last_hidden, sess->normed, D * sizeof(float));
+            if (logits_out != NULL) {
+                if (m->output.qtype == OC_QUANT_F32) {
+                    oc_matvec_f32((const float *)m->output.data,
+                                  m->output.rows, m->output.cols,
+                                  sess->normed, logits_out);
+                } else {
+                    oc_matvec_quantized(m->output.qtype, m->output.data,
+                                        m->output.rows, m->output.cols,
+                                        m->output.row_bytes, sess->normed,
+                                        logits_out, sess->dequant_temp);
+                }
+                logits_post(c, logits_out);
+            }
+        }
+    }
+
+    free(lg);
+    prefill_buf_free(&buf);
+    return OC_OK;
 }
 
 static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
@@ -6781,30 +7217,12 @@ static bool prefill_batch_supported(const OcLlamaModel *m)
         m->arch == OC_ARCH_FALCON) return false;
     if (m->cfg.uses_mla || m->cfg.is_longcat) return false;
     if (m->cfg.uses_gemma4) return false;
-    /* qwen4exp: hyper-connections, PLE conv history, and the output hc mix
-     * have no batched equivalent yet; the per-token path is exact. */
+    /* qwen4exp runs its own chunked path (prefill_qwen4exp), dispatched
+     * before the generic batch machinery is reached. */
     if (m->cfg.is_qwen4exp) return false;
     return true;
 }
 
-/* Scale + softcap exactly as the per-token lm_head path does. */
-static void logits_post(const OcLlamaConfig *c, float *lg)
-{
-    if (c->logit_scale > 0.0f && c->logit_scale != 1.0f) {
-        const float ls = c->logit_scale;
-        for (size_t i = 0; i < c->vocab_size; i++) lg[i] *= ls;
-    }
-    if (c->logit_softcap > 0.0f) {
-        const float cap = c->logit_softcap;
-        const float inv = 1.0f / cap;
-        for (size_t i = 0; i < c->vocab_size; i++)
-            lg[i] = tanhf(lg[i] * inv) * cap;
-    }
-}
-
-/* Logits for chunk-local tokens [j0, n) of the current prefill chunk, in
- * sub-batches so the lm_head weights are read once per sub-batch. */
-#define PF_LOGIT_BATCH 32u
 static OcError prefill_emit_logits(OcLlamaSession *sess, PrefillBuf *b,
                                    size_t j0, size_t n, size_t base,
                                    OcLogitsFn cb, void *ud)
@@ -6862,6 +7280,14 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
 
     OcLlamaModel *m = sess->model;
     if ((uint64_t)sess->pos + n_tokens > m->cfg.n_ctx) return OC_ERR_INVALID_ARG;
+
+    /* qwen4exp has its own chunked path: the hyper-connection residual is
+     * hc_mult streams wide, so the generic PrefillBuf.x rows cannot carry
+     * it. The sequential state (delta-net, PLE conv, KV) still advances per
+     * token in order inside the chunk. */
+    if (m->cfg.is_qwen4exp)
+        return prefill_qwen4exp(sess, tokens, n_tokens, chunk, logits_out,
+                                first_logit, cb, ud);
 
     /* Fall back to the per-token path when batching cannot help or is not
      * supported: identical results, just the old speed. */
