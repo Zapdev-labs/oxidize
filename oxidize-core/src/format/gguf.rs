@@ -510,9 +510,10 @@ impl PartialEq for GgufParseError {
             (Self::UnknownMetadataType(a), Self::UnknownMetadataType(b)) => a == b,
             (Self::InvalidAlignment(a), Self::InvalidAlignment(b)) => a == b,
             (Self::IntegerOverflow, Self::IntegerOverflow) => true,
-            (Self::TensorExtentOutOfBounds { name: a }, Self::TensorExtentOutOfBounds { name: b }) => {
-                a == b
-            }
+            (
+                Self::TensorExtentOutOfBounds { name: a },
+                Self::TensorExtentOutOfBounds { name: b },
+            ) => a == b,
             (Self::Io(a), Self::Io(b)) => a.kind() == b.kind(),
             _ => false,
         }
@@ -637,8 +638,7 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
     if tensor_count > reader.remaining() as u64 / MIN_TENSOR_INFO_WIRE_BYTES {
         return Err(GgufParseError::UnexpectedEof);
     }
-    let mut tensor_infos =
-        Vec::with_capacity((tensor_count as usize).min(MAX_GGUF_PREALLOC));
+    let mut tensor_infos = Vec::with_capacity((tensor_count as usize).min(MAX_GGUF_PREALLOC));
     for _ in 0..tensor_count {
         let name = reader.read_string()?;
         let n_dimensions = reader.read_u32()?;
@@ -692,9 +692,7 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
                 .try_fold(1u64, |acc, &d| acc.checked_mul(d))
                 .and_then(|n| usize::try_from(n).ok())
                 .ok_or(GgufParseError::IntegerOverflow)?;
-            if let Ok(declared_bytes) =
-                crate::quantization::quantized_size(qtype, value_count)
-            {
+            if let Ok(declared_bytes) = crate::quantization::quantized_size(qtype, value_count) {
                 let end = tensor
                     .absolute_offset
                     .checked_add(declared_bytes as u64)
@@ -1017,8 +1015,7 @@ impl<'a> ByteReader<'a> {
                 if len > self.remaining() as u64 {
                     return Err(GgufParseError::UnexpectedEof);
                 }
-                let mut values =
-                    Vec::with_capacity((len as usize).min(MAX_GGUF_PREALLOC));
+                let mut values = Vec::with_capacity((len as usize).min(MAX_GGUF_PREALLOC));
                 for _ in 0..len {
                     values.push(self.read_value_of_type_at_depth(element_type, depth + 1)?);
                 }

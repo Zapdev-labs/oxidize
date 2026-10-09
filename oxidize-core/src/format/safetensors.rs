@@ -61,16 +61,14 @@ impl MappedSafeTensorsFile {
             .shape
             .iter()
             .try_fold(1usize, |acc, &d| acc.checked_mul(d))
-            .ok_or_else(|| {
-                SafeTensorsError::Parse(format!("shape product overflow: {name}"))
-            })?;
+            .ok_or_else(|| SafeTensorsError::Parse(format!("shape product overflow: {name}")))?;
         let element_size = match info.dtype {
             DType::F32 => 4,
             DType::F16 | DType::BF16 => 2,
             other => {
                 return Err(SafeTensorsError::Parse(format!(
                     "unsupported dtype for f32 decode: {other:?}"
-                )))
+                )));
             }
         };
         if element_count.saturating_mul(element_size) > bytes.len() {
