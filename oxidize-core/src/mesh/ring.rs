@@ -45,6 +45,10 @@ impl std::fmt::Display for RingError {
 
 impl std::error::Error for RingError {}
 
+/// Maximum accepted ring frame size. A peer declaring a larger length is
+/// rejected before any buffer is allocated.
+const MAX_FRAME_BYTES: usize = 1 << 30;
+
 /// Abstract ring transport.  Each rank sends to its right neighbour and
 /// receives from its left neighbour.
 ///
@@ -136,6 +140,11 @@ impl RingTransport for TcpTransport {
                 .await
                 .map_err(|e| RingError::Io(e.to_string()))?;
             let len = u32::from_le_bytes(len_bytes) as usize;
+            if len > MAX_FRAME_BYTES {
+                return Err(RingError::Io(format!(
+                    "frame length {len} exceeds max {MAX_FRAME_BYTES}"
+                )));
+            }
             let mut buf = vec![0u8; len];
             s.read_exact(&mut buf)
                 .await
@@ -189,6 +198,11 @@ impl RingTransport for DualTcpTransport {
                 .await
                 .map_err(|e| RingError::Io(e.to_string()))?;
             let len = u32::from_le_bytes(len_bytes) as usize;
+            if len > MAX_FRAME_BYTES {
+                return Err(RingError::Io(format!(
+                    "frame length {len} exceeds max {MAX_FRAME_BYTES}"
+                )));
+            }
             let mut buf = vec![0u8; len];
             s.read_exact(&mut buf)
                 .await

@@ -53,7 +53,7 @@ pub fn load_causal_model(
     let plan = ArchPlan::from_config(&cfg);
     plan.ensure_supported(allow_partial)?;
     let mut model =
-        LayerWiseModel::load_from_gguf(&mapped, cfg, 0).map_err(|e| FinetuneError::Model(e))?;
+        LayerWiseModel::load_from_gguf(&mapped, cfg, 0).map_err(FinetuneError::Model)?;
     model
         .warm_layer_cache()
         .map_err(|e| FinetuneError::Model(format!("warm layer cache: {e}")))?;
@@ -366,11 +366,10 @@ fn rollout(
         ));
     }
     let mut hidden = normed[normed.len() - h..].to_vec();
-    let mut pos = prompt.len();
     let mut buffer = RolloutBuffer::new();
     let critic_lr = critic_lr.abs().min(1e-3);
 
-    for _ in 0..max_new {
+    for pos in (prompt.len()..).take(max_new) {
         if pos >= ctx {
             break;
         }
@@ -393,7 +392,6 @@ fn rollout(
             .forward_normed_hidden(&[action], pos)
             .map_err(|e| FinetuneError::Model(format!("{e:?}")))?;
         hidden = next;
-        pos += 1;
     }
     Ok(buffer)
 }
