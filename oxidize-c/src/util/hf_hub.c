@@ -1096,27 +1096,34 @@ OcError oc_hf_download(const OcHfConfig *cfg, const OcHfModel *model,
      * — a truncated or substituted file on disk must not be used as a
      * model just because it exists and is non-empty. */
     if (model->sha256[0]) {
-        struct stat st;
-        if (stat(dest, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
-            FILE *df = fopen(dest, "rb");
-            if (df) {
-                OcSha256 csha;
-                oc_sha256_init(&csha);
-                char buf[OC_HF_DOWNLOAD_CHUNK];
-                size_t r;
-                while ((r = fread(buf, 1, sizeof(buf), df)) > 0) {
-                    oc_sha256_update(&csha, (const uint8_t *)buf, r);
+        int fd = open(dest, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+                FILE *df = fdopen(fd, "rb");
+                if (df) {
+                    OcSha256 csha;
+                    oc_sha256_init(&csha);
+                    char buf[OC_HF_DOWNLOAD_CHUNK];
+                    size_t r;
+                    while ((r = fread(buf, 1, sizeof(buf), df)) > 0) {
+                        oc_sha256_update(&csha, (const uint8_t *)buf, r);
+                    }
+                    fclose(df); /* closes fd as well */
+                    uint8_t digest[32];
+                    oc_sha256_final(&csha, digest);
+                    char hex[OC_HF_MAX_SHA256];
+                    oc_sha256_hex(digest, hex, sizeof(hex));
+                    if (strcmp(hex, model->sha256) == 0) {
+                        return OC_OK;
+                    }
+                    oc_log_warn("hf: cached %s failed SHA-256 check; "
+                                "re-downloading", dest);
+                } else {
+                    close(fd);
                 }
-                fclose(df);
-                uint8_t digest[32];
-                oc_sha256_final(&csha, digest);
-                char hex[OC_HF_MAX_SHA256];
-                oc_sha256_hex(digest, hex, sizeof(hex));
-                if (strcmp(hex, model->sha256) == 0) {
-                    return OC_OK;
-                }
-                oc_log_warn("hf: cached %s failed SHA-256 check; "
-                            "re-downloading", dest);
+            } else {
+                close(fd);
             }
         }
     }
