@@ -9,7 +9,7 @@
  * lifecycle valgrind-clean — ASan substitutes locally).
  *
  * Fixtures live in oxidize-core/tests/fixtures/ (shared with the Rust
- * reference). The fixtures are tiny (132 bytes each) so they live in the
+ * reference). The fixtures are tiny (256 bytes each) so they live in the
  * repo and need no network/model download.
  *
  * Parity reference: Rust `oxidize-core/src/format/gguf.rs::parse_gguf`
@@ -69,7 +69,7 @@ Test(gguf, v3_tensor_inventory_bit_exact_vs_rust)
      * `parses_v3_header_tensor_info_and_alignment`):
      *   tensor_infos.len() == 1
      *   tensor_infos[0].name == "tok_embeddings.weight"
-     *   tensor_infos[0].dimensions == vec![32000, 4096]
+     *   tensor_infos[0].dimensions == vec![8, 4]
      *   tensor_infos[0].absolute_offset == 128
      *   tensor_infos[0].ggml_type == 0 (F32)
      */
@@ -81,8 +81,8 @@ Test(gguf, v3_tensor_inventory_bit_exact_vs_rust)
     const OcGgufTensorInfo *t = &f.tensors[0];
     cr_assert_str_eq(t->name, "tok_embeddings.weight", "tensor name mismatch");
     cr_assert_eq(t->n_dims, 2, "n_dims should be 2");
-    cr_assert_eq(t->dims[0], 32000, "dims[0] should be 32000 (vocab)");
-    cr_assert_eq(t->dims[1], 4096,  "dims[1] should be 4096 (hidden)");
+    cr_assert_eq(t->dims[0], 8, "dims[0] should be 8");
+    cr_assert_eq(t->dims[1], 4,  "dims[1] should be 4");
     cr_assert_eq(t->absolute_offset, 128, "absolute_offset should be 128");
     cr_assert_eq(t->relative_offset, 0, "relative_offset should be 0");
     cr_assert_eq(t->ggml_type, 0, "ggml_type should be 0 (F32)");
@@ -105,7 +105,7 @@ Test(gguf, v3_data_section_first_four_bytes)
     cr_assert_eq(e, OC_OK, "parse failed: %s", oc_error_msg(e));
 
     cr_assert_not_null(f.backing_buf, "oc_gguf_open should populate backing_buf");
-    cr_assert_eq(f.backing_len, 132, "fixture is 132 bytes (128 header + 4 data)");
+    cr_assert_eq(f.backing_len, 256, "fixture is 256 bytes (128 header + 128 data)");
     cr_assert_eq(f.backing_buf[128], 1, "data[0] should be 1");
     cr_assert_eq(f.backing_buf[129], 2, "data[1] should be 2");
     cr_assert_eq(f.backing_buf[130], 3, "data[2] should be 3");
@@ -143,8 +143,8 @@ Test(gguf, v2_backward_compat)
     cr_assert_eq(v2.alignment, 64, "alignment should match v3");
     cr_assert_eq(v2.data_section_start, 128, "data_section_start should match v3");
     cr_assert_str_eq(v2.tensors[0].name, "tok_embeddings.weight", "tensor name should match v3");
-    cr_assert_eq(v2.tensors[0].dims[0], 32000, "dims[0] should match v3");
-    cr_assert_eq(v2.tensors[0].dims[1], 4096, "dims[1] should match v3");
+    cr_assert_eq(v2.tensors[0].dims[0], 8, "dims[0] should match v3");
+    cr_assert_eq(v2.tensors[0].dims[1], 4, "dims[1] should match v3");
     cr_assert_eq(v2.tensors[0].absolute_offset, 128, "absolute_offset should match v3");
 
     oc_gguf_free(&v2);
