@@ -93,7 +93,14 @@ pub async fn enforce_api_key(
     if !state.auth.is_enabled() {
         return next.run(request).await;
     };
-    let query = request.uri().query().map(str::to_owned);
+    // The `api_key=` query fallback exists only for the WebSocket upgrade at
+    // /v1/realtime (browsers cannot set custom headers there). Accepting it on
+    // other routes would put keys into URLs, proxy logs, and browser history.
+    let query = if path == "/v1/realtime" {
+        request.uri().query().map(str::to_owned)
+    } else {
+        None
+    };
     if state.auth.keys().into_iter().any(|expected_key| {
         request_has_api_key(request.headers(), expected_key)
             || query_has_api_key(query.as_deref(), expected_key)

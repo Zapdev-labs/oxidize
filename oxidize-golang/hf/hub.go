@@ -42,6 +42,9 @@ func ResolveGGUF(opts ResolveOptions) (string, error) {
 			return "", err
 		}
 	}
+	if !safeFilename(filename) {
+		return "", fmt.Errorf("hf: unsafe filename %q", filename)
+	}
 	rev := opts.Revision
 	if rev == "" {
 		rev = defaultRevision
@@ -85,6 +88,22 @@ func splitRepoAndFile(repo, explicitFile string) (string, string, error) {
 		return repo, file, nil
 	}
 	return repo, "", nil
+}
+
+// safeFilename reports whether filename is safe to join under the cache
+// dir: a relative path with no "..", ".", or empty components, no leading
+// "/", and no backslashes. Filenames may come from a remote API response,
+// so a hostile repo must not be able to write outside the cache tree.
+func safeFilename(filename string) bool {
+	if filename == "" || strings.HasPrefix(filename, "/") {
+		return false
+	}
+	for _, comp := range strings.Split(filename, "/") {
+		if comp == "" || comp == "." || comp == ".." || strings.Contains(comp, "\\") {
+			return false
+		}
+	}
+	return true
 }
 
 func defaultCacheDir() string {
