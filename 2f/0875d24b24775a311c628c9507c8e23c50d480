@@ -1,0 +1,19 @@
+oxidize-c/src/compute/exl3.c
+  s_4634b8c310642f::t_cbe0e15bacd668 168-247
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2f0875d24b24775a311c628c9507c8e23c50d480",
+  "prompts": {},
+  "sessions": {
+    "s_4634b8c310642f": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "6b579ea0-9260-4076-8f52-e5adcacad260",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "Jackson57279 <jackson@email.zapdev.link>"
+    }
+  }
+}
