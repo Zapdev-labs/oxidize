@@ -175,6 +175,7 @@ typedef struct OcCliContext {
     const char        *mtp_model;       /* --mtp-model PATH                  */
     bool               mtp;             /* --mtp                             */
     bool               chat;            /* --chat: wrap the prompt as a turn */
+    const char        *exl3_path;
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.

@@ -1023,6 +1023,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
 {
     if (!ctx || !model) return OC_ERR_INVALID_ARG;
     memset(ctx, 0, sizeof(*ctx));
+    if (model->exl3_overlay) return OC_ERR_BACKEND;
 
     /* K2-Horizon needs grouped norms, MoVA values and the softplus output
      * gate, none of which the device forward implements: it would run the

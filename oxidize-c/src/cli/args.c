@@ -79,6 +79,20 @@ void oc_cli_args_defaults(OcCliArgs *a)
 
 static int g_cli_parse_error;
 
+int oc_cli_exl3_reject(const char *path, const char *backend,
+                        bool incompatible, bool has_model)
+{
+    if (!path) return 0;
+    if (!path[0] || !has_model || incompatible ||
+        (backend && strcmp(backend, "cpu") != 0)) {
+        fprintf(stderr, "error: --exl3 requires a matching --model GGUF and "
+                "CPU prompt/bench/perplexity inference; server, GPU, "
+                "MTP, draft decoding and expert streaming are unsupported\n");
+        return 1;
+    }
+    return 0;
+}
+
 int oc_cli_parse_failed(void)
 {
     return g_cli_parse_error;
@@ -207,6 +221,7 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     }
     else if (match(arg, "--prerouter"))     { a->prerouter_path = val; *consumed_val = true; }
     else if (match(arg, "--lora"))          { a->lora_path = val; *consumed_val = true; }
+    else if (match(arg, "--exl3"))          { a->exl3_path = val; *consumed_val = true; }
     else if (match(arg, "--experts-per-tok")) {
         uint32_t n;
         if (!oc_parse_u32(val, &n) || n == 0) {
@@ -246,6 +261,10 @@ void oc_cli_parse_args(int argc, char **argv, OcCliArgs *a)
 
         bool consumed_val = false;
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (match(arg, "--exl3") && (!val || val[0] == '-')) {
+            cli_bad_value(arg, val);
+            continue;
+        }
         if (parse_value_flag(a, arg, val, &consumed_val)) {
             if (consumed_val) i++;
             continue;
@@ -293,6 +312,10 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         if (match(arg, "--chat"))       { ctx->chat = true; continue; }
 
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
+        if (match(arg, "--exl3") && (!val || val[0] == '-')) {
+            cli_bad_value(arg, val);
+            continue;
+        }
         if (val == NULL) {
             /* A trailing bare word is the prompt for generation commands. */
             if (arg[0] != '-' && ctx->prompt == NULL) ctx->prompt = arg;
@@ -400,6 +423,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         }
         else if (match(arg, "--prerouter"))      { ctx->prerouter_path = val; i++; }
         else if (match(arg, "--lora"))           { ctx->lora_path = val; i++; }
+        else if (match(arg, "--exl3"))           { ctx->exl3_path = val; i++; }
         else if (match(arg, "--experts-per-tok")) {
             uint32_t n;
             if (!oc_parse_u32(val, &n) || n == 0) {

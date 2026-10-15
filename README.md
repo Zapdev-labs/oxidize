@@ -275,6 +275,35 @@ Design goals:
 - Keep transport/UI concerns at the edge crates (`oxidize-cli`, `oxidize-server`, `oxidize-py`) for maintainability.
 - Support multiple acceleration targets behind stable core APIs to keep feature parity across platforms.
 
+### EXL3 on CPU in oxidize-c
+
+Build with `make -C oxidize-c`, then attach an EXL3 SafeTensors file or shard
+directory to a GGUF from the **same model and revision**:
+
+```bash
+./oxidize-c/oxidize-c --model model.gguf --exl3 /path/to/exl3/ \
+  --prompt "Hello" --n-predict 64 --threads 16
+```
+
+The GGUF supplies configuration, tokenizer, embeddings and any weights absent
+from the overlay. This is an explicit mixed-checkpoint overlay, not a standalone
+EXL3 model loader or an EXL3 quantizer. Use matching weights; dimensions alone
+cannot establish that two checkpoints are equivalent.
+
+The CPU path keeps native trellis weights compressed, applies 128-point
+Hadamard transforms to activations, and decodes tiles during multiplication.
+It supports the 3inst, MCG and mul1 codebooks, integer rates 1–8 bits, and
+mul1 rates 1.5/2.5/3.5 bits, including FP16 channel scales and legacy packed
+signs. Initial model integration supports dense Llama/Mistral/Qwen2 projections
+and the output head; unsupported architectures, tensor groups and execution
+modes fail explicitly. EXL3 groups containing separate bias or obsolete scale
+tensors are currently rejected. GPU execution, expert streaming, speculative decoding
+and serving with this overlay are unavailable. Speed and model-quality claims
+require full-checkpoint benchmarks; fewer stored bits do not guarantee faster
+CPU decoding.
+
+Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllamav3/blob/058b8630fd081f3ff46fce6246955b157c3a2e3b/tests/testlib/trellis.py).
+
 ## License
 
 Zapdev labs Fair Use License

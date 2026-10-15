@@ -14,6 +14,8 @@
  * mirror Rust's `x.iter().map(|v| v*v).sum::<f32>()`.
  */
 #include "oxidize/llama.h"
+#include "oxidize/exl3_overlay.h"
+#include "oxidize/exl3.h"
 #include "oxidize/rope_scaling.h"
 
 #include "oxidize/activation.h"
@@ -3085,6 +3087,7 @@ void oc_llama_session_free(OcLlamaSession *sess)
 void oc_llama_free(OcLlamaModel *model)
 {
     if (model == NULL) return;
+    oc_exl3_overlay_free(model->exl3_overlay);
     if (model->layers) {
         for (uint32_t i = 0; i < model->cfg.n_layer; i++) {
             free(model->layers[i].attn_norm);
@@ -3180,10 +3183,18 @@ static void embed_token(OcLlamaSession *s, uint32_t token)
 }
 
 /* matvec wrapper: pick f32 or quantized path based on qtype. */
+static _Thread_local OcError exl3_compute_error;
+
 static void matvec(const OcWeightView *w, const float *in, float *out,
                    float *temp)
 {
-    if (w->qtype == OC_QUANT_F32) {
+    if (w->exl3) {
+        OcError e = oc_exl3_matvec(w->exl3, in, out);
+        if (e != OC_OK) {
+            exl3_compute_error = e;
+            memset(out, 0, w->rows * sizeof(float));
+        }
+    } else if (w->qtype == OC_QUANT_F32) {
         oc_matvec_f32((const float *)w->data, w->rows, w->cols, in, out);
     } else {
         oc_matvec_quantized(w->qtype, w->data, w->rows, w->cols, w->row_bytes,
@@ -3852,7 +3863,8 @@ static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
     const OcLlamaConfig *c = &s->model->cfg;
     /* FFN: gate = act(W_gate·x) * (W_up·x); out = W_down·gate.
      * Llama/Mistral/Qwen use SwiGLU (silu). Gemma uses GeGLU (gelu). */
-    if (L->ffn_gate.qtype != OC_QUANT_F32 &&
+    if (!L->ffn_gate.exl3 && !L->ffn_up.exl3 &&
+        L->ffn_gate.qtype != OC_QUANT_F32 &&
         L->ffn_up.qtype != OC_QUANT_F32) {
         OcGgufQuantizationType qtypes[2] = {
             L->ffn_gate.qtype, L->ffn_up.qtype,
@@ -4782,6 +4794,7 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
             const bool has_gate =
                 c->attn_out_gate && L->attn_gate.data != NULL;
             const bool fusable =
+                !L->attn_q.exl3 && !L->attn_k.exl3 && !L->attn_v.exl3 &&
                 L->attn_q.qtype != OC_QUANT_F32 &&
                 L->attn_k.qtype != OC_QUANT_F32 &&
                 L->attn_v.qtype != OC_QUANT_F32 &&
@@ -5288,15 +5301,7 @@ static OcError forward_qwen4exp(OcLlamaSession *s, uint32_t token,
         memcpy(s->last_hidden, s->normed, D * sizeof(float));
     s->last_token = token;
     if (logits_out != NULL) {
-        if (m->output.qtype == OC_QUANT_F32) {
-            oc_matvec_f32((const float *)m->output.data, m->output.rows,
-                          m->output.cols, s->normed, logits_out);
-        } else {
-            oc_matvec_quantized(m->output.qtype, m->output.data,
-                                m->output.rows, m->output.cols,
-                                m->output.row_bytes, s->normed, logits_out,
-                                s->dequant_temp);
-        }
+        matvec(&m->output, s->normed, logits_out, s->dequant_temp);
         if (c->logit_scale > 0.0f && c->logit_scale != 1.0f) {
             for (size_t i = 0; i < c->vocab_size; i++)
                 logits_out[i] *= c->logit_scale;
@@ -5318,6 +5323,7 @@ static OcError forward_qwen4exp(OcLlamaSession *s, uint32_t token,
 
 OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out)
 {
+    exl3_compute_error = OC_OK;
     if (sess == NULL || sess->model == NULL) return OC_ERR_INVALID_ARG;
     if ((uint64_t)sess->pos >= sess->model->cfg.n_ctx) return OC_ERR_INVALID_ARG;
 
@@ -5364,14 +5370,7 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
     }
     sess->last_token = token;
     if (logits_out != NULL) {
-        if (m->output.qtype == OC_QUANT_F32) {
-            oc_matvec_f32((const float *)m->output.data, m->output.rows,
-                          m->output.cols, sess->normed, logits_out);
-        } else {
-            oc_matvec_quantized(m->output.qtype, m->output.data, m->output.rows,
-                                 m->output.cols, m->output.row_bytes,
-                                 sess->normed, logits_out, sess->dequant_temp);
-        }
+        matvec(&m->output, sess->normed, logits_out, sess->dequant_temp);
         /* Muse Glimmer scales the lm_head output before the softcap. 0 means
          * "unset" — treat it as 1.0, not as zeroing the logits. */
         if (m->cfg.logit_scale > 0.0f && m->cfg.logit_scale != 1.0f) {
@@ -5390,7 +5389,7 @@ OcError oc_llama_forward(OcLlamaSession *sess, uint32_t token, float *logits_out
         }
     }
     sess->pos++;
-    return OC_OK;
+    return exl3_compute_error;
 }
 
 bool oc_llama_mtp_present(const OcLlamaModel *model)
@@ -5442,14 +5441,7 @@ static OcError mtp_forward_one(OcLlamaSession *sess, uint32_t token,
     oc_rms_norm_f32(sess->x, hn, sess->normed, h, m->cfg.rms_norm_eps);
     OcWeightView *head = m->mtp.shared_head_head.data ? &m->mtp.shared_head_head
                                                       : &m->output;
-    if (head->qtype == OC_QUANT_F32) {
-        oc_matvec_f32((const float *)head->data, head->rows, head->cols,
-                      sess->normed, logits_out);
-    } else {
-        oc_matvec_quantized(head->qtype, head->data, head->rows, head->cols,
-                            head->row_bytes, sess->normed, logits_out,
-                            sess->dequant_temp);
-    }
+    matvec(head, sess->normed, logits_out, sess->dequant_temp);
     return OC_OK;
 }
 
@@ -5769,7 +5761,14 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
 static void mm_batch(const OcWeightView *w, const float *in, size_t in_stride,
                      float *out, size_t out_stride, size_t n, PrefillBuf *b)
 {
-    if (w->qtype == OC_QUANT_F32) {
+    if (w->exl3) {
+        OcError e = oc_exl3_matmul(w->exl3, in, in_stride, out, out_stride, n);
+        if (e != OC_OK) {
+            exl3_compute_error = e;
+            for (size_t i = 0; i < n; i++)
+                memset(out + i * out_stride, 0, w->rows * sizeof(float));
+        }
+    } else if (w->qtype == OC_QUANT_F32) {
         oc_matvec_f32_batch((const float *)w->data, w->rows, w->cols,
                             in, in_stride, out, out_stride, n);
     } else {
@@ -7072,16 +7071,7 @@ static OcError prefill_qwen4exp(OcLlamaSession *sess,
             if (sess->last_hidden != NULL)
                 memcpy(sess->last_hidden, sess->normed, D * sizeof(float));
             if (logits_out != NULL) {
-                if (m->output.qtype == OC_QUANT_F32) {
-                    oc_matvec_f32((const float *)m->output.data,
-                                  m->output.rows, m->output.cols,
-                                  sess->normed, logits_out);
-                } else {
-                    oc_matvec_quantized(m->output.qtype, m->output.data,
-                                        m->output.rows, m->output.cols,
-                                        m->output.row_bytes, sess->normed,
-                                        logits_out, sess->dequant_temp);
-                }
+                matvec(&m->output, sess->normed, logits_out, sess->dequant_temp);
                 logits_post(c, logits_out);
             }
         }
@@ -7405,8 +7395,10 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
 OcError oc_llama_prefill(OcLlamaSession *sess, const uint32_t *tokens,
                          size_t n_tokens, size_t chunk, float *logits_out)
 {
-    return prefill_impl(sess, tokens, n_tokens, chunk, logits_out, 0, NULL,
-                        NULL);
+    exl3_compute_error = OC_OK;
+    OcError e = prefill_impl(sess, tokens, n_tokens, chunk, logits_out, 0, NULL,
+                             NULL);
+    return e == OC_OK ? exl3_compute_error : e;
 }
 
 OcError oc_llama_prefill_all_logits(OcLlamaSession *sess,
@@ -7415,7 +7407,9 @@ OcError oc_llama_prefill_all_logits(OcLlamaSession *sess,
                                     void *ud)
 {
     if (cb == NULL) return OC_ERR_INVALID_ARG;
-    return prefill_impl(sess, tokens, n_tokens, 0, NULL, first_logit, cb, ud);
+    exl3_compute_error = OC_OK;
+    OcError e = prefill_impl(sess, tokens, n_tokens, 0, NULL, first_logit, cb, ud);
+    return e == OC_OK ? exl3_compute_error : e;
 }
 
 static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
@@ -7525,15 +7519,7 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
                     sess->normed[i] *= m->cfg.norm_scale;
             }
             sess->last_token = tokens[n_tokens - 1];
-            if (m->output.qtype == OC_QUANT_F32) {
-                oc_matvec_f32((const float *)m->output.data, m->output.rows,
-                              m->output.cols, sess->normed, logits_out);
-            } else {
-                oc_matvec_quantized(m->output.qtype, m->output.data,
-                                    m->output.rows, m->output.cols,
-                                    m->output.row_bytes, sess->normed,
-                                    logits_out, sess->dequant_temp);
-            }
+            matvec(&m->output, sess->normed, logits_out, sess->dequant_temp);
             /* Mirrors the per-token path: scale, then softcap. */
             if (m->cfg.logit_scale > 0.0f && m->cfg.logit_scale != 1.0f) {
                 const float ls = m->cfg.logit_scale;
@@ -8725,6 +8711,7 @@ OcError oc_batch_session_init(OcLlamaModel *model, size_t max_seqs,
 
 OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
 {
+    exl3_compute_error = OC_OK;
     if (bs == NULL || seqs == NULL) return OC_ERR_INVALID_ARG;
     OcLlamaModel *m = bs->model;
     /* Process each active sequence sequentially through the same weights.
@@ -8790,19 +8777,12 @@ OcError oc_batch_forward(OcBatchSession *bs, OcBatchSeq *seqs)
             for (size_t i = 0; i < m->cfg.n_embd; i++) tmp.normed[i] *= m->cfg.norm_scale;
         }
         if (seqs[s].logits != NULL) {
-            if (m->output.qtype == OC_QUANT_F32) {
-                oc_matvec_f32((const float *)m->output.data, m->output.rows,
-                              m->output.cols, tmp.normed, seqs[s].logits);
-            } else {
-                oc_matvec_quantized(m->output.qtype, m->output.data, m->output.rows,
-                                     m->output.cols, m->output.row_bytes,
-                                     tmp.normed, seqs[s].logits, tmp.dequant_temp);
-            }
+            matvec(&m->output, tmp.normed, seqs[s].logits, tmp.dequant_temp);
         }
         seqs[s].pos++;
         bs->pos[s] = seqs[s].pos;
     }
-    return OC_OK;
+    return exl3_compute_error;
 }
 
 void oc_batch_session_free(OcBatchSession *bs)

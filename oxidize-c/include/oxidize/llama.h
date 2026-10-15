@@ -32,6 +32,8 @@ extern "C" {
 #endif
 
 typedef struct OcPrerouter OcPrerouter;
+typedef struct OcExl3Matrix OcExl3Matrix;
+typedef struct OcExl3Overlay OcExl3Overlay;
 typedef struct OcLoraModel OcLoraModel;
 
 /* Attention-output gate function. SIGMOID is Muse Glimmer's
@@ -276,6 +278,7 @@ typedef struct OcWeightView {
     size_t rows;
     size_t cols;
     size_t row_bytes;       /* bytes per row (quantized or f32 stride) */
+    const OcExl3Matrix *exl3;
 } OcWeightView;
 
 typedef enum OcLlamaLayerKind {
@@ -440,6 +443,7 @@ typedef struct OcLlamaModel {
      * tensors back m->mtp. Owned; unmapped by oc_llama_free. */
     OcGgufMmappedFile mtp_gguf;
     bool             mtp_gguf_open;
+    OcExl3Overlay *exl3_overlay;
 } OcLlamaModel;
 
 /* KV cache element type.
@@ -679,6 +683,10 @@ void oc_batch_session_free(OcBatchSession *bs);
  * OC_ERR_IO, OC_ERR_FORMAT, OC_ERR_MODEL (unsupported arch / missing
  * tensors), or OC_ERR_OOM. */
 OcError oc_llama_load(const char *path, OcLlamaModel *out);
+
+/* Attach native EXL3 shards before creating sessions; base GGUF supplies
+ * configuration, tokenizer and tensors not present in the overlay. */
+OcError oc_llama_load_exl3(OcLlamaModel *model, const char *path);
 
 /* Skip kernel readahead of the whole GGUF so routed experts can stream
  * from SSD (Edge0-style). Combine with oc_llama_enable_expert_stream(). */

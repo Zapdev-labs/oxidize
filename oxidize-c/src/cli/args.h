@@ -83,6 +83,7 @@ typedef struct OcCliArgs {
     const char *lora_path;            /* --lora PATH.safetensors              */
     uint32_t   experts_per_tok;       /* --experts-per-tok K (0 = GGUF)       */
     bool       prerouter_prefetch;    /* --prerouter-prefetch (native router) */
+    const char *exl3_path;
 } OcCliArgs;
 
 void oc_cli_args_defaults(OcCliArgs *a);
@@ -105,6 +106,9 @@ int oc_cli_kv_compress_reject(const char *backend, const char *kv_compress,
  * it refused (bad RQ bit width, sink, or window). Cleared at the start of
  * each parse. */
 int oc_cli_parse_failed(void);
+
+int oc_cli_exl3_reject(const char *path, const char *backend,
+                        bool incompatible, bool has_model);
 
 /* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext.
  * Returns true when argv[1] names a known subcommand (ctx is filled in and

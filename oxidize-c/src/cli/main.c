@@ -26,6 +26,7 @@
 #include "oxidize/dspark.h"
 #include "oxidize/error.h"
 #include "oxidize/expert_stream.h"
+#include "oxidize/exl3_overlay.h"
 #include "oxidize/gguf.h"
 #include "oxidize/http.h"
 #include "oxidize/llama.h"
@@ -113,6 +114,7 @@ static void print_help(void)
 "\n"
 "OPTIONS:\n"
 "  --model PATH           GGUF model file (required for generation)\n"
+"  --exl3 PATH            EXL3 SafeTensors file/directory over matching GGUF (CPU)\n"
 "  --prompt TEXT          Prompt text (also accepted as positional arg)\n"
 "  --prompt-file PATH     Read prompt from a file\n"
 "  --n-predict N          Max tokens to generate (default 128)\n"
@@ -206,6 +208,15 @@ static OcError run_generation(const OcCliArgs *args)
         fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
         free(file_prompt);
         return e;
+    }
+    if (args->exl3_path) {
+        e = oc_llama_load_exl3(&model, args->exl3_path);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: EXL3 overlay failed (%s)\n", oc_error_msg(e));
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
     }
     if (args->mtp_model != NULL) {
         e = oc_llama_load_mtp_sidecar(&model, args->mtp_model);
@@ -724,6 +735,12 @@ int main(int argc, char **argv)
             ctx.command == OC_CLI_CMD_SERVE_REALTIME)
             server = oc_cli_command_name(ctx.command);
         if (oc_cli_parse_failed()) return 2;
+        bool exl3_command = ctx.command == OC_CLI_CMD_PROMPT ||
+            ctx.command == OC_CLI_CMD_BENCH ||
+            ctx.command == OC_CLI_CMD_PERPLEXITY;
+        if (oc_cli_exl3_reject(ctx.exl3_path, ctx.backend,
+                !exl3_command || ctx.stream_experts || ctx.mtp || ctx.mtp_model,
+                ctx.model_path != NULL)) return 1;
         if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
             return 1;
         if (ctx.command == OC_CLI_CMD_PROMPT) {
@@ -755,6 +772,7 @@ int main(int argc, char **argv)
             args.expert_cache_mb = ctx.expert_cache_mb;
             args.prerouter_path = ctx.prerouter_path;
             args.lora_path = ctx.lora_path;
+            args.exl3_path = ctx.exl3_path;
             args.experts_per_tok = ctx.experts_per_tok;
             args.prerouter_prefetch = ctx.prerouter_prefetch;
             args.mtp = ctx.mtp;
@@ -780,6 +798,11 @@ int main(int argc, char **argv)
      * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
+    if (oc_cli_exl3_reject(args.exl3_path, args.backend,
+            args.serve_api || args.stream_experts || args.mtp || args.mtp_model ||
+            args.draft_model || args.spec_type || args.quantize_input ||
+            args.inspect || args.cuda_selftest || args.print_plan,
+            args.model_path != NULL)) return 1;
     if (oc_cli_kv_compress_reject(args.backend, args.kv_compress,
                                   args.serve_api ? "--serve-api" : NULL))
         return 1;
@@ -1009,6 +1032,10 @@ int main(int argc, char **argv)
         /* Perplexity evaluation mode. */
         OcLlamaModel model;
         OcError e = oc_llama_load(args.model_path, &model);
+        if (e == OC_OK && args.exl3_path) {
+            e = oc_llama_load_exl3(&model, args.exl3_path);
+            if (e != OC_OK) oc_llama_free(&model);
+        }
         if (e != OC_OK) {
             fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
             return 1;
@@ -1075,6 +1102,10 @@ int main(int argc, char **argv)
         /* Benchmark mode: run N iterations and report tok/s. */
         OcLlamaModel model;
         OcError e = oc_llama_load(args.model_path, &model);
+        if (e == OC_OK && args.exl3_path) {
+            e = oc_llama_load_exl3(&model, args.exl3_path);
+            if (e != OC_OK) oc_llama_free(&model);
+        }
         if (e != OC_OK) {
             fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
             return 1;
