@@ -366,7 +366,7 @@ OcError oc_safetensors_open(const char *path, OcSafetensorsFile *out)
     uint8_t *base = (uint8_t *)map;
     uint64_t header_len = 0;
     memcpy(&header_len, base, 8);
-    if (header_len == 0 || (uint64_t)st.st_size < 8u + header_len) {
+    if (header_len == 0 || header_len > (uint64_t)st.st_size - 8u) {
         munmap(map, (size_t)st.st_size);
         return OC_ERR_FORMAT;
     }
@@ -396,7 +396,9 @@ OcError oc_safetensors_open(const char *path, OcSafetensorsFile *out)
     if (fread(hdr_len_buf, 1, 8, fp) != 8) { fclose(fp); return OC_ERR_FORMAT; }
     uint64_t header_len = 0;
     memcpy(&header_len, hdr_len_buf, 8);
-    if (header_len == 0) { fclose(fp); return OC_ERR_FORMAT; }
+    if (header_len == 0 || header_len >= SIZE_MAX || header_len > UINT64_MAX - 8u) {
+        fclose(fp); return OC_ERR_FORMAT;
+    }
     /* Read JSON header. */
     char *json = malloc((size_t)header_len + 1);
     if (json == NULL) { fclose(fp); return OC_ERR_OOM; }

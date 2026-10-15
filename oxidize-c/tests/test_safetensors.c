@@ -310,6 +310,21 @@ Test(safetensors, open_bad_header_length)
     unlink(path);
 }
 
+Test(safetensors, open_overflowing_header_length)
+{
+    const char *path = tmp_path("overflowhdr.safetensors");
+    FILE *fp = fopen(path, "wb");
+    cr_assert_not_null(fp);
+    const uint8_t length[8] = {255,255,255,255,255,255,255,255};
+    cr_assert_eq(fwrite(length,1,sizeof(length),fp),sizeof(length));
+    cr_assert_eq(fclose(fp),0);
+    OcSafetensorsFile st;
+    OcError e = oc_safetensors_open(path,&st);
+    oc_safetensors_close(&st);
+    unlink(path);
+    cr_assert_eq(e,OC_ERR_FORMAT);
+}
+
 Test(safetensors, get_tensor_null_args)
 {
     const OcSafetensorsTensor *t = NULL;
