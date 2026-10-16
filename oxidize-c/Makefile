@@ -104,6 +104,11 @@ TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
                $(TEST_SANITIZE_FLAGS) -fno-omit-frame-pointer -g -O0 \
                -ffp-contract=off -DOC_TESTING \
                -I$(CRITERION_INCLUDE)
+# Darwin hides mkdtemp/mkstemp-family declarations unless _DARWIN_C_SOURCE
+# is set; several test files use them under strict _POSIX_C_SOURCE.
+ifeq ($(shell uname -s),Darwin)
+TEST_CFLAGS += -D_DARWIN_C_SOURCE
+endif
 TEST_SYSTEM_LIBS := -lm -lpthread -ldl
 ifneq ($(shell uname -s),Darwin)
 TEST_SYSTEM_LIBS += -lrt
