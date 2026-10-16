@@ -1290,9 +1290,14 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
         case OC_QUANT_Q4_0:
         case OC_QUANT_AL5:
             packed_multi = oc_oxk_dot_q4_0_q8_0_packed_multi;
-            quad_prep    = oc_oxk_q4_0_quad_prep;
-            quad_multi   = oc_oxk_dot_q4_0_q8_0_quad_multi;
-            quad_bytes   = oc_oxk_q4_0_quad_prep_bytes(blocks);
+#if defined(__x86_64__) || defined(__i386__)
+            if (oc_oxk_caps()->level == OC_OXK_AVX2 ||
+                oc_oxk_caps()->level == OC_OXK_AVX512) {
+                quad_prep  = oc_oxk_q4_0_quad_prep;
+                quad_multi = oc_oxk_dot_q4_0_q8_0_quad_multi;
+                quad_bytes = oc_oxk_q4_0_quad_prep_bytes(blocks);
+            }
+#endif
             break;
         case OC_QUANT_Q8_0:
         case OC_QUANT_AL8:

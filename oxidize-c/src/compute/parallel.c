@@ -316,7 +316,7 @@ void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data)
     g_pool.user_data = user_data;
     g_pool.n_items = n;
     atomic_store_explicit(&g_pool.n_remaining, nt, memory_order_relaxed);
-    atomic_store_explicit(&g_pool.next_slice, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_pool.next_slice, 0, memory_order_release);
     atomic_fetch_add_explicit(&g_pool.generation, 1u, memory_order_seq_cst);
 
     /* Wake anyone who parked — but only if anyone actually did.

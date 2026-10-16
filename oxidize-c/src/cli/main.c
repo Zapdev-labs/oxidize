@@ -316,7 +316,7 @@ static OcError run_generation(const OcCliArgs *args)
         if (args->expert_cache_mb > 0) {
             scfg.cache_bytes = (uint64_t)args->expert_cache_mb << 20;
         } else {
-            /* No explicit budget: disable the DONTNEED reclaim entirely.
+            /* No explicit budget: disable residency tracking and reclaim.
              * Expert spans are clean file-backed pages — the kernel's LRU
              * already evicts them under pressure, and it makes strictly
              * better keep/drop decisions than the pool's FIFO cap (which

@@ -2259,6 +2259,22 @@ void oc_oxk_dot_rows_q4_0_q8_0_facc_avx2(const uint8_t *rows, size_t row_bytes, 
 void oc_oxk_dot_rows_q8_0_q8_0_facc_avx2(const uint8_t *rows, size_t row_bytes, size_t n_rows, size_t blocks, const uint8_t *q8, float *out)
 { for (size_t r = 0; r < n_rows; r++) out[r] = oc_oxk_dot_q8_0_q8_0_scalar(rows + r * row_bytes, blocks, q8); }
 
+void oc_oxk_dot_q4_0_q8_0_packed_multi_avx2(const uint8_t *row, size_t blocks,
+                                            const uint8_t *acts, size_t act_stride,
+                                            size_t n_act, float *out)
+{
+    for (size_t a = 0; a < n_act; a++)
+        out[a] = oc_oxk_dot_q4_0_q8_0_scalar(row, blocks, acts + a * act_stride);
+}
+
+void oc_oxk_dot_q8_0_q8_0_packed_multi_avx2(const uint8_t *row, size_t blocks,
+                                            const uint8_t *acts, size_t act_stride,
+                                            size_t n_act, float *out)
+{
+    for (size_t a = 0; a < n_act; a++)
+        out[a] = oc_oxk_dot_q8_0_q8_0_scalar(row, blocks, acts + a * act_stride);
+}
+
 void oc_oxk_q4_0_quad_prep_avx2(const uint8_t *rows, size_t row_bytes, size_t n_rows, size_t blocks, void *scratch)
 { oc_oxk_q4_0_quad_prep(rows, row_bytes, n_rows, blocks, scratch); }
 void oc_oxk_dot_q4_0_q8_0_quad_multi_avx2(const void *prep4, size_t blocks, const uint8_t *acts, size_t act_stride, size_t dq_off, size_t n_act, float *res4)

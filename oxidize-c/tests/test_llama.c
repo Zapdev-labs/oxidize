@@ -17,14 +17,32 @@
 #include <criterion/criterion.h>
 
 #include "oxidize/activation.h"
+#include "oxidize/gguf_writer.h"
 #include "oxidize/llama.h"
 #include "oxidize/matvec.h"
 #include "oxidize/quant.h"
 
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+Test(llama, qwen4_exp_text_reaches_config_validation)
+{
+    const char *path = "/tmp/oxidize-c-qwen4-exp-text-alias.gguf";
+    OcGgufWriter writer;
+    cr_assert_eq(oc_gguf_writer_init(path, "qwen4_exp_text", &writer), OC_OK);
+    cr_assert_eq(oc_gguf_writer_finalize(&writer), OC_OK);
+    oc_gguf_writer_free(&writer);
+    OcLlamaModel model;
+    /* Missing recurrent geometry is invalid, but the alias must first be
+     * accepted and enter the Qwen4Exp configuration path. */
+    cr_assert_eq(oc_llama_load_flags(path, 0, &model), OC_ERR_MODEL);
+    cr_assert(model.cfg.is_qwen4exp);
+    cr_assert(model.cfg.rope_norm_pairs);
+    cr_assert_eq(remove(path), 0);
+}
 
 /* ─── RMSNorm ────────────────────────────────────────────────────────────
  * x=[3,4,0], w=[1,1,1], eps=1e-5.

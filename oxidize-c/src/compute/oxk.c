@@ -1457,18 +1457,20 @@ OXK_ROWS_DISPATCH(iq3_s, dot_iq3_s_q8_k)
 
 /* Q5_K's single dot is AVX-512-VNNI on some hosts, so the == avx2 test the
  * macro uses would fall back to per-row calls there. The AVX2 rows body is
- * bit-exact against the same scalar reference, so any non-scalar install can
- * serve the rows form. */
+ * bit-exact against the same scalar reference, so any non-scalar x86 install
+ * can serve the rows form. Other hosts use their installed dot function. */
 void oc_oxk_dot_rows_q5_k_q8_k(const uint8_t *rows, size_t row_bytes,
                                size_t n_rows, size_t blocks,
                                const uint8_t *q8, float *out)
 {
     oc_oxk_init();
+#if defined(__x86_64__) || defined(__i386__)
     if (g_ctx.dot_q5_k_q8_k != oc_oxk_dot_q5_k_q8_k_scalar) {
         oc_oxk_dot_rows_q5_k_q8_k_avx2(rows, row_bytes, n_rows, blocks, q8,
                                        out);
         return;
     }
+#endif
     for (size_t r = 0; r < n_rows; r++)
         out[r] = g_ctx.dot_q5_k_q8_k(rows + r * row_bytes, blocks, q8);
 }

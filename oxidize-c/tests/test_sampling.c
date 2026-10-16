@@ -85,6 +85,35 @@ Test(sampling, repeat_penalty_noop_when_one)
     cr_assert_arr_eq(logits, copy, sizeof(logits), "penalty=1 is identity");
 }
 
+Test(sampling, greedy_subunit_penalty_can_promote_recent_token)
+{
+    const float logits[][2] = {{4.0f, 3.0f}, {-2.0f, -3.0f}};
+    const uint32_t recent[] = {1};
+    OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;
+    cfg.repeat_penalty = 0.5f;
+    for (size_t i = 0; i < 2; i++)
+        cr_assert_eq(oc_sample(logits[i], 2, &cfg, recent, 1), 1u);
+}
+
+Test(sampling, greedy_matches_copied_penalties_with_large_recent_list)
+{
+    float logits[1024], penalized[1024];
+    uint32_t recent[16384];
+    for (size_t i = 0; i < 1024; i++)
+        logits[i] = (float)((int)(i % 101) - 50) / 10.0f;
+    for (size_t i = 0; i < 16384; i++)
+        recent[i] = (uint32_t)(i % 1027); /* Includes invalid token IDs. */
+    const float penalties[] = {0.5f, 0.0f, 1.0f, 1.1f, 2.0f};
+    OcSamplerConfig cfg = OC_SAMPLER_DEFAULT;
+    for (size_t p = 0; p < sizeof(penalties) / sizeof(penalties[0]); p++) {
+        cfg.repeat_penalty = penalties[p];
+        memcpy(penalized, logits, sizeof(logits));
+        oc_apply_repeat_penalty(penalized, 1024, recent, 16384, penalties[p]);
+        cr_assert_eq(oc_sample(logits, 1024, &cfg, recent, 16384),
+                     oc_argmax(penalized, 1024));
+    }
+}
+
 Test(sampling, top_k_restricts_to_k_candidates)
 {
     /* logits: token 0 = 100 (dominant), others tiny. top_k=2 keeps {0,1}.

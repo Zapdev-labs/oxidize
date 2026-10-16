@@ -257,7 +257,8 @@ static bool is_qwen4exp_arch(const char *arch)
 {
     return arch != NULL &&
         (strcmp(arch, "qwen4exp") == 0 || strcmp(arch, "qwen4_exp") == 0 ||
-         strcmp(arch, "qwen4exp_text") == 0);
+         strcmp(arch, "qwen4exp_text") == 0 ||
+         strcmp(arch, "qwen4_exp_text") == 0);
 }
 
 static bool is_longcat_arch(const char *arch)

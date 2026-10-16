@@ -169,6 +169,7 @@ static void reclaim_one(OcExpertStreamPool *pool)
 static OcError record_hot(OcExpertStreamPool *pool, uint32_t layer,
                           uint32_t expert, uint64_t bytes)
 {
+    if (pool->cfg.cache_bytes == UINT64_MAX) return OC_OK;
     if (!pool->hot || pool->hot_cap == 0) return OC_OK;
     if (layer >= pool->n_layers || expert >= pool->n_experts) return OC_OK;
     if (pool->cached && pool->cached[cache_key(pool, layer, expert)]) {
@@ -290,6 +291,11 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
                              inter, &pool->layers[i].down);
         collect_dense(&model->gguf, L, &pool->layers[i]);
     }
+    /* Unlimited mode leaves residency decisions to the kernel's page cache. */
+    if (pool->cfg.cache_bytes == UINT64_MAX) {
+        *out = pool;
+        return OC_OK;
+    }
     size_t nslot = (size_t)pool->n_layers * (size_t)n_exp;
     pool->cached = calloc(nslot ? nslot : 1, 1);
     if (!pool->cached) {
@@ -343,7 +349,8 @@ OcError oc_expert_stream_prepare_mapping(OcExpertStreamPool *pool)
     advise_view(gguf, &pool->model->tok_embeddings, OC_MMAP_ADVICE_WILLNEED);
     advise_view(gguf, &pool->model->output, OC_MMAP_ADVICE_WILLNEED);
     for (uint32_t i = 0; i < pool->n_layers; i++) {
-        const OcLlamaLayer *L = &pool->model->layers[i];
+        const OcLlamaLayer *L = (i < pool->model->cfg.n_layer)
+            ? &pool->model->layers[i] : &pool->model->mtp.layer;
         advise_view(gguf, &L->attn_q, OC_MMAP_ADVICE_WILLNEED);
         advise_view(gguf, &L->attn_k, OC_MMAP_ADVICE_WILLNEED);
         advise_view(gguf, &L->attn_v, OC_MMAP_ADVICE_WILLNEED);
@@ -464,7 +471,8 @@ OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
         clock_gettime(CLOCK_MONOTONIC, &ts1);
         pool->fault_ms += (double)(ts1.tv_sec - ts0.tv_sec) * 1e3 +
                           (double)(ts1.tv_nsec - ts0.tv_nsec) * 1e-6;
-        pool->fault_bytes += (uint64_t)n_jobs * bytes / 3u;
+        for (size_t i = 0; i < n_jobs; i++)
+            pool->fault_bytes += jobs[i].len;
     }
     free(jobs);
     return OC_OK;

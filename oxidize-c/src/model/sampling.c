@@ -305,41 +305,15 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
         return oc_argmax(logits_in, vocab_size);
     }
 
-    /* Greedy + repeat penalty can be answered without a vocab-sized copy:
-     * the penalty only ever lowers a recent token's effective logit, so the
-     * raw argmax stands unless it is itself a recent token. Only then do we
-     * rescan with a small bitmap marking recent positions, applying the
-     * penalty once per occurrence — identical to what the copy path does. */
-    if (is_greedy) {
+    /* Penalties above one only lower recent logits, so an untouched raw
+     * winner can be returned directly. Penalties below one can promote a
+     * different token and must use the copy path. */
+    if (is_greedy && pen > 1.0f) {
         const uint32_t top = oc_argmax(logits_in, vocab_size);
         bool hit = false;
         for (size_t r = 0; r < n_recent; r++)
             if (recent_tokens[r] == top) { hit = true; break; }
         if (!hit) return top;
-        uint8_t *seen = calloc((vocab_size + 7u) / 8u, 1);
-        if (seen != NULL) {
-            for (size_t r = 0; r < n_recent; r++)
-                if (recent_tokens[r] < vocab_size)
-                    seen[recent_tokens[r] >> 3] |=
-                        (uint8_t)(1u << (recent_tokens[r] & 7u));
-            size_t best = 0;
-            float bestv = logits_in[0];
-            for (size_t r = 0; r < n_recent; r++)
-                if (recent_tokens[r] == 0)
-                    bestv = (bestv > 0.0f) ? bestv / pen : bestv * pen;
-            for (size_t i = 1; i < vocab_size; i++) {
-                float v = logits_in[i];
-                if (seen[i >> 3] & (uint8_t)(1u << (i & 7u))) {
-                    for (size_t r = 0; r < n_recent; r++)
-                        if (recent_tokens[r] == i)
-                            v = (v > 0.0f) ? v / pen : v * pen;
-                }
-                if (v > bestv) { bestv = v; best = i; }
-            }
-            free(seen);
-            return (uint32_t)best;
-        }
-        /* OOM: fall through to the generic copy path. */
     }
 
     /* Working copy: apply repeat-penalty (for all sampler types, including

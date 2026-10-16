@@ -77,7 +77,8 @@ static void swiglu_avx2(float *gate, const float *up, size_t n)
 void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n)
 {
     const OcSimdCaps *sc = oc_simd_caps();
-    if (sc->level == OC_SIMD_AVX2 || sc->level == OC_SIMD_AVX512) {
+    if (sc->has_fma &&
+        (sc->level == OC_SIMD_AVX2 || sc->level == OC_SIMD_AVX512)) {
         swiglu_avx2(gate, up, n);
         return;
     }
