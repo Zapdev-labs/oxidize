@@ -754,8 +754,10 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
                      "mtp.layers.0.%s.block_inject_weight",
                      hc_sides[side]) >= (int)sizeof(key))
             do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
-        if (q4e_view(ni, o, key, c->hc_mult, hc_dim, inject) != OC_OK)
-            inject->data = NULL;
+        /* Same contract as the layer path above: a malformed
+         * block_inject must not silently zero the inject projection. */
+        if ((e = q4e_view(ni, o, key, c->hc_mult, hc_dim, inject)))
+            return e;
     }
 
     /* MoE: router + shared expert + per-expert EXL3. */

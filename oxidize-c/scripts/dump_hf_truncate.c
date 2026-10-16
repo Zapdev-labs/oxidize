@@ -662,6 +662,8 @@ static void emit_config_and_tokenizer(const char *src_dir,
     };
     for (size_t i = 0; i < sizeof(idx_fields) / sizeof(idx_fields[0]); i++)
         rewrite_int_field(cfg, idx_fields[i], 0);
+    /* The dump also drops every mtp.* tensor; advertise no draft head. */
+    rewrite_int_field(cfg, "mtp_num_hidden_layers", 0);
     truncate_str_array(cfg, "layer_types", NLAYERS);
     truncate_str_array(cfg, "layers_block_type", NLAYERS);
 
