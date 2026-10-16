@@ -153,6 +153,7 @@ OcError oc_cuda_selftest(void)
         }
         OcQwen35DeltaParams params = {
             conv_w, conv_dim * KW, ssm_a, NV, dt_bias, NV, norm_w, DV, 1e-6f,
+            /*sigmoid_gate=*/false,
         };
         OcQwen35DeltaInput input = { qkv, conv_dim, gate, NV * DV, beta, NV,
                                      alpha, NV };

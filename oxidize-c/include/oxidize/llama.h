@@ -32,6 +32,8 @@ extern "C" {
 #endif
 
 typedef struct OcPrerouter OcPrerouter;
+typedef struct OcExl3Matrix OcExl3Matrix;
+typedef struct OcExl3Overlay OcExl3Overlay;
 typedef struct OcLoraModel OcLoraModel;
 
 /* Attention-output gate function. SIGMOID is Muse Glimmer's
@@ -41,6 +43,11 @@ typedef enum OcAttnGateKind {
     OC_ATTN_GATE_SIGMOID      = 0,
     OC_ATTN_GATE_SOFTPLUS_LN2 = 1,
 } OcAttnGateKind;
+
+/* qwen4exp PLE: llama.cpp's LLAMA_MAX_PLE_NGRAM is 8 and
+ * LLAMA_MAX_PLE_HEADS is 32 (e.g. (3-1)*8 = 16 heads for an n-gram of 3). */
+#define OC_Q4E_PLE_MAX_NGRAM 8
+#define OC_Q4E_PLE_MAX_HEADS 32
 
 /* ─── Config (port of InferenceConfig, Llama-relevant subset) ──────────── */
 typedef struct OcLlamaConfig {
@@ -216,6 +223,48 @@ typedef struct OcLlamaConfig {
     bool     expert_weights_norm;
     /* First N blocks use a dense FFN + a plain attn_v projection. */
     uint32_t leading_dense_block_count;
+    /* ── qwen4exp (GGUF arch "qwen4exp", e.g. Qwen3.8-Flash-Next) ─────────
+     *
+     * A qwen35-family hybrid — gated delta-net layers plus a full-attention
+     * layer every full_attention_interval blocks — where the residual is
+     * hc_mult streams wide (hyper-connections) instead of a single n_embd
+     * vector, and the ordinary attn_norm/ffn_norm are replaced by per-stream
+     * RMSNorms inside each hc_* block. The delta-net differs from Qwen3.5's
+     * in one place only: the output gate is sigmoid, not SiLU.
+     *
+     * Full-attention layers additionally carry a DeepSeek-DSA-style sparse
+     * indexer (QSA). One early layer (ple_layer) carries PLE n-gram hash
+     * embeddings that add a token-context signal into the wide residual. */
+    bool     is_qwen4exp;
+    uint32_t hc_mult;            /* hyper_connection.count (4)           */
+    uint32_t hc_low_rank;        /* hyper_connection.low_rank            */
+    /* attention.recurrent_layers — explicit per-layer kind map (n_layer
+     * entries, owned by the model and freed in oc_llama_free). NULL means
+     * "derive the kind from full_attention_interval". */
+    uint8_t *recurrent_layers;
+    /* rope.dimension_sections: interleaved MRoPE section boundaries.
+     * For text-only inference all positions are equal, which degenerates
+     * to plain interleaved RoPE over the first rope_dim dims. */
+    uint32_t rope_sections[4];
+    /* QSA sparse-indexer geometry (full-attention layers). The dense
+     * attention path is bit-identical while pos < indexer_top_k. */
+    uint32_t indexer_n_head;
+    uint32_t indexer_head_size;
+    uint32_t indexer_top_k;
+    uint32_t indexer_kpool;
+    /* PLE n-gram hash embeddings (see ple.layers). */
+    bool     ple_enabled;
+    uint32_t ple_layer;          /* the single PLE layer index            */
+    uint32_t ple_ngram;          /* token window (3)                      */
+    uint32_t ple_heads_per_ngram;
+    uint32_t ple_conv_kernel;    /* dilated depthwise conv width (4)      */
+    uint32_t ple_n_heads;        /* (ngram-1) * ple_heads_per_ngram       */
+    uint32_t ple_embd_dim;       /* embedding_length_per_layer_input      */
+    uint32_t ple_eos;            /* ple.eos_token_id                      */
+    uint32_t ple_img;            /* ple.image_token_id                    */
+    uint64_t ple_mult[OC_Q4E_PLE_MAX_NGRAM];
+    uint64_t ple_head_off[OC_Q4E_PLE_MAX_HEADS];
+    uint64_t ple_head_vocab[OC_Q4E_PLE_MAX_HEADS];
 } OcLlamaConfig;
 
 /* Upper bound on LongCat n-gram tables. LongCat-2.0 has
@@ -229,6 +278,7 @@ typedef struct OcWeightView {
     size_t rows;
     size_t cols;
     size_t row_bytes;       /* bytes per row (quantized or f32 stride) */
+    const OcExl3Matrix *exl3;
 } OcWeightView;
 
 typedef enum OcLlamaLayerKind {
@@ -252,6 +302,13 @@ typedef struct OcLlamaLayer {
     OcWeightView ffn_gate_exps;           /* [num_experts*exp_i_size, n_embd]    */
     OcWeightView ffn_up_exps;             /* [num_experts*exp_i_size, n_embd]    */
     OcWeightView ffn_down_exps;           /* [num_experts*n_embd, exp_i_size]    */
+    /* Native per-expert EXL3 (qwen4exp SafeTensors): one trellis matrix per
+     * expert projection instead of a stacked view. Arrays of num_experts
+     * entries; the matrices' packed backing data is owned by the model's
+     * EXL3 overlay while the struct arrays are layer-owned. Non-NULL
+     * only when the layer is a routed-EXL3 MoE (the stacked views above are
+     * then left empty). */
+    OcExl3Matrix *exl3_gate, *exl3_up, *exl3_down;
     /* Shared expert (always active, added with weight 1.0). */
     OcWeightView ffn_gate_shexp, ffn_up_shexp, ffn_down_shexp;
     OcWeightView ffn_gate_inp_shexp;     /* optional sigmoid gate for shared    */
@@ -314,6 +371,30 @@ typedef struct OcLlamaLayer {
     /* Whether RoPE applies in this layer. False only on Muse Glimmer's
      * global (NoPE) layers; true everywhere else. */
     bool     use_rope;
+    /* ── qwen4exp hyper-connections (all layers when cfg.is_qwen4exp) ──
+     * hc_*_norm are owned f32 of length hc_mult*n_embd in stream-major
+     * order: the gamma for stream c element e sits at [c*n_embd + e], and
+     * the GGUF already carries the converter's pre-folded (1+w). The
+     * down/up/inject views are [hc_low_rank, hc_dim], [hc_dim, hc_low_rank]
+     * and [hc_mult, hc_dim]; inject may be absent. */
+    float *hc_attn_norm;
+    OcWeightView hc_attn_down, hc_attn_up, hc_attn_inject;
+    float *hc_ffn_norm;
+    OcWeightView hc_ffn_down, hc_ffn_up, hc_ffn_inject;
+    /* QSA sparse indexer (full-attention layers; bound but unused while
+     * the dense path runs). Norms are owned f32 of indexer_head_size. */
+    OcWeightView indexer_q_proj, indexer_k_proj;
+    float *indexer_q_norm, *indexer_k_norm;
+    /* PLE (present on cfg.ple_layer only). ple_conv_w is the dilated
+     * depthwise kernel dequantized to owned f32, [hc_dim][kernel]
+     * row-major. ple_norm_* are owned f32 of hc_dim. */
+    OcWeightView ple_key, ple_value, ple_conv1d;
+    float *ple_norm_key, *ple_norm_query, *ple_norm_conv, *ple_conv_w;
+    /* Owned f32 copies for recurrent tensors the GGUF quantizes
+     * (CYBER-FROST ships ssm_conv1d as F16): when non-NULL the
+     * corresponding view's data pointer is redirected here and marked
+     * OC_QUANT_F32, so the shared forward code sees plain floats. */
+    float *ssm_conv_f32, *ssm_a_f32, *ssm_dt_f32, *ssm_norm_f32;
 } OcLlamaLayer;
 
 #define OC_MTP_DEFAULT_DRAFT 3u
@@ -325,8 +406,13 @@ typedef struct OcLlamaMtp {
     OcWeightView embed_tokens;
     OcWeightView shared_head_head;
     float *enorm;
-    float *hnorm;
+    float *hnorm;               /* n_embd; hc_mult*n_embd on qwen4exp */
     float *shared_head_norm;
+    /* qwen4exp: the head's logits come from a third hyper-connection mix
+     * (hc_head_*) instead of shared_head_norm. hc_head_norm is owned f32
+     * of length hc_mult*n_embd. */
+    float *hc_head_norm;
+    OcWeightView hc_head_down, hc_head_up;
 } OcLlamaMtp;
 
 typedef struct OcLlamaModel {
@@ -351,6 +437,12 @@ typedef struct OcLlamaModel {
      * zeroed. */
     OcWeightView     ngram_embd[OC_LONGCAT_MAX_NGRAM];
     OcWeightView     ngram_proj[OC_LONGCAT_MAX_NGRAM];
+    /* qwen4exp: the PLE n-gram table ([ple_embd_dim, rows], gathered by
+     * row index — never dequantized whole) and the final hyper-connection
+     * head that replaces output_norm. */
+    OcWeightView     per_layer_tok_embd;
+    float           *output_hc_norm;
+    OcWeightView     output_hc_down, output_hc_up;
     unsigned         load_flags;
     OcExpertStreamPool *expert_stream; /* owned; SSD expert offload        */
     uint32_t         live_sessions;
@@ -358,6 +450,7 @@ typedef struct OcLlamaModel {
      * tensors back m->mtp. Owned; unmapped by oc_llama_free. */
     OcGgufMmappedFile mtp_gguf;
     bool             mtp_gguf_open;
+    OcExl3Overlay *exl3_overlay;
 } OcLlamaModel;
 
 /* KV cache element type.
@@ -457,6 +550,30 @@ typedef struct OcLlamaSession {
     float *qwen35_alpha;
     float *qwen35_conv_output;
     float *qwen35_delta_output;
+    /* qwen4exp persistent state and scratch (NULL for other archs).
+     * hc_resid is the real model residual — hc_mult streams of n_embd;
+     * s->x stays n_embd-wide so the shared logits path is untouched.
+     * hc_block is the zeroed accumulator the reused qwen35 sublayer
+     * functions write their output into (they do x += out, so s->x is
+     * swapped for it while they run). */
+    float *hc_resid;             /* hc_mult * n_embd                      */
+    float *hc_xn;                /* hc_mult * n_embd: normed streams      */
+    float *hc_gate;              /* hc_mult * n_embd                      */
+    float *hc_lo;                /* hc_low_rank                           */
+    float *hc_inject;            /* hc_mult                               */
+    float *hc_block;             /* n_embd                                */
+    /* PLE scratch + the dilated conv ring: ple_conv_state holds
+     * (ple_conv_kernel-1)*ngram positions of hc_dim, oldest first.
+     * ple_hist holds the last ple_ngram-1 input token ids (plus pad),
+     * newest first, for the n-gram hash. */
+    float *ple_emb;              /* ple_n_heads * ple_embd_dim            */
+    float *ple_key_buf;          /* hc_mult * n_embd                      */
+    float *ple_val_buf;          /* n_embd                                */
+    float *ple_gated;            /* hc_mult * n_embd                      */
+    float *ple_conv_state;       /* hist * hc_dim                         */
+    float *ple_conv_out;         /* hc_mult * n_embd                      */
+    uint32_t ple_hist[OC_Q4E_PLE_MAX_NGRAM];
+    uint32_t ple_cur;            /* current token id, for the hash        */
     /* Muse Glimmer attention-output gate, n_head * head_dim. Allocated only
      * when cfg.attn_out_gate is set. */
     float *muse_gate;
@@ -485,8 +602,23 @@ typedef struct OcLlamaSession {
     float    *rope_cos;      /* rope_dim/2, current position (K2)          */
     float    *rope_sin;
     /* K2 MTP speculative state (oc_llama_mtp_enable). NULL when off. While
-     * on, mtp_hidden holds h_{pos-1} after output_norm. */
+     * on, mtp_hidden holds h_{pos-1} after output_norm. For qwen4exp it
+     * holds the hc_mult-wide residual (the pre-output-mix streams) and is
+     * allocated at hc_mult*n_embd. */
     struct OcK2Mtp *k2mtp;
+    /* qwen4exp MTP speculative state, NULL when off. */
+    struct OcQ4eMtp *q4emtp;
+    /* Non-NULL only inside a qwen4exp MTP verify pass: hooks the batched
+     * layer functions into per-row recurrent/PLE state snapshots so the
+     * rejected-suffix rollback is exact. */
+    struct OcQ4eSnap *q4e_snap;
+    /* Per-position RoPE cos/sin caches for the non-K2 rope paths, keyed by
+     * (rope_dim, theta). Lazily grown to the highest position seen; each
+     * entry pays the trig once per position instead of once per head per
+     * layer per token. Opaque to callers; owned by the session. */
+    struct OcRopeTable *rope_tabs;
+    int                 rope_tabs_n;
+    int                 rope_tabs_cap;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
@@ -558,6 +690,10 @@ void oc_batch_session_free(OcBatchSession *bs);
  * OC_ERR_IO, OC_ERR_FORMAT, OC_ERR_MODEL (unsupported arch / missing
  * tensors), or OC_ERR_OOM. */
 OcError oc_llama_load(const char *path, OcLlamaModel *out);
+
+/* Attach native EXL3 shards before creating sessions; base GGUF supplies
+ * configuration, tokenizer and tensors not present in the overlay. */
+OcError oc_llama_load_exl3(OcLlamaModel *model, const char *path);
 
 /* Skip kernel readahead of the whole GGUF so routed experts can stream
  * from SSD (Edge0-style). Combine with oc_llama_enable_expert_stream(). */
@@ -794,6 +930,14 @@ void oc_llama_session_reset(OcLlamaSession *sess);
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);
+/* Load a full native (SafeTensors directory) checkpoint — e.g. a qwen4exp
+ * EXL3 tree with config.json, tokenizer and one or more .safetensors
+ * shards — into `out`. Unlike oc_llama_load_exl3(), which attaches an EXL3
+ * overlay directory onto an already-loaded GGUF model, this reads the
+ * complete model: embeddings, heads, MoE experts, hyper-connections and
+ * the optional MTP draft head all come from the SafeTensors files. */
+OcError oc_llama_load_exl3_native(const char *directory, OcLlamaModel *out);
+
 void oc_llama_free(OcLlamaModel *model);
 
 #ifdef __cplusplus

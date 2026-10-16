@@ -84,7 +84,11 @@ OcModelArchitecture oc_model_arch_from_str(const char *s)
         || strcmp(norm, "qwen35_text") == 0
         || strcmp(norm, "qwen3_5_moe") == 0
         || strcmp(norm, "qwen3_5_moe_text") == 0
-        || strcmp(norm, "qwen35moe") == 0)                   return OC_ARCH_QWEN;
+        || strcmp(norm, "qwen35moe") == 0
+        || strcmp(norm, "qwen4exp") == 0
+        || strcmp(norm, "qwen4_exp") == 0
+        || strcmp(norm, "qwen4exp_text") == 0
+        || strcmp(norm, "qwen4_exp_text") == 0)            return OC_ARCH_QWEN;
     if (strcmp(norm, "gemma") == 0
         || strcmp(norm, "gemma2") == 0
         || strcmp(norm, "gemma3") == 0

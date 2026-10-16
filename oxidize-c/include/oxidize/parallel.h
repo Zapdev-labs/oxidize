@@ -3,11 +3,12 @@
  *
  * The forward pass dispatches a parallel region several times per layer (Q/K/V,
  * attention output, gate/up, down — so on the order of 200 regions per token
- * for a 32-layer model). That rules out both thread-per-call and the queue in
- * spinpool.h, which allocates and takes a mutex per submitted item: the
- * dispatch overhead would swamp the work. Here a region is published by
- * bumping one atomic generation counter, workers pick up a statically-assigned
- * slice, and the calling thread does a slice itself rather than idling.
+ * for a 32-layer model). That rules out both thread-per-call and a
+ * mutex-guarded task queue, which allocates and takes a lock per submitted
+ * item: the dispatch overhead would swamp the work. Here a region is
+ * published by bumping one atomic generation counter, workers claim slices
+ * off a shared atomic counter (so a parked or preempted worker never pins
+ * its slice), and the calling thread claims slices too rather than idling.
  *
  * The pool is process-global and lazily started. `oc_parallel_set_threads(1)`
  * makes every region run inline on the calling thread with no synchronization
@@ -31,10 +32,17 @@ extern "C" {
  * effective count is min(this, what the caller asks for). */
 #define OC_PARALLEL_MAX_THREADS 256u
 
-/* Body of a parallel region. Called once per participating thread with a
+/* Body of a parallel region. Called once per claimed slice with a
  * half-open slice [begin, end) of the iteration space and a stable thread
- * index `tid` in [0, n_threads). Slices never overlap, so a body that writes
- * only within its own slice needs no locking. */
+ * index `tid` in [0, n_threads). Slices are claimed rather than assigned:
+ * a thread that finishes early may run several disjoint slices in one
+ * region, so a body can be invoked multiple times on the same `tid` and
+ * must not assume exactly one call per thread per region. oc_parallel_scratch
+ * offers only a temporary per-call buffer (the pointer can move when a
+ * larger request grows it), so state must be re-derived on every
+ * invocation rather than cached across calls or regions. Slices never
+ * overlap, so a body that writes only within its own slice needs no
+ * locking. */
 typedef void (*OcParallelFn)(size_t begin, size_t end, size_t tid,
                              void *user_data);
 

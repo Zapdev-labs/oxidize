@@ -5,12 +5,14 @@
 
 #include "oxidize/llama.h"
 #include "oxidize/log.h"
+#include "oxidize/parallel.h"
 #include "oxidize/util/mmap.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <time.h>
 
 typedef struct {
     const uint8_t *base;
@@ -20,10 +22,23 @@ typedef struct {
 } OcExpertTensorSpan;
 
 typedef struct {
+    OcMmap *mmap;
+    size_t  off;
+    size_t  len;
+} OcExpertFaultJob;
+
+#define OC_ES_MAX_DENSE 24
+
+typedef struct {
     uint32_t n_experts;
     OcExpertTensorSpan gate;
     OcExpertTensorSpan up;
     OcExpertTensorSpan down;
+    /* Per-token dense weights (attention/delta/router/shared-expert) that are
+     * re-read every decode step but never explicitly faulted: under page-cache
+     * pressure they inline-fault inside matvecs at single-thread speed. */
+    OcExpertFaultJob dense[OC_ES_MAX_DENSE];
+    uint32_t n_dense;
 } OcExpertLayerLayout;
 
 typedef struct {
@@ -46,6 +61,8 @@ struct OcExpertStreamPool {
     uint64_t resident_bytes;
     uint64_t prefetch_bytes;
     uint64_t reclaim_bytes;
+    double   fault_ms;      /* wall time inside the blocking fault-in */
+    uint64_t fault_bytes;   /* spans populated through the blocking path */
 };
 
 void oc_expert_stream_config_init(OcExpertStreamConfig *cfg)
@@ -152,6 +169,7 @@ static void reclaim_one(OcExpertStreamPool *pool)
 static OcError record_hot(OcExpertStreamPool *pool, uint32_t layer,
                           uint32_t expert, uint64_t bytes)
 {
+    if (pool->cfg.cache_bytes == UINT64_MAX) return OC_OK;
     if (!pool->hot || pool->hot_cap == 0) return OC_OK;
     if (layer >= pool->n_layers || expert >= pool->n_experts) return OC_OK;
     if (pool->cached && pool->cached[cache_key(pool, layer, expert)]) {
@@ -185,6 +203,52 @@ static OcError record_hot(OcExpertStreamPool *pool, uint32_t layer,
     return OC_OK;
 }
 
+static void push_dense(const OcGgufMmappedFile *gguf, const OcWeightView *view,
+                       OcExpertLayerLayout *L)
+{
+    if (!view || !view->data || L->n_dense >= OC_ES_MAX_DENSE) return;
+    OcExpertTensorSpan span;
+    if (!span_from_view(gguf, view, 1, 0, 0, &span) || !span.mmap) return;
+    size_t packed = (size_t)view->rows * view->row_bytes;
+    if (packed == 0) return;
+    OcExpertFaultJob *j = &L->dense[L->n_dense++];
+    j->mmap = span.mmap;
+    j->off  = span.mmap_offset;
+    j->len  = packed;
+}
+
+/* Small per-layer weights are kept hot by normal LRU pressure; the dense set
+ * targets the multi-MB tensors that otherwise inline-fault during decode. */
+static void collect_dense(const OcGgufMmappedFile *gguf, const OcLlamaLayer *L,
+                          OcExpertLayerLayout *out)
+{
+    push_dense(gguf, &L->attn_q, out);
+    push_dense(gguf, &L->attn_k, out);
+    push_dense(gguf, &L->attn_v, out);
+    push_dense(gguf, &L->attn_output, out);
+    push_dense(gguf, &L->attn_qkv, out);
+    push_dense(gguf, &L->attn_gate, out);
+    push_dense(gguf, &L->ssm_out, out);
+    push_dense(gguf, &L->ssm_alpha, out);
+    push_dense(gguf, &L->ssm_beta, out);
+    push_dense(gguf, &L->ssm_conv1d, out);
+    push_dense(gguf, &L->ssm_dt_bias, out);
+    push_dense(gguf, &L->ffn_gate_inp, out);
+    push_dense(gguf, &L->ffn_gate_inp_shexp, out);
+    push_dense(gguf, &L->ffn_gate_shexp, out);
+    push_dense(gguf, &L->ffn_up_shexp, out);
+    push_dense(gguf, &L->ffn_down_shexp, out);
+    /* qwen4exp hyper-connection + PLE tensors are also per-token dense. */
+    push_dense(gguf, &L->hc_attn_down, out);
+    push_dense(gguf, &L->hc_attn_up, out);
+    push_dense(gguf, &L->hc_attn_inject, out);
+    push_dense(gguf, &L->hc_ffn_down, out);
+    push_dense(gguf, &L->hc_ffn_up, out);
+    push_dense(gguf, &L->hc_ffn_inject, out);
+    push_dense(gguf, &L->ple_key, out);
+    push_dense(gguf, &L->ple_value, out);
+}
+
 OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cfg,
                              OcExpertStreamPool **out)
 {
@@ -202,6 +266,10 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
         return OC_OK;
     }
     pool->n_layers = model->cfg.n_layer;
+    /* The MTP/nextn block carries its own expert pool — give it the slot
+     * one past the last main layer (see moe_layer_index). */
+    if (model->mtp.layer.ffn_gate_exps.data != NULL)
+        pool->n_layers += 1;
     pool->layers = calloc(pool->n_layers, sizeof(*pool->layers));
     if (!pool->layers) {
         free(pool);
@@ -210,16 +278,32 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
     uint32_t n_exp = model->cfg.num_experts;
     pool->n_experts = n_exp;
     for (uint32_t i = 0; i < pool->n_layers; i++) {
-        const OcLlamaLayer *L = &model->layers[i];
+        /* The MTP/nextn slot may be backed by the sidecar file rather than
+         * the main mapping: resolve its views against the mapping that owns
+         * them or the spans silently cover the wrong bytes. */
+        const bool is_mtp = (i >= model->cfg.n_layer);
+        const OcLlamaLayer *L = is_mtp ? &model->mtp.layer : &model->layers[i];
+        const OcGgufMmappedFile *g =
+            (is_mtp && model->mtp_gguf_open) ? &model->mtp_gguf
+                                             : &model->gguf;
         pool->layers[i].n_experts = n_exp;
         size_t n_embd = model->cfg.n_embd;
         size_t inter = model->cfg.expert_intermediate_size;
-        (void)span_from_view(&model->gguf, &L->ffn_gate_exps, n_exp, n_embd,
+        (void)span_from_view(g, &L->ffn_gate_exps, n_exp, n_embd,
                              inter, &pool->layers[i].gate);
-        (void)span_from_view(&model->gguf, &L->ffn_up_exps, n_exp, n_embd,
+        (void)span_from_view(g, &L->ffn_up_exps, n_exp, n_embd,
                              inter, &pool->layers[i].up);
-        (void)span_from_view(&model->gguf, &L->ffn_down_exps, n_exp, n_embd,
+        (void)span_from_view(g, &L->ffn_down_exps, n_exp, n_embd,
                              inter, &pool->layers[i].down);
+        collect_dense(g, L, &pool->layers[i]);
+    }
+    /* Unlimited mode leaves residency decisions to the kernel's page cache. */
+    if (pool->cfg.cache_bytes == UINT64_MAX) {
+        oc_log(OC_LOG_INFO,
+               "expert-stream: cache=unbounded layers=%u experts=%u",
+               pool->n_layers, pool->model->cfg.num_experts);
+        *out = pool;
+        return OC_OK;
     }
     size_t nslot = (size_t)pool->n_layers * (size_t)n_exp;
     pool->cached = calloc(nslot ? nslot : 1, 1);
@@ -274,7 +358,8 @@ OcError oc_expert_stream_prepare_mapping(OcExpertStreamPool *pool)
     advise_view(gguf, &pool->model->tok_embeddings, OC_MMAP_ADVICE_WILLNEED);
     advise_view(gguf, &pool->model->output, OC_MMAP_ADVICE_WILLNEED);
     for (uint32_t i = 0; i < pool->n_layers; i++) {
-        const OcLlamaLayer *L = &pool->model->layers[i];
+        const OcLlamaLayer *L = (i < pool->model->cfg.n_layer)
+            ? &pool->model->layers[i] : &pool->model->mtp.layer;
         advise_view(gguf, &L->attn_q, OC_MMAP_ADVICE_WILLNEED);
         advise_view(gguf, &L->attn_k, OC_MMAP_ADVICE_WILLNEED);
         advise_view(gguf, &L->attn_v, OC_MMAP_ADVICE_WILLNEED);
@@ -306,6 +391,24 @@ OcError oc_expert_stream_prepare_mapping(OcExpertStreamPool *pool)
     return OC_OK;
 }
 
+static void fault_jobs(size_t begin, size_t end, size_t tid, void *user)
+{
+    const OcExpertFaultJob *jobs = (const OcExpertFaultJob *)user;
+    (void)tid;
+    for (size_t i = begin; i < end; i++)
+        (void)oc_mmap_fault_range(jobs[i].mmap, jobs[i].off, jobs[i].len);
+}
+
+static void push_fault_job(OcExpertFaultJob *jobs, size_t *n_jobs,
+                           const OcExpertTensorSpan *span, uint32_t expert)
+{
+    if (!span->mmap || span->expert_bytes == 0) return;
+    jobs[*n_jobs].mmap = span->mmap;
+    jobs[*n_jobs].off  = span->mmap_offset + (size_t)expert * span->expert_bytes;
+    jobs[*n_jobs].len  = span->expert_bytes;
+    (*n_jobs)++;
+}
+
 OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
                                const uint32_t *experts, uint32_t n,
                                bool prefetch)
@@ -316,13 +419,37 @@ OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
     const OcExpertLayerLayout *L = &pool->layers[layer];
     uint64_t bytes = expert_bytes(L);
     OcMmapAdvice advice = OC_MMAP_ADVICE_WILLNEED;
+    /* Issue all WILLNEED hints first so the kernel's async readahead pipeline
+     * is primed for every selected expert before we start faulting. */
     for (uint32_t i = 0; i < n; i++) {
         uint32_t idx = experts[i];
         if (idx >= L->n_experts) continue;
         advise_span(&L->gate, idx, advice);
         advise_span(&L->up, idx, advice);
         advise_span(&L->down, idx, advice);
-        if (!prefetch) {
+    }
+    /* Fault-in is spread across the compute pool: each expert's gate/up/down
+     * span populates on a different thread so the SSD's queue depth does the
+     * overlapping instead of serializing on one fault stream. The layer's
+     * dense weights ride along — they are re-read every token but are never
+     * touched elsewhere, so without this they inline-fault one page at a
+     * time inside the matvec threads (~5x slower than POPULATE's batched
+     * readahead). */
+    OcExpertFaultJob *jobs = NULL;
+    if (!prefetch) {
+        jobs = (OcExpertFaultJob *)malloc(((size_t)n * 3 +
+                                          (size_t)OC_ES_MAX_DENSE) *
+                                         sizeof(*jobs));
+    }
+    size_t n_jobs = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t idx = experts[i];
+        if (idx >= L->n_experts) continue;
+        if (jobs) {
+            push_fault_job(jobs, &n_jobs, &L->gate, idx);
+            push_fault_job(jobs, &n_jobs, &L->up, idx);
+            push_fault_job(jobs, &n_jobs, &L->down, idx);
+        } else if (!prefetch) {
             fault_span(&L->gate, idx);
             fault_span(&L->up, idx);
             fault_span(&L->down, idx);
@@ -330,6 +457,33 @@ OcError oc_expert_stream_touch(OcExpertStreamPool *pool, uint32_t layer,
         if (prefetch) pool->prefetch_bytes += bytes;
         record_hot(pool, layer, idx, bytes);
     }
+    if (jobs) {
+        /* Fault this layer's dense weights (the not-yet-read FFN-side ones)
+         * and async-prefetch the NEXT layer's dense set so its attention
+         * tensors arrive while this layer's MoE compute runs. */
+        for (uint32_t i = 0; i < L->n_dense; i++)
+            jobs[n_jobs++] = L->dense[i];
+        uint32_t next = (layer + 1) % pool->n_layers;
+        const OcExpertLayerLayout *NL = &pool->layers[next];
+        for (uint32_t i = 0; i < NL->n_dense; i++) {
+            const OcExpertFaultJob *j = &NL->dense[i];
+            (void)oc_mmap_advise_range(j->mmap, j->off, j->len,
+                                     OC_MMAP_ADVICE_WILLNEED);
+        }
+    }
+    if (n_jobs > 0) {
+        struct timespec ts0, ts1;
+        clock_gettime(CLOCK_MONOTONIC, &ts0);
+        if (n_jobs > 1) oc_parallel_for(n_jobs, fault_jobs, jobs);
+        else (void)oc_mmap_fault_range(jobs[0].mmap, jobs[0].off,
+                                       jobs[0].len);
+        clock_gettime(CLOCK_MONOTONIC, &ts1);
+        pool->fault_ms += (double)(ts1.tv_sec - ts0.tv_sec) * 1e3 +
+                          (double)(ts1.tv_nsec - ts0.tv_nsec) * 1e-6;
+        for (size_t i = 0; i < n_jobs; i++)
+            pool->fault_bytes += jobs[i].len;
+    }
+    free(jobs);
     return OC_OK;
 }
 
@@ -359,4 +513,14 @@ uint64_t oc_expert_stream_prefetch_bytes(const OcExpertStreamPool *pool)
 uint64_t oc_expert_stream_reclaim_bytes(const OcExpertStreamPool *pool)
 {
     return pool ? pool->reclaim_bytes : 0;
+}
+
+double oc_expert_stream_fault_ms(const OcExpertStreamPool *pool)
+{
+    return pool ? pool->fault_ms : 0.0;
+}
+
+uint64_t oc_expert_stream_fault_bytes(const OcExpertStreamPool *pool)
+{
+    return pool ? pool->fault_bytes : 0;
 }

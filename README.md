@@ -275,6 +275,47 @@ Design goals:
 - Keep transport/UI concerns at the edge crates (`oxidize-cli`, `oxidize-server`, `oxidize-py`) for maintainability.
 - Support multiple acceleration targets behind stable core APIs to keep feature parity across platforms.
 
+### EXL3 on CPU in oxidize-c
+
+Build with `make -C oxidize-c`, then load the native EXL3 checkpoint directory:
+
+```bash
+./oxidize-c/oxidize-c --model /path/to/exl3/ \
+  --prompt "Hello" --n-predict 64 --threads 16
+```
+
+The directory supplies `config.json`, `tokenizer.json`, optional tokenizer
+configuration, and the `.safetensors` weight shards. A path to a shard is also
+accepted; companion assets and other shards are resolved in its directory.
+No companion GGUF or weight conversion is required. Packed EXL3 projections,
+ordinary embeddings, norms and unquantized projections come from the same
+checkpoint.
+
+Native tokenizer import supports byte-level BPE with recognized GPT-2,
+Llama 3 and Qwen2 split rules, including `ignore_merges`, and raw Unigram
+tokenizers. Unsupported normalization/Metaspace pipelines and RoPE scaling
+configurations are rejected explicitly.
+
+The earlier `--model matching.gguf --exl3 /path/to/exl3/` overlay form remains
+available for explicit mixed-checkpoint use. Those inputs must come from the
+same model and revision.
+
+The CPU path keeps native trellis weights compressed, applies 128-point
+Hadamard transforms to activations, and decodes tiles during multiplication.
+It supports the 3inst, MCG and mul1 codebooks, integer rates 1–8 bits, and
+mul1 rates 1.5/2.5/3.5 bits, including FP16 channel scales and legacy packed
+signs. Initial model integration supports dense Llama/Mistral/Qwen2 projections
+and the output head, plus qwen4_exp checkpoints natively — those are hybrid
+MoE models (EXL3 experts, delta-net and full-attention layers,
+hyper-connections, and the MTP draft head), not dense. Unsupported
+architectures, tensor groups and execution modes fail explicitly. GPU
+execution, expert streaming, speculative decoding
+and serving with EXL3 are unavailable. Speed and model-quality claims
+require full-checkpoint benchmarks; fewer stored bits do not guarantee faster
+CPU decoding.
+
+Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllamav3/blob/058b8630fd081f3ff46fce6246955b157c3a2e3b/tests/testlib/trellis.py).
+
 ## License
 
 Zapdev labs Fair Use License

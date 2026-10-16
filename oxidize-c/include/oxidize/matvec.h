@@ -32,6 +32,16 @@ extern "C" {
 void oc_matvec_f32(const float *data, size_t rows, size_t cols,
                    const float *input, float *output);
 
+/* Fused f32 multi-projection: several f32 matvecs sharing the SAME input
+ * vector run as one worker region (one barrier instead of one per matrix,
+ * input read once from cache). `n_outs` matrices; matrix i has `datas[i]`
+ * row-major `rows[i]` × `cols` and writes `outs[i]`. Every row is still an
+ * independent ascending dot, so output is bit-identical to per-matrix
+ * oc_matvec_f32 at any thread count. */
+void oc_matvec_f32_multi(const float *const *datas, const size_t *rows,
+                         size_t cols, size_t n_outs, const float *input,
+                         float *const *outs);
+
 /* Quantized weight × f32 input → f32 output. Dequantizes one weight row at
  * a time into `temp` (caller-provided, length >= cols) and dots with `input`.
  * `data` is the packed quant buffer; `row_bytes` is the per-row byte stride

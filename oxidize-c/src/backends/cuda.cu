@@ -1023,6 +1023,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
 {
     if (!ctx || !model) return OC_ERR_INVALID_ARG;
     memset(ctx, 0, sizeof(*ctx));
+    if (model->exl3_overlay) return OC_ERR_BACKEND;
 
     /* K2-Horizon needs grouped norms, MoVA values and the softplus output
      * gate, none of which the device forward implements: it would run the
@@ -1030,6 +1031,15 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
      * to the CPU path. */
     if (model->cfg.is_k2) {
         oc_log(OC_LOG_WARN, "cuda: k2-horizon is CPU-only");
+        return OC_ERR_BACKEND;
+    }
+
+    /* qwen4exp has no device forward: the hybrid path dispatches on
+     * is_qwen35 only, so a qwen4exp model would fall into generic
+     * attention missing its delta-net/PLE/hyper-connection tensors and
+     * emit garbage. Refuse so the CLI falls back to the CPU path. */
+    if (model->cfg.is_qwen4exp) {
+        oc_log(OC_LOG_WARN, "cuda: qwen4exp is CPU-only");
         return OC_ERR_BACKEND;
     }
 

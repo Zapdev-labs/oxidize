@@ -24,6 +24,8 @@
 #include "simd.h"
 #include "activation.h"
 #include "matvec.h"
+#include "exl3.h"
+#include "exl3_overlay.h"
 #include "llama.h"
 #include "expert_stream.h"
 #include "prerouter.h"

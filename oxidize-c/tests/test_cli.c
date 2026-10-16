@@ -17,6 +17,36 @@
 #include <stddef.h>
 #include <string.h>
 
+Test(cli, exl3_overlay_flags_and_mode_guards)
+{
+    char *legacy[] = {"oxidize-c", "--model", "base.gguf", "--exl3", "weights/"};
+    OcCliArgs a;
+    oc_cli_parse_args(5, legacy, &a);
+    cr_assert_not(oc_cli_parse_failed());
+    cr_assert_str_eq(a.exl3_path, "weights/");
+    char *sub[] = {"oxidize-c", "prompt", "--model", "base.gguf", "--exl3", "w.safetensors"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(6, sub, &ctx));
+    cr_assert_not(oc_cli_parse_failed());
+    cr_assert_str_eq(ctx.exl3_path, "w.safetensors");
+    cr_assert_eq(oc_cli_exl3_reject(a.exl3_path, "cpu", false, true), 0);
+    cr_assert_eq(oc_cli_exl3_reject(a.exl3_path, "cuda", false, true), 1);
+    cr_assert_eq(oc_cli_exl3_reject(a.exl3_path, "cpu", true, true), 1);
+    cr_assert_eq(oc_cli_exl3_reject(a.exl3_path, "cpu", false, false), 1);
+}
+
+Test(cli, exl3_missing_value_is_error)
+{
+    char *legacy[] = {"oxidize-c", "--exl3"};
+    OcCliArgs a;
+    oc_cli_parse_args(2, legacy, &a);
+    cr_assert(oc_cli_parse_failed());
+    char *sub[] = {"oxidize-c", "prompt", "--exl3", "--model", "base.gguf"};
+    OcCliContext ctx;
+    cr_assert(oc_cli_context_parse(5, sub, &ctx));
+    cr_assert(oc_cli_parse_failed());
+}
+
 Test(cli, defaults_are_sensible)
 {
     OcCliArgs a;
@@ -377,6 +407,7 @@ Test(cli, context_prefill_chunk_size_is_append_only)
         offsetof(OcCliContext, mtp_model),
         offsetof(OcCliContext, mtp),
         offsetof(OcCliContext, chat),
+        offsetof(OcCliContext, exl3_path),
     };
     for (size_t i = 1; i < sizeof(order) / sizeof(order[0]); i++) {
         cr_assert(order[i] > order[i - 1],
@@ -384,10 +415,10 @@ Test(cli, context_prefill_chunk_size_is_append_only)
                   i);
     }
     cr_assert_eq(order[sizeof(order) / sizeof(order[0]) - 1],
-                 offsetof(OcCliContext, chat));
+                 offsetof(OcCliContext, exl3_path));
     /* Only alignment padding may follow the last field. */
     cr_assert_eq(sizeof(OcCliContext),
-                 ((offsetof(OcCliContext, chat) + sizeof(bool)
+                 ((offsetof(OcCliContext, exl3_path) + sizeof(const char *)
                    + _Alignof(OcCliContext) - 1)
                   / _Alignof(OcCliContext)) * _Alignof(OcCliContext));
 }

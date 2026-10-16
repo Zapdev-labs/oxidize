@@ -27,6 +27,7 @@
 #include "oxidize/benchmark.h"
 #include "oxidize/error.h"
 #include "oxidize/expert_stream.h"
+#include "oxidize/exl3_overlay.h"
 #include "oxidize/finetune.h"
 #include "oxidize/gguf.h"
 #include "oxidize/hf_hub.h"
@@ -173,6 +174,14 @@ static OcError cli_load_llama(const OcCliContext *ctx, OcLlamaModel *model)
     unsigned flags = ctx->stream_experts ? OC_LLAMA_LOAD_STREAM : 0u;
     OcError e = oc_llama_load_flags(ctx->model_path, flags, model);
     if (e != OC_OK) return e;
+    if (ctx->exl3_path) {
+        e = oc_llama_load_exl3(model, ctx->exl3_path);
+        if (e != OC_OK) {
+            cli_error("EXL3 overlay failed (%s)", oc_error_msg(e));
+            oc_llama_free(model);
+            return e;
+        }
+    }
     oc_cli_apply_ctx(ctx, model);
     if (ctx->experts_per_tok > 0 && model->cfg.num_experts > 0) {
         uint32_t max = model->cfg.num_experts + model->cfg.zero_expert_count;
@@ -182,8 +191,13 @@ static OcError cli_load_llama(const OcCliContext *ctx, OcLlamaModel *model)
     if (ctx->stream_experts) {
         OcExpertStreamConfig scfg;
         oc_expert_stream_config_init(&scfg);
+        /* Unset/zero budget means kernel-managed (unbounded), matching the
+         * --expert-cache-mb help text and the main CLI path — not the
+         * bounded 3GiB default from oc_expert_stream_config_init. */
         if (ctx->expert_cache_mb > 0)
             scfg.cache_bytes = (uint64_t)ctx->expert_cache_mb << 20;
+        else
+            scfg.cache_bytes = UINT64_MAX;
         e = oc_llama_enable_expert_stream(model, &scfg);
         if (e != OC_OK) {
             oc_llama_free(model);
@@ -361,6 +375,17 @@ void oc_cli_context_defaults(OcCliContext *ctx)
 OcError oc_cli_command_run(OcCliContext *ctx)
 {
     if (!ctx) return OC_ERR_INVALID_ARG;
+    bool exl3_command = ctx->command == OC_CLI_CMD_BENCH ||
+        ctx->command == OC_CLI_CMD_PERPLEXITY;
+    const char *exl3_source = ctx->exl3_path ? ctx->exl3_path :
+        oc_cli_native_model_path(ctx->model_path) ? ctx->model_path : NULL;
+    /* dflash2 takes a SafeTensors dir or file as --model; the EXL3
+     * native-path check does not apply to it. An explicit --exl3 still
+     * goes through the gate so it is rejected rather than ignored. */
+    if (!(ctx->command == OC_CLI_CMD_DFLASH2 && !ctx->exl3_path) &&
+        oc_cli_exl3_reject(exl3_source, ctx->backend,
+            !exl3_command || ctx->stream_experts || ctx->mtp || ctx->mtp_model,
+            ctx->model_path != NULL)) return OC_ERR_INVALID_ARG;
 
     switch (ctx->command) {
     case OC_CLI_CMD_BENCH:           return oc_cli_run_bench(ctx);
@@ -418,7 +443,8 @@ void oc_cli_command_help(void)
 "  perplexity       Compute perplexity on input text\n"
 "\n"
 "COMMON OPTIONS:\n"
-"  --model PATH          GGUF model file\n"
+"  --model PATH          GGUF file or native EXL3 checkpoint directory/file\n"
+"  --exl3 PATH           Native EXL3 SafeTensors overlay (CPU dense inference)\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
 "  --kv, --kv-type T     f32|q8|rq|rq:K,V (q8 auto when ctx>=8192, rq >=131072)\n"

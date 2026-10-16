@@ -77,42 +77,81 @@ CRITERION_DEPS := $(CRITERION_ARCHIVE)
 CRITERION_LINK := $(CRITERION_ARCHIVE)
 endif
 
-TEST_SRCS := $(wildcard tests/test_*.c)
-TEST_OBJS := $(TEST_SRCS:.c=.o)
-
 # ASan + UBSan for leak/UB detection in tests (valgrind not installed locally).
 # Criterion needs pthreads, dynamic loading, and math.  Linux additionally
 # needs librt for its POSIX shared-memory implementation; macOS provides the
 # same APIs through libSystem and has no separate librt.
+# SANITIZE=0 builds the harness without sanitizers for hosts where libasan
+# is not installed (e.g. minimal containers). Those objects use a .nosan.o
+# suffix so the sanitized and plain variants never mix in the object tree.
+SANITIZE ?= 1
+ifeq ($(SANITIZE),0)
+TEST_SANITIZE_FLAGS :=
+SAN_SUFFIX   := nosan
+else
+TEST_SANITIZE_FLAGS := -fsanitize=address,undefined
+SAN_SUFFIX   := asan
+endif
+
+TEST_SRCS := $(wildcard tests/test_*.c)
+# Test objects carry the sanitizer suffix too, so flipping SANITIZE can
+# never reuse a test object built with the other mode's flags.
+TEST_OBJS := $(TEST_SRCS:.c=.$(SAN_SUFFIX).o)
+# Both variants, for `clean` and dep coverage regardless of SANITIZE.
+ALL_SAN_OBJS := $(addsuffix .asan.o,$(basename $(TEST_SRCS) $(LIB_SRCS))) \
+                $(addsuffix .nosan.o,$(basename $(TEST_SRCS) $(LIB_SRCS)))
 TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
-               -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 \
+               $(TEST_SANITIZE_FLAGS) -fno-omit-frame-pointer -g -O0 \
                -ffp-contract=off -DOC_TESTING \
                -I$(CRITERION_INCLUDE)
+# Darwin hides mkdtemp/mkstemp-family declarations unless _DARWIN_C_SOURCE
+# is set; several test files use them under strict _POSIX_C_SOURCE.
+ifeq ($(shell uname -s),Darwin)
+TEST_CFLAGS += -D_DARWIN_C_SOURCE
+endif
 TEST_SYSTEM_LIBS := -lm -lpthread -ldl
 ifneq ($(shell uname -s),Darwin)
 TEST_SYSTEM_LIBS += -lrt
 endif
-TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) -fsanitize=address,undefined
+TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) $(TEST_SANITIZE_FLAGS)
 
-# ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
-LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
+# Sanitizer-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
+LIB_ASAN_OBJS := $(LIB_SRCS:.c=.$(SAN_SUFFIX).o)
 DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
-             $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d) \
+             $(ALL_SAN_OBJS:.o=.d) \
              oc-tokenize.d oc-eval.d
 
-test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
+# The real runner is sanitizer-suffixed so flipping SANITIZE can never
+# leave test_runner linked against the other mode's objects; the plain
+# test_runner name CI and `make test` invoke is a fresh copy.
+test_runner.$(SAN_SUFFIX): $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LINK) $(TEST_LDFLAGS)
 
-# Build library objects with ASan for the test_runner.
+test_runner: test_runner.$(SAN_SUFFIX)
+	cp -f $< $@
+
+# Build library objects with the configured sanitizer level for the test_runner.
 src/%.asan.o: src/%.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-tests/%.o: tests/%.c
+src/%.nosan.o: src/%.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+tests/%.asan.o: tests/%.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+tests/%.nosan.o: tests/%.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # Default object rule (no ASan).
 src/%.o: src/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+# oxk_avx2's GEMV kernels are the prefill hot path: keep the explicit -O3
+# they had via the optimize() attribute (removed because it broke the
+# target() attribute on GCC) scoped to this file rather than project-wide.
+src/compute/oxk_avx2.o: CFLAGS += -O3
+src/compute/oxk_avx2.asan.o src/compute/oxk_avx2.nosan.o: TEST_CFLAGS += -O3
 
 -include $(DEP_FILES)
 
@@ -248,9 +287,10 @@ cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 	nvcc $(NVCC_FLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
-	      $(LIB_ASAN_OBJS) $(CUDA_OBJS) \
+	rm -f $(LIB_OBJS) $(BIN_OBJS) $(ALL_SAN_OBJS) \
+	      $(TEST_SRCS:.c=.o) $(TEST_SRCS:.c=.d) \
+	      $(CUDA_OBJS) \
 	      $(DEP_FILES) \
-	      oxidize-c oc-tokenize oc-eval test_runner liboxidize-c.a
+	      oxidize-c oc-tokenize oc-eval test_runner test_runner.* liboxidize-c.a
 
 .PHONY: build lib test lint clean avx512 cuda manual-tests
