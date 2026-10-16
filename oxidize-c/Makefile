@@ -84,18 +84,29 @@ TEST_OBJS := $(TEST_SRCS:.c=.o)
 # Criterion needs pthreads, dynamic loading, and math.  Linux additionally
 # needs librt for its POSIX shared-memory implementation; macOS provides the
 # same APIs through libSystem and has no separate librt.
+# SANITIZE=0 builds the harness without sanitizers for hosts where libasan
+# is not installed (e.g. minimal containers). Those objects use a .nosan.o
+# suffix so the sanitized and plain variants never mix in the object tree.
+SANITIZE ?= 1
+ifeq ($(SANITIZE),0)
+TEST_SANITIZE_FLAGS :=
+SAN_SUFFIX   := nosan
+else
+TEST_SANITIZE_FLAGS := -fsanitize=address,undefined
+SAN_SUFFIX   := asan
+endif
 TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
-               -fsanitize=address,undefined -fno-omit-frame-pointer -g -O0 \
+               $(TEST_SANITIZE_FLAGS) -fno-omit-frame-pointer -g -O0 \
                -ffp-contract=off -DOC_TESTING \
                -I$(CRITERION_INCLUDE)
 TEST_SYSTEM_LIBS := -lm -lpthread -ldl
 ifneq ($(shell uname -s),Darwin)
 TEST_SYSTEM_LIBS += -lrt
 endif
-TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) -fsanitize=address,undefined
+TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) $(TEST_SANITIZE_FLAGS)
 
-# ASan-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
-LIB_ASAN_OBJS := $(LIB_SRCS:.c=.asan.o)
+# Sanitizer-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
+LIB_ASAN_OBJS := $(LIB_SRCS:.c=.$(SAN_SUFFIX).o)
 DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
              $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d) \
              oc-tokenize.d oc-eval.d
@@ -103,8 +114,11 @@ DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
 test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LINK) $(TEST_LDFLAGS)
 
-# Build library objects with ASan for the test_runner.
+# Build library objects with the configured sanitizer level for the test_runner.
 src/%.asan.o: src/%.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+src/%.nosan.o: src/%.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 tests/%.o: tests/%.c

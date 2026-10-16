@@ -3,11 +3,12 @@
  *
  * The forward pass dispatches a parallel region several times per layer (Q/K/V,
  * attention output, gate/up, down — so on the order of 200 regions per token
- * for a 32-layer model). That rules out both thread-per-call and the queue in
- * spinpool.h, which allocates and takes a mutex per submitted item: the
- * dispatch overhead would swamp the work. Here a region is published by
- * bumping one atomic generation counter, workers pick up a statically-assigned
- * slice, and the calling thread does a slice itself rather than idling.
+ * for a 32-layer model). That rules out both thread-per-call and a
+ * mutex-guarded task queue, which allocates and takes a lock per submitted
+ * item: the dispatch overhead would swamp the work. Here a region is
+ * published by bumping one atomic generation counter, workers claim slices
+ * off an atomic counter, and the calling thread participates rather than
+ * idling.
  *
  * The pool is process-global and lazily started. `oc_parallel_set_threads(1)`
  * makes every region run inline on the calling thread with no synchronization

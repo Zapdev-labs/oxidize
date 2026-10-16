@@ -440,6 +440,59 @@ void oc_matvec_f32(const float *data, size_t rows, size_t cols,
     oc_parallel_for(rows, matvec_f32_slice, &job);
 }
 
+/* Fused f32 multi-projection: one region over the concatenated rows of all
+ * matrices. A slice may span matrix boundaries, so rows map back to their
+ * (matrix, local row) pair as the slice walks forward. */
+typedef struct {
+    const float *const *datas;
+    const size_t       *rows;
+    size_t              cols;
+    size_t              n_outs;
+    const float        *input;
+    float *const       *outs;
+} F32MultiJob;
+
+static void matvec_f32_multi_slice(size_t begin, size_t end, size_t tid,
+                                   void *ud)
+{
+    (void)tid;
+    const F32MultiJob *j = (const F32MultiJob *)ud;
+    size_t k = 0, r = begin;
+    while (k + 1 < j->n_outs && r >= j->rows[k]) { r -= j->rows[k]; k++; }
+    for (size_t g = begin; g < end;) {
+        const size_t take = (end - g < j->rows[k] - r) ? end - g
+                                                       : j->rows[k] - r;
+        const float *data = j->datas[k];
+        float *out = j->outs[k];
+        for (size_t i = 0; i < take; i++)
+            out[r + i] = oc_attn_dot_f32(data + (r + i) * j->cols,
+                                         j->input, j->cols);
+        g += take;
+        r += take;
+        if (r == j->rows[k] && k + 1 < j->n_outs) {
+            k++;
+            r = 0;
+            /* Skip empty matrices; the walk can never stall on the last one
+             * because g == end there by construction. */
+            while (j->rows[k] == 0 && k + 1 < j->n_outs) k++;
+        }
+    }
+}
+
+void oc_matvec_f32_multi(const float *const *datas, const size_t *rows,
+                         size_t cols, size_t n_outs, const float *input,
+                         float *const *outs)
+{
+    if (n_outs == 0 || cols == 0) return;
+    size_t total_rows = 0;
+    for (size_t k = 0; k < n_outs; k++) {
+        if (rows[k] > SIZE_MAX - total_rows) return;   /* overflow: bail out */
+        total_rows += rows[k];
+    }
+    F32MultiJob job = { datas, rows, cols, n_outs, input, outs };
+    oc_parallel_for(total_rows, matvec_f32_multi_slice, &job);
+}
+
 #if defined(__x86_64__) || defined(__i386__)
 __attribute__((target("avx512f,avx512bw")))
 static float bf16_row_dot_avx512(const uint16_t *w, const float *x, size_t n)

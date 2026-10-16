@@ -3897,6 +3897,16 @@ static void forward_dense_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         oc_matvec_quantized_fused(qtypes, data, rows, c->n_embd,
                                   row_bytes, 2, s->normed, outputs,
                                   s->dequant_temp);
+    } else if (!L->ffn_gate.exl3 && !L->ffn_up.exl3 &&
+               L->ffn_gate.qtype == OC_QUANT_F32 &&
+               L->ffn_up.qtype == OC_QUANT_F32) {
+        /* F32 gate/up: one worker region over both matrices instead of two
+         * (the quantized fused path above does the same for packed types). */
+        const float *datas[2] = { (const float *)L->ffn_gate.data,
+                                  (const float *)L->ffn_up.data };
+        size_t rows[2] = { L->ffn_gate.rows, L->ffn_up.rows };
+        float *outs[2] = { s->ffn_gate, s->ffn_up };
+        oc_matvec_f32_multi(datas, rows, c->n_embd, 2, s->normed, outs);
     } else {
         matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
         matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
@@ -4837,6 +4847,26 @@ static OcError forward_layer(OcLlamaSession *s, uint32_t layer)
                 oc_matvec_quantized_fused(qts, d, rws, c->n_embd, rbs,
                                           has_gate ? 4u : 3u, s->normed,
                                           oo, s->dequant_temp);
+            } else if (!L->attn_q.exl3 && !L->attn_k.exl3 &&
+                       !L->attn_v.exl3 &&
+                       (!has_gate || !L->attn_gate.exl3) &&
+                       L->attn_q.qtype == OC_QUANT_F32 &&
+                       L->attn_k.qtype == OC_QUANT_F32 &&
+                       L->attn_v.qtype == OC_QUANT_F32 &&
+                       (!has_gate || L->attn_gate.qtype == OC_QUANT_F32)) {
+                /* All-F32 projections: same single-region idea, no
+                 * activation quantization involved. */
+                const float *d[4] = {
+                    (const float *)L->attn_q.data,
+                    (const float *)L->attn_k.data,
+                    (const float *)L->attn_v.data,
+                    (const float *)L->attn_gate.data };
+                const size_t rws[4] = {
+                    L->attn_q.rows, L->attn_k.rows, L->attn_v.rows,
+                    L->attn_gate.rows };
+                float *oo[4] = { s->q, s->k, s->v, s->muse_gate };
+                oc_matvec_f32_multi(d, rws, c->n_embd, has_gate ? 4u : 3u,
+                                    s->normed, oo);
             } else {
                 matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
                 matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
