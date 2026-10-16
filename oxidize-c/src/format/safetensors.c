@@ -210,8 +210,12 @@ static void parser_handle_value(OcStParser *p, const char *src,
             while (src < end && *src != ']') {
                 while (src < end && isspace((unsigned char)*src)) src++;
                 if (src >= end || *src == ']') break;
+                /* Non-integer element: bail so json_decode_uint can't
+                 * spin without consuming input. */
+                if (!isdigit((unsigned char)*src)) break;
                 const char *e;
                 uint64_t v = json_decode_uint(src, end, &e);
+                if (e == src) break;
                 if (p->shape_count < OC_SAFETENSORS_MAX_DIMS) {
                     p->shape_vals[p->shape_count++] = v;
                 }
@@ -228,8 +232,10 @@ static void parser_handle_value(OcStParser *p, const char *src,
             while (src < end && *src != ']') {
                 while (src < end && isspace((unsigned char)*src)) src++;
                 if (src >= end || *src == ']') break;
+                if (!isdigit((unsigned char)*src)) break;
                 const char *e;
                 uint64_t v = json_decode_uint(src, end, &e);
+                if (e == src) break;
                 if (p->offset_count < 2) {
                     p->offsets[p->offset_count++] = v;
                 }

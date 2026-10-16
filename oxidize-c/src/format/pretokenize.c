@@ -205,7 +205,8 @@ static size_t split_standard(Splitter *s, OcPretokType type)
 
         start = pos + (gpt2 && c == ' ');
         if (get_flags(s, start) & OC_UCPT_NUMBER) {
-            size_t limit = gpt2 ? s->n - start : (type == OC_PRETOK_QWEN2 ? 1 : 3);
+            size_t limit = gpt2 ? s->n - start :
+                (type == OC_PRETOK_QWEN2 || type == OC_PRETOK_QWEN2_M ? 1 : 3);
             pos = start;
             while (pos - start < limit && (get_flags(s, pos) & OC_UCPT_NUMBER)) pos++;
             add_token(s, pos);

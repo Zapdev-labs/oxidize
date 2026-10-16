@@ -121,8 +121,14 @@ DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
              $(ALL_SAN_OBJS:.o=.d) \
              oc-tokenize.d oc-eval.d
 
-test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
+# The real runner is sanitizer-suffixed so flipping SANITIZE can never
+# leave test_runner linked against the other mode's objects; the plain
+# test_runner name CI and `make test` invoke is a fresh copy.
+test_runner.$(SAN_SUFFIX): $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) -o $@ $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_LINK) $(TEST_LDFLAGS)
+
+test_runner: test_runner.$(SAN_SUFFIX)
+	cp -f $< $@
 
 # Build library objects with the configured sanitizer level for the test_runner.
 src/%.asan.o: src/%.c
@@ -282,8 +288,9 @@ cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 
 clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(ALL_SAN_OBJS) \
+	      $(TEST_SRCS:.c=.o) $(TEST_SRCS:.c=.d) \
 	      $(CUDA_OBJS) \
 	      $(DEP_FILES) \
-	      oxidize-c oc-tokenize oc-eval test_runner liboxidize-c.a
+	      oxidize-c oc-tokenize oc-eval test_runner test_runner.* liboxidize-c.a
 
 .PHONY: build lib test lint clean avx512 cuda manual-tests

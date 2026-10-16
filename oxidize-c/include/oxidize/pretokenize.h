@@ -31,7 +31,7 @@ typedef enum {
      * numbers split in 1-3 digit chunks and contractions lowercase. */
     OC_PRETOK_LLAMA3 = 3,
     /* Qwen2 (`pre == "qwen2"`): letters run without combining marks;
-     * numbers are not chunked (one token per digit run). */
+     * numbers are matched one Unicode number at a time. */
     OC_PRETOK_QWEN2 = 4,
     /* Qwen2 multimodal variant (`pre == "qwen_m"`): combining marks
      * (\p{M}) stay inside letter runs. */
