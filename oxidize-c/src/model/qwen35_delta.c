@@ -362,7 +362,7 @@ static void gate_heads(size_t begin, size_t end, size_t tid, void *user_data)
         for (size_t i = 0; i < dv; i++) {
             /* qwen4exp's only delta-net difference: sigmoid output gate. */
             const float g = sigmoid
-                ? 1.0f / (1.0f + expf(-gate[i]))
+                ? sigmoid_stable(gate[i])
                 : silu_stable(gate[i]);
             out[i] = out[i] * inv * ctx->params->norm_weight[i] * g;
         }

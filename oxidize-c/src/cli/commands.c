@@ -191,8 +191,13 @@ static OcError cli_load_llama(const OcCliContext *ctx, OcLlamaModel *model)
     if (ctx->stream_experts) {
         OcExpertStreamConfig scfg;
         oc_expert_stream_config_init(&scfg);
+        /* Unset/zero budget means kernel-managed (unbounded), matching the
+         * --expert-cache-mb help text and the main CLI path — not the
+         * bounded 3GiB default from oc_expert_stream_config_init. */
         if (ctx->expert_cache_mb > 0)
             scfg.cache_bytes = (uint64_t)ctx->expert_cache_mb << 20;
+        else
+            scfg.cache_bytes = UINT64_MAX;
         e = oc_llama_enable_expert_stream(model, &scfg);
         if (e != OC_OK) {
             oc_llama_free(model);

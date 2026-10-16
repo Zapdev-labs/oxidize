@@ -114,6 +114,13 @@ static void claim_and_run(size_t executor_tid)
         const size_t i = atomic_fetch_add_explicit(&g_pool.next_slice, 1u,
                                                    memory_order_acquire);
         if (i >= nt) break;
+        /* A thread still draining the previous region can claim a slice of
+         * the next one without ever observing its generation in
+         * worker_main. The acquire on next_slice already pairs with the
+         * publisher's release reset, and this acquire on generation pairs
+         * with its seq_cst bump, so fn/user_data/n_items are guaranteed
+         * visible here even on that straggler path. */
+        (void)atomic_load_explicit(&g_pool.generation, memory_order_acquire);
         size_t begin, end;
         slice_for(g_pool.n_items, i, nt, &begin, &end);
         if (begin < end) {

@@ -803,7 +803,7 @@ void oc_oxk_q4_0_quad_prep_avx2(const uint8_t *rows, size_t row_bytes,
     }
 }
 
-__attribute__((target("avx2,fma,f16c"), optimize("O3,unroll-loops")))
+__attribute__((target("avx2,fma,f16c")))
 void oc_oxk_dot_q4_0_q8_0_quad_multi_avx2(
     const void *prep4, size_t blocks, const uint8_t *acts,
     size_t act_stride, size_t dq_off, size_t n_act, float *res4)

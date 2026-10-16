@@ -14,6 +14,7 @@
  * GGUF model; that test runs on the remote NUMA box (ai@192.168.1.121) as
  * part of the cpu-qwen-benchmark-121 feature.
  */
+#define _POSIX_C_SOURCE 200809L  /* mkstemp */
 #include <criterion/criterion.h>
 
 #include "oxidize/activation.h"
@@ -27,10 +28,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 Test(llama, qwen4_exp_text_reaches_config_validation)
 {
-    const char *path = "/tmp/oxidize-c-qwen4-exp-text-alias.gguf";
+    char path[] = "/tmp/oxidize-c-qwen4-exp-text-alias-XXXXXX";
+    const int fd = mkstemp(path);
+    cr_assert_geq(fd, 0);
+    close(fd);
     OcGgufWriter writer;
     cr_assert_eq(oc_gguf_writer_init(path, "qwen4_exp_text", &writer), OC_OK);
     cr_assert_eq(oc_gguf_writer_finalize(&writer), OC_OK);
@@ -40,7 +45,9 @@ Test(llama, qwen4_exp_text_reaches_config_validation)
      * accepted and enter the Qwen4Exp configuration path. */
     cr_assert_eq(oc_llama_load_flags(path, 0, &model), OC_ERR_MODEL);
     cr_assert(model.cfg.is_qwen4exp);
-    cr_assert(model.cfg.rope_norm_pairs);
+    /* qwen4exp uses the standard half-split (rotate_half) RoPE convention,
+     * not normed pairs. */
+    cr_assert(!model.cfg.rope_norm_pairs);
     cr_assert_eq(remove(path), 0);
 }
 

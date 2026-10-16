@@ -180,7 +180,11 @@ static void quantize_act_q8_0_dqf(const float *x, size_t n, uint8_t *out)
         const uint16_t dh = oc_f32_to_f16_bits(d);
         dst[0] = (uint8_t)(dh & 0xFF);
         dst[1] = (uint8_t)(dh >> 8);
-        dq[b] = d;
+        /* Store the f16-decoded scale, not the pre-rounding d: the single
+         * row dots all multiply by the header's f16 value, so the quad path
+         * must use the same quantized scale or its results drift off the
+         * reference. */
+        dq[b] = oc_f16_to_f32_bits(dh);
         int8_t *q = (int8_t *)(dst + 2);
         for (size_t i = 0; i < OC_OXK_QK8_0; i++) {
             int v = (int)lrintf(src[i] * id);

@@ -1260,7 +1260,12 @@ static void oc_oxk_init_once(void)
      * Every _avx2 symbol installed below now carries a real body; the last
      * scalar forwarders (Q4_1, Q5_K) were replaced. Check a variant's body,
      * not its name, before wiring it up here. */
-    if (level >= OC_OXK_AVX2) {
+    /* Every _avx2 body is compiled target("avx2,fma,f16c"), so the ISA
+     * level alone is not sufficient: a VM can mask FMA or F16C while still
+     * reporting AVX2/AVX-512, and installing these kernels there would
+     * SIGILL on first use. Require the full feature set the bodies were
+     * built with. */
+    if (level >= OC_OXK_AVX2 && has_fma && has_f16c) {
         g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_avx2;
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;

@@ -485,8 +485,9 @@ void oc_oxk_dot_q8_0_q8_0_packed_multi_avx2(const uint8_t *row,
  * a 4-row x 4-act register-blocked loop dots them against n_act Q8_0
  * activations. Same exact integer dots as packed_multi with the same f32
  * reassociation; res4[v*4 + r] is the dot of prepped row r against
- * activation v. res4 must hold round_up(n_act,4)*4 floats — padding
- * activation slots are computed but always valid. dq_off gives the byte
+ * activation v. res4 must hold n_act*4 floats — only the first n_act
+ * activation slots are written; padding slots are left untouched.
+ * dq_off gives the byte
  * offset of an f32 per-block scale array inside each activation (the batch
  * path appends it to the Q8_0 blocks); pass 0 to read the f16 block
  * headers instead. The dispatched wrappers fall back to scalar versions

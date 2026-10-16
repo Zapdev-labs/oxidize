@@ -391,9 +391,17 @@ static void check_quad_multi(size_t cols, size_t rows, size_t n_act)
     for (size_t v = 0; v < n_act; v++) {
         memcpy(acts2 + v * act_rb2, acts + v * act_rb, act_rb);
         float *dq = (float *)(acts2 + v * act_rb2 + dq_off);
-        for (size_t b = 0; b < blocks; b++)
+        for (size_t b = 0; b < blocks; b++) {
+            /* Keep the true decoded scale in the tail but overwrite the
+             * header with f16 64.0 (0x5000): a kernel that ignores dq_off
+             * reads the bogus header and fails loudly instead of silently
+             * matching the reference. */
+            uint8_t *hdr = acts2 + v * act_rb2 + b * OC_OXK_BLOCK_Q8_0_SIZE;
+            hdr[0] = 0x00;
+            hdr[1] = 0x50;
             dq[b] = oc_oxk_f16_le_to_f32(
                 acts + v * act_rb + b * OC_OXK_BLOCK_Q8_0_SIZE);
+        }
     }
 
     for (size_t r0 = 0; r0 < rows; r0 += 4) {
