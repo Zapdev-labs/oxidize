@@ -92,15 +92,15 @@ static bool parser_emit(OcStParser *p)
  * fixed-size NUL-terminated buffer. Returns the decoded length, or -1 on
  * truncation. `src` points at the opening quote; `*endp` is set past the
  * closing quote. */
-static int json_decode_string(const char *src, const char **endp,
-                              char *dst, size_t dst_cap)
+static int json_decode_string(const char *src, const char *end,
+                              const char **endp, char *dst, size_t dst_cap)
 {
-    if (*src != '"') { *endp = src; return -1; }
+    if (src >= end || *src != '"') { *endp = src; return -1; }
     src++;
     size_t i = 0;
-    while (*src && *src != '"') {
+    while (src < end && *src != '"') {
         char c = *src++;
-        if (c == '\\' && *src) {
+        if (c == '\\' && src < end) {
             char esc = *src++;
             switch (esc) {
             case 'n':  c = '\n'; break;
@@ -114,7 +114,8 @@ static int json_decode_string(const char *src, const char **endp,
             case 'u': {
                 /* Skip 4 hex digits; emit '?' for non-ASCII (tensor names
                  * are ASCII in practice). */
-                for (int h = 0; h < 4 && isxdigit((unsigned char)*src); h++) src++;
+                for (int h = 0; h < 4 && src < end &&
+                       isxdigit((unsigned char)*src); h++) src++;
                 c = '?';
                 break;
             }
@@ -125,16 +126,18 @@ static int json_decode_string(const char *src, const char **endp,
         else { /* truncation: advance to closing quote */ }
     }
     if (dst != NULL && dst_cap > 0) dst[i] = '\0';
-    if (*src == '"') src++;
+    if (src >= end || *src != '"') { *endp = end; return -1; }
+    src++;
     *endp = src;
     return (int)i;
 }
 
 /* Parse a JSON unsigned integer. `*endp` points past the last digit. */
-static uint64_t json_decode_uint(const char *src, const char **endp)
+static uint64_t json_decode_uint(const char *src, const char *end,
+                                 const char **endp)
 {
     uint64_t v = 0;
-    while (isdigit((unsigned char)*src)) {
+    while (src < end && isdigit((unsigned char)*src)) {
         v = v * 10 + (uint64_t)(*src - '0');
         src++;
     }
@@ -144,24 +147,25 @@ static uint64_t json_decode_uint(const char *src, const char **endp)
 
 /* Skip a JSON value (string, number, array, object, true/false/null) starting
  * at `src`. Sets `*endp` just past the value. Used to skip unknown fields. */
-static void json_skip_value(const char *src, const char **endp)
+static void json_skip_value(const char *src, const char *end,
+                            const char **endp)
 {
-    while (*src && isspace((unsigned char)*src)) src++;
-    if (*src == '"') {
+    while (src < end && isspace((unsigned char)*src)) src++;
+    if (src < end && *src == '"') {
         const char *e;
-        json_decode_string(src, &e, NULL, 0);
+        json_decode_string(src, end, &e, NULL, 0);
         *endp = e;
         return;
     }
-    if (*src == '[' || *src == '{') {
+    if (src < end && (*src == '[' || *src == '{')) {
         char open_ch = *src;
         char close_ch = (open_ch == '[') ? ']' : '}';
         int depth = 1;
         src++;
-        while (*src && depth > 0) {
+        while (src < end && depth > 0) {
             if (*src == '"') {
                 const char *e;
-                json_decode_string(src, &e, NULL, 0);
+                json_decode_string(src, end, &e, NULL, 0);
                 src = e;
                 continue;
             }
@@ -173,7 +177,7 @@ static void json_skip_value(const char *src, const char **endp)
         return;
     }
     /* number / true / false / null: skip word chars */
-    while (*src && !isspace((unsigned char)*src) && *src != ',' &&
+    while (src < end && !isspace((unsigned char)*src) && *src != ',' &&
            *src != ']' && *src != '}') {
         src++;
     }
@@ -181,12 +185,13 @@ static void json_skip_value(const char *src, const char **endp)
 }
 
 /* Handle a value for a known descriptor field, given the parser state. */
-static void parser_handle_value(OcStParser *p, const char *src, const char **endp)
+static void parser_handle_value(OcStParser *p, const char *src,
+                                const char *end, const char **endp)
 {
-    while (*src && isspace((unsigned char)*src)) src++;
-    if (*src == '"') {
+    while (src < end && isspace((unsigned char)*src)) src++;
+    if (src < end && *src == '"') {
         char buf[OC_SAFETENSORS_DTYPE_LEN];
-        json_decode_string(src, endp, buf, sizeof(buf));
+        json_decode_string(src, end, endp, buf, sizeof(buf));
         if (strcmp(p->field, "dtype") == 0) {
             strncpy(p->cur.dtype, buf, OC_SAFETENSORS_DTYPE_LEN - 1);
             p->cur.dtype[OC_SAFETENSORS_DTYPE_LEN - 1] = '\0';
@@ -194,6 +199,7 @@ static void parser_handle_value(OcStParser *p, const char *src, const char **end
         /* "endianess" and other string fields are ignored. */
         return;
     }
+    if (src >= end) { *endp = src; return; }
     if (*src == '[') {
         /* Array value: shape or data_offsets. The skip fallback below
          * handles unknown arrays by re-parsing from the '['. */
@@ -201,46 +207,46 @@ static void parser_handle_value(OcStParser *p, const char *src, const char **end
         src++;
         if (strcmp(p->field, "shape") == 0) {
             p->shape_count = 0;
-            while (*src && *src != ']') {
-                while (*src && isspace((unsigned char)*src)) src++;
-                if (*src == ']') break;
+            while (src < end && *src != ']') {
+                while (src < end && isspace((unsigned char)*src)) src++;
+                if (src >= end || *src == ']') break;
                 const char *e;
-                uint64_t v = json_decode_uint(src, &e);
+                uint64_t v = json_decode_uint(src, end, &e);
                 if (p->shape_count < OC_SAFETENSORS_MAX_DIMS) {
                     p->shape_vals[p->shape_count++] = v;
                 }
                 src = e;
-                while (*src && isspace((unsigned char)*src)) src++;
-                if (*src == ',') src++;
+                while (src < end && isspace((unsigned char)*src)) src++;
+                if (src < end && *src == ',') src++;
             }
-            if (*src == ']') src++;
+            if (src < end && *src == ']') src++;
             *endp = src;
             return;
         }
         if (strcmp(p->field, "data_offsets") == 0) {
             p->offset_count = 0;
-            while (*src && *src != ']') {
-                while (*src && isspace((unsigned char)*src)) src++;
-                if (*src == ']') break;
+            while (src < end && *src != ']') {
+                while (src < end && isspace((unsigned char)*src)) src++;
+                if (src >= end || *src == ']') break;
                 const char *e;
-                uint64_t v = json_decode_uint(src, &e);
+                uint64_t v = json_decode_uint(src, end, &e);
                 if (p->offset_count < 2) {
                     p->offsets[p->offset_count++] = v;
                 }
                 src = e;
-                while (*src && isspace((unsigned char)*src)) src++;
-                if (*src == ',') src++;
+                while (src < end && isspace((unsigned char)*src)) src++;
+                if (src < end && *src == ',') src++;
             }
-            if (*src == ']') src++;
+            if (src < end && *src == ']') src++;
             *endp = src;
             return;
         }
         /* Unknown array: skip from the '['. */
-        json_skip_value(arr_start, endp);
+        json_skip_value(arr_start, end, endp);
         return;
     }
     /* Unknown scalar value: skip. */
-    json_skip_value(src, endp);
+    json_skip_value(src, end, endp);
 }
 
 /* Parse the JSON header string. Populates `p->out_arr` / `p->out_len`.
@@ -268,14 +274,14 @@ static OcError parse_header(const char *json, size_t json_len,
             if (c != '"') return OC_ERR_FORMAT;
             const char *e;
             char namebuf[OC_SAFETENSORS_NAME_LEN];
-            int n = json_decode_string(s, &e, namebuf, sizeof(namebuf));
+            int n = json_decode_string(s, end, &e, namebuf, sizeof(namebuf));
             if (n < 0) return OC_ERR_FORMAT;
             s = e;
             /* Top-level "__metadata__" key is skipped as an unknown value. */
             if (strcmp(namebuf, "__metadata__") == 0) {
-                while (*s && isspace((unsigned char)*s)) s++;
-                if (*s == ':') s++;
-                json_skip_value(s, &e);
+                while (s < end && isspace((unsigned char)*s)) s++;
+                if (s < end && *s == ':') s++;
+                json_skip_value(s, end, &e);
                 s = e;
                 st = OC_STJ_TOP;
                 break;
@@ -312,7 +318,7 @@ static OcError parse_header(const char *json, size_t json_len,
             if (c == '}') { s++; st = OC_STJ_DESC_OBJ; break; }
             if (c != '"') return OC_ERR_FORMAT;
             const char *e;
-            json_decode_string(s, &e, p->field, sizeof(p->field));
+            json_decode_string(s, end, &e, p->field, sizeof(p->field));
             s = e;
             st = OC_STJ_AFTER_FIELD;
             break;
@@ -323,7 +329,7 @@ static OcError parse_header(const char *json, size_t json_len,
             break;
         case OC_STJ_VALUE: {
             const char *e;
-            parser_handle_value(p, s, &e);
+            parser_handle_value(p, s, end, &e);
             s = e;
             /* After a value, expect ',' or '}' inside the descriptor. */
             st = OC_STJ_DESC_OBJ;
@@ -399,20 +405,25 @@ OcError oc_safetensors_open(const char *path, OcSafetensorsFile *out)
     if (header_len == 0 || header_len >= SIZE_MAX || header_len > UINT64_MAX - 8u) {
         fclose(fp); return OC_ERR_FORMAT;
     }
+    /* Bound the declared header by the real file size before allocating —
+     * a truncated file reporting a huge header_len must be FORMAT, not OOM. */
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return OC_ERR_IO; }
+    long fsize = ftell(fp);
+    if (fsize < 0) { fclose(fp); return OC_ERR_IO; }
+    uint64_t file_size = (uint64_t)fsize;
+    if (file_size < 8u || header_len > file_size - 8u) {
+        fclose(fp); return OC_ERR_FORMAT;
+    }
     /* Read JSON header. */
     char *json = malloc((size_t)header_len + 1);
     if (json == NULL) { fclose(fp); return OC_ERR_OOM; }
-    if (fread(json, 1, (size_t)header_len, fp) != (size_t)header_len) {
+    if (fseek(fp, 8, SEEK_SET) != 0 ||
+        fread(json, 1, (size_t)header_len, fp) != (size_t)header_len) {
         free(json); fclose(fp); return OC_ERR_FORMAT;
     }
     json[header_len] = '\0';
     /* Read the rest into a buffer. */
     uint64_t data_start = 8u + header_len;
-    /* Determine file size. */
-    if (fseek(fp, 0, SEEK_END) != 0) { free(json); fclose(fp); return OC_ERR_IO; }
-    long fsize = ftell(fp);
-    if (fsize < 0) { free(json); fclose(fp); return OC_ERR_IO; }
-    uint64_t file_size = (uint64_t)fsize;
     uint64_t data_len = file_size > data_start ? file_size - data_start : 0;
     void *raw = NULL;
     if (data_len > 0) {

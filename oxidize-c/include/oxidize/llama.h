@@ -930,6 +930,12 @@ void oc_llama_session_reset(OcLlamaSession *sess);
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);
+/* Load a full native (SafeTensors directory) checkpoint — e.g. a qwen4exp
+ * EXL3 tree with config.json, tokenizer and one or more .safetensors
+ * shards — into `out`. Unlike oc_llama_load_exl3(), which attaches an EXL3
+ * overlay directory onto an already-loaded GGUF model, this reads the
+ * complete model: embeddings, heads, MoE experts, hyper-connections and
+ * the optional MTP draft head all come from the SafeTensors files. */
 OcError oc_llama_load_exl3_native(const char *directory, OcLlamaModel *out);
 
 void oc_llama_free(OcLlamaModel *model);

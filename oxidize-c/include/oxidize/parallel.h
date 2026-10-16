@@ -37,10 +37,12 @@ extern "C" {
  * index `tid` in [0, n_threads). Slices are claimed rather than assigned:
  * a thread that finishes early may run several disjoint slices in one
  * region, so a body can be invoked multiple times on the same `tid` and
- * must not assume exactly one call per thread per region — per-thread
- * state belongs in oc_parallel_scratch(tid), not in call-scoped setup.
- * Slices never overlap, so a body that writes only within its own slice
- * needs no locking. */
+ * must not assume exactly one call per thread per region. oc_parallel_scratch
+ * offers only a temporary per-call buffer (the pointer can move when a
+ * larger request grows it), so state must be re-derived on every
+ * invocation rather than cached across calls or regions. Slices never
+ * overlap, so a body that writes only within its own slice needs no
+ * locking. */
 typedef void (*OcParallelFn)(size_t begin, size_t end, size_t tid,
                              void *user_data);
 

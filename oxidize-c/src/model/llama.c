@@ -3325,10 +3325,14 @@ static const float *rope_row(OcLlamaSession *s, float theta,
             if (cap > SIZE_MAX / 2u) return NULL;
             cap *= 2u;
         }
+        /* Transactional grow: a failed realloc leaves the old block live,
+         * a successful one must be adopted — never freed and left
+         * dangling in `t`. */
         float *nc = realloc(t->cos_t, cap * t->half * sizeof(float));
-        float *ns = realloc(t->sin_t, cap * t->half * sizeof(float));
-        if (nc == NULL || ns == NULL) { free(nc); free(ns); return NULL; }
+        if (nc == NULL) return NULL;
         t->cos_t = nc;
+        float *ns = realloc(t->sin_t, cap * t->half * sizeof(float));
+        if (ns == NULL) return NULL;
         t->sin_t = ns;
         t->cap = cap;
     }
@@ -5372,6 +5376,16 @@ static OcError forward_layer_qwen4exp(OcLlamaSession *s, uint32_t layer)
     OcError e = OC_OK;
     if (L->kind == OC_LLAMA_LAYER_QWEN35_RECURRENT) {
         e = forward_qwen35_recurrent(s, layer);
+    } else if (c->indexer_top_k > 0 && s->pos >= c->indexer_top_k) {
+        /* Past the QSA budget the reference model routes attention through
+         * the sparse indexer (top_k KV cells); dense full-prefix attention
+         * would silently produce different logits. No QSA implementation
+         * exists yet, so fail loudly instead. */
+        oc_log(OC_LOG_ERROR,
+               "llama: qwen4exp context %u reached QSA budget %u; "
+               "sparse indexer attention is not implemented",
+               s->pos, c->indexer_top_k);
+        return OC_ERR_MODEL;
     } else {
         /* Dense attention over the whole prefix — exact while
          * s->pos < cfg.indexer_top_k (the QSA budget). */

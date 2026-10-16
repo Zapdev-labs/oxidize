@@ -106,10 +106,10 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
     /* Recurrent/full layer kinds, hyper-connections, QSA indexer. */
     const OcJson *lt=oc_json_get(t,"layer_types");
     if(!lt||lt->type!=OC_JSON_ARRAY||lt->count!=c->n_layer)return OC_ERR_MODEL;
-    c->recurrent_layers=calloc(c->n_layer,sizeof(uint8_t));if(!c->recurrent_layers)return OC_ERR_OOM;
-    size_t li=0;for(const OcJson *v=lt->child;v;v=v->next,li++)
-        if(eq(v,"linear_attention"))c->recurrent_layers[li]=1;
-        else if(!eq(v,"full_attention"))return OC_ERR_MODEL;
+    /* Validate entries before allocating so later failure paths cannot
+     * leak recurrent_layers (it is filled in at the end of the parse). */
+    for(const OcJson *v=lt->child;v;v=v->next)
+        if(!eq(v,"linear_attention")&&!eq(v,"full_attention"))return OC_ERR_MODEL;
     if(!uint_field(t,"full_attention_interval",1,&c->full_attention_interval)||!c->full_attention_interval)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!uint_field(t,"hc_count",0,&c->hc_mult)||!uint_field(t,"hc_lowrank",0,&c->hc_low_rank)||
        !c->hc_mult||c->hc_mult>8u||!c->hc_low_rank)return OC_ERR_MODEL;
@@ -149,6 +149,9 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
     bool tied=false;if(!flag(t,"tie_word_embeddings",false,&tied))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);c->tied_embeddings=tied;
     c->norm_scale=1;c->expert_weights_scale=1;c->sliding_window_pattern=1;c->norm_groups=1;
     c->head_dim_swa=c->head_dim;c->n_head_kv_swa=c->n_head_kv;c->rope_dim_swa=c->rope_dim;c->rope_theta_swa=c->rope_theta;
+    c->recurrent_layers=calloc(c->n_layer,sizeof(uint8_t));if(!c->recurrent_layers)return OC_ERR_OOM;
+    size_t li=0;for(const OcJson *v=lt->child;v;v=v->next,li++)
+        if(eq(v,"linear_attention"))c->recurrent_layers[li]=1;
     return OC_OK;
 }
 static OcError config_load(const OcJson *j,OcLlamaConfig *c,OcModelArchitecture *arch) {
@@ -198,7 +201,8 @@ static bool pipeline(const OcJson *j,bool bpe,const char **pre_name) {
             /* Qwen variant that keeps combining marks with the letter run. */
             const char *qwen_m="(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
             if(eq(pattern,llama))*pre_name="llama-bpe";
-            else if(eq(pattern,qwen)||eq(pattern,qwen_m))*pre_name="qwen2";
+            else if(eq(pattern,qwen))*pre_name="qwen2";
+            else if(eq(pattern,qwen_m))*pre_name="qwen_m";
             else return false;
         }
         if(!pre||!eq(oc_json_get(pre,"type"),"ByteLevel")||!flag(pre,"add_prefix_space",false,&prefix)||prefix||!flag(pre,"use_regex",true,&regex))return false;

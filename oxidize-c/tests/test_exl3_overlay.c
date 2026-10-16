@@ -4,10 +4,23 @@
 #include "oxidize/exl3.h"
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Append fmt to buf, asserting the result fits. Keeps header-building
+ * chains from silently advancing `n` past the buffer on truncation. */
+static void hcat(char *buf, size_t cap, size_t *n, const char *fmt, ...)
+{
+    va_list ap; va_start(ap, fmt);
+    int w = (*n < cap) ? vsnprintf(buf + *n, cap - *n, fmt, ap) : -1;
+    va_end(ap);
+    cr_assert_geq(w, 0);
+    cr_assert_lt(*n + (size_t)w, cap);
+    *n += (size_t)w;
+}
 
 #define D 128u
 #define PACKED (8u * 8u * 32u * 2u)
@@ -75,7 +88,7 @@ static void fixture(char path[64], size_t groups, int malformed)
     header[n++]='{';
     for (size_t i=0;i<groups;i++) {
         const char *key = (malformed == 1 && i == groups-1) ? "unsupported" : keys[i];
-        n += (size_t)snprintf(header+n,sizeof(header)-n,
+        hcat(header,sizeof(header),&n,
             "%s\"%s.trellis\":{\"dtype\":\"I16\",\"shape\":[8,8,%u],\"data_offsets\":[%zu,%zu]},"
             "\"%s.%s\":{\"dtype\":\"%s\",\"shape\":[%zu],\"data_offsets\":[%zu,%zu]},"
             "\"%s.%s\":{\"dtype\":\"%s\",\"shape\":[%zu],\"data_offsets\":[%zu,%zu]}",
@@ -86,13 +99,13 @@ static void fixture(char path[64], size_t groups, int malformed)
             malformed == 3 ? "I16" : "F16",scale_bytes/2,
             offset+PACKED+scale_bytes,offset+PACKED+scale_bytes*2);
         if (malformed == 4 || malformed == 5 || malformed == 8) {
-            n += (size_t)snprintf(header+n,sizeof(header)-n,
+            hcat(header,sizeof(header),&n,
                 ",\"%s.%s\":{\"dtype\":\"I32\",\"shape\":[],\"data_offsets\":[%zu,%zu]}",
                 key,malformed == 5 ? "bias" : "mul1",
                 malformed == 4 ? (size_t)1000000 : 0,
                 malformed == 4 ? (size_t)1000004 : 4);
             if (malformed == 8)
-                n += (size_t)snprintf(header+n,sizeof(header)-n,
+                hcat(header,sizeof(header),&n,
                     ",\"%s.mcg\":{\"dtype\":\"I32\",\"shape\":[],\"data_offsets\":[0,4]}",key);
         }
         offset += PACKED+scale_bytes*2;
@@ -266,7 +279,7 @@ static void native_fixture(char dir[64], bool tied, int bad)
     for(size_t i=0;i<count;i++) {
         size_t width = i>=7 && i%3 ? 2 : 4;
         size_t bytes=(i==0 || i>=7 ? D*D : D)*width;
-        n+=(size_t)snprintf(header+n,sizeof(header)-n,
+        hcat(header,sizeof(header),&n,
             "%s\"%s\":{\"dtype\":\"%s\",\"shape\":[%s128],\"data_offsets\":[%zu,%zu]}",
             i ? "," : "",bad==1 && i==2 ? "missing_norm" : names[i],width==4 ? "F32" : i%3==1 ? "F16" : "BF16",i==0 || i>=7 ? "128," : "",off,off+bytes);
         off+=bytes;

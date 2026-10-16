@@ -156,7 +156,12 @@ static const OcSafetensorsTensor *src_find(Src *s, const char *name,
         for (size_t t = 0; t < f->n_tensors; t++) {
             const OcSafetensorsTensor *ten = &f->tensors[t];
             if (!strcmp(ten->name, name)) {
-                /* raw_data points at the start of the data section */
+                /* data section occupies [data_start, file_size); reject
+                 * a header claiming data outside it. */
+                if (ten->data_offset > f->file_size - f->data_start ||
+                    ten->data_length >
+                        f->file_size - f->data_start - ten->data_offset)
+                    die("tensor %s out of bounds", name);
                 *(const uint8_t **)data =
                     (const uint8_t *)f->raw_data + ten->data_offset;
                 return ten;
@@ -222,9 +227,7 @@ static float *src_dequant(Src *s, const char *key, size_t in, size_t out)
     for (size_t c = 0; c < in; c++) x[c * in + c] = 1.0f;
     OcError mm = oc_exl3_matmul(&m, x, in, cols, out, in);
     if (mm != OC_OK) die("matmul %s rc=%d", key, (int)mm);
-    fprintf(stderr, "  dequant %s matmul ok\n", key);
     free(x);
-    fprintf(stderr, "  free x ok\n");
     float *w = malloc(out * in * sizeof(float));
     if (!w) die("oom");
     for (size_t r = 0; r < out; r++)
@@ -242,6 +245,13 @@ static float *src_vector(Src *s, const char *name, size_t n)
     const void *data = NULL;
     const OcSafetensorsTensor *t = src_find(s, name, &data);
     if (!t) die("missing %s", name);
+    /* The header can under-report elements; never read past data_length. */
+    size_t esz = !strcmp(t->dtype, "F32") ? 4 : 2;
+    if (!strcmp(t->dtype, "F32") && !strcmp(t->dtype, "F16") &&
+        strcmp(t->dtype, "BF16"))
+        esz = 0;
+    if (esz == 0 || n > t->data_length / esz)
+        die("short tensor %s (%zu x %s)", name, n, t->dtype);
     float *v = malloc(n * sizeof(float));
     if (!v) die("oom");
     const uint8_t *p = data;

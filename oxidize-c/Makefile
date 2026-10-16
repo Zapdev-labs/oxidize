@@ -77,9 +77,6 @@ CRITERION_DEPS := $(CRITERION_ARCHIVE)
 CRITERION_LINK := $(CRITERION_ARCHIVE)
 endif
 
-TEST_SRCS := $(wildcard tests/test_*.c)
-TEST_OBJS := $(TEST_SRCS:.c=.o)
-
 # ASan + UBSan for leak/UB detection in tests (valgrind not installed locally).
 # Criterion needs pthreads, dynamic loading, and math.  Linux additionally
 # needs librt for its POSIX shared-memory implementation; macOS provides the
@@ -95,6 +92,14 @@ else
 TEST_SANITIZE_FLAGS := -fsanitize=address,undefined
 SAN_SUFFIX   := asan
 endif
+
+TEST_SRCS := $(wildcard tests/test_*.c)
+# Test objects carry the sanitizer suffix too, so flipping SANITIZE can
+# never reuse a test object built with the other mode's flags.
+TEST_OBJS := $(TEST_SRCS:.c=.$(SAN_SUFFIX).o)
+# Both variants, for `clean` and dep coverage regardless of SANITIZE.
+ALL_SAN_OBJS := $(addsuffix .asan.o,$(basename $(TEST_SRCS) $(LIB_SRCS))) \
+                $(addsuffix .nosan.o,$(basename $(TEST_SRCS) $(LIB_SRCS)))
 TEST_CFLAGS := -std=c11 -Wall -Wextra -Wno-format-zero-length \
                $(TEST_SANITIZE_FLAGS) -fno-omit-frame-pointer -g -O0 \
                -ffp-contract=off -DOC_TESTING \
@@ -108,7 +113,7 @@ TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) $(TEST_SANITIZE_FLAGS)
 # Sanitizer-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
 LIB_ASAN_OBJS := $(LIB_SRCS:.c=.$(SAN_SUFFIX).o)
 DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
-             $(TEST_OBJS:.o=.d) $(LIB_ASAN_OBJS:.o=.d) \
+             $(ALL_SAN_OBJS:.o=.d) \
              oc-tokenize.d oc-eval.d
 
 test_runner: $(TEST_OBJS) $(LIB_ASAN_OBJS) $(CRITERION_DEPS)
@@ -121,12 +126,21 @@ src/%.asan.o: src/%.c
 src/%.nosan.o: src/%.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-tests/%.o: tests/%.c
+tests/%.asan.o: tests/%.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+tests/%.nosan.o: tests/%.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # Default object rule (no ASan).
 src/%.o: src/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+# oxk_avx2's GEMV kernels are the prefill hot path: keep the explicit -O3
+# they had via the optimize() attribute (removed because it broke the
+# target() attribute on GCC) scoped to this file rather than project-wide.
+src/compute/oxk_avx2.o: CFLAGS += -O3
+src/compute/oxk_avx2.asan.o src/compute/oxk_avx2.nosan.o: TEST_CFLAGS += -O3
 
 -include $(DEP_FILES)
 
@@ -262,8 +276,8 @@ cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 	nvcc $(NVCC_FLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(LIB_OBJS) $(BIN_OBJS) $(TEST_OBJS) \
-	      $(LIB_ASAN_OBJS) $(CUDA_OBJS) \
+	rm -f $(LIB_OBJS) $(BIN_OBJS) $(ALL_SAN_OBJS) \
+	      $(CUDA_OBJS) \
 	      $(DEP_FILES) \
 	      oxidize-c oc-tokenize oc-eval test_runner liboxidize-c.a
 

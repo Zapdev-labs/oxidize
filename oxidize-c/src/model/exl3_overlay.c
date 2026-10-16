@@ -853,13 +853,12 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
     return OC_OK;
 }
 
-static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
+static OcError q4e_load_native_body(OcLlamaModel *m, OcExl3Overlay *o,
+                                    Q4eIndex ni)
 {
     OcLlamaConfig *c = &m->cfg;
-    Q4eIndex ni = {0};
     char key[OC_SAFETENSORS_NAME_LEN];
-    OcError e = q4e_index_build(o, &ni);
-    if (e != OC_OK) return e;
+    OcError e = OC_OK;
 
     const size_t D = c->n_embd;
     const size_t hc_dim = (size_t)c->hc_mult * D;
@@ -870,7 +869,9 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
     const size_t conv_dim = 2 * key_dim + c->ssm_inner_size;
     const uint32_t n_exp = c->num_experts;
 
-    /* V-head permutation for the linear-attention layers. */
+    /* V-head permutation for the linear-attention layers. Owned by the
+     * overlay so every error path below frees it. */
+    /* q4e_v_perm registers its buffer with q4e_owned on success. */
     uint32_t *vperm = q4e_v_perm(o, c->ssm_group_count, c->ssm_value_heads);
     if (!vperm) return OC_ERR_OOM;
     /* The trellis row/block perms below treat one V head as exactly one
@@ -1213,12 +1214,26 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
                nme);
         return OC_ERR_MODEL;
     }
-    free(ni.items);
-    free(ni.used);
     oc_log(OC_LOG_INFO, "qwen4exp native EXL3 checkpoint loaded: "
            "%u layers (%u recurrent, %u full), %u experts, ctx %u",
            c->n_layer, n_state, n_kv, n_exp, c->n_ctx);
     return OC_OK;
+}
+
+/* Wrapper: owns the name index so every body error path releases it. */
+static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
+{
+    Q4eIndex ni = {0};
+    OcError e = q4e_index_build(o, &ni);
+    if (e != OC_OK) {
+        free(ni.items);
+        free(ni.used);
+        return e;
+    }
+    e = q4e_load_native_body(m, o, ni);
+    free(ni.items);
+    free(ni.used);
+    return e;
 }
 
 OcError oc_llama_load_exl3_native(const char *directory, OcLlamaModel *out)

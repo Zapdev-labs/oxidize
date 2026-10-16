@@ -49,13 +49,24 @@ static char *string(Parser *p) {
     }
     return NULL;
 }
-static bool unique(OcJson *v) {
+/* OC_OK when keys are unique; OC_ERR_FORMAT on a duplicate; OC_ERR_OOM when
+ * the scratch table cannot be allocated. The probe bound stops a crafted
+ * document full of FNV-1a-colliding keys from stalling the parse: once a
+ * single key needs more than MAX_PROBE steps the input is rejected. */
+static OcError unique(OcJson *v) {
     size_t cap=8; while(cap<v->count*2) cap*=2;
-    const char **keys=calloc(cap,sizeof(*keys)); if(!keys) return false;
-    bool ok=true;
-    for(OcJson *c=v->child;c;c=c->next) { size_t h=2166136261u;for(const unsigned char *s=(const unsigned char *)c->key;*s;s++) h=(h^*s)*16777619u;h&=cap-1;
-        while(keys[h]) { if(!strcmp(keys[h],c->key)) {ok=false;break;} h=(h+1)&(cap-1); } if(!ok) break;keys[h]=c->key; }
-    free(keys);return ok;
+    const char **keys=calloc(cap,sizeof(*keys)); if(!keys) return OC_ERR_OOM;
+    OcError err=OC_OK;
+    for(OcJson *c=v->child;c&&err==OC_OK;c=c->next) {
+        size_t h=2166136261u;for(const unsigned char *s=(const unsigned char *)c->key;*s;s++) h=(h^*s)*16777619u;h&=cap-1;
+        size_t probes=0;
+        while(keys[h]) {
+            if(!strcmp(keys[h],c->key)||++probes>64) {err=OC_ERR_FORMAT;break;}
+            h=(h+1)&(cap-1);
+        }
+        if(err==OC_OK) keys[h]=c->key;
+    }
+    free(keys);return err;
 }
 static OcJson *value(Parser *p,unsigned depth) {
     ws(p);if(depth>128||p->p==p->end) return NULL;
@@ -69,7 +80,7 @@ static OcJson *value(Parser *p,unsigned depth) {
             if(p->p==p->end)return NULL;
             if(*p->p==close) {p->p++;break;} if(*p->p++!=',')return NULL;
         }
-        return c=='{'&&!unique(v)?NULL:v;
+        if(c=='{'){OcError ue=unique(v);if(ue!=OC_OK){p->error=ue;return NULL;}} return v;
     }
     const char *literal=c=='t'?"true":c=='f'?"false":c=='n'?"null":NULL;
     if(literal) { size_t n=strlen(literal);if((size_t)(p->end-p->p)<n||memcmp(p->p,literal,n))return NULL;p->p+=n;v->type=c=='n'?OC_JSON_NULL:OC_JSON_BOOL;v->boolean=c=='t';return v; }
