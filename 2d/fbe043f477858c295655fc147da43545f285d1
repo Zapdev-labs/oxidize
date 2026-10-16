@@ -1,0 +1,36 @@
+oxidize-c/src/model/llama.c
+  s_4634b8c310642f::t_b1554bc837d6ba 614-618
+oxidize-c/src/compute/exl3.c
+  s_4634b8c310642f::t_f7f52499e5b8fd 233-235,241,243-244
+  s_4634b8c310642f::t_1bafbd53f23d82 332
+  s_4634b8c310642f::t_c64f47ce1d5e4f 387-388,390,393
+  s_4634b8c310642f::t_e4850f6416c469 412-413,415
+  s_4634b8c310642f::t_fe702644185524 461-462,465
+  s_4634b8c310642f::t_f34cf28223f846 310-313,316
+  s_4634b8c310642f::t_4d15e9735c3c21 481-482
+oxidize-c/src/format/hf_metadata.c
+  s_4634b8c310642f::t_af2724f56c7142 180-183,197-201
+  s_4634b8c310642f::t_579d25c7d9aab3 184
+  s_4634b8c310642f::t_d3d7525bac99fd 81-84
+  s_4634b8c310642f::t_19340458c3ea05 185
+oxidize-c/src/cli/main.c
+  s_4634b8c310642f::t_f082d282930390 806-809,812
+oxidize-c/src/model/exl3_overlay.c
+  s_4634b8c310642f::t_6d3f9805f54b2c 486
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2dfbe043f477858c295655fc147da43545f285d1",
+  "prompts": {},
+  "sessions": {
+    "s_4634b8c310642f": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "6b579ea0-9260-4076-8f52-e5adcacad260",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "Jackson57279 <jackson@email.zapdev.link>"
+    }
+  }
+}
