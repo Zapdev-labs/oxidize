@@ -923,6 +923,8 @@ void oc_llama_session_reset(OcLlamaSession *sess);
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);
+OcError oc_llama_load_exl3_native(const char *directory, OcLlamaModel *out);
+
 void oc_llama_free(OcLlamaModel *model);
 
 #ifdef __cplusplus

@@ -113,7 +113,7 @@ static void print_help(void)
 "  oxidize-c --model <path.gguf> --prompt \"text\" [OPTIONS]\n"
 "\n"
 "OPTIONS:\n"
-"  --model PATH           GGUF model file (required for generation)\n"
+"  --model PATH           GGUF file or native EXL3 checkpoint directory/file\n"
 "  --exl3 PATH            EXL3 SafeTensors file/directory over matching GGUF (CPU)\n"
 "  --prompt TEXT          Prompt text (also accepted as positional arg)\n"
 "  --prompt-file PATH     Read prompt from a file\n"
@@ -262,6 +262,7 @@ static OcError run_generation(const OcCliArgs *args)
     memset(&plan, 0, sizeof(plan));
     bool have_plan = false;
     if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+        model.gguf.n_shards > 0 &&
         oc_autotune_fingerprint_gguf(&model.gguf, &fp) == OC_OK) {
         plan = oc_autotune_plan(&cpu, &fp);
         have_plan = true;
@@ -738,7 +739,9 @@ int main(int argc, char **argv)
         bool exl3_command = ctx.command == OC_CLI_CMD_PROMPT ||
             ctx.command == OC_CLI_CMD_BENCH ||
             ctx.command == OC_CLI_CMD_PERPLEXITY;
-        if (oc_cli_exl3_reject(ctx.exl3_path, ctx.backend,
+        const char *exl3_source = ctx.exl3_path ? ctx.exl3_path :
+            oc_cli_native_model_path(ctx.model_path) ? ctx.model_path : NULL;
+        if (oc_cli_exl3_reject(exl3_source, ctx.backend,
                 !exl3_command || ctx.stream_experts || ctx.mtp || ctx.mtp_model,
                 ctx.model_path != NULL)) return 1;
         if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
@@ -798,7 +801,9 @@ int main(int argc, char **argv)
      * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
-    if (oc_cli_exl3_reject(args.exl3_path, args.backend,
+    const char *exl3_source = args.exl3_path ? args.exl3_path :
+        oc_cli_native_model_path(args.model_path) ? args.model_path : NULL;
+    if (oc_cli_exl3_reject(exl3_source, args.backend,
             args.serve_api || args.stream_experts || args.mtp || args.mtp_model ||
             args.draft_model || args.spec_type || args.quantize_input ||
             args.inspect || args.cuda_selftest || args.print_plan,

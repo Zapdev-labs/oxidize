@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 struct OcK2Mtp;
 static void k2_mtp_free(struct OcK2Mtp *k);
@@ -1782,6 +1783,26 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
     if (path == NULL || out == NULL) return OC_ERR_INVALID_ARG;
     memset(out, 0, sizeof(*out));
     out->load_flags = flags;
+    struct stat checkpoint_stat;
+    if (stat(path, &checkpoint_stat) == 0) {
+        size_t len = strlen(path);
+        bool directory = S_ISDIR(checkpoint_stat.st_mode);
+        bool safetensors = S_ISREG(checkpoint_stat.st_mode) && len >= 12 &&
+            strcmp(path + len - 12, ".safetensors") == 0;
+        if (directory || safetensors) {
+            if (flags & OC_LLAMA_LOAD_STREAM) return OC_ERR_MODEL;
+            if (directory) return oc_llama_load_exl3_native(path, out);
+            const char *slash = strrchr(path, '/');
+            size_t prefix = slash ? (size_t)(slash - path) : 0;
+            char *dir = malloc(prefix + 2);
+            if (!dir) return OC_ERR_OOM;
+            if (prefix) { memcpy(dir, path, prefix); dir[prefix] = 0; }
+            else { dir[0] = slash ? '/' : '.'; dir[1] = 0; }
+            OcError native_error = oc_llama_load_exl3_native(dir, out);
+            free(dir);
+            return native_error;
+        }
+    }
 
     /* K2-Horizon is a large MoE that is usually close to the RAM limit.
      * WILLNEED faults the whole file in at once, so map it with the kernel's

@@ -109,6 +109,7 @@ int oc_cli_parse_failed(void);
 
 int oc_cli_exl3_reject(const char *path, const char *backend,
                         bool incompatible, bool has_model);
+bool oc_cli_native_model_path(const char *path);
 
 /* Parse the `oxidize-c <subcommand> [flags]` form into an OcCliContext.
  * Returns true when argv[1] names a known subcommand (ctx is filled in and

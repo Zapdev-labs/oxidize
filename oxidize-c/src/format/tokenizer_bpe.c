@@ -353,6 +353,7 @@ struct OcBpeTokenizer {
     /* Pre-tokenizer from `tokenizer.ggml.pre`. OC_PRETOK_NONE keeps the
      * legacy whole-segment merge path (Qwen) bit-for-bit unchanged. */
     OcPretokType pretok;
+    bool ignore_merges;
     /* Pre-tokenized path only: vocab id of each byte's GPT-2 character. */
     uint32_t  byte_ids[256];
     bool      byte_id_ok[256];
@@ -972,6 +973,8 @@ static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
     size_t *lens = (size_t *)malloc(len * sizeof(size_t));
     size_t *boff = (size_t *)malloc((len + 1) * sizeof(size_t));
     OcWordCacheEntry *cache = NULL;
+    char *whole_word = NULL;
+    size_t whole_cap = 0;
     if (!cpts || !lens || !boff) { e = OC_ERR_OOM; goto done; }
 
     size_t n = oc_unicode_cpts_from_utf8_offs(text, len, cpts, boff);
@@ -1014,6 +1017,28 @@ static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
             slot->hash = h;
         }
 
+        size_t start = out->n;
+        if (bpe->ignore_merges) {
+            if (nbytes > (SIZE_MAX - 1) / 4) { e = OC_ERR_INVALID_ARG; goto done; }
+            size_t want = nbytes * 4 + 1;
+            if (want > whole_cap) {
+                char *grown = realloc(whole_word, want);
+                if (!grown) { e = OC_ERR_OOM; goto done; }
+                whole_word = grown; whole_cap = want;
+            }
+            size_t length = 0;
+            for (size_t j = 0; j < nbytes; j++) {
+                const char *encoded = byte_to_gpt2_str[(uint8_t)bytes[j]];
+                size_t size = strlen(encoded);
+                memcpy(whole_word + length, encoded, size); length += size;
+            }
+            whole_word[length] = 0;
+            void *id;
+            if (oc_hashtable_get(bpe->vocab, whole_word, &id)) {
+                e = idbuf_push(out, (uint32_t)(uintptr_t)id);
+                goto word_done;
+            }
+        }
         /* Byte-encode the word from its raw span. Re-encoding code points
          * turns an invalid UTF-8 byte into U+FFFD (three tokens); llama.cpp
          * maps each original byte through byte_to_token. */
@@ -1025,8 +1050,8 @@ static OcError encode_fragment(const OcBpeTokenizer *bpe, const char *text,
             if (bpe->byte_id_ok[b]) m->id[n_sym++] = bpe->byte_ids[b];
             else if (bpe->has_unknown) m->id[n_sym++] = bpe->unknown_id;
         }
-        size_t start = out->n;
         e = merge_word(bpe, m, n_sym, out);
+word_done:
         if (e != OC_OK) goto done;
         if (slot) {
             slot->byte_off = b0;
@@ -1041,6 +1066,7 @@ done:
     free(lens);
     free(boff);
     free(cache);
+    free(whole_word);
     return e;
 }
 
@@ -1166,7 +1192,7 @@ OcError oc_bpe_encode(const OcBpeTokenizer *bpe, const char *text,
     *out_ids = NULL;
     *out_count = 0;
 
-    if (bpe->pretok != OC_PRETOK_NONE) {
+    if (bpe->pretok != OC_PRETOK_NONE || bpe->ignore_merges) {
         return bpe_encode_pretok(bpe, text, true, out_ids, out_count);
     }
 
@@ -1577,12 +1603,13 @@ OcError oc_bpe_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     }
 
     /* Pre-tokenizer selection (absent / unknown → legacy path). */
+    oc_gguf_metadata_get_bool(gguf, "tokenizer.hf.ignore_merges", &bpe->ignore_merges);
     const char *pre = NULL;
     size_t pre_len = 0;
     if (oc_gguf_metadata_get_str(gguf, "tokenizer.ggml.pre", &pre, &pre_len)) {
         bpe->pretok = oc_pretok_type_from_name(pre);
     }
-    if (bpe->pretok != OC_PRETOK_NONE) {
+    if (bpe->pretok != OC_PRETOK_NONE || bpe->ignore_merges) {
         for (uint32_t b = 0; b < 256; ++b) {
             void *vp;
             bpe->byte_id_ok[b] = oc_hashtable_get(bpe->vocab, byte_to_gpt2_str[b], &vp);
@@ -1809,7 +1836,7 @@ OcError oc_tokenizer_encode(const OcTokenizer *t, const char *text,
     OcError e;
     if (t->kind == OC_TOK_KIND_BPE && t->bpe) {
         const OcBpeTokenizer *bpe = t->bpe;
-        if (bpe->pretok != OC_PRETOK_NONE) {
+        if (bpe->pretok != OC_PRETOK_NONE || bpe->ignore_merges) {
             e = bpe_encode_pretok(bpe, text, policy != OC_TOK_DISALLOW_SPECIAL,
                                   out_ids, out_count);
         } else if (policy == OC_TOK_DISALLOW_SPECIAL) {

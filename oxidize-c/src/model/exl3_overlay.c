@@ -1,5 +1,6 @@
 #include "oxidize/exl3_overlay.h"
 #include "oxidize/exl3.h"
+#include "oxidize/hf_metadata.h"
 #include "oxidize/safetensors.h"
 #include "oxidize/oxk.h"
 #include "oxidize/log.h"
@@ -21,6 +22,8 @@ struct OcExl3Overlay {
     size_t n_files;
     OcExl3Entry *entries;
     size_t n_entries;
+    void **owned;
+    size_t n_owned;
 };
 
 void oc_exl3_overlay_free(OcExl3Overlay *o)
@@ -31,6 +34,8 @@ void oc_exl3_overlay_free(OcExl3Overlay *o)
         free((void *)o->entries[i].matrix.svh);
     }
     for (size_t i = 0; i < o->n_files; i++) oc_safetensors_close(&o->files[i]);
+    for (size_t i = 0; i < o->n_owned; i++) free(o->owned[i]);
+    free(o->owned);
     free(o->entries);
     free(o->files);
     free(o);
@@ -146,18 +151,9 @@ static OcWeightView *target(OcLlamaModel *m, const char *key)
     return NULL;
 }
 
-OcError oc_llama_load_exl3(OcLlamaModel *m, const char *path)
+static OcError attach_exl3(OcLlamaModel *m, OcExl3Overlay *o, bool native)
 {
-    if (!m || !path || !m->layers || !m->output.data ||
-        m->live_sessions || m->exl3_overlay) return OC_ERR_INVALID_ARG;
-    if ((m->arch != OC_ARCH_LLAMA && m->arch != OC_ARCH_MISTRAL &&
-         m->arch != OC_ARCH_QWEN) || m->cfg.num_experts || m->cfg.uses_mla ||
-        m->cfg.is_qwen35 || m->cfg.is_k2 || m->cfg.is_qwen4exp ||
-        m->mtp.present || m->cfg.nextn_predict_layers) return OC_ERR_MODEL;
-    OcExl3Overlay *o = calloc(1, sizeof(*o));
-    if (!o) return OC_ERR_OOM;
-    OcError e = open_files(o, path);
-    if (e != OC_OK) goto fail;
+    OcError e = OC_OK;
     size_t count = 0;
     /* Duplicate names, including companions in different shards, are ambiguous. */
     for (size_t f = 0; f < o->n_files; f++) {
@@ -212,7 +208,7 @@ OcError oc_llama_load_exl3(OcLlamaModel *m, const char *path)
             q->bits_twice = (unsigned)(t->shape[2] / 8);
             bool mcg = companion(o, key, "mcg", &data) != NULL;
             bool mul1 = companion(o, key, "mul1", &data) != NULL;
-            if ((mcg && mul1) || companion(o, key, "bias", &data) ||
+            if ((mcg && mul1) || (!native && companion(o, key, "bias", &data)) ||
                 companion(o, key, "scale", &data)) { e = OC_ERR_FORMAT; goto fail; }
             q->codebook = mul1 ? 2u :
                           mcg ? 1u : 0u;
@@ -231,6 +227,191 @@ OcError oc_llama_load_exl3(OcLlamaModel *m, const char *path)
            o->n_entries, o->n_files);
     return OC_OK;
 fail:
-    oc_exl3_overlay_free(o);
+    return e;
+}
+
+OcError oc_llama_load_exl3(OcLlamaModel *m, const char *path)
+{
+    if (!m || !path || !m->layers || !m->output.data ||
+        m->live_sessions || m->exl3_overlay) return OC_ERR_INVALID_ARG;
+    if ((m->arch != OC_ARCH_LLAMA && m->arch != OC_ARCH_MISTRAL &&
+         m->arch != OC_ARCH_QWEN) || m->cfg.num_experts || m->cfg.uses_mla ||
+        m->cfg.is_qwen35 || m->cfg.is_k2 || m->cfg.is_qwen4exp ||
+        m->mtp.present || m->cfg.nextn_predict_layers) return OC_ERR_MODEL;
+    OcExl3Overlay *o = calloc(1, sizeof(*o));
+    if (!o) return OC_ERR_OOM;
+    OcError e = open_files(o, path);
+    if (e == OC_OK) e = attach_exl3(m, o, false);
+    if (e != OC_OK) oc_exl3_overlay_free(o);
+    return e;
+}
+
+
+static OcError native_vector(const OcExl3Overlay *o, const char *name,
+                             size_t dim, bool optional, float **out)
+{
+    const void *data = NULL;
+    const OcSafetensorsTensor *t = find_tensor(o, name, &data);
+    if (!t) return optional ? OC_OK : OC_ERR_TENSOR;
+    size_t width = !strcmp(t->dtype, "F32") ? 4 :
+        (!strcmp(t->dtype, "F16") || !strcmp(t->dtype, "BF16")) ? 2 : 0;
+    if (!width || t->n_dims != 1 || t->shape[0] != dim ||
+        dim > SIZE_MAX / sizeof(float) || t->data_length != dim * width)
+        return OC_ERR_FORMAT;
+    float *v = malloc(dim * sizeof(*v));
+    if (!v) return OC_ERR_OOM;
+    const uint8_t *p = data;
+    for (size_t i = 0; i < dim; i++) {
+        if (width == 4) memcpy(&v[i], p + i * 4, 4);
+        else if (!strcmp(t->dtype, "F16")) v[i] = oc_oxk_f16_le_to_f32(p + i * 2);
+        else {
+            uint32_t bits = ((uint32_t)p[i*2] | (uint32_t)p[i*2+1] << 8) << 16;
+            memcpy(&v[i], &bits, 4);
+        }
+        if (!isfinite(v[i])) { free(v); return OC_ERR_FORMAT; }
+    }
+    *out = v;
+    return OC_OK;
+}
+
+static OcError native_matrix(OcExl3Overlay *o, const char *key,
+                             size_t rows, size_t cols, bool packed,
+                             OcWeightView *view)
+{
+    const void *data = NULL, *trellis = NULL;
+    const OcSafetensorsTensor *t = companion(o, key, "weight", &data);
+    const OcSafetensorsTensor *q = companion(o, key, "trellis", &trellis);
+    if (q) {
+        if (!packed || t) return OC_ERR_FORMAT;
+        *view = (OcWeightView){.data=trellis, .rows=rows, .cols=cols};
+        return OC_OK;
+    }
+    if (!t) return OC_ERR_TENSOR;
+    size_t width = !strcmp(t->dtype,"F32") ? 4 :
+        (!strcmp(t->dtype,"F16") || !strcmp(t->dtype,"BF16")) ? 2 : 0;
+    if (!width || !rows || !cols || cols > SIZE_MAX / width ||
+        rows > SIZE_MAX / (cols * width) || t->n_dims != 2 ||
+        t->shape[0] != rows || t->shape[1] != cols ||
+        t->data_length != rows * cols * width) return OC_ERR_FORMAT;
+    /* SafeTensors permits unaligned payload offsets. Keep ordinary views
+     * aligned for CPU kernels without expanding their storage dtype. */
+    if ((uintptr_t)data % width) {
+        void *copy = malloc(t->data_length);
+        if (!copy) return OC_ERR_OOM;
+        void **owned = realloc(o->owned, (o->n_owned + 1) * sizeof(*owned));
+        if (!owned) { free(copy); return OC_ERR_OOM; }
+        o->owned = owned; o->owned[o->n_owned++] = copy;
+        memcpy(copy, data, t->data_length); data = copy;
+    }
+    *view = (OcWeightView){.data=data, .rows=rows, .cols=cols,
+        .row_bytes=cols*width, .qtype=width == 4 ? OC_QUANT_F32 :
+            !strcmp(t->dtype,"F16") ? OC_QUANT_F16 : OC_QUANT_BF16};
+    return OC_OK;
+}
+
+static bool native_known_tensor(OcLlamaModel *m, const char *name)
+{
+    if (!strcmp(name,"model.embed_tokens.weight") || !strcmp(name,"model.norm.weight"))
+        return true;
+    char key[OC_SAFETENSORS_NAME_LEN];
+    size_t n = strlen(name);
+    if (n >= sizeof(key)) return false;
+    memcpy(key,name,n+1);
+    char *suffix = strrchr(key,'.');
+    if (!suffix) return false;
+    *suffix++ = 0;
+    OcWeightView *w = target(m,key);
+    if (w) {
+        if (!strcmp(suffix,"bias")) {
+            for (size_t i=0;i<m->cfg.n_layer;i++)
+                if (w == &m->layers[i].attn_q || w == &m->layers[i].attn_k ||
+                    w == &m->layers[i].attn_v) return true;
+            return false;
+        }
+        if (!strcmp(suffix,"weight")) return true;
+        const void *data;
+        if (!companion(m->exl3_overlay,key,"trellis",&data)) return false;
+        return !strcmp(suffix,"trellis") || !strcmp(suffix,"suh") ||
+            !strcmp(suffix,"svh") || !strcmp(suffix,"su") ||
+            !strcmp(suffix,"sv") || !strcmp(suffix,"mcg") || !strcmp(suffix,"mul1");
+    }
+    for (uint32_t i=0;i<m->cfg.n_layer;i++) {
+        const char *norms[]={"input_layernorm", "post_attention_layernorm",
+            "self_attn.q_norm", "self_attn.k_norm"};
+        for(size_t j=0;j<4;j++) {
+            char expected[128];
+            snprintf(expected,sizeof(expected),"model.layers.%u.%s.weight",i,norms[j]);
+            if (!strcmp(name,expected)) return true;
+        }
+    }
+    return false;
+}
+
+OcError oc_llama_load_exl3_native(const char *directory, OcLlamaModel *out)
+{
+    if (!directory || !out) return OC_ERR_INVALID_ARG;
+    memset(out,0,sizeof(*out));
+    OcError e = oc_hf_metadata_load(directory,&out->cfg,&out->arch,&out->gguf.unified);
+    if (e != OC_OK) goto fail;
+    OcLlamaConfig *c = &out->cfg;
+    if ((out->arch != OC_ARCH_LLAMA && out->arch != OC_ARCH_MISTRAL &&
+         out->arch != OC_ARCH_QWEN) || c->num_experts || c->uses_mla ||
+        c->is_qwen35 || c->is_k2 || c->is_qwen4exp || c->nextn_predict_layers) {
+        e = OC_ERR_MODEL; goto fail;
+    }
+    out->layers = calloc(c->n_layer,sizeof(*out->layers));
+    out->exl3_overlay = calloc(1,sizeof(*out->exl3_overlay));
+    if (!out->layers || !out->exl3_overlay) { e=OC_ERR_OOM; goto fail; }
+    OcExl3Overlay *o = out->exl3_overlay;
+    e = open_files(o,directory);
+    if (e != OC_OK) goto fail;
+    for(size_t f=0;f<o->n_files;f++) for(size_t i=0;i<o->files[f].n_tensors;i++)
+        if (!native_known_tensor(out,o->files[f].tensors[i].name)) {
+            e=OC_ERR_MODEL; goto fail;
+        }
+    e = native_matrix(o,"model.embed_tokens",c->vocab_size,c->n_embd,false,&out->tok_embeddings);
+    if (e != OC_OK) goto fail;
+    e = native_vector(o,"model.norm.weight",c->n_embd,false,&out->final_norm);
+    if (e != OC_OK) goto fail;
+    for (uint32_t i=0;i<c->n_layer;i++) {
+        OcLlamaLayer *l=&out->layers[i];
+        l->head_dim=c->head_dim; l->n_head_kv=c->n_head_kv;
+        l->rope_dim=c->rope_dim; l->rope_theta=c->rope_theta;
+        l->use_rope=true; l->kv_cache_index=i;
+        l->sliding_window=c->sliding_window;
+        const char *names[]={"self_attn.q_proj","self_attn.k_proj","self_attn.v_proj",
+            "self_attn.o_proj","mlp.gate_proj","mlp.up_proj","mlp.down_proj"};
+        OcWeightView *views[]={&l->attn_q,&l->attn_k,&l->attn_v,&l->attn_output,
+            &l->ffn_gate,&l->ffn_up,&l->ffn_down};
+        size_t q=(size_t)c->n_head*c->head_dim, kv=(size_t)c->n_head_kv*c->kv_head_dim;
+        size_t rows[]={q,kv,kv,c->n_embd,c->n_ff,c->n_ff,c->n_embd};
+        size_t cols[]={c->n_embd,c->n_embd,c->n_embd,q,c->n_embd,c->n_embd,c->n_ff};
+        char key[128];
+        for(size_t j=0;j<7;j++) {
+            snprintf(key,sizeof(key),"model.layers.%u.%s",i,names[j]);
+            e=native_matrix(o,key,rows[j],cols[j],true,views[j]);
+            if(e != OC_OK) goto fail;
+        }
+        const char *vectors[]={"input_layernorm.weight","post_attention_layernorm.weight",
+            "self_attn.q_proj.bias","self_attn.k_proj.bias","self_attn.v_proj.bias",
+            "self_attn.q_norm.weight","self_attn.k_norm.weight"};
+        float **values[]={&l->attn_norm,&l->ffn_norm,&l->attn_q_bias,&l->attn_k_bias,
+            &l->attn_v_bias,&l->attn_q_norm,&l->attn_k_norm};
+        size_t dims[]={c->n_embd,c->n_embd,q,kv,kv,c->head_dim,c->head_dim};
+        for(size_t j=0;j<7;j++) {
+            snprintf(key,sizeof(key),"model.layers.%u.%s",i,vectors[j]);
+            e=native_vector(o,key,dims[j],j>=2,values[j]);
+            if(e != OC_OK) goto fail;
+        }
+    }
+    e=native_matrix(o,"lm_head",c->vocab_size,c->n_embd,true,&out->output);
+    if(e == OC_ERR_TENSOR && c->tied_embeddings) { out->output=out->tok_embeddings; e=OC_OK; }
+    else if(e == OC_OK) c->tied_embeddings=false;
+    if(e != OC_OK) goto fail;
+    e=attach_exl3(out,o,true);
+    if(e != OC_OK) goto fail;
+    return OC_OK;
+fail:
+    oc_llama_free(out);
     return e;
 }

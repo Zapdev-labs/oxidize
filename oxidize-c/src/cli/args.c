@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 int oc_cli_kv_compress_enabled(const char *name)
 {
@@ -85,12 +86,22 @@ int oc_cli_exl3_reject(const char *path, const char *backend,
     if (!path) return 0;
     if (!path[0] || !has_model || incompatible ||
         (backend && strcmp(backend, "cpu") != 0)) {
-        fprintf(stderr, "error: --exl3 requires a matching --model GGUF and "
+        fprintf(stderr, "error: EXL3 requires a native checkpoint directory or "
+                "a matching --model GGUF plus --exl3 and "
                 "CPU prompt/bench/perplexity inference; server, GPU, "
                 "MTP, draft decoding and expert streaming are unsupported\n");
         return 1;
     }
     return 0;
+}
+
+bool oc_cli_native_model_path(const char *path)
+{
+    if (!path) return false;
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) return true;
+    size_t n = strlen(path);
+    return n >= 12 && strcmp(path + n - 12, ".safetensors") == 0;
 }
 
 int oc_cli_parse_failed(void)

@@ -372,7 +372,9 @@ OcError oc_cli_command_run(OcCliContext *ctx)
     if (!ctx) return OC_ERR_INVALID_ARG;
     bool exl3_command = ctx->command == OC_CLI_CMD_BENCH ||
         ctx->command == OC_CLI_CMD_PERPLEXITY;
-    if (oc_cli_exl3_reject(ctx->exl3_path, ctx->backend,
+    const char *exl3_source = ctx->exl3_path ? ctx->exl3_path :
+        oc_cli_native_model_path(ctx->model_path) ? ctx->model_path : NULL;
+    if (oc_cli_exl3_reject(exl3_source, ctx->backend,
             !exl3_command || ctx->stream_experts || ctx->mtp || ctx->mtp_model,
             ctx->model_path != NULL)) return OC_ERR_INVALID_ARG;
 
@@ -432,7 +434,7 @@ void oc_cli_command_help(void)
 "  perplexity       Compute perplexity on input text\n"
 "\n"
 "COMMON OPTIONS:\n"
-"  --model PATH          GGUF model file\n"
+"  --model PATH          GGUF file or native EXL3 checkpoint directory/file\n"
 "  --exl3 PATH           Native EXL3 SafeTensors overlay (CPU dense inference)\n"
 "  --output text|json    Output format (default: text)\n"
 "  --threads N           CPU thread hint (0 = auto)\n"
