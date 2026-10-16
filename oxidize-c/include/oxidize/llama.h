@@ -302,6 +302,12 @@ typedef struct OcLlamaLayer {
     OcWeightView ffn_gate_exps;           /* [num_experts*exp_i_size, n_embd]    */
     OcWeightView ffn_up_exps;             /* [num_experts*exp_i_size, n_embd]    */
     OcWeightView ffn_down_exps;           /* [num_experts*n_embd, exp_i_size]    */
+    /* Native per-expert EXL3 (qwen4exp SafeTensors): one trellis matrix per
+     * expert projection instead of a stacked view. Arrays of num_experts
+     * entries; the matrices are owned by the model's EXL3 overlay. Non-NULL
+     * only when the layer is a routed-EXL3 MoE (the stacked views above are
+     * then left empty). */
+    OcExl3Matrix *exl3_gate, *exl3_up, *exl3_down;
     /* Shared expert (always active, added with weight 1.0). */
     OcWeightView ffn_gate_shexp, ffn_up_shexp, ffn_down_shexp;
     OcWeightView ffn_gate_inp_shexp;     /* optional sigmoid gate for shared    */

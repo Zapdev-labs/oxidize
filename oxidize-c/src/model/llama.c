@@ -1638,7 +1638,11 @@ static OcError resolve_weights(OcLlamaModel *m)
                        "mis-shaped in blk.%u", l);
                 return OC_ERR_TENSOR;
             }
-            const bool invalid_moe = m->cfg.num_experts > 0 &&
+            /* Native per-expert EXL3 replaces the stacked expert views; the
+             * router, shared expert and its gate keep their ordinary views. */
+            const bool moe_exl3 =
+                L->exl3_gate && L->exl3_up && L->exl3_down;
+            const bool invalid_moe = m->cfg.num_experts > 0 && !moe_exl3 &&
                 (!L->ffn_gate_inp.data || !L->ffn_gate_exps.data ||
                  !L->ffn_up_exps.data || !L->ffn_down_exps.data ||
                  !L->ffn_gate_shexp.data || !L->ffn_up_shexp.data ||
@@ -1676,6 +1680,8 @@ static OcError resolve_weights(OcLlamaModel *m)
             OcLlamaLayer *M = &m->mtp.layer;
             const size_t q_rows = 2u * (size_t)m->cfg.n_head * m->cfg.head_dim;
             const size_t kv_rows = (size_t)m->cfg.n_head_kv * m->cfg.head_dim;
+            const bool m_moe_exl3 =
+                M->exl3_gate && M->exl3_up && M->exl3_down;
             const bool mtp_full =
                 M->attn_q.data && M->attn_q.rows == q_rows &&
                 M->attn_q.cols == m->cfg.n_embd &&
@@ -1688,8 +1694,10 @@ static OcError resolve_weights(OcLlamaModel *m)
                 M->hc_attn_norm && M->hc_ffn_norm &&
                 M->hc_attn_down.data && M->hc_attn_up.data &&
                 M->hc_ffn_down.data && M->hc_ffn_up.data &&
-                M->ffn_gate_inp.data && M->ffn_gate_exps.data &&
-                M->ffn_up_exps.data && M->ffn_down_exps.data &&
+                M->ffn_gate_inp.data &&
+                (m_moe_exl3 ||
+                 (M->ffn_gate_exps.data &&
+                  M->ffn_up_exps.data && M->ffn_down_exps.data)) &&
                 M->ffn_gate_shexp.data && M->ffn_up_shexp.data &&
                 M->ffn_down_shexp.data && M->ffn_gate_inp_shexp.data &&
                 m->mtp.eh_proj.data &&
@@ -3138,6 +3146,8 @@ void oc_llama_free(OcLlamaModel *model)
             free(model->layers[i].ssm_a_f32);
             free(model->layers[i].ssm_dt_f32);
             free(model->layers[i].ssm_norm_f32);
+            /* exl3_gate/up/down are owned by the EXL3 overlay's
+             * ownership list — not freed here. */
         }
         free(model->layers);
     }
@@ -3145,6 +3155,8 @@ void oc_llama_free(OcLlamaModel *model)
     free(model->mtp.layer.ffn_norm);
     free(model->mtp.layer.attn_q_norm);
     free(model->mtp.layer.attn_k_norm);
+    free(model->mtp.layer.hc_attn_norm);
+    free(model->mtp.layer.hc_ffn_norm);
     free(model->mtp.layer.post_attention_norm);
     free(model->mtp.layer.post_ffw_norm);
     free(model->mtp.enorm);
@@ -4147,7 +4159,55 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         L->ffn_down_shexp.row_bytes == down_row_bytes;
     const uint32_t n_mm = n_routed + (shexp_fused ? 1u : 0u);
 
-    if (grouped && n_routed > 0) {
+    if (L->exl3_gate) {
+        /* Native per-expert EXL3: each projection is its own trellis matrix,
+         * so instead of slicing stacked views the routed experts run through
+         * the fused per-expert runner (one parallel region per phase). */
+        if (n_routed > 0) {
+            OcExl3Expert *ex = malloc((size_t)n_routed * sizeof(*ex));
+            if (!ex) { exl3_compute_error = OC_ERR_OOM; return; }
+            uint32_t routed = 0;
+            for (uint32_t ei = 0; ei < k; ei++) {
+                const uint32_t idx = sel[ei];
+                if (idx >= n_exp) continue;
+                ex[routed].gate = &L->exl3_gate[idx];
+                ex[routed].up   = &L->exl3_up[idx];
+                ex[routed].down = &L->exl3_down[idx];
+                routed++;
+            }
+            OcError ee = oc_exl3_experts_gate_up(ex, routed, s->normed,
+                c->n_embd, NULL, NULL, s->expert_gate_all, s->expert_up_all,
+                i_size);
+            if (ee == OC_OK) {
+                swiglu_parallel(s->expert_gate_all, s->expert_up_all,
+                                (size_t)routed * i_size);
+                ee = oc_exl3_experts_down(ex, routed, s->expert_gate_all,
+                                          i_size, NULL, NULL,
+                                          s->expert_down_all, c->n_embd);
+            }
+            free(ex);
+            if (ee != OC_OK) { exl3_compute_error = ee; return; }
+            memset(s->expert_out, 0, c->n_embd * sizeof(float));
+            routed = 0;
+            for (uint32_t ei = 0; ei < k; ei++) {
+                const uint32_t idx = sel[ei];
+                const float w = routed_scale *
+                    (float)(s->router_logits[idx] / weight_norm);
+                if (idx < n_exp) {
+                    const float *down = s->expert_down_all +
+                        (size_t)routed * c->n_embd;
+                    for (size_t i = 0; i < c->n_embd; i++)
+                        s->expert_out[i] += w * down[i];
+                    routed++;
+                } else {
+                    for (size_t i = 0; i < c->n_embd; i++)
+                        s->expert_out[i] += w * s->normed[i];
+                }
+            }
+        } else {
+            memset(s->expert_out, 0, c->n_embd * sizeof(float));
+        }
+    } else if (grouped && n_routed > 0) {
         const size_t n_gate_up = (size_t)n_mm * 2;
         OcGgufQuantizationType gate_up_qtypes[n_gate_up];
         const uint8_t *gate_up_data[n_gate_up];
@@ -5671,6 +5731,10 @@ typedef struct {
      * [cap][hc_mult]. b->x is reused as the narrow block accumulator. */
     float    *hcx, *hc_xn, *hc_gate, *hc_lo, *hc_inj;
     const uint32_t *toks;   /* current chunk's token ids (PLE context)  */
+    /* Native per-expert EXL3 (qwen4exp): routed (expert, token) pair
+     * scratch, pair-indexed — [cap*k] rows of i_size (gate/up/act) and
+     * n_embd (down). */
+    float    *exl3_ga, *exl3_ub, *exl3_dn;
 } PrefillBuf;
 
 static void prefill_buf_free(PrefillBuf *b)
@@ -5688,6 +5752,7 @@ static void prefill_buf_free(PrefillBuf *b)
     free(b->rope_cos); free(b->rope_sin);
     free(b->hcx); free(b->hc_xn); free(b->hc_gate);
     free(b->hc_lo); free(b->hc_inj);
+    free(b->exl3_ga); free(b->exl3_ub); free(b->exl3_dn);
     memset(b, 0, sizeof(*b));
 }
 
@@ -5778,6 +5843,21 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
         if (!b->hcx || !b->hc_xn || !b->hc_gate || !b->hc_lo || !b->hc_inj) {
             prefill_buf_free(b);
             return OC_ERR_OOM;
+        }
+        /* Native per-expert EXL3 needs pair-indexed routed scratch. */
+        if (m->layers && m->layers[0].exl3_gate && b->n_slots > 0) {
+            const size_t pairs = cap * b->k;
+            size_t i2 = i_size;
+            if (pairs && pairs <= SIZE_MAX / i2 / sizeof(float) &&
+                pairs <= SIZE_MAX / b->n_embd / sizeof(float)) {
+                b->exl3_ga = xcalloc(pairs * i2, sizeof(float));
+                b->exl3_ub = xcalloc(pairs * i2, sizeof(float));
+                b->exl3_dn = xcalloc(pairs * b->n_embd, sizeof(float));
+            }
+            if (!b->exl3_ga || !b->exl3_ub || !b->exl3_dn) {
+                prefill_buf_free(b);
+                return OC_ERR_OOM;
+            }
         }
     }
 
@@ -5966,7 +6046,55 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
     const size_t up_rb   = L->ffn_up_exps.row_bytes;
     const size_t down_rb = L->ffn_down_exps.row_bytes;
 
-    for (uint32_t e = 0; e < n_slots; e++) {
+    if (L->exl3_gate) {
+        /* Native per-expert EXL3: compact the routed experts (zero-width
+         * ranges drop out; the pair offsets stay the global pair indices)
+         * and run the whole routed MoE in two parallel regions. */
+        if (n_zero != 0 || !b->exl3_ga) {
+            oc_log(OC_LOG_ERROR,
+                   "llama: per-expert EXL3 MoE with zero-experts or missing "
+                   "scratch is unsupported");
+            exl3_compute_error = OC_ERR_MODEL;
+            return;
+        }
+        uint32_t ne = 0;
+        OcExl3Expert *ex = malloc((size_t)n_exp * sizeof(*ex));
+        uint32_t *off = malloc(((size_t)n_exp + 1) * sizeof(*off));
+        if (!ex || !off) { free(ex); free(off); exl3_compute_error = OC_ERR_OOM; return; }
+        for (uint32_t e = 0; e < n_exp; e++) {
+            if (b->ex_off[e + 1] == b->ex_off[e]) continue;
+            ex[ne].gate = &L->exl3_gate[e];
+            ex[ne].up   = &L->exl3_up[e];
+            ex[ne].down = &L->exl3_down[e];
+            off[ne] = b->ex_off[e];
+            ne++;
+        }
+        off[ne] = b->ex_off[n_slots];
+        const uint32_t pairs = off[ne];
+        if (ne > 0) {
+            OcError ee = oc_exl3_experts_gate_up(ex, ne, b->normed,
+                b->n_embd, b->ex_tok, off, b->exl3_ga, b->exl3_ub, i_size);
+            if (ee == OC_OK) {
+                swiglu_parallel(b->exl3_ga, b->exl3_ub,
+                                (size_t)pairs * i_size);
+                ee = oc_exl3_experts_down(ex, ne, b->exl3_ga, i_size,
+                                          b->ex_tok, off, b->exl3_dn,
+                                          b->n_embd);
+            }
+            if (ee != OC_OK) {
+                exl3_compute_error = ee;
+                free(ex); free(off);
+                return;
+            }
+            for (uint32_t p = 0; p < pairs; p++) {
+                float *dst = b->expert_out + (size_t)b->ex_tok[p] * b->n_embd;
+                const float *src = b->exl3_dn + (size_t)p * b->n_embd;
+                const float w = b->ex_w[p];
+                for (size_t i = 0; i < b->n_embd; i++) dst[i] += w * src[i];
+            }
+        }
+        free(ex); free(off);
+    } else for (uint32_t e = 0; e < n_slots; e++) {
         const uint32_t m = b->ex_off[e + 1] - b->ex_off[e];
         if (m == 0) continue;
         const uint32_t *toks = b->ex_tok + b->ex_off[e];

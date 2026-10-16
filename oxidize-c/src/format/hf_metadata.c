@@ -53,8 +53,106 @@ static OcGgufMetadataValue *array(OcGgufFile *m,const char *key,OcGgufMetadataTy
 static bool token(OcGgufFile *m,OcGgufMetadataValue *v,const char *text) {
     v->v.str.data=oc_arena_dup(m->arena,text);v->v.str.len=strlen(text);return v->v.str.data!=NULL;
 }
+/* qwen4_exp_text (Qwen3.8-Flash-Next family, e.g. CYBER-FROST): the real
+ * fields live in the nested "text_config" object and the semantics differ
+ * from every dense arch, so map them here rather than through the generic
+ * llama path. Behavior in llama.c keys off cfg->is_qwen4exp; the arch enum
+ * stays OC_ARCH_QWEN. Mirrors the GGUF qwen4exp metadata contract:
+ *   linear_*            -> ssm.*             (gated delta-net geometry)
+ *   hc_count/hc_lowrank -> hyper_connection.*
+ *   indexer_*           -> attention.indexer.*
+ *   layer_types         -> attention.recurrent_layers
+ *   ple_layer_ids       -> ple.layers        (1-based in HF, 0-based here)
+ *   rope_parameters     -> rope.dimension_count/sections (interleaved MRoPE)
+ * PLE hash constants and ple_embd_dim are not in config.json — they live in
+ * ngram_embedding.safetensors and are filled in by the native loader. */
+static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
+    const OcJson *t=oc_json_get(j,"text_config");
+    const OcJson *tmt=oc_json_get(t,"model_type");
+    if(!t||(tmt&&!eq(tmt,"qwen4_exp_text")))return OC_ERR_MODEL;
+    if(!uint_field(t,"vocab_size",0,&c->vocab_size)||!uint_field(t,"hidden_size",0,&c->n_embd)||
+       !uint_field(t,"num_hidden_layers",0,&c->n_layer)||!uint_field(t,"num_attention_heads",0,&c->n_head)||
+       !uint_field(t,"num_key_value_heads",c->n_head,&c->n_head_kv)||!uint_field(t,"head_dim",0,&c->head_dim)||
+       !uint_field(t,"max_position_embeddings",4096,&c->n_ctx)||!float_field(t,"rms_norm_eps",1e-5f,&c->rms_norm_eps))return OC_ERR_FORMAT;
+    if(!c->vocab_size||!c->n_embd||!c->n_layer||!c->n_head||!c->n_head_kv||c->n_head%c->n_head_kv||
+       !c->head_dim||c->head_dim%2||!c->n_ctx||c->n_head_kv>c->n_head)return OC_ERR_MODEL;
+    const OcJson *act=oc_json_get(t,"hidden_act");if(act&&!eq(act,"silu"))return OC_ERR_MODEL;
+    bool ab=false;if(!flag(t,"attention_bias",false,&ab)||ab)return OC_ERR_MODEL;
+    c->is_qwen4exp=true;c->rope_norm_pairs=true;c->attn_out_gate=false;
+    /* MoE: every layer is routed (top-k of num_experts + shared expert). */
+    if(!uint_field(t,"num_experts",0,&c->num_experts)||!uint_field(t,"num_experts_per_tok",0,&c->num_experts_per_tok)||
+       !uint_field(t,"moe_intermediate_size",0,&c->expert_intermediate_size)||
+       !uint_field(t,"shared_expert_intermediate_size",0,&c->shared_expert_intermediate_size))return OC_ERR_FORMAT;
+    if(!c->num_experts||!c->num_experts_per_tok||c->num_experts_per_tok>c->num_experts||!c->expert_intermediate_size)return OC_ERR_MODEL;
+    c->n_ff=c->expert_intermediate_size;c->moe_layer_start=0;
+    /* RoPE: interleaved MRoPE over head_dim*partial_rotary_factor dims. */
+    const OcJson *rp=oc_json_get(t,"rope_parameters");
+    const OcJson *tt=rp?rp:t;
+    float theta;if(!float_field(tt,"rope_theta",10000,&theta))return OC_ERR_MODEL;c->rope_theta=theta;
+    float partial=1;const OcJson *pv=oc_json_get(tt,"partial_rotary_factor");
+    if(pv&&(pv->type!=OC_JSON_NUMBER||pv->number<=0||pv->number>1))return OC_ERR_MODEL;
+    if(pv)partial=(float)pv->number;
+    c->rope_dim=(uint32_t)((uint64_t)c->head_dim*partial);if(!c->rope_dim||c->rope_dim>c->head_dim)return OC_ERR_MODEL;
+    c->kv_head_dim=c->head_dim;
+    const OcJson *sec=rp?oc_json_get(rp,"mrope_section"):NULL;
+    if(sec&&sec->type==OC_JSON_ARRAY) {
+        size_t i=0;for(const OcJson *v=sec->child;v&&i<4;v=v->next,i++)
+            if(v->type!=OC_JSON_NUMBER||v->number<0||!oc_json_u32(v,&c->rope_sections[i]))return OC_ERR_FORMAT;
+    }
+    /* Recurrent/full layer kinds, hyper-connections, QSA indexer. */
+    const OcJson *lt=oc_json_get(t,"layer_types");
+    if(!lt||lt->type!=OC_JSON_ARRAY||lt->count!=c->n_layer)return OC_ERR_MODEL;
+    c->recurrent_layers=calloc(c->n_layer,sizeof(uint8_t));if(!c->recurrent_layers)return OC_ERR_OOM;
+    size_t li=0;for(const OcJson *v=lt->child;v;v=v->next,li++)
+        if(eq(v,"linear_attention"))c->recurrent_layers[li]=1;
+        else if(!eq(v,"full_attention"))return OC_ERR_MODEL;
+    if(!uint_field(t,"full_attention_interval",1,&c->full_attention_interval)||!c->full_attention_interval)return OC_ERR_FORMAT;
+    if(!uint_field(t,"hc_count",0,&c->hc_mult)||!uint_field(t,"hc_lowrank",0,&c->hc_low_rank)||
+       !c->hc_mult||c->hc_mult>8u||!c->hc_low_rank)return OC_ERR_MODEL;
+    if(!uint_field(t,"indexer_n_heads",0,&c->indexer_n_head)||!uint_field(t,"indexer_head_dim",0,&c->indexer_head_size)||
+       !uint_field(t,"indexer_budget",0,&c->indexer_top_k)||!uint_field(t,"indexer_compress_ratio",1,&c->indexer_kpool))return OC_ERR_FORMAT;
+    if(!c->indexer_n_head||!c->indexer_head_size||!c->indexer_top_k)return OC_ERR_MODEL;
+    /* Gated delta-net geometry. */
+    if(!uint_field(t,"linear_conv_kernel_dim",0,&c->ssm_conv_kernel)||
+       !uint_field(t,"linear_key_head_dim",0,&c->ssm_state_size)||
+       !uint_field(t,"linear_num_key_heads",0,&c->ssm_group_count)||
+       !uint_field(t,"linear_num_value_heads",0,&c->ssm_value_heads)||
+       !uint_field(t,"linear_value_head_dim",0,&c->ssm_inner_size))return OC_ERR_FORMAT;
+    c->ssm_inner_size*=c->ssm_value_heads;
+    if(c->ssm_conv_kernel<2||!c->ssm_state_size||!c->ssm_group_count||!c->ssm_value_heads||
+       c->ssm_inner_size%c->ssm_value_heads||c->ssm_value_heads%c->ssm_group_count)return OC_ERR_MODEL;
+    /* MTP draft head: HF counts it separately from num_hidden_layers. */
+    if(!uint_field(t,"mtp_num_hidden_layers",0,&c->nextn_predict_layers))return OC_ERR_FORMAT;
+    if(c->nextn_predict_layers>=c->n_layer)return OC_ERR_MODEL;
+    /* PLE: layer ids are 1-based in HF. Hash constants are read from
+     * ngram_embedding.safetensors by the native loader; if that file is
+     * absent it disables ple_enabled and logs. */
+    const OcJson *pl=oc_json_get(t,"ple_layer_ids");
+    if(pl&&pl->type==OC_JSON_ARRAY&&pl->count) {
+        if(pl->count!=1)return OC_ERR_MODEL;
+        uint32_t id;if(!oc_json_u32(pl->child,&id)||!id||id-1>=c->n_layer)return OC_ERR_MODEL;
+        c->ple_layer=id-1;
+        if(!uint_field(t,"ngram_size",0,&c->ple_ngram)||!uint_field(t,"heads_per_ngram",0,&c->ple_heads_per_ngram)||
+           !uint_field(t,"ple_conv_kernel_size",0,&c->ple_conv_kernel))return OC_ERR_FORMAT;
+        c->ple_n_heads=c->ple_ngram>0?(c->ple_ngram-1u)*c->ple_heads_per_ngram:0;
+        if(c->ple_ngram<2||c->ple_ngram>OC_Q4E_PLE_MAX_NGRAM||!c->ple_n_heads||
+           c->ple_n_heads>OC_Q4E_PLE_MAX_HEADS||c->ple_conv_kernel<2)return OC_ERR_MODEL;
+        c->ple_eos=0;const OcJson *ev=oc_json_get(t,"eos_token_id");
+        if(ev&&ev->type==OC_JSON_NUMBER)oc_json_u32(ev,&c->ple_eos);
+        c->ple_img=0;if(oc_json_u32(oc_json_get(j,"image_token_id"),&c->ple_img)) {}
+        c->ple_enabled=true;
+    }
+    bool tied=false;if(!flag(t,"tie_word_embeddings",false,&tied))return OC_ERR_FORMAT;c->tied_embeddings=tied;
+    c->norm_scale=1;c->expert_weights_scale=1;c->sliding_window_pattern=1;c->norm_groups=1;
+    c->head_dim_swa=c->head_dim;c->n_head_kv_swa=c->n_head_kv;c->rope_dim_swa=c->rope_dim;c->rope_theta_swa=c->rope_theta;
+    return OC_OK;
+}
 static OcError config_load(const OcJson *j,OcLlamaConfig *c,OcModelArchitecture *arch) {
     const OcJson *type=oc_json_get(j,"model_type");
+    if(eq(type,"qwen4_exp")||eq(type,"qwen4_exp_text")||eq(oc_json_get(oc_json_get(j,"text_config"),"model_type"),"qwen4_exp_text")) {
+        *arch=OC_ARCH_QWEN;
+        return config_load_qwen4exp(j,c);
+    }
     if(eq(type,"llama"))*arch=OC_ARCH_LLAMA;else if(eq(type,"mistral"))*arch=OC_ARCH_MISTRAL;else if(eq(type,"qwen2"))*arch=OC_ARCH_QWEN;else return OC_ERR_MODEL;
     if(!uint_field(j,"vocab_size",0,&c->vocab_size)||!uint_field(j,"hidden_size",0,&c->n_embd)||!uint_field(j,"num_hidden_layers",0,&c->n_layer)||!uint_field(j,"num_attention_heads",0,&c->n_head)||!uint_field(j,"intermediate_size",0,&c->n_ff))return OC_ERR_FORMAT;
     if(!c->vocab_size||!c->n_embd||!c->n_layer||!c->n_head||!c->n_ff||c->vocab_size>10000000||c->n_embd%c->n_head)return OC_ERR_MODEL;
@@ -203,7 +301,7 @@ OcError oc_hf_metadata_load(const char *directory,OcLlamaConfig *config,OcModelA
     memset(config,0,sizeof(*config));memset(metadata,0,sizeof(*metadata));*arch=OC_ARCH_UNKNOWN;
     OcArena *scratch=oc_arena_new(0);if(!scratch)return OC_ERR_OOM;
     OcJson *cfg=NULL,*tok=NULL,*tc=NULL;OcError e=read_json(directory,"config.json",false,scratch,&cfg);
-    if(e==OC_OK) {e=config_load(cfg,config,arch);if(e!=OC_OK)oc_log_error("HF config.json: invalid dense llama/mistral/qwen2 config or unsupported architecture, rope scaling, activation, or sliding window");}
+    if(e==OC_OK) {e=config_load(cfg,config,arch);if(e!=OC_OK)oc_log_error("HF config.json: invalid dense llama/mistral/qwen2 or qwen4exp config, or unsupported architecture, rope scaling, activation, or sliding window");}
     if(e==OC_OK)e=read_json(directory,"tokenizer.json",false,scratch,&tok);
     if(e==OC_OK)e=read_json(directory,"tokenizer_config.json",true,scratch,&tc);
     if(e==OC_OK) {metadata->arena=oc_arena_new(0);if(!metadata->arena)e=OC_ERR_OOM;}
