@@ -77,7 +77,7 @@ static OcJson *value(Parser *p,unsigned depth) {
     if(*p->p=='0')p->p++;else {if(*p->p<'1'||*p->p>'9')return NULL;while(p->p<p->end&&*p->p>='0'&&*p->p<='9')p->p++;}
     if(p->p<p->end&&*p->p=='.') {p->p++;const char *a=p->p;while(p->p<p->end&&*p->p>='0'&&*p->p<='9')p->p++;if(a==p->p)return NULL;}
     if(p->p<p->end&&(*p->p=='e'||*p->p=='E')) {p->p++;if(p->p<p->end&&(*p->p=='+'||*p->p=='-'))p->p++;const char *a=p->p;while(p->p<p->end&&*p->p>='0'&&*p->p<='9')p->p++;if(a==p->p)return NULL;}
-    size_t n=(size_t)(p->p-start);if(n>127)return NULL;char buf[128];memcpy(buf,start,n);buf[n]=0;errno=0;char *end;v->number=strtod(buf,&end);if(errno||*end||!isfinite(v->number))return NULL;v->type=OC_JSON_NUMBER;return v;
+    size_t n=(size_t)(p->p-start);if(n>127)return NULL;char buf[128];memcpy(buf,start,n);buf[n]=0;errno=0;char *end;v->number=strtod(buf,&end);/* ERANGE on underflow to a denormal (e.g. 1e-310) is still a valid, representable number — accept it; but reject non-finite overflow and literals that underflow all the way to zero (1e-999). */if(*end||!isfinite(v->number)||(errno==ERANGE&&v->number==0.0))return NULL;v->type=OC_JSON_NUMBER;return v;
 }
 OcError oc_json_parse(const char *data,size_t len,OcArena *arena,OcJson **out) {
     if(!data||!arena||!out)return OC_ERR_INVALID_ARG;

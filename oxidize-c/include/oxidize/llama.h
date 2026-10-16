@@ -304,7 +304,8 @@ typedef struct OcLlamaLayer {
     OcWeightView ffn_down_exps;           /* [num_experts*n_embd, exp_i_size]    */
     /* Native per-expert EXL3 (qwen4exp SafeTensors): one trellis matrix per
      * expert projection instead of a stacked view. Arrays of num_experts
-     * entries; the matrices are owned by the model's EXL3 overlay. Non-NULL
+     * entries; the matrices' packed backing data is owned by the model's
+     * EXL3 overlay while the struct arrays are layer-owned. Non-NULL
      * only when the layer is a routed-EXL3 MoE (the stacked views above are
      * then left empty). */
     OcExl3Matrix *exl3_gate, *exl3_up, *exl3_down;

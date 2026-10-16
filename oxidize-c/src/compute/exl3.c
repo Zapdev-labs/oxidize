@@ -30,6 +30,7 @@ Packed format/codebooks adapted from exllamav3 tests/testlib/trellis.py,
 #include "oxidize/parallel.h"
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -92,6 +93,7 @@ OcError oc_exl3_validate(const OcExl3Matrix *m)
     size_t k = m->input_dim / 16, n = m->output_dim / 16, bytes = 16 * b;
     size_t kts = m->packed_kt_stride ? m->packed_kt_stride : n;
     if (k > SIZE_MAX / (kts ? kts : 1) || k < 1 ||
+        n > SIZE_MAX - m->packed_nt_base ||
         (k - 1) * kts > SIZE_MAX - n - m->packed_nt_base ||
         (k - 1) * kts + n + m->packed_nt_base > SIZE_MAX / bytes ||
         m->packed_size != ((k - 1) * kts + n + m->packed_nt_base) * bytes ||
@@ -155,25 +157,25 @@ OcError oc_exl3_dequant_f32(const OcExl3Matrix *m, float *out)
     if (!m || !out) return OC_ERR_INVALID_ARG;
     OcError e = oc_exl3_validate(m);
     if (e != OC_OK) return e;
-    size_t n_kt = m->input_dim / 16, n_nt = m->output_dim / 16;
-    for (size_t nt = 0; nt < n_nt; nt++)
-        for (size_t kt = 0; kt < n_kt; kt++) {
-            float tile[256];
-            e = oc_exl3_decode_tile(m, kt, nt, tile);
-            if (e != OC_OK) return e;
-            for (unsigned r = 0; r < 16; r++)
-                for (unsigned c = 0; c < 16; c++)
-                    out[(nt * 16 + r) * m->input_dim + kt * 16 + c] =
-                        tile[r * 16 + c];
-        }
-    /* Fold the su/sv Hadamard scales so `out` is the effective matrix —
-     * the same map oc_exl3_matmul applies to its input. */
-    for (size_t r = 0; r < m->output_dim; r++) {
-        float sv = m->svh ? m->svh[r] : 1.0f;
-        float *row = out + r * m->input_dim;
-        for (size_t c = 0; c < m->input_dim; c++)
-            row[c] *= sv * (m->suh ? m->suh[c] : 1.0f);
-    }
+    const size_t in_d = m->input_dim, out_d = m->output_dim;
+    /* Materialize the effective matrix by pushing the identity batch
+     * through oc_exl3_matmul: result row c is column c of W[out][in].
+     * suh/svh are Hadamard transforms, not elementwise scales, so a
+     * tile-decode plus row/column multiply cannot reproduce the map. */
+    if (in_d > SIZE_MAX / sizeof(float) / in_d ||
+        out_d > SIZE_MAX / sizeof(float) / in_d)
+        return OC_ERR_OOM;
+    float *ident = calloc(in_d * in_d, sizeof(float));
+    float *res = malloc(in_d * out_d * sizeof(float));
+    if (!ident || !res) { free(ident); free(res); return OC_ERR_OOM; }
+    for (size_t c = 0; c < in_d; c++) ident[c * in_d + c] = 1.0f;
+    e = oc_exl3_matmul(m, ident, in_d, res, out_d, in_d);
+    free(ident);
+    if (e != OC_OK) { free(res); return e; }
+    for (size_t r = 0; r < out_d; r++)
+        for (size_t c = 0; c < in_d; c++)
+            out[r * in_d + c] = res[c * out_d + r];
+    free(res);
     return OC_OK;
 }
 static void hadamard(float *x)
@@ -378,6 +380,10 @@ typedef struct {
     const float *act;
     float *out;
     size_t gu_stride, act_stride, out_stride;
+    /* Set by any slice that had to skip work (scratch OOM or overflow);
+     * the wrapper then reports failure instead of silently returning OK
+     * with uninitialized outputs. */
+    atomic_int failed;
 } ExpertJob;
 
 static void expert_slice(size_t begin, size_t end, size_t tid, void *ud)
@@ -404,10 +410,16 @@ static void expert_slice(size_t begin, size_t end, size_t tid, void *ud)
         /* Per-job scratch: prepped input rows followed by the accumulator
          * rows blocks_prepped needs. The scratch persists per worker, so
          * the allocation cost amortizes across tokens. */
-        if (batch > SIZE_MAX / (m->input_dim + 128) / sizeof(float)) continue;
+        if (batch > SIZE_MAX / (m->input_dim + 128) / sizeof(float)) {
+            atomic_store_explicit(&j->failed, 1, memory_order_relaxed);
+            continue;
+        }
         float *sc = oc_parallel_scratch(tid,
             batch * (m->input_dim + 128) * sizeof(float));
-        if (!sc) continue;
+        if (!sc) {
+            atomic_store_explicit(&j->failed, 1, memory_order_relaxed);
+            continue;
+        }
         prep_rows(m, j->in, j->in_stride, ids, batch, sc);
         /* The accumulator must not alias the prepped rows: they share the
          * TLS scratch, so the acc lives in the reserved +128 tail. */
@@ -420,11 +432,27 @@ static OcError experts_validate(const OcExl3Expert *ex, uint32_t n,
                                 int phase, size_t *nb_out)
 {
     if (!ex || !n) return OC_ERR_INVALID_ARG;
-    const OcExl3Matrix *g = ex[0].gate, *u = ex[0].up, *d = ex[0].down;
-    for (uint32_t i = 0; i < 3; ++i) {
-        OcError e = oc_exl3_validate(i == 0 ? g : i == 1 ? u : d);
-        if (e != OC_OK) return e;
+    const OcExl3Matrix *g0 = ex[0].gate, *u0 = ex[0].up, *d0 = ex[0].down;
+    /* Validate every expert, not just expert 0: the slice walk indexes
+     * ex[e] using expert 0's dimensions, so a NULL or mismatched expert
+     * would silently read out of bounds. */
+    for (uint32_t e = 0; e < n; ++e) {
+        for (uint32_t i = 0; i < 3; ++i) {
+            const OcExl3Matrix *m =
+                i == 0 ? ex[e].gate : i == 1 ? ex[e].up : ex[e].down;
+            OcError err = oc_exl3_validate(m);
+            if (err != OC_OK) return err;
+        }
+        if (!e) continue;
+        if (ex[e].gate->input_dim != g0->input_dim ||
+            ex[e].gate->output_dim != g0->output_dim ||
+            ex[e].up->input_dim != u0->input_dim ||
+            ex[e].up->output_dim != u0->output_dim ||
+            ex[e].down->input_dim != d0->input_dim ||
+            ex[e].down->output_dim != d0->output_dim)
+            return OC_ERR_MODEL;
     }
+    const OcExl3Matrix *g = g0, *u = u0, *d = d0;
     /* gate and up share the expert shape; down consumes the activation. */
     if (u->input_dim != g->input_dim || u->output_dim != g->output_dim ||
         u->bits_twice != g->bits_twice || u->codebook != g->codebook ||
@@ -446,12 +474,23 @@ OcError oc_exl3_experts_gate_up(const OcExl3Expert *experts, uint32_t n,
     size_t nb = 0;
     OcError e = experts_validate(experts, n, 0, &nb);
     if (e != OC_OK) return e;
-    if (!in || !gate_out || !up_out || !out_stride || (rows != NULL) != (off != NULL))
+    if (!in || !gate_out || !up_out || !out_stride ||
+        (rows != NULL) != (off != NULL) ||
+        in_stride < experts[0].gate->input_dim ||
+        out_stride < experts[0].gate->output_dim ||
+        out_stride < experts[0].up->output_dim || n > SIZE_MAX / nb)
         return OC_ERR_INVALID_ARG;
+    /* Routed offsets must be non-decreasing: slices index
+     * rows[off[e]..off[e+1]) and out rows off[e]+j. */
+    if (rows)
+        for (uint32_t e2 = 0; e2 < n; ++e2)
+            if (off[e2] > off[e2 + 1]) return OC_ERR_INVALID_ARG;
     ExpertJob j = { experts, n, in, in_stride, rows, off,
-                    gate_out, up_out, NULL, NULL, out_stride, 0, out_stride };
+                    gate_out, up_out, NULL, NULL, out_stride, 0, out_stride,
+                    0 };
     oc_parallel_for((size_t)n * nb, expert_slice, &j);
-    return OC_OK;
+    return atomic_load_explicit(&j.failed, memory_order_relaxed)
+        ? OC_ERR_OOM : OC_OK;
 }
 
 static void down_slice(size_t begin, size_t end, size_t tid, void *ud)
@@ -469,14 +508,20 @@ static void down_slice(size_t begin, size_t end, size_t tid, void *ud)
             if (!batch) continue;
             row0 = j->off[e];
         }
-        if (batch > SIZE_MAX / (d->input_dim + 128) / sizeof(float)) continue;
+        if (batch > SIZE_MAX / (d->input_dim + 128) / sizeof(float)) {
+            atomic_store_explicit(&j->failed, 1, memory_order_relaxed);
+            continue;
+        }
         float *sc = oc_parallel_scratch(tid,
             batch * (d->input_dim + 128) * sizeof(float));
-        if (!sc) continue;
+        if (!sc) {
+            atomic_store_explicit(&j->failed, 1, memory_order_relaxed);
+            continue;
+        }
         /* The down input is the SwiGLU'd activation rows, already gathered
          * by pair — copy them through the su-hadamard into scratch. */
         const float *src = j->act + (j->rows ? (size_t)j->off[e] : e) * j->act_stride;
-        prep_rows(d, src, d->input_dim, NULL, batch, sc);
+        prep_rows(d, src, j->act_stride, NULL, batch, sc);
         blocks_prepped(d, sc, batch, j->out, j->out_stride, row0,
                        block, block + 1, table, tid,
                        sc + batch * d->input_dim);
@@ -491,10 +536,17 @@ OcError oc_exl3_experts_down(const OcExl3Expert *experts, uint32_t n,
     size_t nb = 0;
     OcError e = experts_validate(experts, n, 1, &nb);
     if (e != OC_OK) return e;
-    if (!act || !out || !out_stride || (rows != NULL) != (off != NULL))
+    if (!act || !out || !out_stride ||
+        (rows != NULL) != (off != NULL) ||
+        act_stride < experts[0].down->input_dim ||
+        out_stride < experts[0].down->output_dim || n > SIZE_MAX / nb)
         return OC_ERR_INVALID_ARG;
+    if (rows)
+        for (uint32_t e2 = 0; e2 < n; ++e2)
+            if (off[e2] > off[e2 + 1]) return OC_ERR_INVALID_ARG;
     ExpertJob j = { experts, n, act, act_stride, rows, off,
-                    NULL, NULL, act, out, 0, act_stride, out_stride };
+                    NULL, NULL, act, out, 0, act_stride, out_stride, 0 };
     oc_parallel_for((size_t)n * nb, down_slice, &j);
-    return OC_OK;
+    return atomic_load_explicit(&j.failed, memory_order_relaxed)
+        ? OC_ERR_OOM : OC_OK;
 }

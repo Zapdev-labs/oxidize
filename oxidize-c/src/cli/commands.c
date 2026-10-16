@@ -379,7 +379,10 @@ OcError oc_cli_command_run(OcCliContext *ctx)
         ctx->command == OC_CLI_CMD_PERPLEXITY;
     const char *exl3_source = ctx->exl3_path ? ctx->exl3_path :
         oc_cli_native_model_path(ctx->model_path) ? ctx->model_path : NULL;
-    if (oc_cli_exl3_reject(exl3_source, ctx->backend,
+    /* dflash2 takes a SafeTensors dir or file as --model; the EXL3
+     * native-path check does not apply to it. */
+    if (ctx->command != OC_CLI_CMD_DFLASH2 &&
+        oc_cli_exl3_reject(exl3_source, ctx->backend,
             !exl3_command || ctx->stream_experts || ctx->mtp || ctx->mtp_model,
             ctx->model_path != NULL)) return OC_ERR_INVALID_ARG;
 

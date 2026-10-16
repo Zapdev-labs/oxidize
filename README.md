@@ -305,8 +305,11 @@ Hadamard transforms to activations, and decodes tiles during multiplication.
 It supports the 3inst, MCG and mul1 codebooks, integer rates 1–8 bits, and
 mul1 rates 1.5/2.5/3.5 bits, including FP16 channel scales and legacy packed
 signs. Initial model integration supports dense Llama/Mistral/Qwen2 projections
-and the output head; unsupported architectures, tensor groups and execution
-modes fail explicitly. GPU execution, expert streaming, speculative decoding
+and the output head, plus qwen4_exp checkpoints natively — those are hybrid
+MoE models (EXL3 experts, delta-net and full-attention layers,
+hyper-connections, and the MTP draft head), not dense. Unsupported
+architectures, tensor groups and execution modes fail explicitly. GPU
+execution, expert streaming, speculative decoding
 and serving with EXL3 are unavailable. Speed and model-quality claims
 require full-checkpoint benchmarks; fewer stored bits do not guarantee faster
 CPU decoding.

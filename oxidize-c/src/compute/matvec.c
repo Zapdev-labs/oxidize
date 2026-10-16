@@ -487,7 +487,15 @@ void oc_matvec_f32_multi(const float *const *datas, const size_t *rows,
                          size_t cols, size_t n_outs, const float *input,
                          float *const *outs)
 {
-    if (n_outs == 0 || cols == 0) return;
+    if (n_outs == 0) return;
+    /* cols == 0 is a valid degenerate shape: every output row is the
+     * empty dot 0.0f, matching oc_matvec_f32(). */
+    if (cols == 0) {
+        for (size_t k = 0; k < n_outs; k++)
+            for (size_t r = 0; r < rows[k]; r++)
+                outs[k][r] = 0.0f;
+        return;
+    }
     size_t total_rows = 0;
     for (size_t k = 0; k < n_outs; k++) {
         if (rows[k] > SIZE_MAX - total_rows) return;   /* overflow: bail out */

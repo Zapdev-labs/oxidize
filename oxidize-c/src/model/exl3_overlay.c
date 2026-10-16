@@ -820,17 +820,29 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
     if ((e = q4e_exl3_matrix(ni, o, "mtp.fc_embedding", D, D, NULL, NULL,
                              &fc_emb)))
         return e;
+    /* fc_emb/fc_hid stay owned by the overlay — no frees here or model
+     * cleanup would double-free them. */
     if ((e = q4e_exl3_matrix(ni, o, "mtp.fc_hidden", D, D, NULL, NULL,
-                             &fc_hid))) {
-        free(fc_emb); /* owned by the overlay; struct copy only */
+                             &fc_hid)))
         return e;
-    }
+    float *emb = malloc(D * D * sizeof(float));
+    float *hid = malloc(D * D * sizeof(float));
     float *eh = malloc(D * 2 * D * sizeof(float));
-    if (!eh) return OC_ERR_OOM;
-    e = oc_exl3_dequant_f32(fc_emb, eh);
+    if (!emb || !hid || !eh) {
+        free(emb); free(hid); free(eh);
+        return OC_ERR_OOM;
+    }
+    e = oc_exl3_dequant_f32(fc_emb, emb);
     if (e == OC_OK)
-        e = oc_exl3_dequant_f32(fc_hid, eh + D);
-    if (e != OC_OK) { free(eh); return e; }
+        e = oc_exl3_dequant_f32(fc_hid, hid);
+    if (e != OC_OK) { free(emb); free(hid); free(eh); return e; }
+    /* eh_proj is row-major D×2D = [W_emb | W_h]: the two D×D halves must
+     * be interleaved column-wise per output row, not concatenated. */
+    for (size_t r = 0; r < D; r++) {
+        memcpy(eh + r * 2 * D, emb + r * D, D * sizeof(float));
+        memcpy(eh + r * 2 * D + D, hid + r * D, D * sizeof(float));
+    }
+    free(emb); free(hid);
     if (!q4e_owned(o, eh)) { free(eh); return OC_ERR_OOM; }
     m->mtp.eh_proj = (OcWeightView){.data = (const uint8_t *)eh, .rows = D, .cols = 2 * D,
         .row_bytes = 2 * D * sizeof(float), .qtype = OC_QUANT_F32};
@@ -998,9 +1010,10 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
                          l, hc_sides[side]) >= (int)sizeof(key))
                 do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             /* block_inject is present on every layer of this checkpoint;
-             * treat it as optional to stay honest to the GGUF contract. */
-            if (q4e_view(&ni, o, key, c->hc_mult, hc_dim, inject) != OC_OK)
-                inject->data = NULL;
+             * discarding a view failure would silently drop the inject
+             * projection, so propagate it. */
+            if ((e = q4e_view(&ni, o, key, c->hc_mult, hc_dim, inject)))
+                return e;
         }
 
         if (c->recurrent_layers && c->recurrent_layers[l]) {
@@ -1187,7 +1200,15 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
         if (!strncmp(nme, "model.visual.", 13)) continue;   /* vision tower */
         if (strstr(nme, ".ple.")) continue;                 /* PLE block    */
         if (strstr(nme, "ngram_embedding.")) continue;      /* PLE table    */
-        if (strstr(nme, "self_attn.indexer.")) continue;    /* QSA: dense attention is exact */
+        if (strstr(nme, "self_attn.indexer.")) {
+            /* QSA indexer tensors mean dense attention is only exact
+             * below indexer_top_k; beyond it the logits attend the wrong
+             * keys. Refuse rather than silently run inexact. */
+            oc_log(OC_LOG_ERROR,
+                   "qwen4exp: QSA indexer tensor %s is unsupported — "
+                   "checkpoint requires sparse attention", nme);
+            return OC_ERR_MODEL;
+        }
         oc_log(OC_LOG_ERROR, "qwen4exp: unconsumed checkpoint tensor %s",
                nme);
         return OC_ERR_MODEL;

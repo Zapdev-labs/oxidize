@@ -3150,8 +3150,12 @@ void oc_llama_free(OcLlamaModel *model)
             free(model->layers[i].ssm_a_f32);
             free(model->layers[i].ssm_dt_f32);
             free(model->layers[i].ssm_norm_f32);
-            /* exl3_gate/up/down are owned by the EXL3 overlay's
-             * ownership list — not freed here. */
+            /* The exl3_* struct arrays are layer-owned; the matrices'
+             * packed backing data is owned by the EXL3 overlay's
+             * ownership list and freed there. */
+            free(model->layers[i].exl3_gate);
+            free(model->layers[i].exl3_up);
+            free(model->layers[i].exl3_down);
         }
         free(model->layers);
     }
@@ -3163,6 +3167,9 @@ void oc_llama_free(OcLlamaModel *model)
     free(model->mtp.layer.hc_ffn_norm);
     free(model->mtp.layer.post_attention_norm);
     free(model->mtp.layer.post_ffw_norm);
+    free(model->mtp.layer.exl3_gate);
+    free(model->mtp.layer.exl3_up);
+    free(model->mtp.layer.exl3_down);
     free(model->mtp.enorm);
     free(model->mtp.hnorm);
     free(model->mtp.shared_head_norm);

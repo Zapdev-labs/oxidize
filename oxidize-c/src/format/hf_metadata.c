@@ -75,7 +75,8 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
        !uint_field(t,"num_key_value_heads",c->n_head,&c->n_head_kv)||!uint_field(t,"head_dim",0,&c->head_dim)||
        !uint_field(t,"max_position_embeddings",4096,&c->n_ctx)||!float_field(t,"rms_norm_eps",1e-5f,&c->rms_norm_eps))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!c->vocab_size||!c->n_embd||!c->n_layer||!c->n_head||!c->n_head_kv||c->n_head%c->n_head_kv||
-       !c->head_dim||c->head_dim%2||!c->n_ctx||c->n_head_kv>c->n_head)return OC_ERR_MODEL;
+       !c->head_dim||c->head_dim%2||!c->n_ctx||c->n_head_kv>c->n_head||
+       c->vocab_size>10000000)return OC_ERR_MODEL;
     const OcJson *act=oc_json_get(t,"hidden_act");if(act&&!eq(act,"silu"))return OC_ERR_MODEL;
     bool ab=false;if(!flag(t,"attention_bias",false,&ab)||ab)return OC_ERR_MODEL;
     /* RoPE is the standard half-split convention (verified against the
