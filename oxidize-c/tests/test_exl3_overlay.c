@@ -1,4 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+/* Darwin hides mkdtemp unless the default surface is re-enabled. */
+#define _DARWIN_C_SOURCE
+#endif
 #include <criterion/criterion.h>
 #include "oxidize/exl3_overlay.h"
 #include "oxidize/exl3.h"

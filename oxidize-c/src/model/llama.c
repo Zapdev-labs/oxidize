@@ -5382,9 +5382,9 @@ static OcError forward_layer_qwen4exp(OcLlamaSession *s, uint32_t layer)
          * would silently produce different logits. No QSA implementation
          * exists yet, so fail loudly instead. */
         oc_log(OC_LOG_ERROR,
-               "llama: qwen4exp context %u reached QSA budget %u; "
+               "llama: qwen4exp context %lld reached QSA budget %u; "
                "sparse indexer attention is not implemented",
-               s->pos, c->indexer_top_k);
+               (long long)s->pos, c->indexer_top_k);
         return OC_ERR_MODEL;
     } else {
         /* Dense attention over the whole prefix — exact while
