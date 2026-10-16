@@ -230,14 +230,18 @@ static inline size_t col_phys(const OcExl3Matrix *m, size_t col)
 /* Output blocks [begin, end) of a batch whose input rows are ALREADY in the
  * su-hadamard domain (x, logical order). Called both from oc_parallel_for
  * jobs and from the expert runner, so it never touches the pool itself.
+ * acc_ext: optional accumulator space; must hold batch*128 floats. Needed
+ * when x itself lives in the caller's TLS scratch — the internal scratch
+ * allocation would alias it. NULL allocates from the TLS scratch.
  * Per-output accumulation order (kt ascending, then k, then n) matches the
  * serial reference exactly. */
 static void blocks_prepped(const OcExl3Matrix *m, const float *x, size_t batch,
                            float *out, size_t out_stride, size_t out_row0,
                            size_t begin, size_t end, const float *table,
-                           size_t tid)
+                           size_t tid, float *acc_ext)
 {
-    float *acc = oc_parallel_scratch(tid, batch * 128 * sizeof(float));
+    float *acc = acc_ext ? acc_ext
+                         : oc_parallel_scratch(tid, batch * 128 * sizeof(float));
     if (acc == NULL) {
         /* Scratch failure: keep the old stack-buffered chunking. */
         for (size_t block = begin; block < end; ++block) {
@@ -303,9 +307,13 @@ static void prep_rows(const OcExl3Matrix *m, const float *in, size_t in_stride,
         const float *src = in + (rows ? (size_t)rows[r] : r) * in_stride;
         float *d = dst + r * m->input_dim;
         for (size_t b = 0; b < m->input_dim / 128; ++b) {
+            /* The tile decode walks input tiles in LOGICAL order and maps
+             * them to PHYSICAL tiles via kt_phys(), so the data stays in
+             * the caller's (logical) order; only the per-row suh scale
+             * lives in physical order and must be gathered. */
             size_t pb = m->in_block_perm ? m->in_block_perm[b] : b;
             for (size_t k = 0; k < 128; ++k)
-                d[b * 128 + k] = src[pb * 128 + k] * m->suh[pb * 128 + k];
+                d[b * 128 + k] = src[b * 128 + k] * m->suh[pb * 128 + k];
             hadamard(d + b * 128);
         }
     }
@@ -321,7 +329,7 @@ static void product(size_t begin, size_t end, size_t tid, void *arg)
      * Per-output accumulation order (kt ascending, then k, then n) is
      * unchanged, so results stay bit-identical to the serial reference. */
     blocks_prepped(j->m, j->x, j->rows, j->out, j->stride, j->row0,
-                   begin, end, j->table, tid);
+                   begin, end, j->table, tid, NULL);
 }
 OcError oc_exl3_matmul(const OcExl3Matrix *m, const float *in, size_t is,
                       float *out, size_t os, size_t batch)
@@ -376,14 +384,13 @@ static void expert_slice(size_t begin, size_t end, size_t tid, void *ud)
 {
     ExpertJob *j = ud;
     const OcExl3Expert *ex = j->ex;
-    const OcExl3Matrix *g = ex[0].gate, *u = ex[0].up;
-    const size_t nb_g = g->output_dim / 128;
-    const size_t nb_u = u->output_dim / 128;
+    const size_t nb_g = ex[0].gate->output_dim / 128;
+    const size_t nb_u = ex[0].up->output_dim / 128;
     const size_t per_e = nb_g + nb_u;
-    const float *table = get_lut(g->codebook);
+    const float *table = get_lut(ex[0].gate->codebook);
     for (size_t it = begin; it < end; ++it) {
         size_t e = it / per_e, r = it % per_e;
-        const OcExl3Matrix *m = r < nb_g ? g : u;
+        const OcExl3Matrix *m = r < nb_g ? ex[e].gate : ex[e].up;
         size_t block = r < nb_g ? r : r - nb_g;
         float *dst = (r < nb_g ? j->gate_out : j->up_out) +
             (j->rows ? (size_t)j->off[e] : e) * j->gu_stride;
@@ -402,8 +409,10 @@ static void expert_slice(size_t begin, size_t end, size_t tid, void *ud)
             batch * (m->input_dim + 128) * sizeof(float));
         if (!sc) continue;
         prep_rows(m, j->in, j->in_stride, ids, batch, sc);
+        /* The accumulator must not alias the prepped rows: they share the
+         * TLS scratch, so the acc lives in the reserved +128 tail. */
         blocks_prepped(m, sc, batch, dst, j->gu_stride, 0, block, block + 1,
-                       table, tid);
+                       table, tid, sc + batch * m->input_dim);
     }
 }
 
@@ -449,11 +458,11 @@ static void down_slice(size_t begin, size_t end, size_t tid, void *ud)
 {
     ExpertJob *j = ud;
     const OcExl3Expert *ex = j->ex;
-    const OcExl3Matrix *d = ex[0].down;
-    const size_t nb_d = d->output_dim / 128;
-    const float *table = get_lut(d->codebook);
+    const size_t nb_d = ex[0].down->output_dim / 128;
+    const float *table = get_lut(ex[0].down->codebook);
     for (size_t it = begin; it < end; ++it) {
         size_t e = it / nb_d, block = it % nb_d;
+        const OcExl3Matrix *d = ex[e].down;
         size_t batch = 1, row0 = e;
         if (j->rows) {
             batch = j->off[e + 1] - j->off[e];
@@ -469,7 +478,8 @@ static void down_slice(size_t begin, size_t end, size_t tid, void *ud)
         const float *src = j->act + (j->rows ? (size_t)j->off[e] : e) * j->act_stride;
         prep_rows(d, src, d->input_dim, NULL, batch, sc);
         blocks_prepped(d, sc, batch, j->out, j->out_stride, row0,
-                       block, block + 1, table, tid);
+                       block, block + 1, table, tid,
+                       sc + batch * d->input_dim);
     }
 }
 

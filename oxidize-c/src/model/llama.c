@@ -612,7 +612,11 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
      * hyper-connections, an explicit per-layer kind map, MRoPE sections,
      * the QSA indexer and PLE. */
     if (cfg->is_qwen4exp) {
-        cfg->rope_norm_pairs = true;   /* IMROPE rotates adjacent pairs */
+        /* RoPE here is the standard half-split (rotate_half) convention —
+         * verified against the transformers reference: normed-q dims pair
+         * (i, i+rope_len/2), not adjacent pairs. Only the [q|gate] weight
+         * interleave is head-local. */
+        cfg->rope_norm_pairs = false;
         cfg->attn_out_gate = false;
 
         /* A merged file stores the nextn draft head as the last block, same

@@ -803,9 +803,13 @@ int main(int argc, char **argv)
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
     const char *exl3_source = args.exl3_path ? args.exl3_path :
         oc_cli_native_model_path(args.model_path) ? args.model_path : NULL;
+    /* --spec-type none only disables speculative decoding; it does not
+     * opt into an unsupported EXL3 mode. */
+    const bool spec_active = args.spec_type &&
+        strcmp(args.spec_type, "none") != 0;
     if (oc_cli_exl3_reject(exl3_source, args.backend,
             args.serve_api || args.stream_experts || args.mtp || args.mtp_model ||
-            args.draft_model || args.spec_type || args.quantize_input ||
+            args.draft_model || spec_active || args.quantize_input ||
             args.inspect || args.cuda_selftest || args.print_plan,
             args.model_path != NULL)) return 1;
     if (oc_cli_kv_compress_reject(args.backend, args.kv_compress,

@@ -27,7 +27,7 @@ static OcError read_json(const char *dir,const char *name,bool optional,OcArena 
     snprintf(path,n,"%s/%s",dir,name);FILE *fp=fopen(path,"rb");free(path);
     if(!fp)return optional&&errno==ENOENT?OC_OK:OC_ERR_IO;
     if(fseek(fp,0,SEEK_END)) {fclose(fp);return OC_ERR_IO;}long size=ftell(fp);
-    if(size<0||(unsigned long)size>HF_JSON_LIMIT||fseek(fp,0,SEEK_SET)){fclose(fp);return OC_ERR_FORMAT;}
+    if(size<0||(unsigned long)size>HF_JSON_LIMIT||fseek(fp,0,SEEK_SET)){fclose(fp);do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);}
     char *buf=malloc((size_t)size+1);if(!buf){fclose(fp);return OC_ERR_OOM;}
     bool ok=fread(buf,1,(size_t)size,fp)==(size_t)size;fclose(fp);
     OcError e=ok?oc_json_parse(buf,(size_t)size,arena,out):OC_ERR_IO;free(buf);
@@ -73,16 +73,19 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
     if(!uint_field(t,"vocab_size",0,&c->vocab_size)||!uint_field(t,"hidden_size",0,&c->n_embd)||
        !uint_field(t,"num_hidden_layers",0,&c->n_layer)||!uint_field(t,"num_attention_heads",0,&c->n_head)||
        !uint_field(t,"num_key_value_heads",c->n_head,&c->n_head_kv)||!uint_field(t,"head_dim",0,&c->head_dim)||
-       !uint_field(t,"max_position_embeddings",4096,&c->n_ctx)||!float_field(t,"rms_norm_eps",1e-5f,&c->rms_norm_eps))return OC_ERR_FORMAT;
+       !uint_field(t,"max_position_embeddings",4096,&c->n_ctx)||!float_field(t,"rms_norm_eps",1e-5f,&c->rms_norm_eps))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!c->vocab_size||!c->n_embd||!c->n_layer||!c->n_head||!c->n_head_kv||c->n_head%c->n_head_kv||
        !c->head_dim||c->head_dim%2||!c->n_ctx||c->n_head_kv>c->n_head)return OC_ERR_MODEL;
     const OcJson *act=oc_json_get(t,"hidden_act");if(act&&!eq(act,"silu"))return OC_ERR_MODEL;
     bool ab=false;if(!flag(t,"attention_bias",false,&ab)||ab)return OC_ERR_MODEL;
-    c->is_qwen4exp=true;c->rope_norm_pairs=true;c->attn_out_gate=false;
+    /* RoPE is the standard half-split convention (verified against the
+     * transformers reference); only the [q|gate] weight interleave is
+     * head-local. */
+    c->is_qwen4exp=true;c->rope_norm_pairs=false;c->attn_out_gate=false;
     /* MoE: every layer is routed (top-k of num_experts + shared expert). */
     if(!uint_field(t,"num_experts",0,&c->num_experts)||!uint_field(t,"num_experts_per_tok",0,&c->num_experts_per_tok)||
        !uint_field(t,"moe_intermediate_size",0,&c->expert_intermediate_size)||
-       !uint_field(t,"shared_expert_intermediate_size",0,&c->shared_expert_intermediate_size))return OC_ERR_FORMAT;
+       !uint_field(t,"shared_expert_intermediate_size",0,&c->shared_expert_intermediate_size))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!c->num_experts||!c->num_experts_per_tok||c->num_experts_per_tok>c->num_experts||!c->expert_intermediate_size)return OC_ERR_MODEL;
     c->n_ff=c->expert_intermediate_size;c->moe_layer_start=0;
     /* RoPE: interleaved MRoPE over head_dim*partial_rotary_factor dims. */
@@ -97,7 +100,7 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
     const OcJson *sec=rp?oc_json_get(rp,"mrope_section"):NULL;
     if(sec&&sec->type==OC_JSON_ARRAY) {
         size_t i=0;for(const OcJson *v=sec->child;v&&i<4;v=v->next,i++)
-            if(v->type!=OC_JSON_NUMBER||v->number<0||!oc_json_u32(v,&c->rope_sections[i]))return OC_ERR_FORMAT;
+            if(v->type!=OC_JSON_NUMBER||v->number<0||!oc_json_u32(v,&c->rope_sections[i]))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     }
     /* Recurrent/full layer kinds, hyper-connections, QSA indexer. */
     const OcJson *lt=oc_json_get(t,"layer_types");
@@ -106,23 +109,23 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
     size_t li=0;for(const OcJson *v=lt->child;v;v=v->next,li++)
         if(eq(v,"linear_attention"))c->recurrent_layers[li]=1;
         else if(!eq(v,"full_attention"))return OC_ERR_MODEL;
-    if(!uint_field(t,"full_attention_interval",1,&c->full_attention_interval)||!c->full_attention_interval)return OC_ERR_FORMAT;
+    if(!uint_field(t,"full_attention_interval",1,&c->full_attention_interval)||!c->full_attention_interval)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!uint_field(t,"hc_count",0,&c->hc_mult)||!uint_field(t,"hc_lowrank",0,&c->hc_low_rank)||
        !c->hc_mult||c->hc_mult>8u||!c->hc_low_rank)return OC_ERR_MODEL;
     if(!uint_field(t,"indexer_n_heads",0,&c->indexer_n_head)||!uint_field(t,"indexer_head_dim",0,&c->indexer_head_size)||
-       !uint_field(t,"indexer_budget",0,&c->indexer_top_k)||!uint_field(t,"indexer_compress_ratio",1,&c->indexer_kpool))return OC_ERR_FORMAT;
+       !uint_field(t,"indexer_budget",0,&c->indexer_top_k)||!uint_field(t,"indexer_compress_ratio",1,&c->indexer_kpool))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!c->indexer_n_head||!c->indexer_head_size||!c->indexer_top_k)return OC_ERR_MODEL;
     /* Gated delta-net geometry. */
     if(!uint_field(t,"linear_conv_kernel_dim",0,&c->ssm_conv_kernel)||
        !uint_field(t,"linear_key_head_dim",0,&c->ssm_state_size)||
        !uint_field(t,"linear_num_key_heads",0,&c->ssm_group_count)||
        !uint_field(t,"linear_num_value_heads",0,&c->ssm_value_heads)||
-       !uint_field(t,"linear_value_head_dim",0,&c->ssm_inner_size))return OC_ERR_FORMAT;
+       !uint_field(t,"linear_value_head_dim",0,&c->ssm_inner_size))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     c->ssm_inner_size*=c->ssm_value_heads;
     if(c->ssm_conv_kernel<2||!c->ssm_state_size||!c->ssm_group_count||!c->ssm_value_heads||
        c->ssm_inner_size%c->ssm_value_heads||c->ssm_value_heads%c->ssm_group_count)return OC_ERR_MODEL;
     /* MTP draft head: HF counts it separately from num_hidden_layers. */
-    if(!uint_field(t,"mtp_num_hidden_layers",0,&c->nextn_predict_layers))return OC_ERR_FORMAT;
+    if(!uint_field(t,"mtp_num_hidden_layers",0,&c->nextn_predict_layers))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(c->nextn_predict_layers>=c->n_layer)return OC_ERR_MODEL;
     /* PLE: layer ids are 1-based in HF. Hash constants are read from
      * ngram_embedding.safetensors by the native loader; if that file is
@@ -133,7 +136,7 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
         uint32_t id;if(!oc_json_u32(pl->child,&id)||!id||id-1>=c->n_layer)return OC_ERR_MODEL;
         c->ple_layer=id-1;
         if(!uint_field(t,"ngram_size",0,&c->ple_ngram)||!uint_field(t,"heads_per_ngram",0,&c->ple_heads_per_ngram)||
-           !uint_field(t,"ple_conv_kernel_size",0,&c->ple_conv_kernel))return OC_ERR_FORMAT;
+           !uint_field(t,"ple_conv_kernel_size",0,&c->ple_conv_kernel))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
         c->ple_n_heads=c->ple_ngram>0?(c->ple_ngram-1u)*c->ple_heads_per_ngram:0;
         if(c->ple_ngram<2||c->ple_ngram>OC_Q4E_PLE_MAX_NGRAM||!c->ple_n_heads||
            c->ple_n_heads>OC_Q4E_PLE_MAX_HEADS||c->ple_conv_kernel<2)return OC_ERR_MODEL;
@@ -142,7 +145,7 @@ static OcError config_load_qwen4exp(const OcJson *j,OcLlamaConfig *c) {
         c->ple_img=0;if(oc_json_u32(oc_json_get(j,"image_token_id"),&c->ple_img)) {}
         c->ple_enabled=true;
     }
-    bool tied=false;if(!flag(t,"tie_word_embeddings",false,&tied))return OC_ERR_FORMAT;c->tied_embeddings=tied;
+    bool tied=false;if(!flag(t,"tie_word_embeddings",false,&tied))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);c->tied_embeddings=tied;
     c->norm_scale=1;c->expert_weights_scale=1;c->sliding_window_pattern=1;c->norm_groups=1;
     c->head_dim_swa=c->head_dim;c->n_head_kv_swa=c->n_head_kv;c->rope_dim_swa=c->rope_dim;c->rope_theta_swa=c->rope_theta;
     return OC_OK;
@@ -154,9 +157,9 @@ static OcError config_load(const OcJson *j,OcLlamaConfig *c,OcModelArchitecture 
         return config_load_qwen4exp(j,c);
     }
     if(eq(type,"llama"))*arch=OC_ARCH_LLAMA;else if(eq(type,"mistral"))*arch=OC_ARCH_MISTRAL;else if(eq(type,"qwen2"))*arch=OC_ARCH_QWEN;else return OC_ERR_MODEL;
-    if(!uint_field(j,"vocab_size",0,&c->vocab_size)||!uint_field(j,"hidden_size",0,&c->n_embd)||!uint_field(j,"num_hidden_layers",0,&c->n_layer)||!uint_field(j,"num_attention_heads",0,&c->n_head)||!uint_field(j,"intermediate_size",0,&c->n_ff))return OC_ERR_FORMAT;
+    if(!uint_field(j,"vocab_size",0,&c->vocab_size)||!uint_field(j,"hidden_size",0,&c->n_embd)||!uint_field(j,"num_hidden_layers",0,&c->n_layer)||!uint_field(j,"num_attention_heads",0,&c->n_head)||!uint_field(j,"intermediate_size",0,&c->n_ff))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!c->vocab_size||!c->n_embd||!c->n_layer||!c->n_head||!c->n_ff||c->vocab_size>10000000||c->n_embd%c->n_head)return OC_ERR_MODEL;
-    if(!uint_field(j,"num_key_value_heads",c->n_head,&c->n_head_kv)||!uint_field(j,"head_dim",c->n_embd/c->n_head,&c->head_dim)||!uint_field(j,"max_position_embeddings",2048,&c->n_ctx)||!float_field(j,"rope_theta",10000,&c->rope_theta)||!float_field(j,"rms_norm_eps",1e-6f,&c->rms_norm_eps)||!flag(j,"tie_word_embeddings",false,&c->tied_embeddings))return OC_ERR_FORMAT;
+    if(!uint_field(j,"num_key_value_heads",c->n_head,&c->n_head_kv)||!uint_field(j,"head_dim",c->n_embd/c->n_head,&c->head_dim)||!uint_field(j,"max_position_embeddings",2048,&c->n_ctx)||!float_field(j,"rope_theta",10000,&c->rope_theta)||!float_field(j,"rms_norm_eps",1e-6f,&c->rms_norm_eps)||!flag(j,"tie_word_embeddings",false,&c->tied_embeddings))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     if(!c->n_head_kv||c->n_head%c->n_head_kv||!c->head_dim||c->head_dim%2||!c->n_ctx||c->head_dim>UINT32_MAX/c->n_head)return OC_ERR_MODEL;
     if(!nullish(oc_json_get(j,"rope_scaling")))return OC_ERR_MODEL;
     bool sliding=false;if(!flag(j,"use_sliding_window",false,&sliding)||sliding)return OC_ERR_MODEL;
@@ -174,7 +177,12 @@ static OcError config_load(const OcJson *j,OcLlamaConfig *c,OcModelArchitecture 
  * regex or SentencePiece normalization for the checkpoint's pipeline. */
 static bool pipeline(const OcJson *j,bool bpe,const char **pre_name) {
     *pre_name=NULL;
-    if(!nullish(oc_json_get(j,"normalizer")))return false;
+    /* NFC is accepted and treated as identity: the byte-level BPE vocab is
+     * ASCII-pure, and unnormalized non-ASCII input only affects which byte
+     * sequence reaches the encoder — flagged below. */
+    const OcJson *norm=oc_json_get(j,"normalizer");
+    if(!nullish(norm)&&!eq(oc_json_get(norm,"type"),"NFC"))return false;
+    if(!nullish(norm))oc_log_warn("HF tokenizer normalizer NFC treated as identity (non-ASCII input may tokenize differently)");
     const OcJson *pre=oc_json_get(j,"pre_tokenizer"),*dec=oc_json_get(j,"decoder");
     if(bpe) {
         bool prefix,regex;
@@ -186,7 +194,11 @@ static bool pipeline(const OcJson *j,bool bpe,const char **pre_name) {
             const OcJson *pattern=oc_json_get(oc_json_get(split,"pattern"),"Regex");
             const char *llama="(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
             const char *qwen="(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
-            if(eq(pattern,llama))*pre_name="llama-bpe";else if(eq(pattern,qwen))*pre_name="qwen2";else return false;
+            /* Qwen variant that keeps combining marks with the letter run. */
+            const char *qwen_m="(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+            if(eq(pattern,llama))*pre_name="llama-bpe";
+            else if(eq(pattern,qwen)||eq(pattern,qwen_m))*pre_name="qwen2";
+            else return false;
         }
         if(!pre||!eq(oc_json_get(pre,"type"),"ByteLevel")||!flag(pre,"add_prefix_space",false,&prefix)||prefix||!flag(pre,"use_regex",true,&regex))return false;
         if(regex){if(*pre_name)return false;*pre_name="gpt2";}
@@ -221,15 +233,15 @@ static bool postprocess(const OcJson *j,const OcJson *tc,const OcGgufFile *m,boo
 }
 static OcError tokenizer_load(const OcJson *j,const OcJson *tc,const OcJson *cfg,OcGgufFile *m,uint32_t n) {
     const OcJson *model=oc_json_get(j,"model"),*type=oc_json_get(model,"type"),*vocab=oc_json_get(model,"vocab");
-    bool bpe=eq(type,"BPE");if(!bpe&&!eq(type,"Unigram"))return OC_ERR_TOKENIZER;
+    bool bpe=eq(type,"BPE");if(!bpe&&!eq(type,"Unigram"))do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
     const char *pre_name=NULL;
-    if(!pipeline(j,bpe,&pre_name)||!vocab||vocab->type!=(bpe?OC_JSON_OBJECT:OC_JSON_ARRAY))return OC_ERR_TOKENIZER;
-    bool fallback=false;if(!flag(model,"byte_fallback",false,&fallback)||fallback)return OC_ERR_TOKENIZER;
+    if(!pipeline(j,bpe,&pre_name)||!vocab||vocab->type!=(bpe?OC_JSON_OBJECT:OC_JSON_ARRAY))do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
+    bool fallback=false;if(!flag(model,"byte_fallback",false,&fallback)||fallback)do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
     if(bpe) {
-        const OcJson *drop=oc_json_get(model,"dropout");if(!nullish(drop)&&(drop->type!=OC_JSON_NUMBER||drop->number!=0))return OC_ERR_TOKENIZER;
+        const OcJson *drop=oc_json_get(model,"dropout");if(!nullish(drop)&&(drop->type!=OC_JSON_NUMBER||drop->number!=0))do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
         const char *keys[]={"continuing_subword_prefix","end_of_word_suffix","unk_token"};
-        for(size_t i=0;i<3;i++){const OcJson *v=oc_json_get(model,keys[i]);if(!nullish(v)&&!eq(v,""))return OC_ERR_TOKENIZER;}
-        bool ignore=false;if(!flag(model,"ignore_merges",false,&ignore))return OC_ERR_TOKENIZER;
+        for(size_t i=0;i<3;i++){const OcJson *v=oc_json_get(model,keys[i]);if(!nullish(v)&&!eq(v,""))do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);}
+        bool ignore=false;if(!flag(model,"ignore_merges",false,&ignore))do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
         OcGgufMetadataValue *iv=entry(m,"tokenizer.hf.ignore_merges",OC_GGUF_MT_BOOL);
         if(!iv)return OC_ERR_OOM;
         iv->v.b=ignore;
@@ -242,39 +254,39 @@ static OcError tokenizer_load(const OcJson *j,const OcJson *tc,const OcJson *cfg
     size_t seq=0;
     for(const OcJson *v=vocab->child;v;v=v->next,seq++) {
         uint32_t id;const char *text;
-        if(bpe){if(!oc_json_u32(v,&id))return OC_ERR_FORMAT;text=v->key;}
-        else {if(seq>UINT32_MAX||v->type!=OC_JSON_ARRAY||v->count!=2||v->child->type!=OC_JSON_STRING||v->child->next->type!=OC_JSON_NUMBER||fabs(v->child->next->number)>FLT_MAX)return OC_ERR_FORMAT;id=(uint32_t)seq;text=v->child->string;}
-        if(id>=n||tokens[id].v.str.data||!*text)return OC_ERR_FORMAT;
+        if(bpe){if(!oc_json_u32(v,&id))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);text=v->key;}
+        else {if(seq>UINT32_MAX||v->type!=OC_JSON_ARRAY||v->count!=2||v->child->type!=OC_JSON_STRING||v->child->next->type!=OC_JSON_NUMBER||fabs(v->child->next->number)>FLT_MAX)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);id=(uint32_t)seq;text=v->child->string;}
+        if(id>=n||tokens[id].v.str.data||!*text)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
         if(!token(m,&tokens[id],text))return OC_ERR_OOM;
         types[id].v.i32=1;if(scores)scores[id].v.f32=(float)v->child->next->number;
     }
-    const OcJson *added=oc_json_get(j,"added_tokens");if(added&&added->type!=OC_JSON_ARRAY)return OC_ERR_FORMAT;
+    const OcJson *added=oc_json_get(j,"added_tokens");if(added&&added->type!=OC_JSON_ARRAY)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
     unsigned char *seen=oc_arena_alloc_bytes(m->arena,n);if(!seen)return OC_ERR_OOM;memset(seen,0,n);
     for(const OcJson *v=added?added->child:NULL;v;v=v->next) {
         uint32_t id;const OcJson *content=oc_json_get(v,"content");bool special=false,b=false;
-        if(!oc_json_u32(oc_json_get(v,"id"),&id)||id>=n||seen[id]||!content||content->type!=OC_JSON_STRING||!*content->string||!flag(v,"special",false,&special))return OC_ERR_FORMAT;
+        if(!oc_json_u32(oc_json_get(v,"id"),&id)||id>=n||seen[id]||!content||content->type!=OC_JSON_STRING||!*content->string||!flag(v,"special",false,&special))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
         seen[id]=1;
-        const char *opts[]={"single_word","lstrip","rstrip"};for(size_t k=0;k<3;k++)if(!flag(v,opts[k],false,&b)||b)return OC_ERR_TOKENIZER;
-        if(!flag(v,"normalized",false,&b))return OC_ERR_TOKENIZER;
-        if(tokens[id].v.str.data&&strcmp(tokens[id].v.str.data,content->string))return OC_ERR_FORMAT;
+        const char *opts[]={"single_word","lstrip","rstrip"};for(size_t k=0;k<3;k++)if(!flag(v,opts[k],false,&b)||b)do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
+        if(!flag(v,"normalized",false,&b))do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
+        if(tokens[id].v.str.data&&strcmp(tokens[id].v.str.data,content->string))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
         if(!token(m,&tokens[id],content->string))return OC_ERR_OOM;
         types[id].v.i32=special?3:4;
     }
     for(uint32_t i=0;i<n;i++)if(!tokens[i].v.str.data) {
-        if(!bpe)return OC_ERR_FORMAT;
+        if(!bpe)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
         if(!token(m,&tokens[i],""))return OC_ERR_OOM;
         types[i].v.i32=5;
     }
     if(bpe) {
-        const OcJson *merges=oc_json_get(model,"merges");if(!merges||merges->type!=OC_JSON_ARRAY)return OC_ERR_FORMAT;
+        const OcJson *merges=oc_json_get(model,"merges");if(!merges||merges->type!=OC_JSON_ARRAY)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
         OcGgufMetadataValue *out=array(m,"tokenizer.ggml.merges",OC_GGUF_MT_STRING,merges->count);if(!out)return OC_ERR_OOM;
         size_t i=0;for(const OcJson *v=merges->child;v;v=v->next,i++) {
             const char *text;
             if(v->type==OC_JSON_STRING)text=v->string;
             else if(v->type==OC_JSON_ARRAY&&v->count==2&&v->child->type==OC_JSON_STRING&&v->child->next->type==OC_JSON_STRING) {
                 text=oc_arena_printf(m->arena,"%s %s",v->child->string,v->child->next->string);if(!text)return OC_ERR_OOM;
-            } else return OC_ERR_FORMAT;
-            const char *space=strchr(text,' ');if(!space||space==text||!space[1]||strchr(space+1,' '))return OC_ERR_FORMAT;
+            } else do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
+            const char *space=strchr(text,' ');if(!space||space==text||!space[1]||strchr(space+1,' '))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
             if(!token(m,&out[i],text))return OC_ERR_OOM;
         }
     }
@@ -282,18 +294,18 @@ static OcError tokenizer_load(const OcJson *j,const OcJson *tc,const OcJson *cfg
     const char *ggnames[]={"bos","eos","padding","unknown","separator","cls","mask"};
     for(size_t k=0;k<7;k++) {
         char key[96];snprintf(key,sizeof(key),"%s_token_id",names[k]);const OcJson *idv=oc_json_get(cfg,key);uint32_t id=0;bool have=false;
-        if(!nullish(idv)){if(!oc_json_u32(idv,&id)||id>=n)return OC_ERR_FORMAT;have=true;}
+        if(!nullish(idv)){if(!oc_json_u32(idv,&id)||id>=n)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);have=true;}
         snprintf(key,sizeof(key),"%s_token",names[k]);const OcJson *text=oc_json_get(tc,key);
         if(text&&text->type==OC_JSON_OBJECT)text=oc_json_get(text,"content");
-        if(!nullish(text)) {if(text->type!=OC_JSON_STRING)return OC_ERR_FORMAT;bool found=false;for(uint32_t i=0;i<n;i++)if(!strcmp(tokens[i].v.str.data,text->string)){if(have&&id!=i)return OC_ERR_FORMAT;id=i;have=found=true;break;}if(!found)return OC_ERR_FORMAT;}
-        if(k==3&&!bpe) {const OcJson *unk=oc_json_get(model,"unk_id");uint32_t uid;if(!nullish(unk)){if(!oc_json_u32(unk,&uid)||uid>=n||(have&&uid!=id))return OC_ERR_FORMAT;id=uid;have=true;}}
-        if(have){if(types[id].v.i32==5)return OC_ERR_FORMAT;snprintf(key,sizeof(key),"tokenizer.ggml.%s_token_id",ggnames[k]);if(!setu32(m,key,id))return OC_ERR_OOM;types[id].v.i32=k==3?2:3;}
+        if(!nullish(text)) {if(text->type!=OC_JSON_STRING)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);bool found=false;for(uint32_t i=0;i<n;i++)if(!strcmp(tokens[i].v.str.data,text->string)){if(have&&id!=i)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);id=i;have=found=true;break;}if(!found)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);}
+        if(k==3&&!bpe) {const OcJson *unk=oc_json_get(model,"unk_id");uint32_t uid;if(!nullish(unk)){if(!oc_json_u32(unk,&uid)||uid>=n||(have&&uid!=id))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);id=uid;have=true;}}
+        if(have){if(types[id].v.i32==5)do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);snprintf(key,sizeof(key),"tokenizer.ggml.%s_token_id",ggnames[k]);if(!setu32(m,key,id))return OC_ERR_OOM;types[id].v.i32=k==3?2:3;}
     }
-    bool bos;if(!flag(tc,"add_bos_token",!bpe,&bos))return OC_ERR_FORMAT;
-    if(!postprocess(j,tc,m,&bos))return OC_ERR_TOKENIZER;
+    bool bos;if(!flag(tc,"add_bos_token",!bpe,&bos))do { oc_log_error("TOKFMT line %d", __LINE__); return OC_ERR_FORMAT; } while (0);
+    if(!postprocess(j,tc,m,&bos))do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
     OcGgufMetadataValue *bv=entry(m,"tokenizer.ggml.add_bos_token",OC_GGUF_MT_BOOL);if(!bv)return OC_ERR_OOM;bv->v.b=bos;
-    bool eos;if(!flag(tc,"add_eos_token",false,&eos)||eos)return OC_ERR_TOKENIZER;
-    const OcJson *chat=oc_json_get(tc,"chat_template");if(!nullish(chat)){if(chat->type!=OC_JSON_STRING)return OC_ERR_TOKENIZER;if(!setstr(m,"tokenizer.chat_template",chat->string))return OC_ERR_OOM;}
+    bool eos;if(!flag(tc,"add_eos_token",false,&eos)||eos)do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);
+    const OcJson *chat=oc_json_get(tc,"chat_template");if(!nullish(chat)){if(chat->type!=OC_JSON_STRING)do { oc_log_error("TOKTRACE line %d", __LINE__); return OC_ERR_TOKENIZER; } while (0);if(!setstr(m,"tokenizer.chat_template",chat->string))return OC_ERR_OOM;}
     return OC_OK;
 }
 OcError oc_hf_metadata_load(const char *directory,OcLlamaConfig *config,OcModelArchitecture *arch,OcGgufFile *metadata) {

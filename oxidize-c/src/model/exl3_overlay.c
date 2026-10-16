@@ -112,19 +112,19 @@ static OcError scale(const OcExl3Overlay *o, const char *key, bool input,
     const void *a = NULL, *b = NULL;
     const OcSafetensorsTensor *h = companion(o, key, input ? "suh" : "svh", &a);
     const OcSafetensorsTensor *p = companion(o, key, input ? "su" : "sv", &b);
-    if ((h != NULL) == (p != NULL)) return OC_ERR_FORMAT;
+    if ((h != NULL) == (p != NULL)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     const OcSafetensorsTensor *t = h ? h : p;
     size_t count = h ? dim : dim / 16;
     if (t->n_dims != 1 || t->shape[0] != count ||
         t->data_length != count * 2 || strcmp(t->dtype, h ? "F16" : "I16"))
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     float *v = malloc(dim * sizeof(*v));
     if (!v) return OC_ERR_OOM;
     const uint8_t *raw = h ? a : b;
     for (size_t i = 0; i < dim; i++) {
         v[i] = h ? oc_oxk_f16_le_to_f32(raw + i * 2)
                  : ((raw[i / 8] >> (i % 8)) & 1) ? -1.0f : 1.0f;
-        if (!isfinite(v[i])) { free(v); return OC_ERR_FORMAT; }
+        if (!isfinite(v[i])) { free(v); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
     }
     *out = v;
     return OC_OK;
@@ -258,7 +258,7 @@ static OcError native_vector(const OcExl3Overlay *o, const char *name,
         (!strcmp(t->dtype, "F16") || !strcmp(t->dtype, "BF16")) ? 2 : 0;
     if (!width || t->n_dims != 1 || t->shape[0] != dim ||
         dim > SIZE_MAX / sizeof(float) || t->data_length != dim * width)
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     float *v = malloc(dim * sizeof(*v));
     if (!v) return OC_ERR_OOM;
     const uint8_t *p = data;
@@ -269,7 +269,7 @@ static OcError native_vector(const OcExl3Overlay *o, const char *name,
             uint32_t bits = ((uint32_t)p[i*2] | (uint32_t)p[i*2+1] << 8) << 16;
             memcpy(&v[i], &bits, 4);
         }
-        if (!isfinite(v[i])) { free(v); return OC_ERR_FORMAT; }
+        if (!isfinite(v[i])) { free(v); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
     }
     *out = v;
     return OC_OK;
@@ -283,17 +283,17 @@ static OcError native_matrix(OcExl3Overlay *o, const char *key,
     const OcSafetensorsTensor *t = companion(o, key, "weight", &data);
     const OcSafetensorsTensor *q = companion(o, key, "trellis", &trellis);
     if (q) {
-        if (!packed || t) return OC_ERR_FORMAT;
+        if (!packed || t) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         *view = (OcWeightView){.data=trellis, .rows=rows, .cols=cols};
         return OC_OK;
     }
-    if (!t) return OC_ERR_TENSOR;
+    if (!t) { oc_log_error("Q4EMISS %s", key); return OC_ERR_TENSOR; }
     size_t width = !strcmp(t->dtype,"F32") ? 4 :
         (!strcmp(t->dtype,"F16") || !strcmp(t->dtype,"BF16")) ? 2 : 0;
     if (!width || !rows || !cols || cols > SIZE_MAX / width ||
         rows > SIZE_MAX / (cols * width) || t->n_dims != 2 ||
         t->shape[0] != rows || t->shape[1] != cols ||
-        t->data_length != rows * cols * width) return OC_ERR_FORMAT;
+        t->data_length != rows * cols * width) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     /* SafeTensors permits unaligned payload offsets. Keep ordinary views
      * aligned for CPU kernels without expanding their storage dtype. */
     if ((uintptr_t)data % width) {
@@ -404,7 +404,7 @@ static OcError q4e_index_build(OcExl3Overlay *o, Q4eIndex *ni)
      * O(n log n), instead of the dense path's quadratic scan. */
     for (size_t i = 1; i < ni->n; i++)
         if (!strcmp(ni->items[i].name, ni->items[i - 1].name))
-            return OC_ERR_FORMAT;
+            do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     return OC_OK;
 }
 
@@ -443,17 +443,17 @@ static OcError q4e_vector(Q4eIndex *ni, OcExl3Overlay *o, const char *name,
 {
     const void *data = NULL;
     const OcSafetensorsTensor *t = q4e_find(ni, o, name, &data, NULL);
-    if (!t) return OC_ERR_TENSOR;
+    if (!t) { oc_log_error("Q4EMISS %s", name); return OC_ERR_TENSOR; }
     size_t width = !strcmp(t->dtype, "F32") ? 4 :
         (!strcmp(t->dtype, "F16") || !strcmp(t->dtype, "BF16")) ? 2 : 0;
     if (!width || t->n_dims != 1 || t->shape[0] != dim ||
         dim > SIZE_MAX / sizeof(float) / 2 || t->data_length != dim * width)
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     float *v = malloc((dim ? dim : 1) * sizeof(*v));
     if (!v) return OC_ERR_OOM;
     for (size_t i = 0; i < dim; i++) {
         size_t s = row_perm ? row_perm[i] : i;
-        if (s >= dim) { free(v); return OC_ERR_FORMAT; }
+        if (s >= dim) { free(v); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
         float x;
         const uint8_t *p = (const uint8_t *)data + s * width;
         if (width == 4) memcpy(&x, p, 4);
@@ -464,7 +464,7 @@ static OcError q4e_vector(Q4eIndex *ni, OcExl3Overlay *o, const char *name,
         }
         if (neg_exp) x = -expf(x);
         v[i] = x + add;
-        if (!isfinite(v[i])) { free(v); return OC_ERR_FORMAT; }
+        if (!isfinite(v[i])) { free(v); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
     }
     /* NOT registered with the overlay: q4e_vector outputs are assigned to
      * model fields that oc_llama_free() releases (norms, ssm_*_f32, …). */
@@ -481,21 +481,21 @@ static OcError q4e_matrix_f32(Q4eIndex *ni, OcExl3Overlay *o, const char *name,
     const void *data = NULL;
     char wname[OC_SAFETENSORS_NAME_LEN];
     if (snprintf(wname, sizeof(wname), "%s.weight", name) >=
-        (int)sizeof(wname)) return OC_ERR_FORMAT;
+        (int)sizeof(wname)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     const OcSafetensorsTensor *t = q4e_find(ni, o, wname, &data, NULL);
-    if (!t) return OC_ERR_TENSOR;
+    if (!t) { oc_log_error("Q4EMISS %s", wname); return OC_ERR_TENSOR; }
     size_t width = !strcmp(t->dtype, "F32") ? 4 :
         (!strcmp(t->dtype, "F16") || !strcmp(t->dtype, "BF16")) ? 2 : 0;
     if (!width || !rows || !cols || t->n_dims != 2 ||
         t->shape[0] != rows || t->shape[1] != cols ||
         cols > SIZE_MAX / width || rows > SIZE_MAX / (cols * width) ||
         t->data_length != rows * cols * width)
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     float *v = malloc(rows * cols * sizeof(*v));
     if (!v) return OC_ERR_OOM;
     for (size_t r = 0; r < rows; r++) {
         size_t s = row_perm ? row_perm[r] : r;
-        if (s >= rows) { free(v); return OC_ERR_FORMAT; }
+        if (s >= rows) { free(v); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
         const uint8_t *p = (const uint8_t *)data + s * cols * width;
         for (size_t i = 0; i < cols; i++) {
             float x;
@@ -507,7 +507,7 @@ static OcError q4e_matrix_f32(Q4eIndex *ni, OcExl3Overlay *o, const char *name,
                 memcpy(&x, &bits, 4);
             }
             v[r * cols + i] = x;
-            if (!isfinite(x)) { free(v); return OC_ERR_FORMAT; }
+            if (!isfinite(x)) { free(v); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
         }
     }
     float *owned = q4e_owned(o, v);
@@ -527,24 +527,24 @@ static OcError q4e_scale(Q4eIndex *ni, OcExl3Overlay *o, const char *key,
     char name[OC_SAFETENSORS_NAME_LEN];
     const void *h = NULL, *p = NULL;
     if (snprintf(name, sizeof(name), "%s.%s", key, input ? "suh" : "svh") >=
-        (int)sizeof(name)) return OC_ERR_FORMAT;
+        (int)sizeof(name)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     const OcSafetensorsTensor *th = q4e_find(ni, o, name, &h, NULL);
     if (snprintf(name, sizeof(name), "%s.%s", key, input ? "su" : "sv") >=
-        (int)sizeof(name)) return OC_ERR_FORMAT;
+        (int)sizeof(name)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     const OcSafetensorsTensor *tp = q4e_find(ni, o, name, &p, NULL);
-    if ((th != NULL) == (tp != NULL)) return OC_ERR_FORMAT;
+    if ((th != NULL) == (tp != NULL)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     const OcSafetensorsTensor *t = th ? th : tp;
     size_t count = th ? dim : dim / 16;
     if (t->n_dims != 1 || t->shape[0] != count ||
         t->data_length != count * 2 || strcmp(t->dtype, th ? "F16" : "I16"))
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     float *v = malloc((dim ? dim : 1) * sizeof(*v));
     if (!v) return OC_ERR_OOM;
     const uint8_t *raw = th ? h : p;
     for (size_t i = 0; i < dim; i++) {
         v[i] = th ? oc_oxk_f16_le_to_f32(raw + i * 2)
                   : ((raw[i / 8] >> (i % 8)) & 1) ? -1.0f : 1.0f;
-        if (!isfinite(v[i])) { free(v); return OC_ERR_FORMAT; }
+        if (!isfinite(v[i])) { free(v); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
     }
     float *owned = q4e_owned(o, v);
     if (!owned) { free(v); return OC_ERR_OOM; }
@@ -563,15 +563,15 @@ static OcError q4e_exl3_matrix(Q4eIndex *ni, OcExl3Overlay *o, const char *key,
 {
     char name[OC_SAFETENSORS_NAME_LEN];
     if (snprintf(name, sizeof(name), "%s.trellis", key) >= (int)sizeof(name))
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     const void *data = NULL;
     const OcSafetensorsTensor *t = q4e_find(ni, o, name, &data, NULL);
-    if (!t) return OC_ERR_TENSOR;
+    if (!t) { oc_log_error("Q4EMISS %s", name); return OC_ERR_TENSOR; }
     if (!in_dim || !out_dim || in_dim % 128 || out_dim % 128 ||
         strcmp(t->dtype, "I16") || t->n_dims != 3 ||
         t->shape[0] != in_dim / 16 || t->shape[1] != out_dim / 16 ||
         t->shape[2] < 8 || t->shape[2] > 128 || t->shape[2] % 8)
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     OcExl3Matrix *q = malloc(sizeof(*q));
     if (!q) return OC_ERR_OOM;
     memset(q, 0, sizeof(*q));
@@ -610,17 +610,17 @@ static OcError q4e_view(Q4eIndex *ni, OcExl3Overlay *o, const char *key,
 {
     char name[OC_SAFETENSORS_NAME_LEN];
     if (snprintf(name, sizeof(name), "%s.weight", key) >= (int)sizeof(name))
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     const void *data = NULL;
     const OcSafetensorsTensor *t = q4e_find(ni, o, name, &data, NULL);
-    if (!t) return OC_ERR_TENSOR;
+    if (!t) { oc_log_error("Q4EMISS %s", name); return OC_ERR_TENSOR; }
     size_t width = !strcmp(t->dtype, "F32") ? 4 :
         (!strcmp(t->dtype, "F16") || !strcmp(t->dtype, "BF16")) ? 2 : 0;
     if (!width || !rows || !cols || t->n_dims != 2 ||
         t->shape[0] != rows || t->shape[1] != cols ||
         cols > SIZE_MAX / width || rows > SIZE_MAX / (cols * width) ||
         t->data_length != rows * cols * width)
-        return OC_ERR_FORMAT;
+        do { oc_log_error("Q4EFMT %s: got shape %zux%zu dims %zu len %zu want %zux%zu", name, (size_t)t->shape[0], (size_t)t->shape[1], (size_t)t->n_dims, (size_t)t->data_length, rows, cols); return OC_ERR_FORMAT; } while (0);
     if ((uintptr_t)data % width) {
         /* SafeTensors permits unaligned payload offsets; keep views aligned
          * for the CPU kernels. */
@@ -696,31 +696,31 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
 
     OcExl3Matrix *mx = NULL;
     if (snprintf(key, sizeof(key), "mtp.layers.0.self_attn.q_proj") >=
-        (int)sizeof(key)) return OC_ERR_FORMAT;
+        (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     if ((e = q4e_exl3_matrix(ni, o, key, D, 2 * q_rows, NULL, NULL, &mx)))
         return e;
     M->attn_q = exl3_view(mx);
     if (snprintf(key, sizeof(key), "mtp.layers.0.self_attn.k_proj") >=
-        (int)sizeof(key)) return OC_ERR_FORMAT;
+        (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     if ((e = q4e_exl3_matrix(ni, o, key, D, kv_rows, NULL, NULL, &mx)))
         return e;
     M->attn_k = exl3_view(mx);
     if (snprintf(key, sizeof(key), "mtp.layers.0.self_attn.v_proj") >=
-        (int)sizeof(key)) return OC_ERR_FORMAT;
+        (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     if ((e = q4e_exl3_matrix(ni, o, key, D, kv_rows, NULL, NULL, &mx)))
         return e;
     M->attn_v = exl3_view(mx);
     if (snprintf(key, sizeof(key), "mtp.layers.0.self_attn.o_proj") >=
-        (int)sizeof(key)) return OC_ERR_FORMAT;
+        (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     if ((e = q4e_exl3_matrix(ni, o, key, q_rows, D, NULL, NULL, &mx)))
         return e;
     M->attn_output = exl3_view(mx);
     if (snprintf(key, sizeof(key), "mtp.layers.0.self_attn.q_norm.weight") >=
-        (int)sizeof(key)) return OC_ERR_FORMAT;
+        (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     if ((e = q4e_vector(ni, o, key, c->head_dim, &M->attn_q_norm, 1.0f, NULL,
                         false))) return e;
     if (snprintf(key, sizeof(key), "mtp.layers.0.self_attn.k_norm.weight") >=
-        (int)sizeof(key)) return OC_ERR_FORMAT;
+        (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
     if ((e = q4e_vector(ni, o, key, c->head_dim, &M->attn_k_norm, 1.0f, NULL,
                         false))) return e;
 
@@ -735,25 +735,25 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
                                          : &M->hc_ffn_inject;
         if (snprintf(key, sizeof(key), "mtp.layers.0.%s.hc_norm.weight",
                      hc_sides[side]) >= (int)sizeof(key))
-            return OC_ERR_FORMAT;
+            do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if ((e = q4e_vector(ni, o, key, hc_dim, norm, 1.0f, NULL, false)))
             return e;
         if (snprintf(key, sizeof(key),
                      "mtp.layers.0.%s.input_mix_weight_down",
                      hc_sides[side]) >= (int)sizeof(key))
-            return OC_ERR_FORMAT;
+            do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if ((e = q4e_view(ni, o, key, c->hc_low_rank, hc_dim, down)))
             return e;
         if (snprintf(key, sizeof(key),
                      "mtp.layers.0.%s.input_mix_weight_up",
                      hc_sides[side]) >= (int)sizeof(key))
-            return OC_ERR_FORMAT;
+            do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if ((e = q4e_view(ni, o, key, hc_dim, c->hc_low_rank, up)))
             return e;
         if (snprintf(key, sizeof(key),
                      "mtp.layers.0.%s.block_inject_weight",
                      hc_sides[side]) >= (int)sizeof(key))
-            return OC_ERR_FORMAT;
+            do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if (q4e_view(ni, o, key, c->hc_mult, hc_dim, inject) != OC_OK)
             inject->data = NULL;
     }
@@ -781,7 +781,7 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
     if (!M->exl3_gate || !M->exl3_up || !M->exl3_down) return OC_ERR_OOM;
     for (uint32_t ex = 0; ex < c->num_experts; ex++) {
         if (snprintf(key, sizeof(key), "mtp.layers.0.mlp.experts.%u.gate_proj",
-                     ex) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                     ex) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if ((e = q4e_exl3_matrix(ni, o, key, D,
                                  c->expert_intermediate_size, NULL, NULL,
                                  &mx))) return e;
@@ -905,7 +905,7 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
         for (uint32_t ex = 0; ex < n_exp; ex++) {
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.mlp.experts.%u.gate_proj",
-                         l, ex) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l, ex) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, D, i_size, NULL, NULL,
                                      &mx))) return e;
             L->exl3_gate[ex] = *mx;
@@ -937,12 +937,12 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
         /* Router + shared expert + its gate (every layer). */
         if (snprintf(key, sizeof(key),
                      "model.language_model.layers.%u.mlp.gate", l) >=
-            (int)sizeof(key)) return OC_ERR_FORMAT;
+            (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if ((e = q4e_view(&ni, o, key, n_exp, D, &L->ffn_gate_inp)))
             return e;
         if (snprintf(key, sizeof(key),
                      "model.language_model.layers.%u.mlp.shared_expert.gate_proj",
-                     l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                     l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if ((e = q4e_exl3_matrix(&ni, o, key, D,
                                  c->shared_expert_intermediate_size, NULL,
                                  NULL, &mx))) return e;
@@ -961,7 +961,7 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
         L->ffn_down_shexp = exl3_view(mx);
         if (snprintf(key, sizeof(key),
                      "model.language_model.layers.%u.mlp.shared_expert_gate",
-                     l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                     l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
         if ((e = q4e_view(&ni, o, key, 1, D, &L->ffn_gate_inp_shexp)))
             return e;
 
@@ -978,25 +978,25 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.%s.hc_norm.weight",
                          l, hc_sides[side]) >= (int)sizeof(key))
-                return OC_ERR_FORMAT;
+                do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_vector(&ni, o, key, hc_dim, norm, 1.0f, NULL,
                                 false))) return e;
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.%s.input_mix_weight_down",
                          l, hc_sides[side]) >= (int)sizeof(key))
-                return OC_ERR_FORMAT;
+                do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_view(&ni, o, key, c->hc_low_rank, hc_dim, down)))
                 return e;
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.%s.input_mix_weight_up",
                          l, hc_sides[side]) >= (int)sizeof(key))
-                return OC_ERR_FORMAT;
+                do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_view(&ni, o, key, hc_dim, c->hc_low_rank, up)))
                 return e;
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.%s.block_inject_weight",
                          l, hc_sides[side]) >= (int)sizeof(key))
-                return OC_ERR_FORMAT;
+                do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             /* block_inject is present on every layer of this checkpoint;
              * treat it as optional to stay honest to the GGUF contract. */
             if (q4e_view(&ni, o, key, c->hc_mult, hc_dim, inject) != OC_OK)
@@ -1017,19 +1017,19 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
             if (!q4e_owned(o, qkv_perm)) { free(qkv_perm); return OC_ERR_OOM; }
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.in_proj_qkv",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, D, conv_dim, NULL,
                                      qkv_perm, &mx))) return e;
             L->attn_qkv = exl3_view(mx);
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.in_proj_z",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, D, c->ssm_inner_size, NULL,
                                      vperm, &mx))) return e;
             L->attn_gate = exl3_view(mx);
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.out_proj",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, c->ssm_inner_size, D,
                                      vperm, NULL, &mx))) return e;
             L->ssm_out = exl3_view(mx);
@@ -1038,7 +1038,7 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
              * wants tiled order and A = -exp(A_log). */
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.dt_bias",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_vector(&ni, o, key, c->ssm_value_heads,
                                 &L->ssm_dt_f32, 0.0f, vperm, false)))
                 return e;
@@ -1048,7 +1048,7 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
                 .qtype = OC_QUANT_F32};
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.A_log",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_vector(&ni, o, key, c->ssm_value_heads,
                                 &L->ssm_a_f32, 0.0f, vperm, true)))
                 return e;
@@ -1061,14 +1061,14 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
              * channels relabeled. */
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.conv1d.weight",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             const void *cdata = NULL;
             const OcSafetensorsTensor *ct = q4e_find(&ni, o, key, &cdata, NULL);
             if (!ct || strcmp(ct->dtype, "BF16") || ct->n_dims != 3 ||
                 ct->shape[0] != conv_dim || ct->shape[1] != 1 ||
                 ct->shape[2] != c->ssm_conv_kernel ||
                 ct->data_length != conv_dim * c->ssm_conv_kernel * 2)
-                return OC_ERR_FORMAT;
+                do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             float *cw = malloc(conv_dim * c->ssm_conv_kernel * sizeof(float));
             if (!cw) return OC_ERR_OOM;
             const uint16_t *cr = cdata;
@@ -1090,7 +1090,7 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
                     float x;
                     memcpy(&x, &bits, 4);
                     cw[r * c->ssm_conv_kernel + kk] = x;
-                    if (!isfinite(x)) { free(cw); return OC_ERR_FORMAT; }
+                    if (!isfinite(x)) { free(cw); do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0); }
                 }
             }
             if (!q4e_owned(o, cw)) { free(cw); return OC_ERR_OOM; }
@@ -1102,19 +1102,19 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
              * grouped rows relabeled). The forward requires f32. */
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.in_proj_a",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_matrix_f32(&ni, o, key, c->ssm_value_heads, D,
                                     vperm, &L->ssm_alpha))) return e;
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.in_proj_b",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_matrix_f32(&ni, o, key, c->ssm_value_heads, D,
                                     vperm, &L->ssm_beta))) return e;
             /* Per-head delta state norm over the value head (no fold —
              * the converter keeps this one zero-centred). */
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.linear_attn.norm.weight",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_vector(&ni, o, key, c->ssm_state_size,
                                 &L->ssm_norm_f32, 0.0f, NULL, false)))
                 return e;
@@ -1128,37 +1128,37 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
             L->kv_cache_index = n_kv++;
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.self_attn.q_proj",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, D, 2 * q_rows, NULL, NULL,
                                      &mx))) return e;
             L->attn_q = exl3_view(mx);
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.self_attn.k_proj",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, D, kv_rows, NULL, NULL,
                                      &mx))) return e;
             L->attn_k = exl3_view(mx);
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.self_attn.v_proj",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, D, kv_rows, NULL, NULL,
                                      &mx))) return e;
             L->attn_v = exl3_view(mx);
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.self_attn.o_proj",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_exl3_matrix(&ni, o, key, q_rows, D, NULL, NULL,
                                      &mx))) return e;
             L->attn_output = exl3_view(mx);
             /* Per-head Q/K RMSNorms, zero-centred → fold to (1 + w). */
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.self_attn.q_norm.weight",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_vector(&ni, o, key, c->head_dim, &L->attn_q_norm,
                                 1.0f, NULL, false))) return e;
             if (snprintf(key, sizeof(key),
                          "model.language_model.layers.%u.self_attn.k_norm.weight",
-                         l) >= (int)sizeof(key)) return OC_ERR_FORMAT;
+                         l) >= (int)sizeof(key)) do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             if ((e = q4e_vector(&ni, o, key, c->head_dim, &L->attn_k_norm,
                                 1.0f, NULL, false))) return e;
         }
