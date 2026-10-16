@@ -25,6 +25,9 @@ typedef enum {
      *   | ?[^\s\p{L}\p{N}]+[\r\n]*
      *   |\s*[\r\n]+|\s+(?!\S)|\s+ */
     OC_PRETOK_K2_HORIZON = 1,
+    OC_PRETOK_GPT2 = 2,
+    OC_PRETOK_LLAMA3 = 3,
+    OC_PRETOK_QWEN2 = 4,
 } OcPretokType;
 
 /* Map a `tokenizer.ggml.pre` string to a splitter. NULL / unknown strings map
