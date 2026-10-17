@@ -1,0 +1,19 @@
+oxidize-c/scripts/standalone_q4k_dot_bench.c
+  s_cdb807f6775df4::t_ac7bedbc9a574b 1-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "bab95f58ae08e783d490288cba703ee85fd77764",
+  "prompts": {},
+  "sessions": {
+    "s_cdb807f6775df4": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "d7da0991-1136-451a-be68-a8dd2b3c9b51",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "Jackson57279 <jackson@email.zapdev.link>"
+    }
+  }
+}
