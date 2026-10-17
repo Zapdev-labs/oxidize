@@ -1690,7 +1690,88 @@ void oc_oxk_dot_q4_k_prepped_multi_avx2(const void *prep, size_t blocks,
     const uint8_t *sc    = codes + blocks * OC_OXK_QK_K;
     const uint8_t *mn    = sc + blocks * (OC_OXK_QK_K / 32u);
 
+    /* 8-act pass first for large batches: 16 ymm accumulator chains lift
+     * the kernel off the latency wall (~5% at prefill tile sizes, measured
+     * scripts/standalone_q4k_multi6_bench.c). Same integer math and float
+     * accumulation order per act — bit-identical with the 4-act path. */
     size_t a0 = 0;
+    if (n_act >= 32) {
+        for (; a0 + 8 <= n_act; a0 += 8) {
+            const uint8_t *act[8];
+            float sums[8];
+            for (int a = 0; a < 8; a++) {
+                act[a] = acts + (a0 + (size_t)a) * act_stride;
+                sums[a] = 0.0f;
+            }
+            for (size_t b = 0; b < blocks; b++) {
+                const uint8_t *cb  = codes + b * OC_OXK_QK_K;
+                const uint8_t *scb = sc + b * (OC_OXK_QK_K / 32u);
+                const uint8_t *mnb = mn + b * (OC_OXK_QK_K / 32u);
+
+                __m256i acc_lo[8], acc_hi[8];
+                for (int a = 0; a < 8; a++) {
+                    acc_lo[a] = _mm256_setzero_si256();
+                    acc_hi[a] = _mm256_setzero_si256();
+                }
+                for (int gp = 0; gp < 4; gp++) {
+                    const __m256i cz0 = _mm256_loadu_si256(
+                        (const __m256i *)(cb + (size_t)gp * 64));
+                    const __m256i cz1 = _mm256_loadu_si256(
+                        (const __m256i *)(cb + (size_t)gp * 64 + 32));
+                    const __m256i sl = _mm256_set1_epi16(
+                        (int16_t)scb[2 * gp]);
+                    const __m256i sh = _mm256_set1_epi16(
+                        (int16_t)scb[2 * gp + 1]);
+                    const size_t qoff = b * OC_OXK_BLOCK_Q8_K_SIZE + 4 +
+                                        (size_t)gp * 64;
+                    for (int a = 0; a < 8; a++) {
+                        const __m256i p0 = _mm256_maddubs_epi16(
+                            cz0, _mm256_loadu_si256(
+                                (const __m256i *)(act[a] + qoff)));
+                        const __m256i p1 = _mm256_maddubs_epi16(
+                            cz1, _mm256_loadu_si256(
+                                (const __m256i *)(act[a] + qoff + 32)));
+                        acc_lo[a] = _mm256_add_epi32(acc_lo[a],
+                            _mm256_madd_epi16(p0, sl));
+                        acc_hi[a] = _mm256_add_epi32(acc_hi[a],
+                            _mm256_madd_epi16(p1, sh));
+                    }
+                }
+
+                const __m256i mn16 = _mm256_cvtepu8_epi16(_mm_shuffle_epi8(
+                    _mm_loadl_epi64((const __m128i *)mnb),
+                    _mm_setr_epi8(0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7)));
+                for (int a = 0; a < 8; a += 2) {
+                    const __m256i t0 =
+                        _mm256_add_epi32(acc_lo[a], acc_hi[a]);
+                    const __m256i t1 =
+                        _mm256_add_epi32(acc_lo[a + 1], acc_hi[a + 1]);
+                    const __m128i h = hsum2_i32_8(t0, t1);
+                    const int32_t pos0 = _mm_cvtsi128_si32(h);
+                    const int32_t pos1 = _mm_extract_epi32(h, 1);
+                    const uint8_t *qb0 =
+                        act[a] + b * OC_OXK_BLOCK_Q8_K_SIZE;
+                    const uint8_t *qb1 =
+                        act[a + 1] + b * OC_OXK_BLOCK_Q8_K_SIZE;
+                    float dq0, dq1;
+                    memcpy(&dq0, qb0, 4);
+                    memcpy(&dq1, qb1, 4);
+                    const int32_t min0 = hsum_i32_8(_mm256_madd_epi16(
+                        mn16, _mm256_loadu_si256(
+                            (const __m256i *)(qb0 + 4 + OC_OXK_QK_K))));
+                    const int32_t min1 = hsum_i32_8(_mm256_madd_epi16(
+                        mn16, _mm256_loadu_si256(
+                            (const __m256i *)(qb1 + 4 + OC_OXK_QK_K))));
+                    sums[a] += d[b] * dq0 * (float)pos0
+                             - dmin[b] * dq0 * (float)min0;
+                    sums[a + 1] += d[b] * dq1 * (float)pos1
+                                 - dmin[b] * dq1 * (float)min1;
+                }
+            }
+            for (int a = 0; a < 8; a++)
+                out[a0 + (size_t)a] = sums[a];
+        }
+    }
     for (; a0 + 4 <= n_act; a0 += 4) {
         const uint8_t *act[4];
         float sums[4];
