@@ -252,16 +252,18 @@ typedef struct OcLlamaConfig {
     uint32_t indexer_head_size;
     uint32_t indexer_top_k;
     uint32_t indexer_kpool;
-    /* PLE n-gram hash embeddings (see ple.layers). */
+    /* PLE geometry. Hashes the current token with its predecessors into
+     * n-gram table rows and injects a gated dilated conv into the wide
+     * residual. Only one layer is supported. */
     bool     ple_enabled;
     uint32_t ple_layer;          /* the single PLE layer index            */
     uint32_t ple_ngram;          /* token window (3)                      */
     uint32_t ple_heads_per_ngram;
     uint32_t ple_conv_kernel;    /* dilated depthwise conv width (4)      */
     uint32_t ple_n_heads;        /* (ngram-1) * ple_heads_per_ngram       */
-    uint32_t ple_embd_dim;       /* embedding_length_per_layer_input      */
-    uint32_t ple_eos;            /* ple.eos_token_id                      */
-    uint32_t ple_img;            /* ple.image_token_id                    */
+    uint32_t ple_embd_dim;       /* n-gram table width per head           */
+    uint32_t ple_eos;            /* n-gram history is cut at this id      */
+    uint32_t ple_img;            /* image placeholder token id            */
     uint64_t ple_mult[OC_Q4E_PLE_MAX_NGRAM];
     uint64_t ple_head_off[OC_Q4E_PLE_MAX_HEADS];
     uint64_t ple_head_vocab[OC_Q4E_PLE_MAX_HEADS];
