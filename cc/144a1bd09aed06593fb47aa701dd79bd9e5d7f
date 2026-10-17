@@ -1,0 +1,44 @@
+oxidize-c/src/model/llama.c
+  s_cdb807f6775df4::t_64dd00f707b34e 1845-1846
+  s_cdb807f6775df4::t_e245fbb0024001 7622-7623
+  s_cdb807f6775df4::t_74e9e9180b3f80 7636-7637
+  s_cdb807f6775df4::t_c7e25160633fba 7653
+oxidize-c/tests/test_oxk_avx2_parity.c
+  s_cdb807f6775df4::t_8a14cc4463f4b6 698-710
+oxidize-c/src/compute/oxk.c
+  s_cdb807f6775df4::t_12516257e4dab5 1297-1301
+oxidize-c/src/compute/matvec.c
+  s_cdb807f6775df4::t_f4466616cf5493 1464
+  s_cdb807f6775df4::t_1dde81df53eaf0 1411-1414,1420-1421
+  s_cdb807f6775df4::t_842138fcef1649 1197-1208
+  s_cdb807f6775df4::t_bf0eeebafce739 1019
+  s_cdb807f6775df4::t_4dcffffae48a96 1405-1410
+  s_cdb807f6775df4::t_ac573e82588f80 1415-1419
+  s_cdb807f6775df4::t_3edace6453cb91 1425
+oxidize-c/src/compute/oxk_avx2.c
+  s_cdb807f6775df4::t_ce4d79ae7cc8d4 1696,1699,1703
+  s_cdb807f6775df4::t_fde88f9c83e595 1592-1595,1598,1600-1602,1605
+  s_cdb807f6775df4::t_0e0f6aa7f54364 1707-1711
+  s_cdb807f6775df4::t_0e78467eff60ac 1737-1764
+  s_cdb807f6775df4::t_d4698d932c524c 1706
+  s_cdb807f6775df4::t_bbeafe60dfdcd2 1663-1690,1692-1695,1697-1698,1700-1702,1712-1736,1765,1771-1774
+  s_cdb807f6775df4::t_c4ee79fc9a5b76 1766-1770
+oxidize-c/include/oxidize/oxk.h
+  s_cdb807f6775df4::t_b7daefd4827227 339-342
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "cc144a1bd09aed06593fb47aa701dd79bd9e5d7f",
+  "prompts": {},
+  "sessions": {
+    "s_cdb807f6775df4": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "d7da0991-1136-451a-be68-a8dd2b3c9b51",
+        "model": "glm-5.3-flash"
+      },
+      "human_author": "Jackson57279 <jackson@email.zapdev.link>"
+    }
+  }
+}
