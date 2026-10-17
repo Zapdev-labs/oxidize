@@ -695,3 +695,16 @@ Test(oxk_avx2, q6_k_prepped_bit_exact_vs_scalar)
                   oc_oxk_dot_q6_k_prepped_multi,
                   oc_oxk_dot_q6_k_prepped_multi_avx2, "q6_k");
 }
+
+Test(oxk_avx2, q4_k_prepped_bit_exact_vs_scalar)
+{
+    /* Q4_K prepped multi got a real AVX2 body (the batched-prefill path
+     * runs it for every Q4_K matrix); no single-act AVX2 kernel exists, so
+     * the single comparison forwards to scalar and disp1 is NULL. */
+    check_prepped(OC_OXK_BLOCK_Q4_K_SIZE, 144, true,
+                  oc_oxk_q4_k_prep_bytes, oc_oxk_q4_k_prep_row,
+                  oc_oxk_dot_q4_k_prepped, oc_oxk_dot_q4_k_prepped,
+                  NULL,
+                  oc_oxk_dot_q4_k_prepped_multi,
+                  oc_oxk_dot_q4_k_prepped_multi_avx2, "q4_k");
+}

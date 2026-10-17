@@ -1016,6 +1016,7 @@ typedef struct {
     float         *outputs;
     size_t         out_stride;
     size_t         tile;        /* activations handled by this region */
+    size_t         subtile;     /* L2-resident act sub-tile (prep path) */
     float         *temp;        /* tid 0 dequant buffer (dequant path) */
     /* Prep path (K-quants with a prepared-row kernel): decode each weight
      * row once into per-thread scratch, then dot the prepared form against
@@ -1193,14 +1194,18 @@ static void matvec_batch_prep_slice(size_t begin, size_t end, size_t tid,
         matvec_batch_fused_slice(begin, end, tid, ud);
         return;
     }
-    for (size_t r = begin; r < end; r++) {
-        j->prep_fn(j->data + r * j->row_bytes, j->blocks, prep);
-        /* The multi-activation kernel writes contiguous results; the output
-         * layout is activation-major, so gather into a small buffer and
-         * scatter. 128 comfortably covers the L2-budget tile widths. */
-        float res[128];
-        for (size_t v0 = 0; v0 < j->tile; v0 += 128) {
-            const size_t m = (j->tile - v0 < 128) ? (j->tile - v0) : 128;
+    /* Walk the activation tile in L2-sized sub-tiles. A wide tile (hundreds
+     * of activations, >1 MB quantized) streams the whole act array out of
+     * L2 once per row; re-prepping each row per sub-tile is far cheaper
+     * than re-reading megabytes (prep is ~5% of a sub-tile's dot work).
+     * 128 acts at ~2.7 KB each (cols 2560) ≈ 348 KB; wider rows shrink the
+     * sub-tile via j->subtile to stay inside a 512 KB L2. */
+    float res[160];
+    for (size_t v0 = 0; v0 < j->tile; v0 += j->subtile) {
+        const size_t m = (j->tile - v0 < j->subtile) ? j->tile - v0
+                                                     : j->subtile;
+        for (size_t r = begin; r < end; r++) {
+            j->prep_fn(j->data + r * j->row_bytes, j->blocks, prep);
             j->multi_fn(prep, j->blocks, j->acts + v0 * j->act_stride,
                         j->act_stride, m, res);
             for (size_t v = 0; v < m; v++) {
@@ -1397,9 +1402,27 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                 else
                     quantize_act_q8_0(in, cols, dst);
             }
+            /* L2-resident act sub-tile for the prep path. 128 measured best
+             * on Ryzen 6850H (512 KB L2/core) for Qwen3-4B Q4_K_M prefill:
+             * 128 → 34.6 tok/s, 256 → 31.6, 4096 (off) → 32.1, 38 → 27.4.
+             * Re-prepping each row per sub-tile is ~5% of a sub-tile's dot
+             * work; streaming the act array out of L2 per row costs more. */
+            size_t subtile = 128;
+            {
+                const char *env = getenv("OXC_PREP_SUBTILE");
+                if (env != NULL) {
+                    unsigned long v = strtoul(env, NULL, 10);
+                    if (v != 0) {
+                        if (v < 16) v = 16;
+                        if (v > 160) v = 160;   /* res[] capacity */
+                        subtile = (size_t)v;
+                    }
+                }
+            }
             BatchJob job = { qtype, data, cols, row_bytes, blocks,
                              act_scratch, abytes, NULL, in_stride,
                              outputs + base * out_stride, out_stride, m,
+                             subtile,
                              temp, prep_bytes, prep_fn, multi_fn, packed_multi,
                              rows, quad_bytes, quad_prep, quad_multi,
                              quad_multi != NULL ? dq_off : 0 };
@@ -1438,7 +1461,7 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
      * there is no tiling benefit to be had here — `temp` is the only
      * per-row working set and it is already small. */
     BatchJob job = { qtype, data, cols, row_bytes, 0, NULL, 0,
-                     inputs, in_stride, outputs, out_stride, n_vec, temp,
+                     inputs, in_stride, outputs, out_stride, n_vec, 0, temp,
                      0, NULL, NULL, NULL, 0, 0, NULL, NULL, 0 };
     if (serial) matvec_batch_dequant_slice(0, rows, 0, &job);
     else        oc_parallel_for(rows, matvec_batch_dequant_slice, &job);
