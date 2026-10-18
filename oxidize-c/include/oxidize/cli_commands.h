@@ -163,7 +163,7 @@ typedef struct OcCliContext {
     const char        *token_ids_str;   /* --ids "1,2,3" (for detokenize)    */
     bool               tokens_no_special; /* --no-special (disallow special) */
     bool               stream_experts;
-    uint32_t           expert_cache_mb;
+    uint32_t           expert_cache_mb;    /* 0/unset = kernel-managed (unbounded) */
     const char        *prerouter_path;
     const char        *lora_path;
     uint32_t           experts_per_tok;
@@ -175,6 +175,7 @@ typedef struct OcCliContext {
     const char        *mtp_model;       /* --mtp-model PATH                  */
     bool               mtp;             /* --mtp                             */
     bool               chat;            /* --chat: wrap the prompt as a turn */
+    const char        *exl3_path;
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.

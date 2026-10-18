@@ -3,10 +3,14 @@
  *
  * Dispatch is a generation counter rather than a queue. Publishing a region
  * is one release-store; each worker compares the counter against the last
- * generation it ran and, when it moves, executes its fixed slice. Completion
- * is an atomic decrement the caller spins on. No allocation and no mutex on
- * the dispatch path — the region body is often only microseconds of work, so
- * a futex round trip per region would cost more than the work itself.
+ * generation it ran and, when it moves, claims slices off an atomic counter.
+ * Completion is an atomic decrement the caller spins on. No allocation and
+ * no mutex on the dispatch path — the region body is often only microseconds
+ * of work, so a futex round trip per region would cost more than the work
+ * itself. Claiming rather than assigning slices means a worker that is
+ * parked or preempted at publish time no longer pins its slice: whoever is
+ * running — including the caller — picks it up, so a single scheduler
+ * preemption can no longer stall the whole region for a full quantum.
  *
  * Workers spin for a bounded number of iterations before parking on a condvar.
  * Generation and decode are back-to-back regions, so a spinning worker
@@ -23,6 +27,7 @@
 #include "oxidize/numa.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -46,6 +51,11 @@ typedef struct Worker {
     size_t    scratch_cap;
 } Worker;
 
+/* A decode step opens ~200 regions; the counters below are hammered by every
+ * thread on every region. Laying them out adjacently put the caller's
+ * generation bump, the workers' n_remaining decrements, and the n_parked
+ * bookkeeping on one cache line, so each region cost several cross-core
+ * invalidations on top of the work itself. Each gets its own line. */
 static struct {
     Worker   workers[OC_PARALLEL_MAX_THREADS];
     size_t   n_threads;          /* including the calling thread; 1 = inline */
@@ -54,20 +64,25 @@ static struct {
     /* Current region. Written by the caller before publishing `generation`,
      * read by workers after observing it — the release/acquire pair on
      * `generation` is what makes these safe to read unsynchronized. */
-    OcParallelFn fn;
+    _Alignas(64) OcParallelFn fn;
     void        *user_data;
     size_t       n_items;
 
-    _Atomic uint64_t generation;   /* bumped once per region                */
-    _Atomic size_t   n_remaining;  /* slices not yet finished               */
-    _Atomic bool     shutdown;
+    _Alignas(64) _Atomic uint64_t generation; /* bumped once per region     */
+    _Alignas(64) _Atomic size_t   n_remaining;/* slices not yet finished   */
+    /* Slices are claimed, not assigned: each participant — caller included —
+     * fetch_adds this counter to take the next slice index. Same partition
+     * as before, but a worker that is parked or preempted when a region is
+     * published no longer pins its slice: whoever finishes early runs it. */
+    _Alignas(64) _Atomic size_t   next_slice;
+    _Alignas(64) _Atomic bool     shutdown;
     /* Workers currently blocked on the condvar. The dispatch path reads this
      * to decide whether waking anyone is necessary at all — see the comment
      * in oc_parallel_for(). */
-    _Atomic uint32_t n_parked;
+    _Alignas(64) _Atomic uint32_t n_parked;
 
     /* Parking. Only touched once a worker has spun without seeing work. */
-    pthread_mutex_t lock;
+    _Alignas(64) pthread_mutex_t lock;
     pthread_cond_t  wake;
 } g_pool;
 
@@ -89,14 +104,31 @@ static void slice_for(size_t n, size_t tid, size_t n_threads,
     *end   = e;
 }
 
-static void run_slice(size_t tid)
+/* Claim and execute slices until none remain unclaimed. `executor_tid` is
+ * the running thread's own id (for scratch), NOT the slice index — a
+ * thread that steals an early-finishing slice still uses its own scratch. */
+static void claim_and_run(size_t executor_tid)
 {
-    size_t begin, end;
-    slice_for(g_pool.n_items, tid, g_pool.n_threads, &begin, &end);
-    if (begin < end) {
-        g_pool.fn(begin, end, tid, g_pool.user_data);
+    const size_t nt = g_pool.n_threads;
+    for (;;) {
+        const size_t i = atomic_fetch_add_explicit(&g_pool.next_slice, 1u,
+                                                   memory_order_acquire);
+        if (i >= nt) break;
+        /* A thread still draining the previous region can claim a slice of
+         * the next one without ever observing its generation in
+         * worker_main. The acquire on next_slice already pairs with the
+         * publisher's release reset, and this acquire on generation pairs
+         * with its seq_cst bump, so fn/user_data/n_items are guaranteed
+         * visible here even on that straggler path. */
+        (void)atomic_load_explicit(&g_pool.generation, memory_order_acquire);
+        size_t begin, end;
+        slice_for(g_pool.n_items, i, nt, &begin, &end);
+        if (begin < end) {
+            g_pool.fn(begin, end, executor_tid, g_pool.user_data);
+        }
+        atomic_fetch_sub_explicit(&g_pool.n_remaining, 1u,
+                                  memory_order_release);
     }
-    atomic_fetch_sub_explicit(&g_pool.n_remaining, 1u, memory_order_release);
 }
 
 static void *worker_main(void *arg)
@@ -135,6 +167,13 @@ static void *worker_main(void *arg)
 #elif defined(__aarch64__)
                 __asm__ __volatile__("yield" ::: "memory");
 #endif
+                /* Past the fast-path pause window, yield periodically: on a
+                 * contended box the spinning worker otherwise steals quanta
+                 * from the caller that still has a slice to finish. Every
+                 * 64th spin, not every spin — a yield is a syscall, and at
+                 * 15 workers × ~200 regions/token an unconditional yield
+                 * burns more sys time than it returns. */
+                if (spins > 1024u && (spins & 63u) == 0u) sched_yield();
                 continue;
             }
             pthread_mutex_lock(&g_pool.lock);
@@ -159,7 +198,7 @@ static void *worker_main(void *arg)
         if (atomic_load_explicit(&g_pool.shutdown, memory_order_acquire)) {
             return NULL;
         }
-        run_slice(w->tid);
+        claim_and_run(w->tid);
     }
 }
 
@@ -284,6 +323,7 @@ void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data)
     g_pool.user_data = user_data;
     g_pool.n_items = n;
     atomic_store_explicit(&g_pool.n_remaining, nt, memory_order_relaxed);
+    atomic_store_explicit(&g_pool.next_slice, 0, memory_order_release);
     atomic_fetch_add_explicit(&g_pool.generation, 1u, memory_order_seq_cst);
 
     /* Wake anyone who parked — but only if anyone actually did.
@@ -305,15 +345,24 @@ void oc_parallel_for(size_t n, OcParallelFn fn, void *user_data)
         pthread_mutex_unlock(&g_pool.lock);
     }
 
-    /* The calling thread is participant 0 rather than a spectator. */
-    run_slice(0);
+    /* The calling thread is a participant, not a spectator: it claims
+     * slices like any worker, which is what lets it cover for a worker
+     * still parked or preempted when this region was published. */
+    claim_and_run(0);
 
+    /* Completion wait: the region is only as fast as its slowest slice, so
+     * when one worker is preempted the caller's spin directly blocks the
+     * whole pass. Yield periodically past the pause window — on an idle
+     * machine the straggler finishes within it anyway; on a contended one
+     * this is what lets it get back on a core. */
+    size_t waits = 0;
     while (atomic_load_explicit(&g_pool.n_remaining, memory_order_acquire) != 0) {
 #if defined(__x86_64__) || defined(__i386__)
         __builtin_ia32_pause();
 #elif defined(__aarch64__)
         __asm__ __volatile__("yield" ::: "memory");
 #endif
+        if (++waits > 4096u && (waits & 63u) == 0u) sched_yield();
     }
 }
 

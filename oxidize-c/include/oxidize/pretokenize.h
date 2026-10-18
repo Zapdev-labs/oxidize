@@ -25,6 +25,17 @@ typedef enum {
      *   | ?[^\s\p{L}\p{N}]+[\r\n]*
      *   |\s*[\r\n]+|\s+(?!\S)|\s+ */
     OC_PRETOK_K2_HORIZON = 1,
+    /* GPT-2 (`pre == "gpt2"`): standard 's/'t/... + letter/number runs. */
+    OC_PRETOK_GPT2 = 2,
+    /* Llama-3 BPE (`pre == "llama-bpe"` or "llama3"): like GPT-2 but
+     * numbers split in 1-3 digit chunks and contractions lowercase. */
+    OC_PRETOK_LLAMA3 = 3,
+    /* Qwen2 (`pre == "qwen2"`): letters run without combining marks;
+     * numbers are matched one Unicode number at a time. */
+    OC_PRETOK_QWEN2 = 4,
+    /* Qwen2 multimodal variant (`pre == "qwen_m"`): combining marks
+     * (\p{M}) stay inside letter runs. */
+    OC_PRETOK_QWEN2_M = 5,
 } OcPretokType;
 
 /* Map a `tokenizer.ggml.pre` string to a splitter. NULL / unknown strings map

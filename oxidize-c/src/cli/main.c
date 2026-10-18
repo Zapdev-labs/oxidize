@@ -26,6 +26,7 @@
 #include "oxidize/dspark.h"
 #include "oxidize/error.h"
 #include "oxidize/expert_stream.h"
+#include "oxidize/exl3_overlay.h"
 #include "oxidize/gguf.h"
 #include "oxidize/http.h"
 #include "oxidize/llama.h"
@@ -112,7 +113,8 @@ static void print_help(void)
 "  oxidize-c --model <path.gguf> --prompt \"text\" [OPTIONS]\n"
 "\n"
 "OPTIONS:\n"
-"  --model PATH           GGUF model file (required for generation)\n"
+"  --model PATH           GGUF file or native EXL3 checkpoint directory/file\n"
+"  --exl3 PATH            EXL3 SafeTensors file/directory over matching GGUF (CPU)\n"
 "  --prompt TEXT          Prompt text (also accepted as positional arg)\n"
 "  --prompt-file PATH     Read prompt from a file\n"
 "  --n-predict N          Max tokens to generate (default 128)\n"
@@ -149,7 +151,8 @@ static void print_help(void)
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
 "  --stream-experts       SSD expert offload (no whole-file readahead/mlock)\n"
-"  --expert-cache-mb N    Expert working set budget (default 3072)\n"
+"  --expert-cache-mb N    Expert working set budget; 0/unset = let the kernel\n"
+"                         page cache manage eviction (recommended)\n"
 "  --prerouter PATH       Edge0 prerouter.safetensors (prediction is routing)\n"
 "  --prerouter-prefetch   Load prerouter heads but keep native router\n"
 "  --lora PATH            Edge0 Recover-LoRA safetensors (unmerged, scale α/r=2)\n"
@@ -206,6 +209,15 @@ static OcError run_generation(const OcCliArgs *args)
         free(file_prompt);
         return e;
     }
+    if (args->exl3_path) {
+        e = oc_llama_load_exl3(&model, args->exl3_path);
+        if (e != OC_OK) {
+            fprintf(stderr, "error: EXL3 overlay failed (%s)\n", oc_error_msg(e));
+            oc_llama_free(&model);
+            free(file_prompt);
+            return e;
+        }
+    }
     if (args->mtp_model != NULL) {
         e = oc_llama_load_mtp_sidecar(&model, args->mtp_model);
         if (e != OC_OK) {
@@ -250,6 +262,7 @@ static OcError run_generation(const OcCliArgs *args)
     memset(&plan, 0, sizeof(plan));
     bool have_plan = false;
     if (oc_autotune_detect_cpu(&cpu) == OC_OK &&
+        model.gguf.n_shards > 0 &&
         oc_autotune_fingerprint_gguf(&model.gguf, &fp) == OC_OK) {
         plan = oc_autotune_plan(&cpu, &fp);
         have_plan = true;
@@ -312,8 +325,16 @@ static OcError run_generation(const OcCliArgs *args)
     if (args->stream_experts) {
         OcExpertStreamConfig scfg;
         oc_expert_stream_config_init(&scfg);
-        if (args->expert_cache_mb > 0)
+        if (args->expert_cache_mb > 0) {
             scfg.cache_bytes = (uint64_t)args->expert_cache_mb << 20;
+        } else {
+            /* No explicit budget: disable residency tracking and reclaim.
+             * Expert spans are clean file-backed pages — the kernel's LRU
+             * already evicts them under pressure, and it makes strictly
+             * better keep/drop decisions than the pool's FIFO cap (which
+             * measured slower: it discards pages the kernel would keep). */
+            scfg.cache_bytes = UINT64_MAX;
+        }
         e = oc_llama_enable_expert_stream(&model, &scfg);
         if (e != OC_OK) {
             fprintf(stderr, "error: expert stream init failed (%s)\n",
@@ -356,7 +377,8 @@ static OcError run_generation(const OcCliArgs *args)
      * raw argmaxes, so a non-zero temperature still opts out. */
     float repeat_penalty = args->repeat_penalty;
     bool k2_mtp = false;
-    const bool want_k2_mtp = model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
+    const bool want_k2_mtp = (model.cfg.is_k2 || model.cfg.is_qwen4exp) &&
+        oc_llama_mtp_present(&model) &&
         (args->mtp || (args->spec_type && strcmp(args->spec_type, "mtp") == 0));
     if (want_k2_mtp) {
         if (use_cuda || args->temperature > 0.0f) {
@@ -557,7 +579,8 @@ static OcError run_generation(const OcCliArgs *args)
                 continue;
             }
             if (!use_cuda && scfg.type == OC_SAMPLER_GREEDY &&
-                !model.cfg.is_k2 && oc_llama_mtp_present(&model) &&
+                !model.cfg.is_k2 && !model.cfg.is_qwen4exp &&
+                oc_llama_mtp_present(&model) &&
                 !(args->spec_type && strcmp(args->spec_type, "none") == 0)) {
                 uint32_t toks[8];
                 size_t n = 0;
@@ -635,13 +658,16 @@ static OcError run_generation(const OcCliArgs *args)
                    (double)mtp_stats.emitted / (double)mtp_stats.steps);
         if (model.expert_stream) {
             oc_log(OC_LOG_INFO,
-                   "expert-stream: resident=%.1f MiB prefetch=%.1f MiB reclaim=%.1f MiB",
+                   "expert-stream: resident=%.1f MiB prefetch=%.1f MiB reclaim=%.1f MiB fault=%.1f MiB fault_ms=%.0f",
                    oc_expert_stream_resident_bytes(model.expert_stream) /
                        (1024.0 * 1024.0),
                    oc_expert_stream_prefetch_bytes(model.expert_stream) /
                        (1024.0 * 1024.0),
                    oc_expert_stream_reclaim_bytes(model.expert_stream) /
-                       (1024.0 * 1024.0));
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_fault_bytes(model.expert_stream) /
+                       (1024.0 * 1024.0),
+                   oc_expert_stream_fault_ms(model.expert_stream));
         }
         if (decode_start > 0 && emitted > 0) {
             double elapsed = wall_now() - decode_start;
@@ -710,6 +736,18 @@ int main(int argc, char **argv)
             ctx.command == OC_CLI_CMD_SERVE_REALTIME)
             server = oc_cli_command_name(ctx.command);
         if (oc_cli_parse_failed()) return 2;
+        bool exl3_command = ctx.command == OC_CLI_CMD_PROMPT ||
+            ctx.command == OC_CLI_CMD_BENCH ||
+            ctx.command == OC_CLI_CMD_PERPLEXITY;
+        const char *exl3_source = ctx.exl3_path ? ctx.exl3_path :
+            oc_cli_native_model_path(ctx.model_path) ? ctx.model_path : NULL;
+        /* dflash2 takes a SafeTensors dir or file as --model; the EXL3
+         * native-path check does not apply to it. An explicit --exl3
+         * still goes through the gate so it is rejected, not ignored. */
+        if (!(ctx.command == OC_CLI_CMD_DFLASH2 && !ctx.exl3_path) &&
+            oc_cli_exl3_reject(exl3_source, ctx.backend,
+                !exl3_command || ctx.stream_experts || ctx.mtp || ctx.mtp_model,
+                ctx.model_path != NULL)) return 1;
         if (oc_cli_kv_compress_reject(ctx.backend, ctx.kv_compress, server))
             return 1;
         if (ctx.command == OC_CLI_CMD_PROMPT) {
@@ -741,6 +779,7 @@ int main(int argc, char **argv)
             args.expert_cache_mb = ctx.expert_cache_mb;
             args.prerouter_path = ctx.prerouter_path;
             args.lora_path = ctx.lora_path;
+            args.exl3_path = ctx.exl3_path;
             args.experts_per_tok = ctx.experts_per_tok;
             args.prerouter_prefetch = ctx.prerouter_prefetch;
             args.mtp = ctx.mtp;
@@ -766,6 +805,17 @@ int main(int argc, char **argv)
      * starting a pool only to tear it down would just add startup latency. */
     if (args.show_help)    { print_help(); return 0; }
     if (args.show_version) { printf("oxidize-c v%s\n", OC_CLI_VERSION); return 0; }
+    const char *exl3_source = args.exl3_path ? args.exl3_path :
+        oc_cli_native_model_path(args.model_path) ? args.model_path : NULL;
+    /* --spec-type none only disables speculative decoding; it does not
+     * opt into an unsupported EXL3 mode. */
+    const bool spec_active = args.spec_type &&
+        strcmp(args.spec_type, "none") != 0;
+    if (oc_cli_exl3_reject(exl3_source, args.backend,
+            args.serve_api || args.stream_experts || args.mtp || args.mtp_model ||
+            args.draft_model || spec_active || args.quantize_input ||
+            args.inspect || args.cuda_selftest || args.print_plan,
+            args.model_path != NULL)) return 1;
     if (oc_cli_kv_compress_reject(args.backend, args.kv_compress,
                                   args.serve_api ? "--serve-api" : NULL))
         return 1;
@@ -995,6 +1045,10 @@ int main(int argc, char **argv)
         /* Perplexity evaluation mode. */
         OcLlamaModel model;
         OcError e = oc_llama_load(args.model_path, &model);
+        if (e == OC_OK && args.exl3_path) {
+            e = oc_llama_load_exl3(&model, args.exl3_path);
+            if (e != OC_OK) oc_llama_free(&model);
+        }
         if (e != OC_OK) {
             fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
             return 1;
@@ -1061,6 +1115,10 @@ int main(int argc, char **argv)
         /* Benchmark mode: run N iterations and report tok/s. */
         OcLlamaModel model;
         OcError e = oc_llama_load(args.model_path, &model);
+        if (e == OC_OK && args.exl3_path) {
+            e = oc_llama_load_exl3(&model, args.exl3_path);
+            if (e != OC_OK) oc_llama_free(&model);
+        }
         if (e != OC_OK) {
             fprintf(stderr, "error: failed to load model (%s)\n", oc_error_msg(e));
             return 1;

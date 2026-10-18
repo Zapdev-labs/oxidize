@@ -5,6 +5,7 @@
 *.a
 oxidize-c
 test_runner
+test_runner.*
 oc-tokenize
 oc-eval
 llama-tokenize-ref

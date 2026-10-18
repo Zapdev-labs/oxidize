@@ -294,18 +294,46 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
     /* Temperature=0 → greedy (penalty still applies; handled below). */
     bool is_greedy = (cfg->type == OC_SAMPLER_GREEDY ||
                       cfg->temperature <= 0.0f);
+    /* penalty <= 0 is a no-op in oc_apply_repeat_penalty, so treat it the
+     * same as 1.0 here. */
+    const float pen = cfg->repeat_penalty;
+    const bool has_pen = pen > 0.0f && pen != 1.0f && n_recent > 0 &&
+                         recent_tokens != NULL;
 
     /* If greedy AND no penalty: skip the working copy (fast path). */
-    if (is_greedy && (cfg->repeat_penalty == 1.0f || n_recent == 0)) {
+    if (is_greedy && !has_pen) {
         return oc_argmax(logits_in, vocab_size);
+    }
+
+    /* Penalties above one only lower recent logits, so an untouched raw
+     * winner can be returned directly. Penalties below one can promote a
+     * different token and must use the copy path. */
+    if (is_greedy && pen > 1.0f) {
+        const uint32_t top = oc_argmax(logits_in, vocab_size);
+        /* Mark recent tokens in a bitmap so the hit test is O(1) and never
+         * degenerates when a caller passes a very large window; on OOM
+         * fall back to a plain early-exit scan. */
+        bool hit = false;
+        uint8_t *seen = calloc((vocab_size + 7u) / 8u, 1);
+        if (seen != NULL) {
+            for (size_t r = 0; r < n_recent; r++) {
+                const uint32_t t = recent_tokens[r];
+                if (t < vocab_size)
+                    seen[t >> 3] |= (uint8_t)(1u << (t & 7u));
+            }
+            hit = (seen[top >> 3] & (uint8_t)(1u << (top & 7u))) != 0;
+            free(seen);
+        } else {
+            for (size_t r = 0; r < n_recent; r++)
+                if (recent_tokens[r] == top) { hit = true; break; }
+        }
+        if (!hit) return top;
     }
 
     /* Working copy: apply repeat-penalty (for all sampler types, including
      * greedy — mirrors the Rust reference which penalizes before sampling). */
     float *logits = malloc(vocab_size * sizeof(float));
-    size_t *idx = malloc(vocab_size * sizeof(size_t));
-    if (logits == NULL || idx == NULL) {
-        free(logits); free(idx);
+    if (logits == NULL) {
         return oc_argmax(logits_in, vocab_size);   /* degrade to greedy on OOM */
     }
     memcpy(logits, logits_in, vocab_size * sizeof(float));
@@ -315,7 +343,14 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
 
     if (is_greedy) {
         uint32_t r = oc_argmax(logits, vocab_size);
-        free(logits); free(idx);
+        free(logits);
+        return r;
+    }
+
+    size_t *idx = malloc(vocab_size * sizeof(size_t));
+    if (idx == NULL) {
+        uint32_t r = oc_argmax(logits, vocab_size);
+        free(logits);
         return r;
     }
 

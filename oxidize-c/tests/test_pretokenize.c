@@ -35,7 +35,11 @@ static void check_split(const char *text, const uint32_t *want, size_t n_want)
 Test(pretokenize, type_from_name)
 {
     cr_assert_eq(oc_pretok_type_from_name("k2-horizon"), OC_PRETOK_K2_HORIZON);
-    cr_assert_eq(oc_pretok_type_from_name("qwen2"), OC_PRETOK_NONE);
+    cr_assert_eq(oc_pretok_type_from_name("qwen2"), OC_PRETOK_QWEN2);
+    cr_assert_eq(oc_pretok_type_from_name("gpt2"), OC_PRETOK_GPT2);
+    cr_assert_eq(oc_pretok_type_from_name("llama-bpe"), OC_PRETOK_LLAMA3);
+    cr_assert_eq(oc_pretok_type_from_name("llama3"), OC_PRETOK_LLAMA3);
+    cr_assert_eq(oc_pretok_type_from_name("unknown"), OC_PRETOK_NONE);
     cr_assert_eq(oc_pretok_type_from_name(NULL), OC_PRETOK_NONE);
 }
 
@@ -80,4 +84,163 @@ Test(pretokenize, marks_and_joiners_extend_letters)
     CHECK("e\xcc\x81", 2);                  /* e + U+0301 */
     CHECK("zero\xe2\x80\x8bwidth", 4, 6);   /* ZWSP prefixes the next word */
     CHECK("a\xe2\x80\x8d" "b", 3);          /* ZWJ inside a letter run */
+}
+
+/* Goldens independently generated with the official regexes (Python regex).
+ * Explicit code points also cover embedded NUL, which a C string loses. */
+static void check_standard(OcPretokType type, const uint32_t *text, size_t n,
+                           const size_t *want, size_t nw)
+{
+    size_t got[256];
+    cr_assert_eq(oc_pretok_split(type, text, n, got), nw);
+    size_t total = 0;
+    for (size_t i = 0; i < nw; i++) {
+        cr_assert_eq(got[i], want[i], "type %d word %zu", type, i);
+        total += got[i];
+    }
+    cr_assert_eq(total, n);
+}
+
+Test(pretokenize, standard_2_0)
+{
+    const uint32_t text[] = { 0x49, 0x27, 0x4d, 0x20, 0x74, 0x68, 0x65, 0x79, 0x27, 0x6c, 0x6c, 0x20, 0x49, 0x27, 0x53, 0x20, 0x27, 0x17f, 0x20, 0x27, 0x52, 0x45 };
+    const size_t want[] = { 1, 1, 1, 5, 3, 2, 1, 1, 2, 1, 2, 2 };
+    check_standard((OcPretokType)2, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_2_1)
+{
+    const uint32_t text[] = { 0x20, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
+    const size_t want[] = { 8 };
+    check_standard((OcPretokType)2, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_2_2)
+{
+    const uint32_t text[] = { 0x65, 0x301, 0x20, 0x61, 0x200d, 0x62, 0x20, 0x301, 0x301, 0x61 };
+    const size_t want[] = { 1, 1, 2, 1, 1, 3, 1 };
+    check_standard((OcPretokType)2, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_2_3)
+{
+    const uint32_t text[] = { 0x78, 0xd, 0xa, 0x20, 0x20, 0x79, 0x21, 0xa, 0xa, 0x20, 0x20 };
+    const size_t want[] = { 1, 3, 2, 1, 4 };
+    check_standard((OcPretokType)2, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_2_4)
+{
+    const uint32_t text[] = { 0x61, 0x9, 0xa0, 0x62, 0x2028, 0x7a };
+    const size_t want[] = { 1, 1, 1, 1, 1, 1 };
+    check_standard((OcPretokType)2, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_2_5)
+{
+    const uint32_t text[] = { 0x0, 0x1c, 0x200b, 0x1f600, 0x4e2d, 0x6587, 0x661, 0xb2, 0x2167 };
+    const size_t want[] = { 4, 2, 3 };
+    check_standard((OcPretokType)2, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_3_0)
+{
+    const uint32_t text[] = { 0x49, 0x27, 0x4d, 0x20, 0x74, 0x68, 0x65, 0x79, 0x27, 0x6c, 0x6c, 0x20, 0x49, 0x27, 0x53, 0x20, 0x27, 0x17f, 0x20, 0x27, 0x52, 0x45 };
+    const size_t want[] = { 1, 2, 5, 3, 2, 2, 2, 1, 2, 2 };
+    check_standard((OcPretokType)3, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_3_1)
+{
+    const uint32_t text[] = { 0x20, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
+    const size_t want[] = { 1, 3, 3, 1 };
+    check_standard((OcPretokType)3, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_3_2)
+{
+    const uint32_t text[] = { 0x65, 0x301, 0x20, 0x61, 0x200d, 0x62, 0x20, 0x301, 0x301, 0x61 };
+    const size_t want[] = { 1, 1, 2, 2, 3, 1 };
+    check_standard((OcPretokType)3, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_3_3)
+{
+    const uint32_t text[] = { 0x78, 0xd, 0xa, 0x20, 0x20, 0x79, 0x21, 0xa, 0xa, 0x20, 0x20 };
+    const size_t want[] = { 1, 2, 1, 2, 3, 2 };
+    check_standard((OcPretokType)3, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_3_4)
+{
+    const uint32_t text[] = { 0x61, 0x9, 0xa0, 0x62, 0x2028, 0x7a };
+    const size_t want[] = { 1, 1, 2, 2 };
+    check_standard((OcPretokType)3, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_3_5)
+{
+    const uint32_t text[] = { 0x0, 0x1c, 0x200b, 0x1f600, 0x4e2d, 0x6587, 0x661, 0xb2, 0x2167 };
+    const size_t want[] = { 4, 2, 3 };
+    check_standard((OcPretokType)3, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_4_0)
+{
+    const uint32_t text[] = { 0x49, 0x27, 0x4d, 0x20, 0x74, 0x68, 0x65, 0x79, 0x27, 0x6c, 0x6c, 0x20, 0x49, 0x27, 0x53, 0x20, 0x27, 0x17f, 0x20, 0x27, 0x52, 0x45 };
+    const size_t want[] = { 1, 2, 5, 3, 2, 2, 2, 1, 2, 2 };
+    check_standard((OcPretokType)4, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_4_1)
+{
+    const uint32_t text[] = { 0x20, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
+    const size_t want[] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+    check_standard((OcPretokType)4, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_4_2)
+{
+    const uint32_t text[] = { 0x65, 0x301, 0x20, 0x61, 0x200d, 0x62, 0x20, 0x301, 0x301, 0x61 };
+    const size_t want[] = { 1, 1, 2, 2, 3, 1 };
+    check_standard((OcPretokType)4, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_4_3)
+{
+    const uint32_t text[] = { 0x78, 0xd, 0xa, 0x20, 0x20, 0x79, 0x21, 0xa, 0xa, 0x20, 0x20 };
+    const size_t want[] = { 1, 2, 1, 2, 3, 2 };
+    check_standard((OcPretokType)4, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_4_4)
+{
+    const uint32_t text[] = { 0x61, 0x9, 0xa0, 0x62, 0x2028, 0x7a };
+    const size_t want[] = { 1, 1, 2, 2 };
+    check_standard((OcPretokType)4, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
+}
+
+Test(pretokenize, standard_4_5)
+{
+    const uint32_t text[] = { 0x0, 0x1c, 0x200b, 0x1f600, 0x4e2d, 0x6587, 0x661, 0xb2, 0x2167 };
+    const size_t want[] = { 4, 2, 1, 1, 1 };
+    check_standard((OcPretokType)4, text, sizeof(text) / sizeof(text[0]),
+                   want, sizeof(want) / sizeof(want[0]));
 }

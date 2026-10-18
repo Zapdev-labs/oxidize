@@ -85,7 +85,8 @@ static double kernel_vs_dequant(OcGgufQuantizationType qt,
 
 static void matvec_matches_kernel(OcGgufQuantizationType qt,
                                   float (*dot)(const uint8_t *, size_t,
-                                               const uint8_t *))
+                                               const uint8_t *),
+                                  double tol)
 {
     const size_t rb = oc_quantized_size(qt, COLS);
     uint8_t *w = malloc(ROWS * rb);
@@ -107,7 +108,14 @@ static void matvec_matches_kernel(OcGgufQuantizationType qt,
     oc_matvec_quantized(qt, w, ROWS, COLS, rb, x, out, temp);
     for (size_t r = 0; r < ROWS; r++) {
         float want = dot(w + r * rb, COLS / 32, act);
-        cr_assert_eq(memcmp(&out[r], &want, sizeof(float)), 0,
+        /* The fused path accumulates in f32 lanes (facc kernels), so it is
+         * a few ulp off the block-sequential reference dot — not
+         * bit-identical. The integer dots are exact; relative error stays
+         * orders of magnitude under the quant noise. */
+        /* abs+rel: reassociation drift is ~ulp of the intermediate sums,
+         * which dominates when cancellation leaves a near-zero dot. */
+        cr_assert_lt(fabs((double)out[r] - (double)want),
+                     tol * (1.0 + fabs((double)want)),
                      "row %zu fused %g != kernel %g", r, out[r], want);
     }
 
@@ -147,20 +155,22 @@ Test(al_fused, al5_xs_kernel_matches_dequant)
 
 Test(al_fused, al5_matvec_uses_q4_0_kernel)
 {
-    matvec_matches_kernel(OC_QUANT_AL5, oc_oxk_dot_q4_0_q8_0);
+    /* AL5/AL8 keep f16 header scales like their base kernels, so the
+     * fused path must match to ~ulp; dq-tail formats stay at 1e-4. */
+    matvec_matches_kernel(OC_QUANT_AL5, oc_oxk_dot_q4_0_q8_0, 1e-6);
 }
 
 Test(al_fused, al8_matvec_uses_q8_0_kernel)
 {
-    matvec_matches_kernel(OC_QUANT_AL8, oc_oxk_dot_q8_0_q8_0);
+    matvec_matches_kernel(OC_QUANT_AL8, oc_oxk_dot_q8_0_q8_0, 1e-6);
 }
 
 Test(al_fused, al6_matvec_uses_q5_0_kernel)
 {
-    matvec_matches_kernel(OC_QUANT_AL6, oc_oxk_dot_q5_0_q8_0);
+    matvec_matches_kernel(OC_QUANT_AL6, oc_oxk_dot_q5_0_q8_0, 1e-4);
 }
 
 Test(al_fused, al5_xs_matvec_uses_al5_xs_kernel)
 {
-    matvec_matches_kernel(OC_QUANT_AL5_XS, oc_oxk_dot_al5_xs_q8_0);
+    matvec_matches_kernel(OC_QUANT_AL5_XS, oc_oxk_dot_al5_xs_q8_0, 1e-4);
 }

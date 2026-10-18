@@ -77,10 +77,21 @@ static void check_parity(OcGgufQuantizationType qtype, size_t rows,
     oc_matvec_quantized_batch(qtype, w, rows, cols, row_bytes, in, cols,
                               out_bat, rows, n_vec, temp, act, act_bytes);
 
+    /* Types whose fused path accumulates in f32 lanes (facc) or whose
+     * packed-multi kernel reassociates differ from the sequential dot by a
+     * few ulp; other types must still agree to within 1 ulp. */
+    const bool reassoc =
+        qtype == OC_QUANT_Q4_0 || qtype == OC_QUANT_AL5 ||
+        qtype == OC_QUANT_Q8_0 || qtype == OC_QUANT_AL8;
     for (size_t v = 0; v < n_vec; v++) {
         for (size_t r = 0; r < rows; r++) {
             const size_t k = v * rows + r;
-            cr_assert(float_within_1ulp(out_bat[k], out_ref[k]),
+            /* abs+rel for the reassociated types: near-zero dots from
+             * cancellation make pure relative tolerance meaningless. */
+            const double tol = 1e-4 * (1.0 + fabs((double)out_ref[k]));
+            cr_assert(reassoc ? fabs((double)out_bat[k] -
+                                        (double)out_ref[k]) < tol
+                              : float_within_1ulp(out_bat[k], out_ref[k]),
                                "qtype=%d cols=%zu n_vec=%zu vec=%zu row=%zu: "
                                "batched %.9g != reference %.9g",
                                (int)qtype, cols, n_vec, v, r,
@@ -281,6 +292,208 @@ Test(matvec_batch, q4k_prepped_matches_packed)
     }
 }
 
+/* The classic-quant packed-multi kernels (Q4_0 / Q8_0 weights against a
+ * tile of Q8_0 activations) amortize the row decode across an
+ * eight-activation group and accumulate in eight f32 lanes — the integer
+ * dots are exact but the float association differs from the sequential
+ * single-dot order, so the comparison is a small relative tolerance, not
+ * the 1-ulp check the bit-exact paths get. Covers the eight-wide tail
+ * (n_act = 13 leaves a partial group). */
+static void check_packed_multi(OcGgufQuantizationType qtype, size_t cols,
+                               size_t n_act)
+{
+    const size_t row_bytes = oc_quantized_size(qtype, cols);
+    const size_t act_rb   = oc_quantized_size(OC_QUANT_Q8_0, cols);
+    const size_t blocks   = cols / OC_OXK_QK8_0;
+    uint8_t *row = malloc(row_bytes);
+    uint8_t *acts = malloc(n_act * act_rb);
+    float *src = malloc(cols * sizeof(float));
+    float *ref = malloc(n_act * sizeof(float));
+    float *got = malloc(n_act * sizeof(float));
+    cr_assert(row && acts && src && ref && got);
+
+    uint32_t seed = 555u + (uint32_t)cols;
+    for (size_t i = 0; i < cols; i++) src[i] = frand(&seed);
+    cr_assert_eq(oc_quant_pack_row(qtype, src, cols, row, row_bytes), OC_OK);
+    for (size_t v = 0; v < n_act; v++) {
+        for (size_t i = 0; i < cols; i++) src[i] = frand(&seed);
+        cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q8_0, src, cols,
+                                       acts + v * act_rb, act_rb), OC_OK);
+    }
+    float (*dot)(const uint8_t *, size_t, const uint8_t *) =
+        (qtype == OC_QUANT_Q4_0) ? oc_oxk_dot_q4_0_q8_0
+                                 : oc_oxk_dot_q8_0_q8_0;
+    for (size_t v = 0; v < n_act; v++)
+        ref[v] = dot(row, blocks, acts + v * act_rb);
+
+    memset(got, 0, n_act * sizeof(float));
+    if (qtype == OC_QUANT_Q4_0)
+        oc_oxk_dot_q4_0_q8_0_packed_multi(row, blocks, acts, act_rb,
+                                          n_act, got);
+    else
+        oc_oxk_dot_q8_0_q8_0_packed_multi(row, blocks, acts, act_rb,
+                                          n_act, got);
+
+    for (size_t v = 0; v < n_act; v++) {
+        const double d = fabs((double)got[v] - (double)ref[v]);
+        const double rel = d / (fabs((double)ref[v]) + 1e-30);
+        cr_assert(rel < 1e-4 || d < 1e-4,
+                  "qtype=%d cols=%zu act=%zu: multi %.9g != single %.9g",
+                  (int)qtype, cols, v, (double)got[v], (double)ref[v]);
+    }
+    free(row); free(acts); free(src); free(ref); free(got);
+}
+
+Test(matvec_batch, classic_packed_multi)
+{
+    for (size_t cols = 32; cols <= 2048; cols *= 4) {
+        check_packed_multi(OC_QUANT_Q4_0, cols, 13);
+        check_packed_multi(OC_QUANT_Q8_0, cols, 13);
+    }
+    check_packed_multi(OC_QUANT_Q4_0, 896, 129);
+    check_packed_multi(OC_QUANT_Q8_0, 896, 129);
+}
+
+/* The quad path decodes four Q4_0 rows once into scratch and dots the
+ * tile against a 4x4 register-blocked kernel: same exact integer dots and
+ * the same f32 reassociation tolerance as packed_multi. Covers row tails
+ * (n_rows mod 4) and activation tails (n_act mod 4). */
+static void check_quad_multi(size_t cols, size_t rows, size_t n_act)
+{
+    const size_t row_bytes = oc_quantized_size(OC_QUANT_Q4_0, cols);
+    const size_t act_rb   = oc_quantized_size(OC_QUANT_Q8_0, cols);
+    const size_t blocks   = cols / OC_OXK_QK8_0;
+    uint8_t *w = malloc(rows * row_bytes);
+    uint8_t *acts = malloc(n_act * act_rb);
+    float *src = malloc(cols * sizeof(float));
+    void *prep = malloc(oc_oxk_q4_0_quad_prep_bytes(blocks));
+    float *res = malloc(((n_act + 3) / 4 * 4) * 4 * sizeof(float));
+    cr_assert(w && acts && src && prep && res);
+
+    uint32_t seed = 777u + (uint32_t)(cols * 131u + rows * 17u + n_act);
+    for (size_t r = 0; r < rows; r++) {
+        for (size_t i = 0; i < cols; i++) src[i] = frand(&seed);
+        cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q4_0, src, cols,
+                                       w + r * row_bytes, row_bytes), OC_OK);
+    }
+    for (size_t v = 0; v < n_act; v++) {
+        for (size_t i = 0; i < cols; i++) src[i] = frand(&seed);
+        cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q8_0, src, cols,
+                                       acts + v * act_rb, act_rb), OC_OK);
+    }
+
+    /* Second act buffer with the extended layout the batch path uses:
+     * [Q8_0 blocks][pad4][f32 dq tail] — exercises the dq_off read. */
+    const size_t dq_off  = (act_rb + 3u) & ~(size_t)3u;
+    const size_t act_rb2 = dq_off + blocks * sizeof(float);
+    uint8_t *acts2 = malloc(n_act * act_rb2);
+    cr_assert(acts2);
+    for (size_t v = 0; v < n_act; v++) {
+        memcpy(acts2 + v * act_rb2, acts + v * act_rb, act_rb);
+        float *dq = (float *)(acts2 + v * act_rb2 + dq_off);
+        for (size_t b = 0; b < blocks; b++) {
+            /* Keep the true decoded scale in the tail but overwrite the
+             * header with f16 64.0 (0x5000): a kernel that ignores dq_off
+             * reads the bogus header and fails loudly instead of silently
+             * matching the reference. */
+            uint8_t *hdr = acts2 + v * act_rb2 + b * OC_OXK_BLOCK_Q8_0_SIZE;
+            hdr[0] = 0x00;
+            hdr[1] = 0x50;
+            dq[b] = oc_oxk_f16_le_to_f32(
+                acts + v * act_rb + b * OC_OXK_BLOCK_Q8_0_SIZE);
+        }
+    }
+
+    for (size_t r0 = 0; r0 < rows; r0 += 4) {
+        const size_t nr = (rows - r0 < 4) ? rows - r0 : 4;
+        oc_oxk_q4_0_quad_prep(w + r0 * row_bytes, row_bytes, nr, blocks,
+                              prep);
+        oc_oxk_dot_q4_0_q8_0_quad_multi(prep, blocks, acts, act_rb, 0,
+                                        n_act, res);
+        for (size_t v = 0; v < n_act; v++) {
+            for (size_t r = 0; r < nr; r++) {
+                const float ref = oc_oxk_dot_q4_0_q8_0(
+                    w + (r0 + r) * row_bytes, blocks, acts + v * act_rb);
+                const float got = res[v * 4 + r];
+                const double d = fabs((double)got - (double)ref);
+                cr_assert(d < 1e-4 * (1.0 + fabs((double)ref)),
+                          "cols=%zu rows=%zu act=%zu: quad v%zu r%zu "
+                          "%.9g != %.9g",
+                          cols, rows, n_act, v, r0 + r,
+                          (double)got, (double)ref);
+            }
+        }
+        /* Same again through the f32 dq tail. */
+        oc_oxk_dot_q4_0_q8_0_quad_multi(prep, blocks, acts2, act_rb2,
+                                        dq_off, n_act, res);
+        for (size_t v = 0; v < n_act; v++) {
+            for (size_t r = 0; r < nr; r++) {
+                const float ref = oc_oxk_dot_q4_0_q8_0(
+                    w + (r0 + r) * row_bytes, blocks, acts + v * act_rb);
+                const float got = res[v * 4 + r];
+                const double d = fabs((double)got - (double)ref);
+                cr_assert(d < 1e-4 * (1.0 + fabs((double)ref)),
+                          "cols=%zu rows=%zu act=%zu: quad-dqf v%zu r%zu "
+                          "%.9g != %.9g",
+                          cols, rows, n_act, v, r0 + r,
+                          (double)got, (double)ref);
+            }
+        }
+    }
+    free(w); free(acts); free(acts2); free(src); free(prep); free(res);
+}
+
+Test(matvec_batch, q4_0_quad_multi)
+{
+    for (size_t cols = 32; cols <= 2048; cols *= 4) {
+        check_quad_multi(cols, 9, 13);   /* row tail 1, act tail 1 */
+        check_quad_multi(cols, 7, 4);    /* row tail 3, exact act group */
+        check_quad_multi(cols, 8, 7);    /* exact quad, act tail 3 */
+    }
+    check_quad_multi(896, 33, 129);
+}
+
+/* The qs form takes per-block activation sums as a side channel so the
+ * fused matvec can hoist the sad chain out of the row loop; it must be
+ * bit-identical to oc_oxk_dot_q4_0_q8_0. */
+Test(matvec_batch, q4_0_qs_matches_standard)
+{
+    for (size_t cols = 32; cols <= 2048; cols *= 4) {
+        const size_t blocks = cols / OC_OXK_QK8_0;
+        const size_t row_bytes = oc_quantized_size(OC_QUANT_Q4_0, cols);
+        uint8_t *w = malloc(row_bytes);
+        float *src = malloc(cols * sizeof(float));
+        float *act_f = malloc(cols * sizeof(float));
+        uint8_t *act = malloc(blocks * OC_OXK_BLOCK_Q8_0_SIZE);
+        int32_t *qsums = malloc(blocks * sizeof(int32_t));
+        cr_assert(w && src && act_f && act && qsums);
+
+        uint32_t seed = (uint32_t)(900u + cols);
+        for (size_t i = 0; i < cols; i++) src[i] = frand(&seed);
+        cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q4_0, src, cols, w,
+                                       row_bytes), OC_OK);
+        for (int iter = 0; iter < 32; iter++) {
+            for (size_t i = 0; i < cols; i++) act_f[i] = frand(&seed);
+            cr_assert_eq(oc_quant_pack_row(OC_QUANT_Q8_0, act_f, cols, act,
+                                           blocks * OC_OXK_BLOCK_Q8_0_SIZE),
+                         OC_OK);
+            for (size_t b = 0; b < blocks; b++) {
+                const int8_t *q = (const int8_t *)(act +
+                    b * OC_OXK_BLOCK_Q8_0_SIZE + 2);
+                int32_t s = 0;
+                for (size_t i = 0; i < OC_OXK_QK8_0; i++) s += q[i];
+                qsums[b] = s;
+            }
+            const float ref = oc_oxk_dot_q4_0_q8_0(w, blocks, act);
+            const float got = oc_oxk_dot_q4_0_q8_0_qs(w, blocks, act, qsums);
+            cr_assert_eq(ref, got,
+                         "cols=%zu iter=%d: qs %.9g != standard %.9g",
+                         cols, iter, (double)got, (double)ref);
+        }
+        free(w); free(src); free(act_f); free(act); free(qsums);
+    }
+}
+
 /* f32 weights take a separate kernel; it must match oc_matvec_f32. */
 Test(matvec_batch, f32_weights)
 {
@@ -303,4 +516,48 @@ Test(matvec_batch, f32_weights)
                                "f32 batch mismatch vec=%zu row=%zu", v, r);
     }
     free(w); free(in); free(out); free(ref);
+}
+
+/* The multi-projection variant walks slices across matrix boundaries and
+ * must match per-matrix oc_matvec_f32, including zero-row matrices. */
+Test(matvec_batch, f32_multi)
+{
+    const size_t cols = 96;
+    const size_t rws[4] = {5, 0, 7, 3};
+    float *d[4] = {0}, *o[4] = {0}, *ref[4] = {0};
+    float *in = malloc(cols * sizeof(float));
+    cr_assert(in);
+    uint32_t seed = 5u;
+    for (size_t i = 0; i < cols; i++) in[i] = frand(&seed);
+    for (size_t k = 0; k < 4; k++) {
+        const size_t nr = rws[k] ? rws[k] : 1;
+        d[k] = malloc(nr * cols * sizeof(float));
+        o[k] = malloc(nr * sizeof(float));
+        ref[k] = malloc(nr * sizeof(float));
+        cr_assert(d[k] && o[k] && ref[k]);
+        for (size_t i = 0; i < rws[k] * cols; i++) d[k][i] = frand(&seed);
+        for (size_t i = 0; i < rws[k]; i++) o[k][i] = -99.0f;
+    }
+    oc_matvec_f32_multi((const float *const *)d, rws, cols, 4, in,
+                        (float *const *)o);
+    for (size_t k = 0; k < 4; k++) {
+        oc_matvec_f32(d[k], rws[k], cols, in, ref[k]);
+        for (size_t r = 0; r < rws[k]; r++)
+            cr_assert_float_eq(o[k][r], ref[k][r], 0.0f,
+                               "f32_multi mismatch matrix=%zu row=%zu", k, r);
+        free(d[k]); free(o[k]); free(ref[k]);
+    }
+    /* cols == 0 is degenerate but valid: every requested output row is
+     * the empty dot 0.0f. */
+    {
+        float z0[3] = {-99.f, -99.f, -99.f}, z1[2] = {-99.f, -99.f};
+        const float *const dz[2] = {NULL, NULL};
+        const size_t rz[2] = {3, 2};
+        float *const oz[2] = {z0, z1};
+        oc_matvec_f32_multi(dz, rz, 0, 2, in, oz);
+        for (size_t k = 0; k < 2; k++)
+            for (size_t r = 0; r < rz[k]; r++)
+                cr_assert_eq(oz[k][r], 0.0f, "cols==0 row %zu:%zu", k, r);
+    }
+    free(in);
 }

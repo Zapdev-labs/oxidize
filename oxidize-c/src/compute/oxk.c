@@ -1234,6 +1234,9 @@ static void oc_oxk_init_once(void)
     g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_scalar;
     g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_scalar;
     g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_scalar;
+    g_ctx.dot_q5_0_q8_0 = oc_oxk_dot_q5_0_q8_0_scalar;
+    g_ctx.dot_q5_1_q8_0 = oc_oxk_dot_q5_1_q8_0_scalar;
+    g_ctx.dot_al5_xs_q8_0 = oc_oxk_dot_al5_xs_q8_0_scalar;
     g_ctx.dot_q2_k_q8_k = oc_oxk_dot_q2_k_q8_k_scalar;
     g_ctx.dot_q3_k_q8_k = oc_oxk_dot_q3_k_q8_k_scalar;
     g_ctx.dot_q4_k_prepped_multi = dot_q4_k_prepped_multi_scalar;
@@ -1254,18 +1257,48 @@ static void oc_oxk_init_once(void)
      * kernel available for Q4_K — which is the dominant weight type for
      * K-quant models, so the whole OXK fast path was silently off.
      *
-     * Only Q4_1 and Q5_K still have scalar-forwarding _avx2 symbols,
-     * and routing through them would add a call for no gain. Check the body
-     * before adding an entry here, not just the symbol name. */
-    if (level >= OC_OXK_AVX2) {
+     * Every _avx2 symbol installed below now carries a real body; the last
+     * scalar forwarders (Q4_1, Q5_K) were replaced. Check a variant's body,
+     * not its name, before wiring it up here. */
+    /* Every _avx2 body is compiled target("avx2,fma,f16c"), so the ISA
+     * level alone is not sufficient: a VM can mask FMA or F16C while still
+     * reporting AVX2/AVX-512, and installing these kernels there would
+     * SIGILL on first use. Require the full feature set the bodies were
+     * built with. */
+    if (level >= OC_OXK_AVX2 && has_fma && has_f16c) {
         g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_avx2;
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
+        /* Q4_1 and Q5_K used to be scalar-forwarding _avx2 symbols; both
+         * have real bodies now, so an AVX2-only host (every Ryzen consumer
+         * CPU) no longer runs them scalar. Q5_0/Q5_1/AL5_XS had no SIMD
+         * path at all — AL6 aliases Q5_0's bitstream, so the custom AL
+         * quants were the ones paying for that. */
+        g_ctx.dot_q4_1_q8_0 = oc_oxk_dot_q4_1_q8_0_avx2;
+        g_ctx.dot_q5_k_q8_k = oc_oxk_dot_q5_k_q8_k_avx2;
+        g_ctx.dot_q5_0_q8_0 = oc_oxk_dot_q5_0_q8_0_avx2;
+        g_ctx.dot_q5_1_q8_0 = oc_oxk_dot_q5_1_q8_0_avx2;
+        g_ctx.dot_al5_xs_q8_0 = oc_oxk_dot_al5_xs_q8_0_avx2;
         /* Q6_K now has a real AVX2 body (not a scalar forwarder). It matters
          * more than its tensor count suggests: K-quant mixes put ffn_down and
          * attn_qkv in Q6_K, ~27% of the bytes of a Q4_K_M file, and running
          * that share scalar left a 6.6x kernel-level gap on the table. */
         g_ctx.dot_q6_k_q8_k = oc_oxk_dot_q6_k_q8_k_avx2;
+        /* Q2_K/Q3_K: real AVX2 bodies now — the packed dots (maddubs on
+         * the raw 2-bit codes, sharing Q6_K's scale-broadcast trick) and
+         * the prepared-row kernels the batched-prefill path runs. Both are
+         * bit-exact against their scalar references. The AVX-512+VNNI
+         * block below still overrides the prepped slots on hosts that
+         * have it. */
+        g_ctx.dot_q2_k_q8_k = oc_oxk_dot_q2_k_q8_k_avx2;
+        g_ctx.dot_q3_k_q8_k = oc_oxk_dot_q3_k_q8_k_avx2;
+        g_ctx.dot_q2_k_prepped_1 = oc_oxk_dot_q2_k_prepped_avx2;
+        g_ctx.dot_q3_k_prepped_1 = oc_oxk_dot_q3_k_prepped_avx2;
+        g_ctx.dot_q2_k_prepped_multi = oc_oxk_dot_q2_k_prepped_multi_avx2;
+        g_ctx.dot_q3_k_prepped_multi = oc_oxk_dot_q3_k_prepped_multi_avx2;
+        /* Q6_K shares the Q3_K prepared body (offset 32 vs 4), so the
+         * batched-prefill multi stops being scalar on AVX2 hosts too. */
+        g_ctx.dot_q6_k_prepped_multi = oc_oxk_dot_q6_k_prepped_multi_avx2;
         /* IQ3_S: real AVX2 bodies, bit-exact against the scalar reference
          * (test_oxk_iq3_s.c). Also used on AVX-512 hosts. */
         g_ctx.dot_iq3_s_q8_k = oc_oxk_dot_iq3_s_q8_k_avx2;
@@ -1342,13 +1375,13 @@ float oc_oxk_dot_q8_0_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
 { oc_oxk_init(); return g_ctx.dot_q8_0_q8_0(row, blocks, q8); }
 
 float oc_oxk_dot_q5_0_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
-{ return oc_oxk_dot_q5_0_q8_0_scalar(row, blocks, q8); }
+{ oc_oxk_init(); return g_ctx.dot_q5_0_q8_0(row, blocks, q8); }
 
 float oc_oxk_dot_q5_1_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
-{ return oc_oxk_dot_q5_1_q8_0_scalar(row, blocks, q8); }
+{ oc_oxk_init(); return g_ctx.dot_q5_1_q8_0(row, blocks, q8); }
 
 float oc_oxk_dot_al5_xs_q8_0(const uint8_t *row, size_t blocks, const uint8_t *q8)
-{ return oc_oxk_dot_al5_xs_q8_0_scalar(row, blocks, q8); }
+{ oc_oxk_init(); return g_ctx.dot_al5_xs_q8_0(row, blocks, q8); }
 
 void oc_oxk_dot_q4_k_prepped_multi(const void *scratch, size_t blocks,
                                    const uint8_t *acts, size_t act_stride,
@@ -1422,8 +1455,231 @@ void oc_oxk_dot_rows_##NAME##_q8_k(const uint8_t *rows, size_t row_bytes,      \
 }
 OXK_ROWS_DISPATCH(q4_k, dot_q4_k_q8_k)
 OXK_ROWS_DISPATCH(q6_k, dot_q6_k_q8_k)
+OXK_ROWS_DISPATCH(q2_k, dot_q2_k_q8_k)
+OXK_ROWS_DISPATCH(q3_k, dot_q3_k_q8_k)
 OXK_ROWS_DISPATCH(iq3_s, dot_iq3_s_q8_k)
 #undef OXK_ROWS_DISPATCH
+
+/* Q5_K's single dot is AVX-512-VNNI on some hosts, so the == avx2 test the
+ * macro uses would fall back to per-row calls there. The AVX2 rows body is
+ * bit-exact against the same scalar reference, so any non-scalar x86 install
+ * can serve the rows form. Other hosts use their installed dot function. */
+void oc_oxk_dot_rows_q5_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out)
+{
+    oc_oxk_init();
+#if defined(__x86_64__) || defined(__i386__)
+    if (g_ctx.dot_q5_k_q8_k != oc_oxk_dot_q5_k_q8_k_scalar) {
+        oc_oxk_dot_rows_q5_k_q8_k_avx2(rows, row_bytes, n_rows, blocks, q8,
+                                       out);
+        return;
+    }
+#endif
+    for (size_t r = 0; r < n_rows; r++)
+        out[r] = g_ctx.dot_q5_k_q8_k(rows + r * row_bytes, blocks, q8);
+}
+
+/* Rows forms for the Q8_0-activation family, taking the AVX2 rows kernel
+ * exactly when the single-row dispatch picked the AVX2 kernel, so per-row
+ * results equal the single-row calls bit for bit. */
+#define OXK_ROWS_DISPATCH_Q80(NAME, FIELD)                                     \
+void oc_oxk_dot_rows_##NAME##_q8_0(const uint8_t *rows, size_t row_bytes,      \
+                                   size_t n_rows, size_t blocks,               \
+                                   const uint8_t *q8, float *out)             \
+{                                                                              \
+    oc_oxk_init();                                                             \
+    if (g_ctx.FIELD == oc_oxk_dot_##NAME##_q8_0_avx2) {                        \
+        oc_oxk_dot_rows_##NAME##_q8_0_avx2(rows, row_bytes, n_rows, blocks,    \
+                                           q8, out);                          \
+        return;                                                                \
+    }                                                                          \
+    for (size_t r = 0; r < n_rows; r++)                                        \
+        out[r] = g_ctx.FIELD(rows + r * row_bytes, blocks, q8);                \
+}
+OXK_ROWS_DISPATCH_Q80(q4_0, dot_q4_0_q8_0)
+OXK_ROWS_DISPATCH_Q80(q4_1, dot_q4_1_q8_0)
+OXK_ROWS_DISPATCH_Q80(q5_0, dot_q5_0_q8_0)
+OXK_ROWS_DISPATCH_Q80(q5_1, dot_q5_1_q8_0)
+OXK_ROWS_DISPATCH_Q80(q8_0, dot_q8_0_q8_0)
+OXK_ROWS_DISPATCH_Q80(al5_xs, dot_al5_xs_q8_0)
+#undef OXK_ROWS_DISPATCH_Q80
+
+/* Packed multi-activation forms for batched prefill (see the header): the
+ * AVX2 kernels are exact in the integer domain but reassociate the float
+ * accumulation, so they are dispatched only when the matching single-row
+ * AVX2 kernel was installed; other hosts keep per-activation calls. */
+void oc_oxk_dot_q4_0_q8_0_packed_multi(const uint8_t *row, size_t blocks,
+                                       const uint8_t *acts,
+                                       size_t act_stride, size_t n_act,
+                                       float *out)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2) {
+        oc_oxk_dot_q4_0_q8_0_packed_multi_avx2(row, blocks, acts,
+                                               act_stride, n_act, out);
+        return;
+    }
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = g_ctx.dot_q4_0_q8_0(row, blocks, acts + v * act_stride);
+}
+
+void oc_oxk_dot_q8_0_q8_0_packed_multi(const uint8_t *row, size_t blocks,
+                                       const uint8_t *acts,
+                                       size_t act_stride, size_t n_act,
+                                       float *out)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q8_0_q8_0 == oc_oxk_dot_q8_0_q8_0_avx2) {
+        oc_oxk_dot_q8_0_q8_0_packed_multi_avx2(row, blocks, acts,
+                                               act_stride, n_act, out);
+        return;
+    }
+    for (size_t v = 0; v < n_act; v++)
+        out[v] = g_ctx.dot_q8_0_q8_0(row, blocks, acts + v * act_stride);
+}
+
+/* Quad-blocked prefill form (see the header). The scalar fallbacks read and
+ * write the same 160-byte quad-block layout the AVX2 side uses so the two
+ * halves stay interchangeable. */
+size_t oc_oxk_q4_0_quad_prep_bytes(size_t blocks)
+{
+    return blocks * OC_OXK_Q4_0_QUAD_BLOCK_BYTES;
+}
+
+void oc_oxk_q4_0_quad_prep(const uint8_t *rows, size_t row_bytes,
+                           size_t n_rows, size_t blocks, void *scratch)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2) {
+        oc_oxk_q4_0_quad_prep_avx2(rows, row_bytes, n_rows, blocks, scratch);
+        return;
+    }
+    uint8_t *s = (uint8_t *)scratch;
+    for (size_t b = 0; b < blocks; b++) {
+        uint8_t *pb = s + b * OC_OXK_Q4_0_QUAD_BLOCK_BYTES;
+        float  *dwq = (float *)pb;
+        float  *cwq = (float *)(pb + 16);
+        int8_t *wq  = (int8_t *)(pb + 32);
+        for (size_t r = 0; r < 4; r++) {
+            dwq[r] = 0.0f;
+            cwq[r] = 0.0f;
+            memset(wq + r * 32, 0, 32);
+            if (r >= n_rows) continue;
+            const uint8_t *wb = rows + r * row_bytes
+                                  + b * OC_OXK_BLOCK_Q4_0_SIZE;
+            const float dw = oc_oxk_f16_le_to_f32(wb);
+            const uint8_t *qs = wb + 2;
+            int32_t wsum = 0;
+            for (int i = 0; i < 16; i++) {
+                const int lo = qs[i] & 0x0F;
+                const int hi = qs[i] >> 4;
+                wq[r * 32 + i]      = (int8_t)(lo - 8);
+                wq[r * 32 + i + 16] = (int8_t)(hi - 8);
+                wsum += lo + hi - 16;
+            }
+            dwq[r] = dw;
+            cwq[r] = 128.0f * dw * (float)wsum;
+        }
+    }
+}
+
+void oc_oxk_dot_q4_0_q8_0_quad_multi(const void *prep4, size_t blocks,
+                                     const uint8_t *acts,
+                                     size_t act_stride, size_t dq_off,
+                                     size_t n_act, float *res4)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2) {
+        oc_oxk_dot_q4_0_q8_0_quad_multi_avx2(prep4, blocks, acts,
+                                             act_stride, dq_off, n_act, res4);
+        return;
+    }
+    const uint8_t *s = (const uint8_t *)prep4;
+    for (size_t v = 0; v < n_act; v++) {
+        const uint8_t *act = acts + v * act_stride;
+        for (size_t r = 0; r < 4; r++) {
+            float acc = 0.0f;
+            for (size_t b = 0; b < blocks; b++) {
+                const uint8_t *pb = s + b * OC_OXK_Q4_0_QUAD_BLOCK_BYTES;
+                const float dw = ((const float *)pb)[r];
+                const float cw = ((const float *)(pb + 16))[r];
+                const int8_t *w = (const int8_t *)(pb + 32) + r * 32;
+                const uint8_t *qb = act + b * OC_OXK_BLOCK_Q8_0_SIZE;
+                const float dq = dq_off
+                    ? ((const float *)(act + dq_off))[b]
+                    : oc_oxk_f16_le_to_f32(qb);
+                const int8_t *qv = (const int8_t *)(qb + 2);
+                int32_t iv = 0;
+                for (int i = 0; i < 32; i++)
+                    iv += ((int)qv[i] + 128) * (int)w[i];
+                acc += dw * dq * (float)iv - dq * cw;
+            }
+            res4[v * 4 + r] = acc;
+        }
+    }
+}
+
+/* qs form (see the header): dispatched to the AVX2 kernels only when the
+ * matching single-row AVX2 kernel was installed; otherwise the standard
+ * kernels produce identical output and the qsums argument is just extra
+ * work the caller already did. */
+float oc_oxk_dot_q4_0_q8_0_qs(const uint8_t *row, size_t blocks,
+                              const uint8_t *q8, const int32_t *qsums)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2)
+        return oc_oxk_dot_q4_0_q8_0_qs_avx2(row, blocks, q8, qsums);
+    (void)qsums;
+    return g_ctx.dot_q4_0_q8_0(row, blocks, q8);
+}
+
+void oc_oxk_dot_rows_q4_0_q8_0_qs(const uint8_t *rows, size_t row_bytes,
+                                  size_t n_rows, size_t blocks,
+                                  const uint8_t *q8, const int32_t *qsums,
+                                  float *out)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2) {
+        oc_oxk_dot_rows_q4_0_q8_0_qs_avx2(rows, row_bytes, n_rows, blocks,
+                                          q8, qsums, out);
+        return;
+    }
+    (void)qsums;
+    oc_oxk_dot_rows_q4_0_q8_0(rows, row_bytes, n_rows, blocks, q8, out);
+}
+
+/* facc rows forms (see the header): dispatched to the AVX2 kernels only
+ * when the matching single-row AVX2 kernel was installed; other hosts take
+ * the bit-exact standard kernels, which is within the same tolerance the
+ * facc callers already accept. */
+void oc_oxk_dot_rows_q4_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, const int32_t *qsums,
+                                    float *out)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2) {
+        oc_oxk_dot_rows_q4_0_q8_0_facc_avx2(rows, row_bytes, n_rows, blocks,
+                                            q8, qsums, out);
+        return;
+    }
+    (void)qsums;
+    oc_oxk_dot_rows_q4_0_q8_0(rows, row_bytes, n_rows, blocks, q8, out);
+}
+
+void oc_oxk_dot_rows_q8_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out)
+{
+    oc_oxk_init();
+    if (g_ctx.dot_q8_0_q8_0 == oc_oxk_dot_q8_0_q8_0_avx2) {
+        oc_oxk_dot_rows_q8_0_q8_0_facc_avx2(rows, row_bytes, n_rows, blocks,
+                                            q8, out);
+        return;
+    }
+    oc_oxk_dot_rows_q8_0_q8_0(rows, row_bytes, n_rows, blocks, q8, out);
+}
 
 void oc_oxk_dot_rows_iq3_s_q8_k_multi(const uint8_t *rows, size_t row_bytes,
                                       size_t n_rows, size_t blocks,

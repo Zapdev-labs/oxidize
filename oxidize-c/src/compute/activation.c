@@ -21,6 +21,74 @@ void oc_rms_norm_f32(const float *x, const float *weight, float *out,
     oc_attn_rms_apply_f32(x, weight, inv_rms, out, n);
 }
 
+#if defined(__x86_64__) || defined(__i386__)
+#include "oxidize/simd.h"
+/* e^x via 2^n * poly(r), r = x - n*ln2, |r| <= ln2/2. Degree-5 minimax,
+ * ~1e-7 relative — the silu tests tolerate 1e-5 and the activations are
+ * re-quantized to Q8_0 by the next matmul anyway. */
+__attribute__((target("avx2,fma")))
+static __m256 exp256_ps(__m256 x)
+{
+    const __m256 ln2hi = _mm256_set1_ps(0.693359375f);
+    const __m256 ln2lo = _mm256_set1_ps(-0.00021219444005469057f);
+    const __m256 invln2 = _mm256_set1_ps(1.4426950408889634f);
+    x = _mm256_min_ps(x, _mm256_set1_ps(88.0f));
+    x = _mm256_max_ps(x, _mm256_set1_ps(-88.0f));
+    const __m256 nf = _mm256_round_ps(_mm256_mul_ps(x, invln2),
+                                      _MM_FROUND_TO_NEAREST_INT
+                                      | _MM_FROUND_NO_EXC);
+    __m256 r = _mm256_fnmadd_ps(nf, ln2hi, x);
+    r = _mm256_fnmadd_ps(nf, ln2lo, r);
+    /* minimax for e^r on [-ln2/2, ln2/2] */
+    __m256 p = _mm256_set1_ps(1.9875691500e-4f);
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.3981999507e-3f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(8.3334519073e-3f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(4.1665795894e-2f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.6666665459e-1f));
+    p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(5.0000001201e-1f));
+    p = _mm256_fmadd_ps(p, _mm256_mul_ps(r, r), r);
+    p = _mm256_add_ps(p, _mm256_set1_ps(1.0f));
+    const __m256i n2 = _mm256_slli_epi32(
+        _mm256_add_epi32(_mm256_cvtps_epi32(nf),
+                         _mm256_set1_epi32(127)), 23);
+    return _mm256_mul_ps(p, _mm256_castsi256_ps(n2));
+}
+
+__attribute__((target("avx2,fma")))
+static void swiglu_avx2(float *gate, const float *up, size_t n)
+{
+    const __m256 one = _mm256_set1_ps(1.0f);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        const __m256 g = _mm256_loadu_ps(gate + i);
+        const __m256 u = _mm256_loadu_ps(up + i);
+        const __m256 sig = _mm256_div_ps(one, _mm256_add_ps(one,
+                                            exp256_ps(_mm256_sub_ps(
+                                                _mm256_setzero_ps(), g))));
+        _mm256_storeu_ps(gate + i, _mm256_mul_ps(_mm256_mul_ps(g, sig), u));
+    }
+    for (; i < n; i++) {
+        float g = gate[i];
+        float sig = 1.0f / (1.0f + expf(-g));
+        gate[i] = g * sig * up[i];
+    }
+}
+
+void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n)
+{
+    const OcSimdCaps *sc = oc_simd_caps();
+    if (sc->has_fma &&
+        (sc->level == OC_SIMD_AVX2 || sc->level == OC_SIMD_AVX512)) {
+        swiglu_avx2(gate, up, n);
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        float g = gate[i];
+        float sig = 1.0f / (1.0f + expf(-g));
+        gate[i] = g * sig * up[i];
+    }
+}
+#else
 void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
@@ -29,6 +97,7 @@ void oc_swiglu_inplace_f32(float *gate, const float *up, size_t n)
         gate[i] = g * sig * up[i];
     }
 }
+#endif
 
 float oc_gelu_exact_f32(float x)
 {
