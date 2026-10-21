@@ -2190,6 +2190,37 @@ OcError oc_cli_run_eagle4(OcCliContext *ctx)
     OcError err;
     if (!ctx) return OC_ERR_INVALID_ARG;
     iters = ctx->bench_iterations > 0 ? ctx->bench_iterations : 8;
+    if (ctx->model_path) {
+        OcEagle4HfBench hf;
+        int warm = ctx->bench_warmup > 0 ? (int)ctx->bench_warmup : 2;
+        err = oc_eagle4_hf_bench(ctx->model_path, warm, iters, &hf);
+        if (err != OC_OK) {
+            cli_error("eagle4 draft failed (%s)", oc_error_msg(err));
+            return err;
+        }
+        if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+            printf("{\"command\":\"eagle4\",\"model\":\"%s\",\"hidden\":%zu,"
+                   "\"vocab\":%zu,\"params\":%zu,\"threads\":%d,"
+                   "\"token_us\":%.1f,\"tok_per_s\":%.2f,"
+                   "\"qkv_us\":%.1f,\"mlp_us\":%.1f,\"attn_us\":%.1f,"
+                   "\"head_us\":%.1f,\"encode_us\":%.1f,\"fault_us\":%.1f,"
+                   "\"top_token\":%u}\n",
+                   ctx->model_path, hf.hidden, hf.vocab, hf.params, hf.threads,
+                   hf.token_us, hf.tok_per_s, hf.qkv_us, hf.mlp_us, hf.attn_us,
+                   hf.head_us, hf.encode_us, hf.fault_us, hf.top_token);
+        } else {
+            printf("EAGLE-4 draft %s\n", ctx->model_path);
+            printf("  hidden %zu  vocab %zu  params %.2fB  threads %d\n",
+                   hf.hidden, hf.vocab, (double)hf.params / 1e9, hf.threads);
+            printf("  draft:  %.2f ms/token   %.1f tok/s\n",
+                   hf.token_us / 1e3, hf.tok_per_s);
+            printf("  qkv %.2f ms   mlp %.2f ms   attn %.2f ms   head %.2f ms\n",
+                   hf.qkv_us / 1e3, hf.mlp_us / 1e3, hf.attn_us / 1e3, hf.head_us / 1e3);
+            printf("  encode %.2f ms   first-touch %.2f ms   top token %u\n",
+                   hf.encode_us / 1e3, hf.fault_us / 1e3, hf.top_token);
+        }
+        return OC_OK;
+    }
     err = oc_eagle4_bench(iters, &r);
     if (err != OC_OK) {
         cli_error("eagle4 bench failed (%s)", oc_error_msg(err));

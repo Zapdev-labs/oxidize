@@ -246,6 +246,26 @@ OcError oc_eagle4_train_safetensors(OcEagle4Draft *m, const char *examples_path,
 
 OcError oc_eagle4_bench(int iters, OcEagle4BenchReport *out);
 
+/* Hugging Face EAGLE-4 draft (BF16 SafeTensors, weights kept packed). */
+typedef struct OcEagle4HfBench {
+    double fault_us;
+    double encode_us;
+    double token_us;
+    double qkv_us;
+    double mlp_us;
+    double attn_us;
+    double head_us;
+    double tok_per_s;
+    size_t hidden;
+    size_t vocab;
+    size_t params;
+    uint32_t top_token;
+    int threads;
+} OcEagle4HfBench;
+
+OcError oc_eagle4_hf_bench(const char *path, int warmup, int iters,
+                           OcEagle4HfBench *out);
+
 #ifdef __cplusplus
 }
 #endif
