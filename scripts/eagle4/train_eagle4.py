@@ -380,7 +380,6 @@ def train(dump: Path, out: Path, steps: int, lr: float, seed: int) -> None:
         eps=1e-6,
         rng=rng,
     )
-    order = np.arange(tokens.shape[0])
     losses: list[float] = []
     for step in range(steps):
         # One full pass is the right scale for a few hundred captured tokens.
