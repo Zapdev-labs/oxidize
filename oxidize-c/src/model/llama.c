@@ -1842,7 +1842,8 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
     }
     if (arch_str == NULL) arch_str = "llama";
     if (strcmp(arch_str, "llama") != 0 && strcmp(arch_str, "mistral") != 0 &&
-        strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "gpt2") != 0 &&
+        strcmp(arch_str, "qwen2") != 0 && strcmp(arch_str, "qwen3") != 0 &&
+        strcmp(arch_str, "gpt2") != 0 &&
         strcmp(arch_str, "gptj") != 0 &&
         strcmp(arch_str, "gptneox") != 0 && strcmp(arch_str, "falcon") != 0 &&
         strcmp(arch_str, "gemma4") != 0 && !is_longcat_arch(arch_str) &&
@@ -7636,9 +7637,14 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
                                 first_logit, cb, ud);
 
     /* Fall back to the per-token path when batching cannot help or is not
-     * supported: identical results, just the old speed. */
-    if (cb != NULL && (!prefill_batch_supported(m) ||
-                       (n_tokens < 2 && sess->k2mtp == NULL))) {
+     * supported: identical results, just the old speed. A one-token prefill
+     * of a supported model is the normal call, so that case stays at DEBUG. */
+    const int unsupported = !prefill_batch_supported(m);
+    const int single = n_tokens < 2 && sess->k2mtp == NULL;
+    if (cb != NULL && (unsupported || single)) {
+        oc_log(unsupported ? OC_LOG_INFO : OC_LOG_DEBUG,
+               "prefill: fallback per-token path (all-logits, unsupported=%d n<2=%d)",
+               unsupported, n_tokens < 2);
         float *lg = malloc(m->cfg.vocab_size * sizeof(float));
         if (lg == NULL) return OC_ERR_OOM;
         for (size_t i = 0; i < n_tokens; i++) {
@@ -7650,7 +7656,10 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
         free(lg);
         return OC_OK;
     }
-    if (!prefill_batch_supported(m) || (n_tokens < 2 && sess->k2mtp == NULL)) {
+    if (unsupported || single) {
+        oc_log(unsupported ? OC_LOG_INFO : OC_LOG_DEBUG,
+               "prefill: fallback per-token path (unsupported=%d n<2=%d)",
+               unsupported, n_tokens < 2);
         for (size_t i = 0; i < n_tokens; i++) {
             float *lg = (i + 1 == n_tokens) ? logits_out : NULL;
             OcError e = oc_llama_forward(sess, tokens[i], lg);
@@ -7666,6 +7675,7 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
     PrefillBuf buf;
     OcError e = prefill_buf_init(m, chunk, &buf);
     if (e != OC_OK) {
+        oc_log(OC_LOG_INFO, "prefill: fallback per-token path (scratch init OOM)");
         /* Out of scratch — the per-token path needs none, so use it. */
         for (size_t i = 0; i < n_tokens; i++) {
             float *lg = (i + 1 == n_tokens) ? logits_out : NULL;

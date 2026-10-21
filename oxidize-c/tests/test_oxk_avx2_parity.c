@@ -609,13 +609,14 @@ static void check_prepped(size_t bsize, size_t d_off, bool two_scales,
                           OxkDotPrepped disp1,
                           OxkDotPreppedMulti multi_disp,
                           OxkDotPreppedMulti multi_avx2,
-                          const char *name)
+                          size_t max_act, const char *name)
 {
     uint32_t s = 0xB5297A4Du;
     static const size_t k_blocks[] = { 1, 3, 8 };
-    enum { MAX_BLOCKS = 8, MAX_ACT = 9 };
+    enum { MAX_BLOCKS = 8, MAX_ACT = 64 };
+    cr_assert(max_act >= 1 && max_act <= MAX_ACT);
     uint8_t *w = malloc(MAX_BLOCKS * bsize);
-    uint8_t *a = malloc(MAX_ACT * MAX_BLOCKS * OC_OXK_BLOCK_Q8_K_SIZE);
+    uint8_t *a = malloc(max_act * MAX_BLOCKS * OC_OXK_BLOCK_Q8_K_SIZE);
     cr_assert(w && a);
     for (size_t bi = 0; bi < sizeof k_blocks / sizeof k_blocks[0]; bi++) {
         const size_t blocks = k_blocks[bi];
@@ -624,7 +625,7 @@ static void check_prepped(size_t bsize, size_t d_off, bool two_scales,
         void *prep = malloc(prep_bytes(blocks));
         cr_assert(prep);
         prep_row(w, blocks, prep);
-        for (size_t v = 0; v < MAX_ACT; v++)
+        for (size_t v = 0; v < max_act; v++)
             rand_act_q8_k(a + v * as, blocks, &s);
         const float sc = scalar(prep, blocks, a);
         if (host_avx2()) {
@@ -640,7 +641,7 @@ static void check_prepped(size_t bsize, size_t d_off, bool two_scales,
             cr_assert(memcmp(&sc, &dp, sizeof sc) == 0,
                       "%s prepped dispatched blocks=%zu", name, blocks);
         }
-        for (size_t na = 1; na <= MAX_ACT; na++) {
+        for (size_t na = 1; na <= max_act; na++) {
             float ref[MAX_ACT], got[MAX_ACT], gav[MAX_ACT];
             for (size_t v = 0; v < na; v++)
                 ref[v] = scalar(prep, blocks, a + v * as);
@@ -668,7 +669,7 @@ Test(oxk_avx2, q2_k_prepped_bit_exact_vs_scalar)
                   oc_oxk_dot_q2_k_prepped, oc_oxk_dot_q2_k_prepped_avx2,
                   oc_oxk_dot_q2_k_prepped_1,
                   oc_oxk_dot_q2_k_prepped_multi,
-                  oc_oxk_dot_q2_k_prepped_multi_avx2, "q2_k");
+                  oc_oxk_dot_q2_k_prepped_multi_avx2, 9, "q2_k");
 }
 
 Test(oxk_avx2, q3_k_prepped_bit_exact_vs_scalar)
@@ -680,7 +681,7 @@ Test(oxk_avx2, q3_k_prepped_bit_exact_vs_scalar)
                   oc_oxk_dot_q3_k_prepped, oc_oxk_dot_q3_k_prepped_avx2,
                   oc_oxk_dot_q3_k_prepped_1,
                   oc_oxk_dot_q3_k_prepped_multi,
-                  oc_oxk_dot_q3_k_prepped_multi_avx2, "q3_k");
+                  oc_oxk_dot_q3_k_prepped_multi_avx2, 9, "q3_k");
 }
 
 Test(oxk_avx2, q6_k_prepped_bit_exact_vs_scalar)
@@ -693,5 +694,20 @@ Test(oxk_avx2, q6_k_prepped_bit_exact_vs_scalar)
                   oc_oxk_dot_q6_k_prepped, oc_oxk_dot_q6_k_prepped_avx2,
                   NULL,
                   oc_oxk_dot_q6_k_prepped_multi,
-                  oc_oxk_dot_q6_k_prepped_multi_avx2, "q6_k");
+                  oc_oxk_dot_q6_k_prepped_multi_avx2, 9, "q6_k");
+}
+
+Test(oxk_avx2, q4_k_prepped_bit_exact_vs_scalar)
+{
+    /* Q4_K prepped multi got a real AVX2 body (the batched-prefill path
+     * runs it for every Q4_K matrix); no single-act AVX2 kernel exists, so
+     * the single comparison forwards to scalar and disp1 is NULL. 37
+     * activations is 4*8+5: the n_act>=32 8-wide pass, the 4-wide pass,
+     * and a scalar tail. d and dmin live at the start of the block. */
+    check_prepped(OC_OXK_BLOCK_Q4_K_SIZE, 0, true,
+                  oc_oxk_q4_k_prep_bytes, oc_oxk_q4_k_prep_row,
+                  oc_oxk_dot_q4_k_prepped, oc_oxk_dot_q4_k_prepped,
+                  NULL,
+                  oc_oxk_dot_q4_k_prepped_multi,
+                  oc_oxk_dot_q4_k_prepped_multi_avx2, 37, "q4_k");
 }

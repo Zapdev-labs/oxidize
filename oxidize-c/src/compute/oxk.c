@@ -1299,6 +1299,11 @@ static void oc_oxk_init_once(void)
         /* Q6_K shares the Q3_K prepared body (offset 32 vs 4), so the
          * batched-prefill multi stops being scalar on AVX2 hosts too. */
         g_ctx.dot_q6_k_prepped_multi = oc_oxk_dot_q6_k_prepped_multi_avx2;
+        /* Q4_K prepped multi: the dominant weight type in Q4_K_M files ran
+         * the scalar reference on every AVX2-only host (Ryzen consumer
+         * parts, most Intel client CPUs) — only AVX-512+VNNI got a SIMD
+         * slot. The AVX2 body above closes that gap. */
+        g_ctx.dot_q4_k_prepped_multi = oc_oxk_dot_q4_k_prepped_multi_avx2;
         /* IQ3_S: real AVX2 bodies, bit-exact against the scalar reference
          * (test_oxk_iq3_s.c). Also used on AVX-512 hosts. */
         g_ctx.dot_iq3_s_q8_k = oc_oxk_dot_iq3_s_q8_k_avx2;

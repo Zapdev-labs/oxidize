@@ -336,6 +336,10 @@ void oc_oxk_dot_q6_k_prepped_multi_avx2(const void *prep, size_t blocks,
                                         const uint8_t *acts,
                                         size_t act_stride, size_t n_act,
                                         float *out);
+void oc_oxk_dot_q4_k_prepped_multi_avx2(const void *prep, size_t blocks,
+                                        const uint8_t *acts,
+                                        size_t act_stride, size_t n_act,
+                                        float *out);
 
 /* ─── Rows form (one activation, many consecutive rows) ─────────────────
  *
