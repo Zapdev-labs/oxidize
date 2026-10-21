@@ -357,6 +357,9 @@ OcError oc_expert_stream_prepare_mapping(OcExpertStreamPool *pool)
     }
     advise_view(gguf, &pool->model->tok_embeddings, OC_MMAP_ADVICE_WILLNEED);
     advise_view(gguf, &pool->model->output, OC_MMAP_ADVICE_WILLNEED);
+    /* The qwen4exp n-gram table is tens of gigabytes and is gathered a few
+     * rows at a time. Random advice keeps readahead from pulling it in. */
+    advise_view(gguf, &pool->model->per_layer_tok_embd, OC_MMAP_ADVICE_RANDOM);
     for (uint32_t i = 0; i < pool->n_layers; i++) {
         const OcLlamaLayer *L = (i < pool->model->cfg.n_layer)
             ? &pool->model->layers[i] : &pool->model->mtp.layer;
@@ -384,10 +387,16 @@ OcError oc_expert_stream_prepare_mapping(OcExpertStreamPool *pool)
         advise_view(gguf, &L->ffn_up_exps, OC_MMAP_ADVICE_RANDOM);
         advise_view(gguf, &L->ffn_down_exps, OC_MMAP_ADVICE_RANDOM);
     }
-    oc_log(OC_LOG_INFO,
-           "expert-stream: cache=%llu MiB layers=%u experts=%u",
-           (unsigned long long)(pool->cfg.cache_bytes / (1024ull * 1024ull)),
-           pool->n_layers, pool->model->cfg.num_experts);
+    if (pool->cfg.cache_bytes == UINT64_MAX) {
+        oc_log(OC_LOG_INFO,
+               "expert-stream: cache=unbounded layers=%u experts=%u",
+               pool->n_layers, pool->model->cfg.num_experts);
+    } else {
+        oc_log(OC_LOG_INFO,
+               "expert-stream: cache=%llu MiB layers=%u experts=%u",
+               (unsigned long long)(pool->cfg.cache_bytes / (1024ull * 1024ull)),
+               pool->n_layers, pool->model->cfg.num_experts);
+    }
     return OC_OK;
 }
 

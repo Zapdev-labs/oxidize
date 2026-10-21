@@ -22,6 +22,7 @@
 #include "oxidize/arch_forward.h"
 #include "oxidize/arena.h"
 #include "oxidize/attn_kernels.h"
+#include "oxidize/eagle4.h"
 #include "oxidize/expert_stream.h"
 #include "oxidize/gguf.h"
 #include "oxidize/k2_arch.h"
@@ -3093,6 +3094,8 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->mova_out_all);
     free(sess->rope_cos);
     free(sess->rope_sin);
+    oc_eagle4_capture_free(sess->eagle_cap);
+    sess->eagle_cap = NULL;
     k2_mtp_free(sess->k2mtp);
     sess->k2mtp = NULL;
     q4e_mtp_free(sess->q4emtp);
@@ -5402,6 +5405,10 @@ static OcError forward_layer_qwen4exp(OcLlamaSession *s, uint32_t layer)
     forward_moe_ffn(s, L);
     s->x = save_x;
     q4e_hc_combine(s, s->hc_block, s->hc_inject);
+    if (s->eagle_cap)
+        oc_eagle4_capture_at(s->eagle_cap, layer, (uint32_t)s->pos,
+                             s->ple_cur, s->hc_resid,
+                             (size_t)c->hc_mult * D);
     return OC_OK;
 }
 
@@ -7150,6 +7157,12 @@ static OcError prefill_qwen4exp_layer(OcLlamaSession *s, uint32_t layer,
                      &L->hc_ffn_up, &L->hc_ffn_inject);
     prefill_moe_ffn(s, L, b, n);
     q4e_hc_combine_batch(c, b, n);
+    if (s->eagle_cap && b->toks) {
+        for (size_t j = 0; j < n; j++)
+            oc_eagle4_capture_at(s->eagle_cap, layer,
+                                 (uint32_t)(pos0 + (int64_t)j), b->toks[j],
+                                 b->hcx + j * hc_dim, hc_dim);
+    }
     return OC_OK;
 }
 
