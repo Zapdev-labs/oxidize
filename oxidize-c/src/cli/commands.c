@@ -35,6 +35,7 @@
 #include "oxidize/inspect.h"
 #include "oxidize/llama.h"
 #include "oxidize/dspark.h"
+#include "oxidize/eagle4.h"
 #include "oxidize/log.h"
 #include "oxidize/merge.h"
 #include "oxidize/openai.h"
@@ -297,6 +298,9 @@ const char *oc_cli_command_name(OcCliCommand cmd)
     case OC_CLI_CMD_PERPLEXITY:     return "perplexity";
     case OC_CLI_CMD_SERVE_REALTIME: return "serve-realtime";
     case OC_CLI_CMD_DFLASH2:        return "dflash2";
+    case OC_CLI_CMD_EAGLE4:         return "eagle4";
+    case OC_CLI_CMD_EAGLE4_TRAIN:   return "eagle4-train";
+    case OC_CLI_CMD_EAGLE4_EXPORT:  return "eagle4-export";
     case OC_CLI_CMD_NONE:           break;
     }
     return "none";
@@ -328,6 +332,9 @@ OcCliCommand oc_cli_command_parse(const char *name)
     if (ieq(name, "serve-realtime") || ieq(name, "realtime"))
                                       return OC_CLI_CMD_SERVE_REALTIME;
     if (ieq(name, "dflash2"))         return OC_CLI_CMD_DFLASH2;
+    if (ieq(name, "eagle4"))          return OC_CLI_CMD_EAGLE4;
+    if (ieq(name, "eagle4-train"))    return OC_CLI_CMD_EAGLE4_TRAIN;
+    if (ieq(name, "eagle4-export"))   return OC_CLI_CMD_EAGLE4_EXPORT;
     return OC_CLI_CMD_NONE;
 }
 
@@ -382,7 +389,10 @@ OcError oc_cli_command_run(OcCliContext *ctx)
     /* dflash2 takes a SafeTensors dir or file as --model; the EXL3
      * native-path check does not apply to it. An explicit --exl3 still
      * goes through the gate so it is rejected rather than ignored. */
-    if (!(ctx->command == OC_CLI_CMD_DFLASH2 && !ctx->exl3_path) &&
+    if (!((ctx->command == OC_CLI_CMD_DFLASH2 ||
+           ctx->command == OC_CLI_CMD_EAGLE4 ||
+           ctx->command == OC_CLI_CMD_EAGLE4_TRAIN ||
+           ctx->command == OC_CLI_CMD_EAGLE4_EXPORT) && !ctx->exl3_path) &&
         oc_cli_exl3_reject(exl3_source, ctx->backend,
             !exl3_command || ctx->stream_experts || ctx->mtp || ctx->mtp_model,
             ctx->model_path != NULL)) return OC_ERR_INVALID_ARG;
@@ -403,6 +413,9 @@ OcError oc_cli_command_run(OcCliContext *ctx)
     case OC_CLI_CMD_SERVE:           return oc_cli_run_serve(ctx);
     case OC_CLI_CMD_SERVE_REALTIME:  return oc_cli_run_serve_realtime(ctx);
     case OC_CLI_CMD_DFLASH2:        return oc_cli_run_dflash2(ctx);
+    case OC_CLI_CMD_EAGLE4:         return oc_cli_run_eagle4(ctx);
+    case OC_CLI_CMD_EAGLE4_TRAIN:   return oc_cli_run_eagle4_train(ctx);
+    case OC_CLI_CMD_EAGLE4_EXPORT:  return oc_cli_run_eagle4_export(ctx);
     /* PROMPT and CHAT are handled by the generation path in main.c. */
     case OC_CLI_CMD_PROMPT:
     case OC_CLI_CMD_CHAT:
@@ -441,6 +454,9 @@ void oc_cli_command_help(void)
 "  tokenize         Tokenize text and print token IDs\n"
 "  detokenize       Detokenize token IDs back to text\n"
 "  perplexity       Compute perplexity on input text\n"
+"  eagle4           Benchmark the EAGLE-4 drafter (no checkpoint)\n"
+"  eagle4-train     Train an EAGLE-4 draft from SafeTensors\n"
+"  eagle4-export    Export a SafeTensors draft to GGUF\n"
 "\n"
 "COMMON OPTIONS:\n"
 "  --model PATH          GGUF file or native EXL3 checkpoint directory/file\n"
@@ -535,6 +551,26 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "OPTIONS:\n"
                "  --host HOST           Bind host (default 127.0.0.1)\n"
                "  --port PORT           Bind port (default 8080)\n");
+        break;
+    case OC_CLI_CMD_EAGLE4:
+        printf("EAGLE-4 drafter microbench\n\n"
+               "USAGE: oxidize-c eagle4 [--bench-iters N] [--json]\n\n"
+               "Reports low-rank head and sliding-window attention speedups\n"
+               "on this CPU, plus the harness width at batch 1, 64 and 384.\n");
+        break;
+    case OC_CLI_CMD_EAGLE4_TRAIN:
+        printf("Train an EAGLE-4 draft from SafeTensors\n\n"
+               "USAGE: oxidize-c eagle4-train --model draft.safetensors \\\n"
+               "       --dataset examples.safetensors [--output out.safetensors]\n"
+               "       [--lr 1e-2] [--epochs N]\n\n"
+               "The draft and the example shard are SafeTensors. A .gguf path\n"
+               "is rejected. GGUF is produced afterwards with eagle4-export.\n");
+        break;
+    case OC_CLI_CMD_EAGLE4_EXPORT:
+        printf("Export a trained EAGLE-4 draft to GGUF\n\n"
+               "USAGE: oxidize-c eagle4-export --model draft.safetensors \\\n"
+               "       --output draft.gguf\n\n"
+               "Reads SafeTensors and writes GGUF. This does not train.\n");
         break;
     case OC_CLI_CMD_DFLASH2:
         printf("DFlash2 draft propose benchmark\n\n"
@@ -2144,5 +2180,152 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     if (lm.bf16)
         oc_dflash2_free_huge(lm.bf16, (size_t)vocab * H * sizeof(uint16_t));
     oc_dflash2_model_free(&model);
+    return OC_OK;
+}
+
+OcError oc_cli_run_eagle4(OcCliContext *ctx)
+{
+    OcEagle4BenchReport r;
+    int iters;
+    OcError err;
+    if (!ctx) return OC_ERR_INVALID_ARG;
+    iters = ctx->bench_iterations > 0 ? ctx->bench_iterations : 8;
+    if (ctx->model_path) {
+        OcEagle4HfBench hf;
+        int warm = ctx->bench_warmup > 0 ? (int)ctx->bench_warmup : 2;
+        err = oc_eagle4_hf_bench(ctx->model_path, warm, iters, &hf);
+        if (err != OC_OK) {
+            cli_error("eagle4 draft failed (%s)", oc_error_msg(err));
+            return err;
+        }
+        if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+            printf("{\"command\":\"eagle4\",\"model\":\"%s\",\"hidden\":%zu,"
+                   "\"vocab\":%zu,\"params\":%zu,\"threads\":%d,"
+                   "\"token_us\":%.1f,\"tok_per_s\":%.2f,"
+                   "\"qkv_us\":%.1f,\"mlp_us\":%.1f,\"attn_us\":%.1f,"
+                   "\"head_us\":%.1f,\"encode_us\":%.1f,\"fault_us\":%.1f,"
+                   "\"top_token\":%u}\n",
+                   ctx->model_path, hf.hidden, hf.vocab, hf.params, hf.threads,
+                   hf.token_us, hf.tok_per_s, hf.qkv_us, hf.mlp_us, hf.attn_us,
+                   hf.head_us, hf.encode_us, hf.fault_us, hf.top_token);
+        } else {
+            printf("EAGLE-4 draft %s\n", ctx->model_path);
+            printf("  hidden %zu  vocab %zu  params %.2fB  threads %d\n",
+                   hf.hidden, hf.vocab, (double)hf.params / 1e9, hf.threads);
+            printf("  draft:  %.2f ms/token   %.1f tok/s\n",
+                   hf.token_us / 1e3, hf.tok_per_s);
+            printf("  qkv %.2f ms   mlp %.2f ms   attn %.2f ms   head %.2f ms\n",
+                   hf.qkv_us / 1e3, hf.mlp_us / 1e3, hf.attn_us / 1e3, hf.head_us / 1e3);
+            printf("  encode %.2f ms   first-touch %.2f ms   top token %u\n",
+                   hf.encode_us / 1e3, hf.fault_us / 1e3, hf.top_token);
+        }
+        return OC_OK;
+    }
+    err = oc_eagle4_bench(iters, &r);
+    if (err != OC_OK) {
+        cli_error("eagle4 bench failed (%s)", oc_error_msg(err));
+        return err;
+    }
+    if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+        printf("{\"command\":\"eagle4\",\"head_full_us\":%.3f,"
+               "\"head_lowrank_us\":%.3f,\"head_speedup\":%.3f,"
+               "\"attn_full_us\":%.3f,\"attn_window_us\":%.3f,"
+               "\"attn_speedup\":%.3f,\"batch1_cap\":%u,"
+               "\"batch1_branch\":%u,\"batch1_selected\":%u,"
+               "\"batch64_cap\":%u,\"batch384_cap\":%u}\n",
+               r.head_full_us, r.head_lowrank_us, r.head_speedup,
+               r.attn_full_us, r.attn_window_us, r.attn_speedup,
+               r.batch1_cap, r.batch1_branch, r.batch1_selected,
+               r.batch64_cap, r.batch384_cap);
+    } else {
+        printf("EAGLE-4 drafter — low-rank head %.2fx, sliding window %.2fx\n",
+               r.head_speedup, r.attn_speedup);
+        printf("  full LM head:      %.1f us\n", r.head_full_us);
+        printf("  low-rank head:     %.1f us\n", r.head_lowrank_us);
+        printf("  full attention:    %.1f us\n", r.attn_full_us);
+        printf("  window attention:  %.1f us\n", r.attn_window_us);
+        printf("  harness batch 1:   branch %u, verify cap %u, selected %u\n",
+               r.batch1_branch, r.batch1_cap, r.batch1_selected);
+        printf("  harness batch 64:  chain cap %u\n", r.batch64_cap);
+        printf("  harness batch 384: chain cap %u\n", r.batch384_cap);
+    }
+    return OC_OK;
+}
+
+OcError oc_cli_run_eagle4_train(OcCliContext *ctx)
+{
+    OcEagle4Draft draft;
+    OcEagle4TrainResult result;
+    const char *out_path;
+    OcError err;
+    if (!ctx || !ctx->model_path || !ctx->dataset_path) {
+        cli_error("eagle4-train requires --model draft.safetensors and --dataset examples.safetensors");
+        return OC_ERR_INVALID_ARG;
+    }
+    if (oc_eagle4_path_is_gguf(ctx->model_path) || oc_eagle4_path_is_gguf(ctx->dataset_path)) {
+        cli_error("EAGLE-4 trains from SafeTensors, not GGUF");
+        return OC_ERR_INVALID_ARG;
+    }
+    out_path = ctx->output_path ? ctx->output_path : ctx->model_path;
+    if (oc_eagle4_path_is_gguf(out_path)) {
+        cli_error("write the trained draft with --output draft.safetensors; use eagle4-export for GGUF");
+        return OC_ERR_INVALID_ARG;
+    }
+    memset(&draft, 0, sizeof(draft));
+    err = oc_eagle4_load_safetensors(&draft, ctx->model_path);
+    if (err != OC_OK) {
+        cli_error("failed to load draft (%s)", oc_error_msg(err));
+        return err;
+    }
+    err = oc_eagle4_train_safetensors(&draft, ctx->dataset_path,
+                                      ctx->learning_rate > 0 ? ctx->learning_rate : 0.01f,
+                                      ctx->epochs ? ctx->epochs : 1, &result);
+    if (err != OC_OK) {
+        cli_error("training failed (%s)", oc_error_msg(err));
+        oc_eagle4_model_free(&draft);
+        return err;
+    }
+    err = oc_eagle4_save_safetensors(&draft, out_path);
+    oc_eagle4_model_free(&draft);
+    if (err != OC_OK) {
+        cli_error("failed to save draft (%s)", oc_error_msg(err));
+        return err;
+    }
+    if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+        printf("{\"command\":\"eagle4-train\",\"steps\":%u,\"loss\":%.6f,\"pred\":%u,\"target\":%u}\n",
+               result.steps, result.loss, result.pred, result.target);
+    } else {
+        printf("EAGLE-4 train — %u steps, last loss %.4f, pred %u target %u\n",
+               result.steps, result.loss, result.pred, result.target);
+        printf("  saved %s\n", out_path);
+    }
+    return OC_OK;
+}
+
+OcError oc_cli_run_eagle4_export(OcCliContext *ctx)
+{
+    OcEagle4Draft draft;
+    OcError err;
+    if (!ctx || !ctx->model_path || !ctx->output_path) {
+        cli_error("eagle4-export requires --model draft.safetensors --output draft.gguf");
+        return OC_ERR_INVALID_ARG;
+    }
+    if (oc_eagle4_path_is_gguf(ctx->model_path)) {
+        cli_error("export reads a SafeTensors draft; it does not train from GGUF");
+        return OC_ERR_INVALID_ARG;
+    }
+    memset(&draft, 0, sizeof(draft));
+    err = oc_eagle4_load_safetensors(&draft, ctx->model_path);
+    if (err != OC_OK) {
+        cli_error("failed to load draft (%s)", oc_error_msg(err));
+        return err;
+    }
+    err = oc_eagle4_export_gguf(&draft, ctx->output_path);
+    oc_eagle4_model_free(&draft);
+    if (err != OC_OK) {
+        cli_error("export failed (%s)", oc_error_msg(err));
+        return err;
+    }
+    printf("exported %s\n", ctx->output_path);
     return OC_OK;
 }

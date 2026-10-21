@@ -137,6 +137,7 @@ Test(af, spec_mode_name)
     cr_assert_str_eq(oc_spec_mode_name(OC_SPEC_MODE_DFLASH), "dflash");
     cr_assert_str_eq(oc_spec_mode_name(OC_SPEC_MODE_TREE), "tree");
     cr_assert_str_eq(oc_spec_mode_name(OC_SPEC_MODE_LOOKUP), "lookup");
+    cr_assert_str_eq(oc_spec_mode_name(OC_SPEC_MODE_EAGLE4), "eagle4");
 }
 
 /* ─── Multi-Model Serving ─────────────────────────────────────────── */

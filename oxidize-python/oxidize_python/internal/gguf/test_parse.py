@@ -50,7 +50,7 @@ def test_parse_fixture_if_present() -> None:
     import os
 
     root = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "..", "oxidize-core", "tests", "fixtures"
+        os.path.dirname(__file__), "..", "..", "..", "..", "oxidize-rust", "oxidize-core", "tests", "fixtures"
     )
     path = os.path.join(root, "valid-v3.gguf")
     if os.path.isfile(path):

@@ -744,7 +744,10 @@ int main(int argc, char **argv)
         /* dflash2 takes a SafeTensors dir or file as --model; the EXL3
          * native-path check does not apply to it. An explicit --exl3
          * still goes through the gate so it is rejected, not ignored. */
-        if (!(ctx.command == OC_CLI_CMD_DFLASH2 && !ctx.exl3_path) &&
+        if (!((ctx.command == OC_CLI_CMD_DFLASH2 ||
+               ctx.command == OC_CLI_CMD_EAGLE4 ||
+               ctx.command == OC_CLI_CMD_EAGLE4_TRAIN ||
+               ctx.command == OC_CLI_CMD_EAGLE4_EXPORT) && !ctx.exl3_path) &&
             oc_cli_exl3_reject(exl3_source, ctx.backend,
                 !exl3_command || ctx.stream_experts || ctx.mtp || ctx.mtp_model,
                 ctx.model_path != NULL)) return 1;

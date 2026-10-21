@@ -4,74 +4,67 @@ This guide is written for AI agents that need to install, build, and verify the 
 
 ## 1. Preconditions (check before building)
 
-Run these checks and stop with a clear error message if any fail:
+The C engine needs a C compiler, `make`, and `git`. Stop if any of these fail:
 
 ```bash
-# Rust toolchain (edition 2024 required)
-rustup --version
-cargo --version
-rustc --version
-```
-
-Required minimums: stable Rust that supports edition 2024. If `rustup` is missing, install it from <https://rustup.rs/> before continuing.
-
-```bash
-# make
+cc --version
 make --version
-```
-
-```bash
-# git
 git --version
 ```
 
-## 2. Choose an install path
+The Rust workspace additionally needs a toolchain that supports edition 2024 (`rustup update` if `cargo` reports that `edition2024` is missing). Skip the Rust checks when the user only asked for the C engine.
 
-The user usually wants one of two outcomes:
+## 2. Choose an install path
 
 | Goal | Command |
 |------|---------|
-| Build from source for development / local runs | `git clone` + `make build` |
-| Install the `oxidize` binary globally | `cargo install --git` |
+| Build the C engine (primary) | `git clone` + `make` |
+| Build the Rust workspace as well | `make rust-build` |
+| Install the Rust `oxidize` binary globally | `cargo install --git` |
 
-Ask the user which they prefer if it is unclear. Default to **build from source**.
+Default to the C engine.
 
-## 3. Build from source
+## 3. Build the C engine
 
 ```bash
-# Clone
 git clone https://github.com/Zapdev-labs/oxidize.git oxidize
 cd oxidize
-
-# Build the workspace in release mode
-make build
+make
+make -C oxidize-c test
 ```
 
-This runs `cargo build --workspace --release` and produces release binaries under `target/release/`.
-
-> **Agent note:** `make build` is the workspace's documented build entry point. For direct `cargo` commands (run, test, etc.), prefix with `sfw` if your environment uses Socket Firewall Free.
+`make` builds `oxidize-c/oxidize-c`. On a host whose `cc` is Clang without compiler-rt, run the tests with `CC=gcc make -C oxidize-c test`.
 
 ### Verify the build
 
 ```bash
-# Confirm the main CLI binary exists
-ls -la target/release/oxidize
+ls -la oxidize-c/oxidize-c
+./oxidize-c/oxidize-c --help
+./oxidize-c/oxidize-c eagle4 --bench-iters 4
+```
 
-# Quick smoke test
+The eagle4 line prints low-rank head and sliding-window speedups plus the harness caps at batch 1, 64, and 384. It does not load a checkpoint.
+
+## 3b. Optional Rust workspace
+
+The Rust crates are in `oxidize-rust/`. The workspace manifest stays at the repo root.
+
+```bash
+make rust-build
 sfw cargo run -p oxidize-cli --release -- --prompt "hello"
 ```
 
-Expected output includes a generated response and no panic.
+This needs a Rust toolchain that supports edition 2024. Prefix `cargo` with `sfw` when the environment uses Socket Firewall Free.
 
-### Optional: run the full validation suite
+### Optional: run the Rust validation suite
 
 ```bash
-make check
+make rust-check
 ```
 
-This runs formatting, linting, audit, and tests. It is slower but proves the workspace is healthy.
+This runs formatting, clippy, `cargo deny`, and the Rust tests.
 
-If your environment requires every `cargo` invocation to go through Socket Firewall Free, run the individual commands from the `Makefile` instead of `make check`.
+If your environment requires every `cargo` invocation to go through Socket Firewall Free, run the individual `rust-*` commands from the `Makefile` instead of `make rust-check`.
 
 ## 4. Install the binary globally (alternative)
 
@@ -92,18 +85,16 @@ oxidize --help
 
 ## 5. Verify the installation
 
-Run the smallest possible end-to-end check:
-
 ```bash
-sfw cargo run -p oxidize-cli --release -- --prompt "What is 2+2?"
+./oxidize-c/oxidize-c eagle4 --bench-iters 4
 ```
 
-If a model path is available, run with it:
+If a Rust build was requested and a GGUF is available:
 
 ```bash
 sfw cargo run -p oxidize-cli --release -- \
   --model /path/to/model.gguf \
-  --prompt "Summarize Rust ownership in one paragraph." \
+  --prompt "Summarize ownership in one paragraph." \
   --max-tokens 128
 ```
 
@@ -122,15 +113,15 @@ sfw cargo run -p oxidize-cli --release -- \
 
 After installation succeeds, tell the user:
 
-- Whether you built from source or installed globally
-- The path to the `oxidize` binary (`target/release/oxidize` or `~/.cargo/bin/oxidize`)
-- The output of the verification command
+- Whether you built the C engine, the Rust workspace, or both
+- The path to `oxidize-c/oxidize-c` (and `target/release/oxidize` if Rust was built)
+- The eagle4 microbench output
 - Any warnings or skipped optional steps
 
 ## 8. Next steps
 
 Point the user to:
 
-- [`QUICKSTART.md`](./QUICKSTART.md) for run/chat/server examples
-- [`README.md`](./README.md) for the full feature overview and tuning guide
-- `oxidize --help` for CLI flags
+- [`README.md`](./README.md) for EAGLE-4, the C engine, and the Rust crates
+- `./oxidize-c/oxidize-c --help` for the C CLI
+- [`QUICKSTART.md`](./QUICKSTART.md) for the Rust run/chat/server examples

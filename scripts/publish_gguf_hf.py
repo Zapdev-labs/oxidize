@@ -50,7 +50,7 @@ Oxidize **AL** quants are custom ggml types (IDs 240–243) that use **multi-see
 MSE-optimal per-block scales** at the same block layouts as Q4_0 / Q5_0 / Q8_0.
 AL5 decodes identically to Q4_0 bitstream layout but encodes with lower
 reconstruction error. Implementation:
-[`al_family.rs`]({OXIDIZE_GH}/blob/master/oxidize-core/src/compute/quantization/al_family.rs).
+[`al_family.rs`]({OXIDIZE_GH}/blob/master/oxidize-rust/oxidize-core/src/compute/quantization/al_family.rs).
 
 ## Quick start — Oxidize-patched llama.cpp
 

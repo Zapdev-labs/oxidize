@@ -14,7 +14,7 @@ QWEN_MODEL_ID = "Qwen3-4B-Q4_K_M"
 def oxidize_repo_root() -> Path | None:
     here = Path(__file__).resolve()
     for parent in [here, *here.parents]:
-        if (parent / "oxidize-core").is_dir() and (parent / "models").is_dir():
+        if (parent / "oxidize-rust" / "oxidize-core").is_dir() and (parent / "models").is_dir():
             return parent
     return None
 

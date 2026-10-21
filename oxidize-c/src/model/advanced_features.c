@@ -103,6 +103,7 @@ const char *oc_spec_mode_name(OcSpecMode mode)
     case OC_SPEC_MODE_DFLASH: return "dflash";
     case OC_SPEC_MODE_TREE:   return "tree";
     case OC_SPEC_MODE_LOOKUP: return "lookup";
+    case OC_SPEC_MODE_EAGLE4: return "eagle4";
     default: return "unknown";
     }
 }
