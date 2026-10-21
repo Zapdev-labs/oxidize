@@ -1598,7 +1598,7 @@ static inline void q3q6_prepped_multi_body(const void *prep, size_t blocks,
                 const __m256i offv = _mm256_madd_epi16(sc16,
                     _mm256_loadu_si256(
                         (const __m256i *)(qb + 4 + OC_OXK_QK_K)));
-                const __m256i t = _mm256_add_epi32(acc[a],
+                const __m256i t = _mm256_sub_epi32(acc[a],
                     _mm256_mullo_epi32(_mm256_set1_epi32(offset), offv));
                 float dq;
                 memcpy(&dq, qb, 4);
@@ -2378,6 +2378,8 @@ void oc_oxk_dot_q3_k_prepped_multi_avx2(const void *prep, size_t blocks, const u
 { for (size_t v = 0; v < n_act; v++) out[v] = oc_oxk_dot_q3_k_prepped(prep, blocks, acts + v * act_stride); }
 void oc_oxk_dot_q6_k_prepped_multi_avx2(const void *prep, size_t blocks, const uint8_t *acts, size_t act_stride, size_t n_act, float *out)
 { for (size_t v = 0; v < n_act; v++) out[v] = oc_oxk_dot_q6_k_prepped(prep, blocks, acts + v * act_stride); }
+void oc_oxk_dot_q4_k_prepped_multi_avx2(const void *prep, size_t blocks, const uint8_t *acts, size_t act_stride, size_t n_act, float *out)
+{ for (size_t v = 0; v < n_act; v++) out[v] = oc_oxk_dot_q4_k_prepped(prep, blocks, acts + v * act_stride); }
 void oc_oxk_matvec_q4_0_f32_avx2(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)
 { oc_oxk_matvec_q4_0_f32_scalar(w, n_rows, row_bytes, x, out); }
 void oc_oxk_matvec_q4_k_f32_avx2(const uint8_t *w, size_t n_rows, size_t row_bytes, const float *x, float *out)

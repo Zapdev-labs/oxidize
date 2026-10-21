@@ -24,11 +24,25 @@ static double now(void)
 
 int main(int argc, char **argv)
 {
-    const size_t rows = argc > 1 ? (size_t)atol(argv[1]) : 9728;
-    const size_t cols = argc > 2 ? (size_t)atol(argv[2]) : 2560;
-    const size_t n    = argc > 3 ? (size_t)atol(argv[3]) : 96;
-    const size_t threads = argc > 4 ? (size_t)atol(argv[4]) : 8;
+    const long rows_arg = argc > 1 ? atol(argv[1]) : 9728;
+    const long cols_arg = argc > 2 ? atol(argv[2]) : 2560;
+    const long n_arg    = argc > 3 ? atol(argv[3]) : 96;
+    const long threads_arg = argc > 4 ? atol(argv[4]) : 8;
+    if (rows_arg <= 0 || cols_arg <= 0 || n_arg <= 0 || threads_arg <= 0 ||
+        threads_arg > rows_arg) {
+        fprintf(stderr,
+                "usage: %s [rows] [cols] [n_act] [threads]\n"
+                "rows, cols, n_act, and threads must be positive, "
+                "and threads <= rows\n",
+                argv[0]);
+        return 1;
+    }
+    const size_t rows = (size_t)rows_arg;
+    const size_t cols = (size_t)cols_arg;
+    const size_t n    = (size_t)n_arg;
+    const size_t threads = (size_t)threads_arg;
     const size_t blocks = cols / OC_OXK_QK_K;
+    const size_t ncols = blocks * OC_OXK_QK_K;
     const size_t row_bytes = blocks * OC_OXK_BLOCK_Q4_K_SIZE;
     const size_t as = blocks * OC_OXK_BLOCK_Q8_K_SIZE;
 
@@ -40,8 +54,9 @@ int main(int argc, char **argv)
         uint8_t *wb = w + r * row_bytes;
         for (size_t i = 4; i < row_bytes; i++) wb[i] = (uint8_t)rnd();
         for (size_t b = 0; b < blocks; b++) {
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE]     = 0x38;
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE + 2] = 0x38;
+            uint8_t *bl = wb + b * OC_OXK_BLOCK_Q4_K_SIZE;
+            bl[0] = 0x00; bl[1] = 0x38; /* f16 0.5 */
+            bl[2] = 0x00; bl[3] = 0x38;
         }
     }
     for (size_t v = 0; v < n; v++) {
@@ -64,9 +79,9 @@ int main(int argc, char **argv)
                                            out + r * n);
     }
     double dt = now() - t0;
-    double gflop = 2.0 * (double)slice * cols * n / 1e9;
+    double gflop = 2.0 * (double)slice * (double)ncols * (double)n / 1e9;
     printf("kernel-only single-thread: %.3fs for %zu rows x %zu cols x %zu acts = %.1f GFLOPS (slice %zu rows)\n",
-           dt, slice, cols, n, gflop / dt, slice);
+           dt, slice, ncols, n, gflop / dt, slice);
 
     /* 8-thread through the real parallel machinery is exercised by the
      * engine; this isolates the kernel itself. */

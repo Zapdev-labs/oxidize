@@ -249,8 +249,9 @@ int main(int argc, char **argv)
         uint8_t *wb = w + r * row_bytes;
         for (size_t i = 4; i < row_bytes; i++) wb[i] = (uint8_t)rnd();
         for (size_t b = 0; b < blocks; b++) {
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE]     = 0x38;
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE + 2] = 0x38;
+            uint8_t *bl = wb + b * OC_OXK_BLOCK_Q4_K_SIZE;
+            bl[0] = 0x00; bl[1] = 0x38; /* f16 0.5 */
+            bl[2] = 0x00; bl[3] = 0x38;
         }
     }
     for (size_t i = 0; i < n * cols; i++)
@@ -280,7 +281,7 @@ int main(int argc, char **argv)
                 const double err = fabs((double)out[v] - (double)ref[v]) /
                                    (mags + 1e-9);
                 if (err > maxerr) maxerr = err;
-                if (err > 1e-5) {
+                if (!(err <= 1e-5)) {
                     fprintf(stderr, "variant %s FAIL v=%zu err=%.3g\n",
                             names[k], v, err);
                     return 1;

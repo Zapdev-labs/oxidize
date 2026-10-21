@@ -7616,11 +7616,14 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
                                 first_logit, cb, ud);
 
     /* Fall back to the per-token path when batching cannot help or is not
-     * supported: identical results, just the old speed. */
-    if (cb != NULL && (!prefill_batch_supported(m) ||
-                       (n_tokens < 2 && sess->k2mtp == NULL))) {
-        oc_log(OC_LOG_INFO, "prefill: fallback per-token path (all-logits, unsupported=%d)",
-               !prefill_batch_supported(m));
+     * supported: identical results, just the old speed. A one-token prefill
+     * of a supported model is the normal call, so that case stays at DEBUG. */
+    const int unsupported = !prefill_batch_supported(m);
+    const int single = n_tokens < 2 && sess->k2mtp == NULL;
+    if (cb != NULL && (unsupported || single)) {
+        oc_log(unsupported ? OC_LOG_INFO : OC_LOG_DEBUG,
+               "prefill: fallback per-token path (all-logits, unsupported=%d n<2=%d)",
+               unsupported, n_tokens < 2);
         float *lg = malloc(m->cfg.vocab_size * sizeof(float));
         if (lg == NULL) return OC_ERR_OOM;
         for (size_t i = 0; i < n_tokens; i++) {
@@ -7632,9 +7635,10 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
         free(lg);
         return OC_OK;
     }
-    if (!prefill_batch_supported(m) || (n_tokens < 2 && sess->k2mtp == NULL)) {
-        oc_log(OC_LOG_INFO, "prefill: fallback per-token path (unsupported=%d n<2=%d)",
-               !prefill_batch_supported(m), n_tokens < 2);
+    if (unsupported || single) {
+        oc_log(unsupported ? OC_LOG_INFO : OC_LOG_DEBUG,
+               "prefill: fallback per-token path (unsupported=%d n<2=%d)",
+               unsupported, n_tokens < 2);
         for (size_t i = 0; i < n_tokens; i++) {
             float *lg = (i + 1 == n_tokens) ? logits_out : NULL;
             OcError e = oc_llama_forward(sess, tokens[i], lg);

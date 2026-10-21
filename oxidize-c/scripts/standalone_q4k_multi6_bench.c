@@ -1,7 +1,7 @@
-/* standalone_q4k_multi6_bench.c — A/B: committed 4-act prepped-multi
- * kernel vs N-act register-blocked variants (more ymm accumulator chains;
- * the kernel was latency-bound at 8 chains). All variants are bit-identical
- * per act (same per-block integer math and float accumulation order).
+/* standalone_q4k_multi6_bench.c — A/B: committed prepped-multi kernel
+ * (8-wide when n_act >= 32) vs N-act register-blocked variants. All
+ * variants are bit-identical per act (same per-block integer math and
+ * float accumulation order).
  * Build: cc -O2 -ffp-contract=off -march=native -Iinclude
  *        scripts/standalone_q4k_multi6_bench.c src/compute/oxk_avx2.c
  *        src/compute/oxk.c src/compute/oxk_avx512.c
@@ -152,18 +152,17 @@ int main(int argc, char **argv)
     uint8_t *w = malloc(rows * row_bytes);
     uint8_t *acts = malloc(n * as);
     float *o4 = malloc(n * sizeof(float));
-    float *o5 = malloc(n * sizeof(float));
     float *o6 = malloc(n * sizeof(float));
     float *o8 = malloc(n * sizeof(float));
     void *prep = malloc(oc_oxk_q4_k_prep_bytes(blocks) + 64);
     for (size_t r = 0; r < rows; r++) {
         uint8_t *wb = w + r * row_bytes;
         for (size_t i = 4; i < row_bytes; i++)
-            wb[i] = (uint8_t)((i % OC_OXK_BLOCK_Q4_K_SIZE) >= 16
-                                  ? rnd() & 0x0F : rnd());
+            wb[i] = (uint8_t)rnd();
         for (size_t b = 0; b < blocks; b++) {
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE]     = 0x38;
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE + 2] = 0x38;
+            uint8_t *bl = wb + b * OC_OXK_BLOCK_Q4_K_SIZE;
+            bl[0] = 0x00; bl[1] = 0x38; /* f16 0.5 */
+            bl[2] = 0x00; bl[3] = 0x38;
         }
     }
     for (size_t v = 0; v < n; v++) {
@@ -192,7 +191,7 @@ int main(int argc, char **argv)
             memcpy(&b8, &o8[v], 4);
             if (b4 != b6 || b4 != b8) {
                 fprintf(stderr, "MISMATCH r=%zu v=%zu: %.9g %.9g %.9g\n",
-                        r, v, o4[v], o6[v]);
+                        r, v, o4[v], o6[v], o8[v]);
                 return 1;
             }
         }
@@ -203,8 +202,7 @@ int main(int argc, char **argv)
     const struct { const char *name;
                    void (*fn)(const void *, size_t, const uint8_t *,
                               size_t, size_t, float *); } vs[] = {
-        { "4-act (committed)", oc_oxk_dot_q4_k_prepped_multi_avx2 },
-        
+        { "committed", oc_oxk_dot_q4_k_prepped_multi_avx2 },
         { "6-act", multi6 },
         { "8-act", multi8 },
     };

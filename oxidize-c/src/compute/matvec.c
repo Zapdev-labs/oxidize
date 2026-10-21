@@ -1403,11 +1403,19 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                     quantize_act_q8_0(in, cols, dst);
             }
             /* L2-resident act sub-tile for the prep path. 128 measured best
-             * on Ryzen 6850H (512 KB L2/core) for Qwen3-4B Q4_K_M prefill:
-             * 128 → 34.6 tok/s, 256 → 31.6, 4096 (off) → 32.1, 38 → 27.4.
-             * Re-prepping each row per sub-tile is ~5% of a sub-tile's dot
-             * work; streaming the act array out of L2 per row costs more. */
+             * on Ryzen 6850H (512 KB L2/core) for Qwen3-4B Q4_K_M prefill
+             * among sizes res[160] can hold: 128 → 34.6 tok/s, 38 → 27.4.
+             * Wider rows shrink that default so the quantized activations
+             * stay inside 512 KB. OXC_PREP_SUBTILE replaces the default and
+             * is clamped to [16, 160]. Re-prepping each row per sub-tile is
+             * ~5% of a sub-tile's dot work; streaming the act array out of
+             * L2 per row costs more. */
             size_t subtile = 128;
+            if (abytes > 0) {
+                const size_t fit = (512u * 1024u) / abytes;
+                if (fit < subtile)
+                    subtile = fit == 0 ? 1 : fit;
+            }
             {
                 const char *env = getenv("OXC_PREP_SUBTILE");
                 if (env != NULL) {
