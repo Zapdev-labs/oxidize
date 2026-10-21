@@ -1598,7 +1598,7 @@ static inline void q3q6_prepped_multi_body(const void *prep, size_t blocks,
                 const __m256i offv = _mm256_madd_epi16(sc16,
                     _mm256_loadu_si256(
                         (const __m256i *)(qb + 4 + OC_OXK_QK_K)));
-                const __m256i t = _mm256_add_epi32(acc[a],
+                const __m256i t = _mm256_sub_epi32(acc[a],
                     _mm256_mullo_epi32(_mm256_set1_epi32(offset), offv));
                 float dq;
                 memcpy(&dq, qb, 4);

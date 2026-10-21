@@ -137,6 +137,7 @@ static void FN(const void *prep, size_t blocks, const uint8_t *acts,           \
 }
 
 
+MULTI_BODY(multi4, 4)
 MULTI_BODY(multi6, 6)
 MULTI_BODY(multi8, 8)
 
@@ -192,7 +193,7 @@ int main(int argc, char **argv)
             memcpy(&b8, &o8[v], 4);
             if (b4 != b6 || b4 != b8) {
                 fprintf(stderr, "MISMATCH r=%zu v=%zu: %.9g %.9g %.9g\n",
-                        r, v, o4[v], o6[v]);
+                        r, v, (double)o4[v], (double)o6[v], (double)o8[v]);
                 return 1;
             }
         }
@@ -203,7 +204,7 @@ int main(int argc, char **argv)
     const struct { const char *name;
                    void (*fn)(const void *, size_t, const uint8_t *,
                               size_t, size_t, float *); } vs[] = {
-        { "4-act (committed)", oc_oxk_dot_q4_k_prepped_multi_avx2 },
+        { "4-act (committed)", multi4 },
         
         { "6-act", multi6 },
         { "8-act", multi8 },
