@@ -213,30 +213,47 @@ class Eagle4:
         dot = float(np.dot(dy * weight, x) / n)
         return dy * weight * inv - x * (inv ** 3) * dot
 
-    def sequence_loss(self, tokens: np.ndarray, aux: np.ndarray) -> tuple[float, float]:
-        """Teacher-forced first-token loss. aux is [T, n_aux, target]."""
+    def sequence_loss(
+        self,
+        tokens: np.ndarray,
+        aux: np.ndarray,
+        rng: np.random.Generator | None = None,
+        n_sample: int = 4096,
+    ) -> tuple[float, float]:
+        """Teacher-forced loss. Large vocabs use a sampled softmax that always
+        includes the label. aux is [T, n_aux, target]."""
         self.zero_grad()
         n = tokens.shape[0] - 1
         caches = [self._trunk(int(tokens[t]), aux[t]) for t in range(n)]
         posts = np.stack([c["post"] for c in caches])
         labels = tokens[1:].astype(np.int64)
-        logits = posts @ self.p["lm_head.weight"].T
+        if n_sample >= self.vocab:
+            cols = np.arange(self.vocab, dtype=np.int64)
+        else:
+            if rng is None:
+                rng = np.random.default_rng(0)
+            neg = rng.integers(0, self.vocab, size=n_sample, dtype=np.int64)
+            cols = np.unique(np.concatenate([neg, labels]))
+        label_at = np.searchsorted(cols, labels)
+        head = self.p["lm_head.weight"][cols]
+        logits = posts @ head.T
         shifted = logits - logits.max(axis=1, keepdims=True)
         exp = np.exp(shifted)
         probs = exp / exp.sum(axis=1, keepdims=True)
-        loss = float(-np.log(np.maximum(probs[np.arange(n), labels], 1e-12)).mean())
-        pred = np.argmax(logits, axis=1)
-        acc = float(np.mean(pred == labels))
+        picked = probs[np.arange(n), label_at]
+        loss = float(-np.log(np.maximum(picked, 1e-12)).mean())
+        acc = float(np.mean(np.argmax(logits, axis=1) == label_at))
         dlogits = probs
-        dlogits[np.arange(n), labels] -= 1.0
+        dlogits[np.arange(n), label_at] -= 1.0
         dlogits /= n
-        self.g["lm_head.weight"] += dlogits.T @ posts
-        dposts = dlogits @ self.p["lm_head.weight"]
+        self.g["lm_head.weight"][cols] += dlogits.T @ posts
+        dposts = dlogits @ head
         low = posts @ self.p["lr_down.weight"].T
-        approx = low @ self.p["lr_up.weight"].T
-        dapprox = (0.05 / self.vocab) * (approx - logits) / n
-        self.g["lr_up.weight"] += dapprox.T @ low
-        dlow = dapprox @ self.p["lr_up.weight"]
+        up = self.p["lr_up.weight"][cols]
+        approx = low @ up.T
+        dapprox = (0.05 / max(cols.shape[0], 1)) * (approx - logits) / n
+        self.g["lr_up.weight"][cols] += dapprox.T @ low
+        dlow = dapprox @ up
         self.g["lr_down.weight"] += dlow.T @ posts
         dposts += dlow @ self.p["lr_down.weight"]
         for t in range(n):
@@ -367,7 +384,7 @@ def train(dump: Path, out: Path, steps: int, lr: float, seed: int) -> None:
     losses: list[float] = []
     for step in range(steps):
         # One full pass is the right scale for a few hundred captured tokens.
-        loss, acc = model.sequence_loss(tokens, hiddens)
+        loss, acc = model.sequence_loss(tokens, hiddens, rng)
         model.adam(lr)
         losses.append(loss)
         print(f"step {step:4d}  loss {loss:.4f}  token-acc {acc:.3f}", flush=True)
