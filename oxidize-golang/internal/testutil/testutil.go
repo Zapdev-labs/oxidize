@@ -26,7 +26,7 @@ func OxidizeRepoRoot(t *testing.T) string {
 		t.Fatalf("getwd: %v", err)
 	}
 	for {
-		if stat, err := os.Stat(filepath.Join(dir, "oxidize-core")); err == nil && stat.IsDir() {
+		if stat, err := os.Stat(filepath.Join(dir, "oxidize-rust", "oxidize-core")); err == nil && stat.IsDir() {
 			if models, err := os.Stat(filepath.Join(dir, "models")); err == nil && models.IsDir() {
 				return dir
 			}
@@ -98,7 +98,7 @@ func AssertGenerationText(t *testing.T, raw string) {
 // written.
 func CopyFixture(t *testing.T, target string) {
 	t.Helper()
-	source := filepath.Join("..", "..", "..", "oxidize-core", "tests", "fixtures", "valid-v3.gguf")
+	source := filepath.Join("..", "..", "..", "oxidize-rust", "oxidize-core", "tests", "fixtures", "valid-v3.gguf")
 	raw, err := os.ReadFile(source)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)

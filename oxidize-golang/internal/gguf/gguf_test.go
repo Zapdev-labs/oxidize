@@ -127,7 +127,7 @@ func TestAsUint64AcceptsZeroForSigned(t *testing.T) {
 }
 
 func fixturePath(name string) string {
-	return filepath.Join("..", "..", "..", "oxidize-core", "tests", "fixtures", name)
+	return filepath.Join("..", "..", "..", "oxidize-rust", "oxidize-core", "tests", "fixtures", name)
 }
 
 func encodedFixture(t *testing.T) []byte {

@@ -41,7 +41,7 @@
 
 /* Fixture path: oxidize-core/tests/fixtures/<name>.gguf, relative to the
  * oxidize-c/ directory where `make test` runs. */
-#define FIXTURE_DIR "../oxidize-core/tests/fixtures"
+#define FIXTURE_DIR "../oxidize-rust/oxidize-core/tests/fixtures"
 #define FIXTURE(name) FIXTURE_DIR "/" name
 
 /* ─── v3 header parse (VAL-FOUND-001, VAL-FOUND-014) ─────────────────────── */

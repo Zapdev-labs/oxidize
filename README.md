@@ -1,52 +1,67 @@
 # oxidize
 
-`oxidize` is a Rust workspace for local LLM tooling:
-
-- `oxidize-core`: model loading, quantization, tensor/sampling primitives, and optional WASM support
-- `oxidize-cli`: local CLI for prompt runs, chat mode, model planning, and profiling hooks
-- `oxidize-server`: OpenAI-compatible HTTP API surface
-- `oxidize-quantize`: file quantization utility
-- `oxidize-py`: Python bindings built with `pyo3`
+`oxidize` is a local LLM inference workspace. The primary engine is the dependency-free C11 port in `oxidize-c`. The Rust crates live under `oxidize-rust/` and remain members of the Cargo workspace at the repo root. Go, Python, and C++ ports sit beside them.
 
 ## Install with your AI agent
 
-Copy and paste the prompt below into your agent (Claude, Cursor, Codex, etc.) and it will install `oxidize` for you.
-
 ```text
-Install the oxidize LLM inference workspace from https://github.com/Zapdev-labs/oxidize.git.
+Install oxidize from https://github.com/Zapdev-labs/oxidize.git.
 
-Follow the exact steps in HOW_TO_INSTALL.md in the repo root. Before building, verify that rustup, cargo, make, and git are available and that the Rust toolchain supports edition 2024. Build the workspace from source with `make build` (prefix cargo commands with `sfw` if your environment uses Socket Firewall Free). After building, run a smoke test with `cargo run -p oxidize-cli --release -- --prompt "What is 2+2?"` and confirm there is no panic. If a GGUF model path is available, also verify inference works by running `cargo run -p oxidize-cli --release -- --model <path> --prompt "Summarize Rust ownership in one paragraph." --max-tokens 128`. Report back the install method used, the path to the `oxidize` binary, and the verification output. If anything fails, pause and ask before proceeding.
+Follow HOW_TO_INSTALL.md. The primary build is the C engine: `make` (or `make -C oxidize-c build`) and `make -C oxidize-c test`. Smoke-test with `./oxidize-c/oxidize-c --help` and `./oxidize-c/oxidize-c eagle4 --bench-iters 4`. The Rust workspace is optional: `make rust-build` needs a Rust toolchain that supports edition 2024. Report the binary path and the eagle4 microbench output. If a step fails, pause and ask before proceeding.
 ```
 
 ## Quick start
 
 ### Prerequisites
 
-- Rust toolchain (`rustup`, `cargo`) with edition 2024 support
-- `make`
-- Optional for WASM builds: `wasm-bindgen-cli`
+- A C11 compiler (`gcc` or `clang`), `make`
+- Optional: Rust edition 2024 for `make rust-build`
 
 ### Clone and build
 
 ```bash
 git clone https://github.com/Zapdev-labs/oxidize.git oxidize
 cd oxidize
-make build
+make
+make -C oxidize-c test
+./oxidize-c/oxidize-c --help
 ```
 
-### Run tests and lint
+## EAGLE-4
+
+EAGLE-4 speculative decoding lives in `oxidize-c`. The drafter is one decoder layer over fused target hidden states. Three things make a draft step cheap:
+
+- Sliding-window attention (released shape: the last 4,096 positions) so draft attention stays flat as context grows. The key/value cache is append-only and rolls back to the accepted prefix.
+- A low-rank candidate head. A rank-128 projection scores the vocabulary, then the full LM head runs only on the top 128 rows.
+- A cost harness. At batch 1 it builds a tree (depth 12, branch 4, verify cap 16), branching widest on the first token. From batch 64 it switches to a chain of 4, and from batch 384 the chain cap is 3. A level is dropped when the expected acceptance gain per microsecond falls below the threshold.
+
+Training reads SafeTensors and writes a SafeTensors draft. Example shards contain `features` `[N, extract_width]`, `tokens` `[N]`, and `targets` `[N]`. A path ending in `.gguf` is rejected by the trainer and by the loader.
 
 ```bash
-make test
-make lint
+./oxidize-c/oxidize-c eagle4-train \
+  --model draft.safetensors \
+  --dataset examples.safetensors \
+  --output draft.safetensors \
+  --lr 0.01 --epochs 1
+
+./oxidize-c/oxidize-c eagle4-export \
+  --model draft.safetensors \
+  --output draft.gguf
 ```
 
-### Fast local validation
+`eagle4-export` packages a draft that was already trained. It is the step that produces the GGUF you publish. This repository does not ship draft weights. The SafeTensors checkpoint and the GGUF package will be published together when that drafter is ready.
+
+`oxidize-c eagle4` times the head and the attention window on the machine you are on. On the build machine used for this change, hidden 1024 / rank 64 / vocab 16384 scored the low-rank head at about 7.6× a full head, and a 64-token window scored about 41× a 2,048-token attention scan. Those are kernel timings, not end-to-end tokens per second for a 27B model.
+
+## Rust workspace
 
 ```bash
-make fmt
-make check
+make rust-build
+make rust-test
+cargo run -p oxidize-cli -- --prompt "hello"
 ```
+
+Crates: `oxidize-rust/oxidize-core`, `oxidize-cli`, `oxidize-server`, `oxidize-quantize`, `oxidize-convert`, `oxidize-prune`, `oxidize-merge`, `oxidize-finetuning`, `oxidize-kernels`, `oxidize-ffi`, `oxidize-py`, `oxidize-train`.
 
 ## Release announcement: oxidize 0.1.0
 
@@ -62,7 +77,7 @@ This release brings together a complete core-to-interface stack:
 
 What this means for early users:
 
-- Start quickly with one workspace and consistent commands (`make build`, `make test`, `make lint`)
+- Start with the C engine (`make`, `make test`) or the Rust crates (`make rust-build`, `make rust-test`)
 - Deploy the same inference behavior across CLI, server, and Python surfaces
 - Tune memory and latency tradeoffs using quantization targets that fit your hardware
 
@@ -242,16 +257,18 @@ Practical tuning priorities:
 - **Model path errors:** verify the model file exists and is readable, then rerun with an absolute path to avoid shell-relative path mistakes.
 - **Slow or no GPU acceleration:** increase `--n-gpu-layers` gradually and compare throughput after each change; if speed does not improve, fall back to CPU and confirm baseline correctness.
 - **Server auth failures (`401`):** set `OXIDIZE_API_KEY` before starting `oxidize-server`, then send the same value with `x-api-key` or `Authorization: Bearer <key>`.
-- **WASM build failures:** install the wasm target (`rustup target add wasm32-unknown-unknown`) and ensure `wasm-bindgen` is available, then run `make wasm` again.
+- **WASM build failures:** install the wasm target (`rustup target add wasm32-unknown-unknown`) and ensure `wasm-bindgen` is available, then run `make rust-wasm` again.
 - **Unexpected output quality after quantization:** keep the original model, benchmark both variants on representative prompts, and move to a less aggressive target if quality regresses.
 
 ## Workspace commands
 
-- Build workspace crates (release): `make build`
-- Test all targets: `make test`
-- Lint with denied warnings: `make lint`
-- Format check: `make fmt`
-- Full CI-equivalent check + build: `make ci`
+- Build the C engine: `make`
+- Test the C engine: `make test`
+- Build Rust crates (release): `make rust-build`
+- Test Rust crates: `make rust-test`
+- Clippy: `make rust-lint`
+- Format check: `make rust-fmt`
+- Rust CI-equivalent: `make rust-ci`
 
 ## Environment variables
 
@@ -318,4 +335,4 @@ Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllam
 
 ## License
 
-Zapdev labs Fair Use License
+Zapdev labs Fair Use License, in `LICENSE`. Individuals, non-commercial entities, and academic institutions may use the Software without charge. A commercial entity with more than 10 employees or more than $1,000,000 USD annual gross revenue needs a separate commercial license from Zapdev-labs (`jacksonwheeler@zapdev.link`). Vendored Criterion under `oxidize-c/tests/criterion/` remains MIT. Model weights are not part of this grant.
