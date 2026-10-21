@@ -335,4 +335,4 @@ Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllam
 
 ## License
 
-Zapdev labs Fair Use License, in `LICENSE`. Individuals, non-commercial entities, and academic institutions may use the Software without charge. A commercial entity with more than 10 employees or more than $1,000,000 USD annual gross revenue needs a separate commercial license from Zapdev-labs (`jacksonwheeler@zapdev.link`). Vendored Criterion under `oxidize-c/tests/criterion/` remains MIT. Model weights are not part of this grant.
+MIT. See `LICENSE`. Vendored Criterion under `oxidize-c/tests/criterion/` keeps its own MIT license.
