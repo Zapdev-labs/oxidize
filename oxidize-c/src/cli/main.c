@@ -148,7 +148,7 @@ static void print_help(void)
 "  --draft-tokens N       MTP/DSpark draft block size (default 4; K2 MTP 1)\n"
 "  --mtp                  K2-Horizon: MTP speculative decoding (greedy, opt-in;\n"
 "                         forces --repeat-penalty 1, needs --temperature 0)\n"
-"  --mtp-model PATH       K2-Horizon: load an mtp-*.gguf nextn head sidecar\n"
+"  --mtp-model PATH       MTP/nextn sidecar (K2-Horizon or qwen4exp)\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
 "  --stream-experts       SSD expert offload (no whole-file readahead/mlock)\n"

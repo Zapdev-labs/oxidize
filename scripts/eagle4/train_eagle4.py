@@ -117,15 +117,25 @@ class Eagle4:
             vhat = self.v[name] / (1 - b2**self.step_n)
             p -= lr * mhat / (np.sqrt(vhat) + eps)
 
-    def _trunk(self, token: int, aux: np.ndarray) -> dict[str, np.ndarray]:
-        """Forward the drafter body. Attention is the current token only,
-        which is also what the first C draft step does on an empty cache."""
+    def _trunk(
+        self,
+        token: int,
+        aux: np.ndarray,
+        g_override: np.ndarray | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Forward one draft step. g_override is the previous post-norm state
+        used by later steps in a chain. The first step reads target features."""
         p = self.p
         eps = self.eps
-        aux_r = aux.reshape(self.n_aux, self.target)
-        an, inv = rms(aux_r, p["fc_norm.weight"], eps)
-        cat = np.ascontiguousarray(an.reshape(-1))
-        g = p["fc.weight"] @ cat
+        from_feedback = g_override is not None
+        if from_feedback:
+            aux_r = an = inv = cat = None
+            g = g_override
+        else:
+            aux_r = aux.reshape(self.n_aux, self.target)
+            an, inv = rms(aux_r, p["fc_norm.weight"], eps)
+            cat = np.ascontiguousarray(an.reshape(-1))
+            g = p["fc.weight"] @ cat
         emb = p["embed_tokens.weight"][token]
         cat2 = np.concatenate([emb, g])
         u = p["eh_proj.weight"] @ cat2
@@ -160,9 +170,12 @@ class Eagle4:
             "hidden": hidden,
             "pinv": pinv,
             "post": post[0],
+            "from_feedback": from_feedback,
         }
 
-    def _trunk_backward(self, token: int, cache: dict[str, np.ndarray], dpost: np.ndarray) -> None:
+    def _trunk_backward(
+        self, token: int, cache: dict[str, np.ndarray], dpost: np.ndarray
+    ) -> np.ndarray:
         p = self.p
         h = self.hidden
         hidden = cache["hidden"]
@@ -199,6 +212,8 @@ class Eagle4:
         dcat2 = p["eh_proj.weight"].T @ du
         self.g["embed_tokens.weight"][token] += dcat2[:h]
         dg = dhidden + dcat2[h:]
+        if cache["from_feedback"]:
+            return dg
         cat = cache["cat"]
         self.g["fc.weight"] += np.outer(dg, cat)
         dan = (p["fc.weight"].T @ dg).reshape(self.n_aux, self.target)
@@ -206,6 +221,7 @@ class Eagle4:
         inv = cache["inv"]
         for i in range(self.n_aux):
             self.g["fc_norm.weight"] += dan[i] * aux[i] * float(inv[i, 0])
+        return dg
 
     @staticmethod
     def _drms(x: np.ndarray, weight: np.ndarray, inv: float, dy: np.ndarray) -> np.ndarray:
@@ -213,20 +229,14 @@ class Eagle4:
         dot = float(np.dot(dy * weight, x) / n)
         return dy * weight * inv - x * (inv ** 3) * dot
 
-    def sequence_loss(
+    def _head_grads(
         self,
-        tokens: np.ndarray,
-        aux: np.ndarray,
-        rng: np.random.Generator | None = None,
-        n_sample: int = 4096,
-    ) -> tuple[float, float]:
-        """Teacher-forced loss. Large vocabs use a sampled softmax that always
-        includes the label. aux is [T, n_aux, target]."""
-        self.zero_grad()
-        n = tokens.shape[0] - 1
-        caches = [self._trunk(int(tokens[t]), aux[t]) for t in range(n)]
-        posts = np.stack([c["post"] for c in caches])
-        labels = tokens[1:].astype(np.int64)
+        posts: np.ndarray,
+        labels: np.ndarray,
+        rng: np.random.Generator | None,
+        n_sample: int,
+    ) -> tuple[float, float, np.ndarray]:
+        n = posts.shape[0]
         if n_sample >= self.vocab:
             cols = np.arange(self.vocab, dtype=np.int64)
         else:
@@ -251,11 +261,49 @@ class Eagle4:
         low = posts @ self.p["lr_down.weight"].T
         up = self.p["lr_up.weight"][cols]
         approx = low @ up.T
-        dapprox = (0.05 / max(cols.shape[0], 1)) * (approx - logits) / n
+        dapprox = (0.05 / max(int(cols.shape[0]), 1)) * (approx - logits) / n
         self.g["lr_up.weight"][cols] += dapprox.T @ low
         dlow = dapprox @ up
         self.g["lr_down.weight"] += dlow.T @ posts
         dposts += dlow @ self.p["lr_down.weight"]
+        return loss, acc, dposts
+
+    def sequence_loss(
+        self,
+        tokens: np.ndarray,
+        aux: np.ndarray,
+        rng: np.random.Generator | None = None,
+        n_sample: int = 4096,
+    ) -> tuple[float, float]:
+        """Two-step teacher-forced loss. Step 0 reads target features. Step 1
+        feeds the draft's own post-norm state back, matching chained drafting.
+        Large vocabs use a sampled softmax that always includes the label."""
+        self.zero_grad()
+        n = int(tokens.shape[0]) - 1
+        if n < 1:
+            return 0.0, 0.0
+        caches = [self._trunk(int(tokens[t]), aux[t]) for t in range(n)]
+        posts = np.stack([c["post"] for c in caches])
+        loss1, acc, dposts = self._head_grads(
+            posts, tokens[1:].astype(np.int64), rng, n_sample
+        )
+        n2 = n - 1
+        if n2 > 0:
+            chain = [
+                self._trunk(int(tokens[t + 1]), aux[t], g_override=caches[t]["post"])
+                for t in range(n2)
+            ]
+            posts2 = np.stack([c["post"] for c in chain])
+            loss2, _, dposts2 = self._head_grads(
+                posts2, tokens[2 : 2 + n2].astype(np.int64), rng, n_sample
+            )
+            for t in range(n2):
+                dposts[t] = dposts[t] + self._trunk_backward(
+                    int(tokens[t + 1]), chain[t], dposts2[t]
+                )
+            loss = 0.5 * (loss1 + loss2)
+        else:
+            loss = loss1
         for t in range(n):
             self._trunk_backward(int(tokens[t]), caches[t], dposts[t])
         return loss, acc
@@ -356,16 +404,37 @@ def self_test() -> None:
         raise SystemExit("self-test did not reduce loss")
 
 
+def load_sequences(path: Path) -> tuple[list[tuple[np.ndarray, np.ndarray]], list[int]]:
+    files = sorted(path.glob("*.e4h1")) if path.is_dir() else [path]
+    if not files:
+        raise SystemExit(f"no E4H1 captures in {path}")
+    seqs: list[tuple[np.ndarray, np.ndarray]] = []
+    layers: list[int] | None = None
+    for f in files:
+        tokens, hiddens, lay = load_dump(f)
+        if tokens.shape[0] < 4:
+            continue
+        if layers is None:
+            layers = lay
+        elif lay != layers:
+            raise SystemExit(f"{f} layers {lay} != {layers}")
+        seqs.append((tokens, hiddens))
+    if not seqs or layers is None:
+        raise SystemExit("no usable sequences")
+    return seqs, layers
+
+
 def train(dump: Path, out: Path, steps: int, lr: float, seed: int) -> None:
-    tokens, hiddens, layers = load_dump(dump)
-    if hiddens.shape[0] < 4:
-        raise SystemExit("capture needs at least 4 tokens")
-    n_aux = hiddens.shape[1]
-    target = hiddens.shape[2]
-    vocab = int(tokens.max()) + 1
-    # The target vocab is the embedding width, not max(token)+1. Callers
-    # pass the real vocab through the environment when they know it.
-    vocab = int(__import__("os").environ.get("EAGLE4_VOCAB", vocab))
+    import os
+
+    seqs, layers = load_sequences(dump)
+    n_tok = sum(int(t.shape[0]) for t, _ in seqs)
+    n_aux = seqs[0][1].shape[1]
+    target = seqs[0][1].shape[2]
+    vocab = int(os.environ.get("EAGLE4_VOCAB", max(int(t.max()) for t, _ in seqs) + 1))
+    hold_n = max(1, len(seqs) // 5) if len(seqs) >= 5 else 0
+    train_seqs = seqs[:-hold_n] if hold_n else seqs
+    hold_seqs = seqs[-hold_n:] if hold_n else []
     rng = np.random.default_rng(seed)
     model = Eagle4(
         hidden=256,
@@ -380,22 +449,72 @@ def train(dump: Path, out: Path, steps: int, lr: float, seed: int) -> None:
         eps=1e-6,
         rng=rng,
     )
-    losses: list[float] = []
-    for step in range(steps):
-        # One full pass is the right scale for a few hundred captured tokens.
-        loss, acc = model.sequence_loss(tokens, hiddens, rng)
-        model.adam(lr)
-        losses.append(loss)
-        print(f"step {step:4d}  loss {loss:.4f}  token-acc {acc:.3f}", flush=True)
+    print(
+        f"sequences {len(seqs)} train {len(train_seqs)} hold {len(hold_seqs)} "
+        f"tokens {n_tok} hidden {target}",
+        flush=True,
+    )
+    history: list[dict[str, float]] = []
+    best_hold = 1e9
+    best_state = {k: v.copy() for k, v in model.p.items()}
+    stale = 0
+    epochs = max(steps, 1)
+    for epoch in range(epochs):
+        order = rng.permutation(len(train_seqs))
+        losses = []
+        accs = []
+        for i in order:
+            tokens, hiddens = train_seqs[int(i)]
+            loss, acc = model.sequence_loss(tokens, hiddens, rng)
+            model.adam(lr)
+            losses.append(loss)
+            accs.append(acc)
+        row = {
+            "epoch": float(epoch),
+            "loss": float(np.mean(losses)),
+            "acc": float(np.mean(accs)),
+        }
+        if hold_seqs:
+            hloss = []
+            hacc = []
+            for tokens, hiddens in hold_seqs:
+                loss, acc = model.sequence_loss(tokens, hiddens, rng)
+                hloss.append(loss)
+                hacc.append(acc)
+            model.zero_grad()
+            row["hold_loss"] = float(np.mean(hloss))
+            row["hold_acc"] = float(np.mean(hacc))
+            if row["hold_loss"] + 1e-4 < best_hold:
+                best_hold = row["hold_loss"]
+                best_state = {k: v.copy() for k, v in model.p.items()}
+                stale = 0
+            else:
+                stale += 1
+        else:
+            best_state = {k: v.copy() for k, v in model.p.items()}
+        history.append(row)
+        extra = ""
+        if "hold_loss" in row:
+            extra = f"  hold {row['hold_loss']:.4f} acc {row['hold_acc']:.3f}"
+        print(
+            f"epoch {epoch:3d}  loss {row['loss']:.4f}  acc {row['acc']:.3f}{extra}",
+            flush=True,
+        )
+        if stale >= 3:
+            print("early stop", flush=True)
+            break
+    model.p = best_state
+    final = history[-1]
     note = (
-        f"Trained {steps} steps on {tokens.shape[0]} captured tokens "
-        f"from CYBER-FROST-3.8. Final loss {losses[-1]:.4f}."
+        f"Trained {len(history)} epochs on {n_tok} Q4_K_M hidden states "
+        f"across {len(seqs)} sequences ({len(hold_seqs)} held out). "
+        f"Two-step chain loss, 4096-way sampled softmax. "
+        f"Last train loss {final['loss']:.4f}, acc {final['acc']:.3f}."
     )
+    if "hold_loss" in final:
+        note += f" Held-out loss {final.get('hold_loss', 0):.4f}, acc {final.get('hold_acc', 0):.3f}."
     save_model(model, layers, out, note)
-    (out / "train_log.json").write_text(
-        json.dumps({"steps": steps, "loss": losses, "tokens": int(tokens.shape[0])})
-        + "\n"
-    )
+    (out / "train_log.json").write_text(json.dumps({"history": history, "tokens": n_tok}) + "\n")
     print(note)
 
 
@@ -404,7 +523,7 @@ def main() -> None:
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--dump", type=Path)
     ap.add_argument("--out", type=Path, default=Path("models/eagle4-cyber-frost"))
-    ap.add_argument("--steps", type=int, default=60)
+    ap.add_argument("--steps", type=int, default=12, help="epochs over the capture set")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()

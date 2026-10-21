@@ -1890,13 +1890,69 @@ OcError oc_llama_load_flags(const char *path, unsigned flags, OcLlamaModel *out)
     return OC_OK;
 }
 
+/* qwen4exp nextn sidecar: blk.{n_layer} is a full-attention HC MoE block
+ * plus nextn.{eh_proj,enorm,hnorm,hc_head_*}. The trunk keeps embeddings
+ * and output; only the blk.N tensors are bound. */
+static OcError q4e_mtp_bind(OcLlamaModel *m)
+{
+    OcLlamaLayer *M = &m->mtp.layer;
+    const OcLlamaConfig *c = &m->cfg;
+    const size_t hc_dim = (size_t)c->hc_mult * c->n_embd;
+    const size_t q_rows = 2u * (size_t)c->n_head * c->head_dim;
+    const size_t kv_rows = (size_t)c->n_head_kv * c->head_dim;
+    const bool ok =
+        M->attn_q.data && M->attn_q.rows == q_rows &&
+        M->attn_q.cols == c->n_embd &&
+        M->attn_k.data && M->attn_k.rows == kv_rows &&
+        M->attn_v.data && M->attn_v.rows == kv_rows &&
+        M->attn_output.data &&
+        M->attn_output.cols == (size_t)c->n_head * c->head_dim &&
+        M->attn_output.rows == c->n_embd &&
+        M->attn_q_norm && M->attn_k_norm &&
+        M->hc_attn_norm && M->hc_ffn_norm &&
+        M->hc_attn_down.data && M->hc_attn_up.data &&
+        M->hc_ffn_down.data && M->hc_ffn_up.data &&
+        M->ffn_gate_inp.data &&
+        M->ffn_gate_exps.data && M->ffn_up_exps.data && M->ffn_down_exps.data &&
+        M->ffn_gate_shexp.data && M->ffn_up_shexp.data &&
+        M->ffn_down_shexp.data && M->ffn_gate_inp_shexp.data &&
+        m->mtp.eh_proj.data &&
+        m->mtp.eh_proj.cols == 2u * c->n_embd &&
+        m->mtp.eh_proj.rows == c->n_embd &&
+        m->mtp.enorm && m->mtp.hnorm && m->mtp.hc_head_norm &&
+        m->mtp.hc_head_down.data &&
+        m->mtp.hc_head_down.rows == c->hc_low_rank &&
+        m->mtp.hc_head_down.cols == hc_dim &&
+        m->mtp.hc_head_up.data &&
+        m->mtp.hc_head_up.rows == hc_dim &&
+        m->mtp.hc_head_up.cols == c->hc_low_rank;
+    if (!ok) {
+        oc_log(OC_LOG_ERROR, "qwen4exp: MTP sidecar blk.%u is incomplete",
+               c->n_layer);
+        m->mtp.present = false;
+        return OC_ERR_TENSOR;
+    }
+    M->kind = OC_LLAMA_LAYER_FULL_ATTENTION;
+    M->head_dim = c->head_dim;
+    M->n_head_kv = c->n_head_kv;
+    M->rope_dim = c->rope_dim;
+    M->rope_theta = c->rope_theta;
+    M->use_rope = true;
+    M->kv_cache_index = c->n_full_attention_layers;
+    if (M->layer_output_scale == 0.0f) M->layer_output_scale = 1.0f;
+    m->mtp.present = true;
+    oc_log(OC_LOG_INFO, "qwen4exp: MTP sidecar bound (blk.%u, kv slot %u)",
+           c->n_layer, M->kv_cache_index);
+    return OC_OK;
+}
+
 OcError oc_llama_load_mtp_sidecar(OcLlamaModel *m, const char *path)
 {
     if (m == NULL || path == NULL) return OC_ERR_INVALID_ARG;
     if (m->live_sessions > 0 || m->mtp.present || m->mtp_gguf_open)
         return OC_ERR_INVALID_ARG;
-    if (!m->cfg.is_k2) {
-        oc_log(OC_LOG_ERROR, "mtp sidecar: only K2-Horizon is supported");
+    if (!m->cfg.is_k2 && !m->cfg.is_qwen4exp) {
+        oc_log(OC_LOG_ERROR, "mtp sidecar: only K2-Horizon and qwen4exp are supported");
         return OC_ERR_MODEL;
     }
     OcError e = oc_gguf_map_open(path, &m->mtp_gguf);
@@ -1906,8 +1962,9 @@ OcError oc_llama_load_mtp_sidecar(OcLlamaModel *m, const char *path)
     const char *arch = NULL;
     size_t arch_len = 0;
     if (!oc_gguf_metadata_get_str(f, "general.architecture", &arch, &arch_len) ||
-        !oc_k2_arch_match(arch)) {
-        oc_log(OC_LOG_ERROR, "mtp sidecar: architecture is not k2-horizon");
+        (m->cfg.is_k2 && !oc_k2_arch_match(arch)) ||
+        (m->cfg.is_qwen4exp && !is_qwen4exp_arch(arch))) {
+        oc_log(OC_LOG_ERROR, "mtp sidecar: architecture does not match the trunk");
         e = OC_ERR_MODEL;
         goto fail;
     }
@@ -1946,7 +2003,8 @@ OcError oc_llama_load_mtp_sidecar(OcLlamaModel *m, const char *path)
         if (assign_tensor(m, infos[i].name, &m->mtp_gguf, &infos[i])) bound++;
     }
     oc_arena_free(arena);
-    e = bound > 0 ? k2_mtp_bind(m) : OC_ERR_TENSOR;
+    e = bound > 0 ? (m->cfg.is_k2 ? k2_mtp_bind(m) : q4e_mtp_bind(m))
+                  : OC_ERR_TENSOR;
     if (e != OC_OK || !m->mtp.present) {
         m->cfg.nextn_predict_layers = saved_nextn;
         if (e == OC_OK) e = OC_ERR_TENSOR;
@@ -1958,9 +2016,14 @@ OcError oc_llama_load_mtp_sidecar(OcLlamaModel *m, const char *path)
 fail_unbind:
     free(m->mtp.layer.attn_norm);
     free(m->mtp.layer.ffn_norm);
+    free(m->mtp.layer.attn_q_norm);
+    free(m->mtp.layer.attn_k_norm);
+    free(m->mtp.layer.hc_attn_norm);
+    free(m->mtp.layer.hc_ffn_norm);
     free(m->mtp.enorm);
     free(m->mtp.hnorm);
     free(m->mtp.shared_head_norm);
+    free(m->mtp.hc_head_norm);
     memset(&m->mtp, 0, sizeof m->mtp);
 fail:
     oc_gguf_map_free(&m->mtp_gguf);
