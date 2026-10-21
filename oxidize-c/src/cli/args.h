@@ -84,6 +84,10 @@ typedef struct OcCliArgs {
     uint32_t   experts_per_tok;       /* --experts-per-tok K (0 = GGUF)       */
     bool       prerouter_prefetch;    /* --prerouter-prefetch (native router) */
     const char *exl3_path;
+    /* EAGLE-4: dump target hidden states, and/or load a trained drafter. */
+    const char *eagle_dump;       /* --eagle-dump PATH (E4H1)             */
+    const char *eagle_layers;     /* --eagle-layers 2,24,46               */
+    const char *eagle4;           /* --eagle4 DIR (config + safetensors)  */
 } OcCliArgs;
 
 void oc_cli_args_defaults(OcCliArgs *a);

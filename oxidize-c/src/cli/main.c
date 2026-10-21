@@ -24,6 +24,7 @@
 #include "oxidize/cli_commands.h"
 #include "oxidize/cuda.h"
 #include "oxidize/dspark.h"
+#include "oxidize/eagle4.h"
 #include "oxidize/error.h"
 #include "oxidize/expert_stream.h"
 #include "oxidize/exl3_overlay.h"
@@ -147,7 +148,7 @@ static void print_help(void)
 "  --draft-tokens N       MTP/DSpark draft block size (default 4; K2 MTP 1)\n"
 "  --mtp                  K2-Horizon: MTP speculative decoding (greedy, opt-in;\n"
 "                         forces --repeat-penalty 1, needs --temperature 0)\n"
-"  --mtp-model PATH       K2-Horizon: load an mtp-*.gguf nextn head sidecar\n"
+"  --mtp-model PATH       MTP/nextn sidecar (K2-Horizon or qwen4exp)\n"
 "  --backend cpu|cuda     Compute backend (default cpu)\n"
 "  --cuda-selftest        Run CUDA kernel self-test (no GGUF) and exit\n"
 "  --stream-experts       SSD expert offload (no whole-file readahead/mlock)\n"
@@ -156,6 +157,9 @@ static void print_help(void)
 "  --prerouter PATH       Edge0 prerouter.safetensors (prediction is routing)\n"
 "  --prerouter-prefetch   Load prerouter heads but keep native router\n"
 "  --lora PATH            Edge0 Recover-LoRA safetensors (unmerged, scale α/r=2)\n"
+"  --eagle-dump PATH      Write EAGLE-4 target hidden states (E4H1)\n"
+"  --eagle-layers L,M,N   Layers to capture (default 2,24,46 on 48 layers)\n"
+"  --eagle4 DIR           Load an EAGLE-4 draft and print a greedy chain\n"
 "  --experts-per-tok K    Override MoE top-k (Edge0 adapters were trained at 4)\n"
 "  --chat                 Wrap the prompt as a user turn (GGUF chat template)\n"
 "  -v, --verbose          Verbose logging\n"
@@ -165,6 +169,32 @@ static void print_help(void)
 }
 
 /* ─── Generation ──────────────────────────────────────────────────────── */
+
+static int parse_eagle_layers(const char *s, uint32_t *out, uint32_t *n_out)
+{
+    if (!s || !s[0]) return 0;
+    uint32_t n = 0;
+    const char *p = s;
+    while (*p && n < OC_EAGLE4_MAX_AUX) {
+        char *end = NULL;
+        unsigned long v = strtoul(p, &end, 10);
+        if (end == p || v > UINT32_MAX) return -1;
+        out[n++] = (uint32_t)v;
+        if (*end == '\0') { *n_out = n; return 1; }
+        if (*end != ',') return -1;
+        p = end + 1;
+    }
+    return -1;
+}
+
+static void default_eagle_layers(uint32_t n_layer, uint32_t *out, uint32_t *n)
+{
+    if (n_layer == 0) { *n = 0; return; }
+    out[0] = n_layer > 16 ? 2u : 0u;
+    out[1] = n_layer / 2u;
+    out[2] = n_layer > 2 ? n_layer - 2u : 0u;
+    *n = 3;
+}
 
 static uint32_t clamp_experts_per_tok(const OcLlamaModel *model, uint32_t k)
 {
@@ -370,6 +400,72 @@ static OcError run_generation(const OcCliArgs *args)
         return e;
     }
 
+    OcEagle4Model eagle;
+    memset(&eagle, 0, sizeof eagle);
+    int have_eagle = 0;
+    if (args->eagle4 || args->eagle_dump) {
+        uint32_t layers[OC_EAGLE4_MAX_AUX];
+        uint32_t n_layers = 0;
+        if (args->eagle4) {
+            e = oc_eagle4_load(&eagle, args->eagle4);
+            if (e != OC_OK) {
+                fprintf(stderr, "error: eagle4 load failed (%s)\n", oc_error_msg(e));
+                oc_llama_session_free(&sess);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                free(file_prompt);
+                return e;
+            }
+            have_eagle = 1;
+            n_layers = (uint32_t)eagle.cfg.n_aux;
+            for (uint32_t i = 0; i < n_layers; i++)
+                layers[i] = eagle.cfg.extract_layers[i];
+            size_t hc = (size_t)model.cfg.hc_mult * model.cfg.n_embd;
+            if (hc == 0) hc = model.cfg.n_embd;
+            if (eagle.cfg.target_hidden_size != hc) {
+                fprintf(stderr,
+                        "error: eagle4 target hidden %zu != model residual %zu\n",
+                        eagle.cfg.target_hidden_size, hc);
+                oc_eagle4_free(&eagle);
+                oc_llama_session_free(&sess);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                free(file_prompt);
+                return OC_ERR_MODEL;
+            }
+        }
+        if (args->eagle_layers) {
+            int pr = parse_eagle_layers(args->eagle_layers, layers, &n_layers);
+            if (pr < 0) {
+                fprintf(stderr, "error: bad --eagle-layers '%s'\n",
+                        args->eagle_layers);
+                oc_eagle4_free(&eagle);
+                oc_llama_session_free(&sess);
+                oc_tokenizer_free(&tok);
+                oc_llama_free(&model);
+                free(file_prompt);
+                return OC_ERR_INVALID_ARG;
+            }
+        } else if (!have_eagle) {
+            default_eagle_layers(model.cfg.n_layer, layers, &n_layers);
+        }
+        uint32_t hidden = model.cfg.is_qwen4exp
+            ? model.cfg.hc_mult * model.cfg.n_embd
+            : model.cfg.n_embd;
+        sess.eagle_cap = oc_eagle4_capture_new(layers, n_layers, hidden, 4096);
+        if (!sess.eagle_cap) {
+            fprintf(stderr, "error: eagle capture alloc failed\n");
+            oc_eagle4_free(&eagle);
+            oc_llama_session_free(&sess);
+            oc_tokenizer_free(&tok);
+            oc_llama_free(&model);
+            free(file_prompt);
+            return OC_ERR_OOM;
+        }
+        oc_log(OC_LOG_INFO, "eagle: capturing %u layers, hidden %u",
+               n_layers, hidden);
+    }
+
     /* K2-Horizon MTP is opt-in (--mtp or --spec-type mtp): with the current
      * head it is not faster than plain decode on CPU (see oc_llama_mtp_step
      * docs). Greedy only. The default repeat penalty is 1.1, which would
@@ -404,6 +500,7 @@ static OcError run_generation(const OcCliArgs *args)
         if (e != OC_OK) {
             fprintf(stderr, "error: prerouter load failed (%s)\n",
                     oc_error_msg(e));
+            oc_eagle4_free(&eagle);
             oc_llama_session_free(&sess);
             oc_tokenizer_free(&tok);
             oc_llama_free(&model);
@@ -415,6 +512,7 @@ static OcError run_generation(const OcCliArgs *args)
         e = oc_llama_session_load_lora(&sess, args->lora_path);
         if (e != OC_OK) {
             fprintf(stderr, "error: lora load failed (%s)\n", oc_error_msg(e));
+            oc_eagle4_free(&eagle);
             oc_llama_session_free(&sess);
             oc_tokenizer_free(&tok);
             oc_llama_free(&model);
@@ -440,6 +538,7 @@ static OcError run_generation(const OcCliArgs *args)
     free(chat_prompt);
     if (e != OC_OK || n_ids == 0) {
         fprintf(stderr, "error: prompt encode failed (%s)\n", oc_error_msg(e));
+        oc_eagle4_free(&eagle);
         oc_llama_session_free(&sess);
         oc_tokenizer_free(&tok);
         oc_llama_free(&model);
@@ -530,6 +629,25 @@ static OcError run_generation(const OcCliArgs *args)
             oc_log(OC_LOG_INFO, "prefill: %zu tokens in %.3fs = %.2f tok/s",
                    n_ids, pf, (double)n_ids / pf);
         }
+    }
+    if (e == OC_OK && have_eagle && sess.eagle_cap && n_ids > 0) {
+        size_t aux_n = (size_t)sess.eagle_cap->n_layers * sess.eagle_cap->hidden;
+        float *aux = malloc(aux_n * sizeof(float));
+        uint32_t drafted[OC_EAGLE4_MAX_DRAFT];
+        uint32_t n_draft = args->draft_tokens > 0 ? (uint32_t)args->draft_tokens : 4u;
+        if (n_draft > OC_EAGLE4_MAX_DRAFT) n_draft = OC_EAGLE4_MAX_DRAFT;
+        if (aux &&
+            oc_eagle4_capture_concat(sess.eagle_cap, (uint32_t)n_ids - 1,
+                                     aux, aux_n) == OC_OK &&
+            oc_eagle4_draft(&eagle, ids[n_ids - 1], aux, n_draft, drafted) == OC_OK) {
+            fprintf(stderr, "eagle4 draft:");
+            for (uint32_t i = 0; i < n_draft; i++)
+                fprintf(stderr, " %u", drafted[i]);
+            fputc('\n', stderr);
+        } else {
+            oc_log(OC_LOG_WARN, "eagle4: draft from the prompt tail failed");
+        }
+        free(aux);
     }
     /* Seed the repeat-penalty ring with the prompt. */
     for (size_t i = 0; i + 1 < n_ids && e == OC_OK; i++) {
@@ -680,8 +798,17 @@ static OcError run_generation(const OcCliArgs *args)
         }
     }
 
+    if (args->eagle_dump && sess.eagle_cap) {
+        OcError se = oc_eagle4_capture_save(sess.eagle_cap, args->eagle_dump);
+        if (se != OC_OK)
+            fprintf(stderr, "error: eagle dump failed (%s)\n", oc_error_msg(se));
+        else
+            oc_log(OC_LOG_INFO, "eagle: wrote %u tokens to %s",
+                   sess.eagle_cap->n_tokens, args->eagle_dump);
+    }
     free(ids);
     if (use_cuda) oc_cuda_free(&cuda_ctx);
+    oc_eagle4_free(&eagle);
     oc_llama_session_free(&sess);
     oc_tokenizer_free(&tok);
     oc_llama_free(&model);

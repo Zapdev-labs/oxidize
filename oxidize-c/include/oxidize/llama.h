@@ -621,6 +621,8 @@ typedef struct OcLlamaSession {
     struct OcRopeTable *rope_tabs;
     int                 rope_tabs_n;
     int                 rope_tabs_cap;
+    /* Optional EAGLE-4 feature capture. Owned by the session when set. */
+    struct OcEagleFeatureCapture *eagle_cap;
 } OcLlamaSession;
 
 /* ─── Batched decode ─────────────────────────────────────────────────────
