@@ -124,6 +124,23 @@ src/%.nosan.o: src/%.c
 tests/%.o: tests/%.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
+# oxk_avx2.c mixes AVX2/FMA/F16C intrinsics with per-function target
+# attributes; some GCC versions (observed on GCC 13, Ubuntu 24.04) fail to
+# inline the intrinsic headers when the file is compiled for the baseline
+# target even though every function carries the right attribute. Compiling
+# the whole translation unit for x86-64-v3 sidesteps that, and is safe here
+# because every function in the file requires AVX2 anyway.
+OXK_AVX2_FLAGS := -mavx2 -mfma -mf16c
+
+src/compute/oxk_avx2.o: src/compute/oxk_avx2.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
+src/compute/oxk_avx2.asan.o: src/compute/oxk_avx2.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
+src/compute/oxk_avx2.nosan.o: src/compute/oxk_avx2.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
 # Default object rule (no ASan).
 src/%.o: src/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
