@@ -47,6 +47,7 @@
 
 #define FAST_BLOCK         256u
 #define FAST_ATTN_THREADS  128u
+#define FAST_ATTN_SMEM_SCORE_CAP 4096u
 #define FAST_RING_CAP      8192u
 #define FAST_BATCH         64u
 
@@ -345,6 +346,8 @@ __global__ void k_f_attention(const float *q,
     float *red = smem + head_dim;
 
     float *sc = scores + ((size_t)t * n_head + h) * score_stride;
+    float *ss = (score_stride <= FAST_ATTN_SMEM_SCORE_CAP)
+              ? (red + nthreads) : sc;
     float *orow = out + t * to + (size_t)h * head_dim;
     const float *qh = q + t * tq + (size_t)h * head_dim;
 
@@ -352,58 +355,74 @@ __global__ void k_f_attention(const float *q,
     __syncthreads();
 
     const bool pair = ((head_dim & 1u) == 0u) && ((kv_off & 1u) == 0u);
-    const bool vec4 = pair && ((head_dim & 3u) == 0u);
-    for (uint32_t p = kv_start + tid; p < n_past; p += nthreads) {
+    /* scores: one warp per position so lanes read each K row coalesced,
+     * then a warp reduction produces the dot product. */
+    const uint32_t lane = tid & 31u;
+    const uint32_t warp = tid >> 5;
+    const uint32_t nw = nthreads >> 5;
+    for (uint32_t p = kv_start + warp; p < n_past; p += nw) {
         const __half *k = kv_k + (size_t)p * kv_row + kv_off;
         float s = 0.0f;
-        if (vec4) {
-            const float4 *q4 = reinterpret_cast<const float4 *>(qs);
+        if (pair) {
             const __half2 *k2 = reinterpret_cast<const __half2 *>(k);
-            const uint32_t n4 = head_dim / 4u;
-            for (uint32_t d = 0; d < n4; d++) {
-                const float4 qv = q4[d];
-                const float2 a = __half22float2(__ldg(&k2[2u * d]));
-                const float2 b = __half22float2(__ldg(&k2[2u * d + 1u]));
-                s += qv.x * a.x + qv.y * a.y + qv.z * b.x + qv.w * b.y;
-            }
-        } else if (pair) {
-            const __half2 *k2 = reinterpret_cast<const __half2 *>(k);
-            for (uint32_t d = 0; d < head_dim / 2u; d++) {
+            for (uint32_t d = lane; d < head_dim / 2u; d += 32u) {
                 const float2 kv = __half22float2(__ldg(&k2[d]));
                 s += qs[2u * d] * kv.x + qs[2u * d + 1u] * kv.y;
             }
         } else {
-            for (uint32_t d = 0; d < head_dim; d++)
-                s += qs[d] * __half2float(k[d]);
+            for (uint32_t d = lane; d < head_dim; d += 32u)
+                s += qs[d] * __half2float(__ldg(&k[d]));
         }
-        sc[p] = s * scale;
+        s = f_warp_sum(s);
+        if (lane == 0u) {
+            const float sv = s * scale;
+            sc[p] = sv;
+            ss[p] = sv;
+        }
     }
     __syncthreads();
 
     float m = -INFINITY;
     for (uint32_t p = kv_start + tid; p < n_past; p += nthreads)
-        m = fmaxf(m, sc[p]);
+        m = fmaxf(m, ss[p]);
     const float max_score = f_block_max(m, red);
     __syncthreads();
 
     float local_sum = 0.0f;
     for (uint32_t p = kv_start + tid; p < n_past; p += nthreads) {
-        const float e = __expf(sc[p] - max_score);
-        sc[p] = e;
+        const float e = __expf(ss[p] - max_score);
+        ss[p] = e;
         local_sum += e;
     }
     const float denom = f_block_sum(local_sum, red);
     const float inv_denom = (denom > 0.0f) ? (1.0f / denom) : 0.0f;
 
     if (pair) {
+        const size_t vs = (size_t)kv_row >> 1;
         for (uint32_t d2 = tid; d2 < head_dim / 2u; d2 += nthreads) {
             float acc0 = 0.0f, acc1 = 0.0f;
-            for (uint32_t p = kv_start; p < n_past; p++) {
-                const __half2 v2 = __ldg(reinterpret_cast<const __half2 *>(
-                    kv_v + (size_t)p * kv_row + kv_off + (size_t)d2 * 2u));
-                const float2 fv = __half22float2(v2);
-                acc0 += sc[p] * fv.x;
-                acc1 += sc[p] * fv.y;
+            const __half2 *vb = reinterpret_cast<const __half2 *>(
+                kv_v + kv_off) + (size_t)d2;
+            uint32_t p = kv_start;
+            for (; p + 4u <= n_past; p += 4u) {
+                const __half2 v0 = __ldg(vb + (size_t)p * vs);
+                const __half2 v1 = __ldg(vb + (size_t)(p + 1u) * vs);
+                const __half2 v2 = __ldg(vb + (size_t)(p + 2u) * vs);
+                const __half2 v3 = __ldg(vb + (size_t)(p + 3u) * vs);
+                const float2 f0 = __half22float2(v0);
+                const float2 f1 = __half22float2(v1);
+                const float2 f2 = __half22float2(v2);
+                const float2 f3 = __half22float2(v3);
+                acc0 += ss[p] * f0.x + ss[p + 1u] * f1.x
+                      + ss[p + 2u] * f2.x + ss[p + 3u] * f3.x;
+                acc1 += ss[p] * f0.y + ss[p + 1u] * f1.y
+                      + ss[p + 2u] * f2.y + ss[p + 3u] * f3.y;
+            }
+            for (; p < n_past; p++) {
+                const float2 fv = __half22float2(
+                    __ldg(vb + (size_t)p * vs));
+                acc0 += ss[p] * fv.x;
+                acc1 += ss[p] * fv.y;
             }
             orow[(size_t)d2 * 2u]     = acc0 * inv_denom;
             orow[(size_t)d2 * 2u + 1u] = acc1 * inv_denom;
@@ -411,9 +430,22 @@ __global__ void k_f_attention(const float *q,
     } else {
         for (uint32_t d = tid; d < head_dim; d += nthreads) {
             float acc = 0.0f;
-            for (uint32_t p = kv_start; p < n_past; p++)
-                acc += sc[p] * __half2float(
-                    kv_v[(size_t)p * kv_row + kv_off + d]);
+            const __half *vb = kv_v + kv_off + d;
+            uint32_t p = kv_start;
+            for (; p + 4u <= n_past; p += 4u) {
+                const float v0 = __half2float(__ldg(vb + (size_t)p * kv_row));
+                const float v1 = __half2float(
+                    __ldg(vb + (size_t)(p + 1u) * kv_row));
+                const float v2 = __half2float(
+                    __ldg(vb + (size_t)(p + 2u) * kv_row));
+                const float v3 = __half2float(
+                    __ldg(vb + (size_t)(p + 3u) * kv_row));
+                acc += ss[p] * v0 + ss[p + 1u] * v1
+                     + ss[p + 2u] * v2 + ss[p + 3u] * v3;
+            }
+            for (; p < n_past; p++)
+                acc += ss[p] * __half2float(
+                    __ldg(vb + (size_t)p * kv_row));
             orow[d] = acc * inv_denom;
         }
     }
@@ -594,7 +626,9 @@ static void fast_submit_body(OcCudaContext *ctx, cudaStream_t s)
                         + (size_t)l * ctx->n_ctx * ctx->kv_row;
             __half *vvl = (__half *)ctx->d_kv_v
                         + (size_t)l * ctx->n_ctx * ctx->kv_row;
-            const size_t asmem = ((size_t)hd + FAST_ATTN_THREADS)
+            const size_t nsc = ctx->n_ctx <= FAST_ATTN_SMEM_SCORE_CAP
+                             ? ctx->n_ctx : 0u;
+            const size_t asmem = ((size_t)hd + FAST_ATTN_THREADS + nsc)
                                * sizeof(float);
             dim3 grid(nh, 1);
             k_f_attention<<<grid, FAST_ATTN_THREADS, asmem, s>>>(
@@ -709,7 +743,9 @@ static void fast_submit_batch_layer(OcCudaContext *ctx, uint32_t l,
                     + (size_t)l * ctx->n_ctx * ctx->kv_row;
         __half *vvl = (__half *)ctx->d_kv_v
                     + (size_t)l * ctx->n_ctx * ctx->kv_row;
-        const size_t asmem = ((size_t)hd + FAST_ATTN_THREADS)
+        const size_t nsc = ctx->n_ctx <= FAST_ATTN_SMEM_SCORE_CAP
+                         ? ctx->n_ctx : 0u;
+        const size_t asmem = ((size_t)hd + FAST_ATTN_THREADS + nsc)
                            * sizeof(float);
         dim3 grid(nh, n_tok);
         k_f_attention<<<grid, FAST_ATTN_THREADS, asmem, s>>>(

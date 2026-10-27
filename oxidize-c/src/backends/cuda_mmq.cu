@@ -1573,8 +1573,24 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
      * too few mma blocks to fill the SMs (rows=256 -> 8 blocks), so they
      * keep the dp4a warp matvec whose grid is ~4x wider. */
     if (n_tok >= 16u && rows >= 512u && mg_mma_capable()) {
-        const dim3 ggrid((unsigned)((rows + MGH_RT - 1u) / MGH_RT),
-                         (unsigned)((n_tok + MGH_TT - 1u) / MGH_TT));
+        const unsigned rblk = (unsigned)((rows + MGH_RT - 1u) / MGH_RT);
+        const unsigned tblk = (unsigned)((n_tok + MGH_TT - 1u) / MGH_TT);
+        /* K-split: when row-block x token-tile blocks underfill ~4 waves of
+         * SM residency (80 slots on 40-SM T4), the tail wave idles most of
+         * the GPU — split the slot loop across gridDim.z and accumulate
+         * into a zeroed output. */
+        const unsigned nblk = rblk * tblk;
+        const uint32_t n_slot = n_groups >> 2;
+        unsigned zsplit = 1u;
+        if (nblk < 320u && n_slot >= 8u) {
+            zsplit = (320u + nblk - 1u) / nblk;
+            const unsigned maxz = n_slot / 4u;
+            if (zsplit > maxz) zsplit = maxz;
+        }
+        const dim3 ggrid(rblk, tblk, zsplit);
+        if (zsplit > 1u)
+            cudaMemset2DAsync(d_out, out_stride * sizeof(float), 0,
+                              rows * sizeof(float), n_tok, s);
         switch ((OcGgufQuantizationType)qtype) {
         case OC_QUANT_Q4_K_S:
         case OC_QUANT_Q4_K_M:
@@ -1776,21 +1792,30 @@ __device__ __forceinline__ void mg_store(float *out, size_t out_stride,
                                          uint32_t t0, uint32_t r0,
                                          uint32_t mt, uint32_t nt,
                                          uint32_t tr, uint32_t lane,
-                                         const float *acc)
+                                         const float *acc, bool accum)
 {
     const uint32_t gt = t0 + mt * 16u + tr;
     const uint32_t gr = r0 + nt * 8u + (lane & 3u) * 2u;
     if (gt < n_tok) {
-        if (gr < rows)
-            out[(size_t)gt * out_stride + gr] = acc[0];
-        if (gr + 1u < rows)
-            out[(size_t)gt * out_stride + gr + 1u] = acc[1];
+        if (gr < rows) {
+            if (accum) atomicAdd(out + (size_t)gt * out_stride + gr, acc[0]);
+            else       out[(size_t)gt * out_stride + gr] = acc[0];
+        }
+        if (gr + 1u < rows) {
+            if (accum) atomicAdd(out + (size_t)gt * out_stride + gr + 1u, acc[1]);
+            else       out[(size_t)gt * out_stride + gr + 1u] = acc[1];
+        }
     }
     if (gt + 8u < n_tok) {
-        if (gr < rows)
-            out[(size_t)(gt + 8u) * out_stride + gr] = acc[2];
-        if (gr + 1u < rows)
-            out[(size_t)(gt + 8u) * out_stride + gr + 1u] = acc[3];
+        if (gr < rows) {
+            if (accum) atomicAdd(out + (size_t)(gt + 8u) * out_stride + gr, acc[2]);
+            else       out[(size_t)(gt + 8u) * out_stride + gr] = acc[2];
+        }
+        if (gr + 1u < rows) {
+            if (accum) atomicAdd(out + (size_t)(gt + 8u) * out_stride + gr + 1u,
+                                 acc[3]);
+            else       out[(size_t)(gt + 8u) * out_stride + gr + 1u] = acc[3];
+        }
     }
 }
 
@@ -1910,6 +1935,13 @@ k_mmq_gemm_xh_q4k(const uint8_t *w, const __half *xh,
     const uint32_t gr2 = r0 + r2;
     const uint32_t gt2 = t0 + t2;
 
+    /* K-split: this z-slice owns a contiguous slot range; empty slices
+     * (more z than slots) retire early. */
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
     uint4 pq[2], phd, pxh[4];
 
 #define MG4_PRE(IS)                                                          \
@@ -1959,23 +1991,24 @@ k_mmq_gemm_xh_q4k(const uint8_t *w, const __half *xh,
         }                                                                    \
     } while (0)
 
-    MG4_PRE(0u);
-    MG4_STAGE(0u);
+    MG4_PRE(s_lo);
+    MG4_STAGE(s_lo);
     __syncthreads();
     float acc[4] = { 0.f, 0.f, 0.f, 0.f };
-    for (uint32_t i = 0; i < n_slot; i++) {
+    for (uint32_t i = s_lo; i < s_hi; i++) {
         const uint32_t h_ = i & 1u;
-        if (i + 1u < n_slot)
+        if (i + 1u < s_hi)
             MG4_PRE(i + 1u);
 #ifndef MG_BENCH_STAGE_ONLY
         mg_sweep_h(sxf + h_ * MGH_H_BYTES, swf + h_ * MGH_H_BYTES,
                    mt, nt, acc);
 #endif
-        if (i + 1u < n_slot)
+        if (i + 1u < s_hi)
             MG4_STAGE(i + 1u);
         __syncthreads();
     }
-    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc);
+    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc,
+             gridDim.z > 1u);
 #undef MG4_PRE
 #undef MG4_STAGE
 }
@@ -2006,6 +2039,11 @@ k_mmq_gemm_xh_q6k(const uint8_t *w, const __half *xh,
     const uint32_t t2  = (tid - 128u) >> 2, sc = (tid - 128u) & 3u;
     const uint32_t gr2 = r0 + r2;
     const uint32_t gt2 = t0 + t2;
+
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
 
     uint4 pql[2], pqh[2], pxh[4];
     uint32_t psc, pdv;
@@ -2066,23 +2104,24 @@ k_mmq_gemm_xh_q6k(const uint8_t *w, const __half *xh,
         }                                                                    \
     } while (0)
 
-    MG6_PRE(0u);
-    MG6_STAGE(0u);
+    MG6_PRE(s_lo);
+    MG6_STAGE(s_lo);
     __syncthreads();
     float acc[4] = { 0.f, 0.f, 0.f, 0.f };
-    for (uint32_t i = 0; i < n_slot; i++) {
+    for (uint32_t i = s_lo; i < s_hi; i++) {
         const uint32_t h_ = i & 1u;
-        if (i + 1u < n_slot)
+        if (i + 1u < s_hi)
             MG6_PRE(i + 1u);
 #ifndef MG_BENCH_STAGE_ONLY
         mg_sweep_h(sxf + h_ * MGH_H_BYTES, swf + h_ * MGH_H_BYTES,
                    mt, nt, acc);
 #endif
-        if (i + 1u < n_slot)
+        if (i + 1u < s_hi)
             MG6_STAGE(i + 1u);
         __syncthreads();
     }
-    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc);
+    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc,
+             gridDim.z > 1u);
 #undef MG6_PRE
 #undef MG6_STAGE
 }
