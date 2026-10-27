@@ -656,6 +656,84 @@ MQ_DEFINE_GETROW(k_mmq_getrow_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expa
 MQ_DEFINE_GETROW(k_mmq_getrow_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
 
+/* Fast-path variants: the row index comes from device memory (an on-device
+ * argmax result or a prompt-ids array), never the host. */
+#define MQ_DEFINE_GETROW_DEV(NAME, BLOCK_BYTES, VALS, EXPAND)                \
+__global__ void NAME(const uint8_t *w, const uint32_t *d_token,              \
+                     float *out, size_t cols, size_t row_bytes)              \
+{                                                                            \
+    const uint8_t *rw = w + (size_t)(*d_token) * row_bytes;                  \
+    const size_t n_blocks = cols / (VALS);                                   \
+    for (size_t b = blockIdx.x * blockDim.x + threadIdx.x; b < n_blocks;     \
+         b += (size_t)gridDim.x * blockDim.x)                                \
+        EXPAND(rw + b * (BLOCK_BYTES), out + b * (VALS));                    \
+}
+
+#define MQ_DEFINE_GETROW_BATCH(NAME, BLOCK_BYTES, VALS, EXPAND)              \
+__global__ void NAME(const uint8_t *w, const uint32_t *d_ids, float *out,    \
+                     size_t cols, size_t row_bytes, size_t out_stride)       \
+{                                                                            \
+    const uint8_t *rw = w + (size_t)d_ids[blockIdx.y] * row_bytes;           \
+    const size_t n_blocks = cols / (VALS);                                   \
+    float *o = out + (size_t)blockIdx.y * out_stride;                        \
+    for (size_t b = blockIdx.x; b < n_blocks; b += (size_t)gridDim.x)        \
+        EXPAND(rw + b * (BLOCK_BYTES), o + b * (VALS));                      \
+}
+
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q8_0,   MQ_DEV_Q8_0_SIZE,   MQ_QK8_0, mq_q8_0_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, mq_q4_0_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
+
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q8_0,   MQ_DEV_Q8_0_SIZE,   MQ_QK8_0, mq_q8_0_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, mq_q4_0_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
+
+/* ─── Batched matvec (prompt prefill) ─────────────────────────────────────
+ *
+ * Same warp-per-row structure as the single-token matvec, but the warp then
+ * walks n_tok activation vectors against the row it already fetched. The
+ * row's packed bytes re-read from L1/L2 for tokens 2..n_tok instead of from
+ * DRAM once per token, so the whole prompt chunk costs ~one weight sweep.
+ * The token loop is outermost to keep the accumulator scalar (a per-token
+ * register array would spill); the row stays cache-hot across iterations. */
+#define MQ_DEFINE_MATVEC_BATCH(NAME, DOT)                                    \
+__global__ void NAME(const uint8_t *w, const float *x, float *out,           \
+                     size_t rows, uint32_t n_groups, size_t row_bytes,       \
+                     uint32_t n_tok, size_t x_stride, size_t out_stride)     \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const size_t row = (size_t)blockIdx.x * MQ_WARPS + (threadIdx.x >> 5);   \
+    if (row >= rows) return;                                                 \
+    const uint8_t *rw = w + row * row_bytes;                                 \
+    for (uint32_t t = 0u; t < n_tok; t++) {                                  \
+        const float *xt = x + (size_t)t * x_stride;                          \
+        float partial = 0.0f;                                                \
+        for (uint32_t g = lane; g < n_groups; g += 32u)                      \
+            partial += DOT(rw, g, xt + (size_t)g * 32u);                     \
+        partial = mq_warp_reduce(partial);                                   \
+        if (lane == 0u) out[(size_t)t * out_stride + row] = partial;         \
+    }                                                                        \
+}
+
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q4k,    mq_q4k_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q5k,    mq_q5k_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q6k,    mq_q6k_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q8_0,   mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q4_0,   mq_q4_0_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q5_0,   mq_q5_0_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_al5_xs, mq_al5_xs_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_iq4_xs, mq_iq4_xs_group_dot)
+
 /* ─── Host API ───────────────────────────────────────────────────────────── */
 
 /* On-disk block bytes / device block bytes / values-per-block, or all zero for
@@ -892,6 +970,617 @@ extern "C" bool oc_cuda_mmq_get_row(uint32_t qtype, const void *d_weights,
         break;
     case OC_QUANT_IQ4_XS:
         k_mmq_getrow_iq4_xs<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_get_row_dev(uint32_t qtype,
+                                        const void *d_weights,
+                                        const uint32_t *d_token,
+                                        float *d_out, size_t cols,
+                                        void *stream)
+{
+    if (!d_weights || !d_token || !d_out) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    size_t sb = 0, db = 0, vals = 0;
+    mq_layout(qtype, &sb, &db, &vals);
+    const size_t n_blocks = cols / vals;
+    const uint32_t block = MQ_BLOCK_THREADS;
+    const uint32_t grid = (uint32_t)((n_blocks + block - 1) / block);
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_getrow_dev_q4k<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_getrow_dev_q5k<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_getrow_dev_q6k<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_getrow_dev_q8_0<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_getrow_dev_q4_0<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_getrow_dev_q5_0<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_getrow_dev_al5_xs<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_getrow_dev_iq4_xs<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_get_row_batch(uint32_t qtype,
+                                          const void *d_weights,
+                                          const uint32_t *d_ids,
+                                          float *d_out, size_t cols,
+                                          size_t out_stride,
+                                          uint32_t n_tok, void *stream)
+{
+    if (!d_weights || !d_ids || !d_out || n_tok == 0) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    size_t sb = 0, db = 0, vals = 0;
+    mq_layout(qtype, &sb, &db, &vals);
+    const size_t n_blocks = cols / vals;
+    const uint32_t block = MQ_BLOCK_THREADS;
+    const uint32_t gx = (uint32_t)((n_blocks + block - 1) / block);
+    dim3 grid(gx, n_tok);
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_getrow_batch_q4k<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_getrow_batch_q5k<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_getrow_batch_q6k<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_getrow_batch_q8_0<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_getrow_batch_q5_0<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_getrow_batch_q4_0<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_getrow_batch_al5_xs<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_getrow_batch_iq4_xs<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_matvec_batch(uint32_t qtype,
+                                         const void *d_weights,
+                                         const float *d_x, float *d_out,
+                                         uint32_t n_tok, size_t x_stride,
+                                         size_t out_stride,
+                                         size_t rows, size_t cols,
+                                         void *stream)
+{
+    if (!d_weights || !d_x || !d_out || rows == 0 || n_tok == 0) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    const uint32_t block = MQ_WARPS * 32u;
+    const size_t grid = (rows + MQ_WARPS - 1u) / MQ_WARPS;
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_mvb_q4k<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_mvb_q5k<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_mvb_q6k<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_mvb_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_mvb_q4_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_mvb_q5_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_mvb_al5_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_mvb_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+/* ─── dp4a path: int8-quantized activations ────────────────────────────────
+ *
+ * The f32 group-dots above spend ~6 instructions per element on nibble
+ * extraction, int→float conversion and scalar FMA — the kernels run at full
+ * SM occupancy yet move ~35% of peak DRAM bandwidth on a T4 because they are
+ * issue-bound, not memory-bound. This section removes that ceiling the same
+ * way every fast int matvec does: quantize the activation to int8 once per
+ * 32-element group (with the group's fp32 scale and exact fp32 sum kept
+ * alongside), then accumulate the weight dot with __dp4a, which retires four
+ * byte-multiply-adds per instruction. The per-group work drops roughly 7x.
+ *
+ * Numerics: the activation is approximated as x ≈ xs*xq (int8, per-group
+ * scale), so results differ slightly from the f32 path — the same class of
+ * approximation llama.cpp's mmq makes. Offset formats (Q4_0's -8, Q5_0's
+ * -16, Q6_K's -32) are corrected with the exact integer activation sums, so
+ * the only loss is the activation's int8 rounding, not the weights'.
+ *
+ * Supported: Q4_K/Q5_K/Q6_K/Q8_0/Q4_0/Q5_0 and aliases. AL5_XS/IQ4_XS keep
+ * the f32 kernels (check oc_cuda_mmq_xq_supported before dispatching). */
+
+#define MQX_MAX_TOK 16u
+
+/* CUDA exposes only __dp4a(int,int,int) and (uint,uint,uint); mixed-sign
+ * calls are ambiguous. Our packed weight bytes are always <= 63 (nibbles
+ * plus carried high bits), so they are positive int8 and the signed
+ * overload computes exactly u8*w × s8*x. */
+__device__ __forceinline__ int32_t mq_dp4a(uint32_t w, uint32_t x, int32_t c)
+{
+    return __dp4a((int)w, (int)x, c);
+}
+
+/* Load one 32-byte int8 activation group as 8 words via two 16B loads. */
+__device__ __forceinline__ void mqx_load8(const int8_t *xq, uint32_t t,
+                                          uint32_t ng, uint32_t g,
+                                          uint32_t v[8])
+{
+    const uint4 a = *reinterpret_cast<const uint4 *>(
+        xq + ((size_t)t * ng + g) * 32u);
+    const uint4 b = *reinterpret_cast<const uint4 *>(
+        xq + ((size_t)t * ng + g) * 32u + 16u);
+    v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w;
+    v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w;
+}
+
+/* Quantize one [n_tok][n_groups*32] activation tile. One warp per group:
+ * lane l owns element g*32+l, so the amax/sum reductions are pure shuffles.
+ * Produces, per group: xq int8 (amax→127), xs fp32 scale, xsum fp32 exact
+ * group sum (K-quant min term), xqsum int8 sums per 16-elem half (0-quant
+ * offsets). Grid.x covers groups, grid.y tokens. */
+__global__ void k_mmq_quant_x(const float *x, int8_t *xq, float2 *xsc,
+                              int32_t *xqsum,
+                              uint32_t n_groups, size_t x_stride)
+{
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t g = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (g >= n_groups) return;
+    const size_t gi = (size_t)blockIdx.y * n_groups + g;
+    const float *xr = x + (size_t)blockIdx.y * x_stride + (size_t)g * 32u;
+
+    float v = xr[lane];
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        amax = fmaxf(amax, __shfl_down_sync(0xffffffffu, amax, o));
+    amax = __shfl_sync(0xffffffffu, amax, 0);
+    const float s = amax > 0.0f ? amax * (1.0f / 127.0f) : 1.0f;
+
+    int32_t qi = __float2int_rn(v / s);
+    qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+    xq[gi * 32u + lane] = (int8_t)qi;
+
+    float sm = v;
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        sm += __shfl_down_sync(0xffffffffu, sm, o);
+    if (lane == 0u) xsc[gi] = make_float2(s, sm);
+
+    int32_t iq = qi;
+    #pragma unroll
+    for (int o = 8; o > 0; o >>= 1)
+        iq += __shfl_down_sync(0xffffffffu, iq, o, 16);
+    if (lane == 0u || lane == 16u)
+        xqsum[gi * 2u + (lane >> 4)] = iq;
+}
+
+/* ── Per-group int dots. Each returns the group's float contribution for
+ * every token: the weight bytes are loaded once and the token loop stays
+ * inside so prefill amortizes the fetch. `acc` is [MQX_MAX_TOK] registers;
+ * the unrolled loop keeps its indices constant so it never spills. */
+
+/* Q4_K: nibbles are unsigned (bias lives in the min term).
+ * out = d*sc*xs*Σxq·nib − mn*m*xsum. */
+__device__ __forceinline__ void mxd_q4k(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q4_K_SIZE;
+    const uint32_t gw = g & 7u;
+    const float d  = mq_f16(blk[0], blk[1]);
+    const float mn = mq_f16(blk[2], blk[3]);
+    uint8_t sc, m;
+    mq_scale_min_k4(gw, blk + 4, &sc, &m);
+    const uint8_t *qs = blk + 16 + (size_t)(gw >> 1) * 32u;
+    const bool hi = (gw & 1u) != 0u;
+    const uint4 w0 = *reinterpret_cast<const uint4 *>(qs);
+    const uint4 w1 = *reinterpret_cast<const uint4 *>(qs + 16);
+    const uint32_t wd[8] = { w0.x, w0.y, w0.z, w0.w,
+                             w1.x, w1.y, w1.z, w1.w };
+    const float dsc = d * (float)sc;
+    const float mnm = mn * (float)m;
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t nib = hi ? ((wd[i] >> 4) & 0x0F0F0F0Fu)
+                                    : (wd[i] & 0x0F0F0F0Fu);
+            qx = mq_dp4a(nib, xv[i], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float2 sc2 = xsc[gi];
+        acc[ti] += dsc * (sc2.x * (float)qx) - mnm * sc2.y;
+    }
+}
+
+/* Q5_K: nibble | (bit gw of qh byte) << 4 — unsigned 0..31, same
+ * scale/min factoring as Q4_K. */
+__device__ __forceinline__ void mxd_q5k(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q5_K_SIZE;
+    const uint32_t gw = g & 7u;
+    const float d  = mq_f16(blk[0], blk[1]);
+    const float mn = mq_f16(blk[2], blk[3]);
+    uint8_t sc, m;
+    mq_scale_min_k4(gw, blk + 4, &sc, &m);
+    const uint8_t *qh = blk + 16;
+    const uint8_t *qs = blk + 48 + (size_t)(gw >> 1) * 32u;
+    const bool hi = (gw & 1u) != 0u;
+    const uint4 w0 = *reinterpret_cast<const uint4 *>(qs);
+    const uint4 w1 = *reinterpret_cast<const uint4 *>(qs + 16);
+    const uint4 h0 = *reinterpret_cast<const uint4 *>(qh);
+    const uint4 h1 = *reinterpret_cast<const uint4 *>(qh + 16);
+    const uint32_t wd[8] = { w0.x, w0.y, w0.z, w0.w,
+                             w1.x, w1.y, w1.z, w1.w };
+    const uint32_t hd[8] = { h0.x, h0.y, h0.z, h0.w,
+                             h1.x, h1.y, h1.z, h1.w };
+    const float dsc = d * (float)sc;
+    const float mnm = mn * (float)m;
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t nib = hi ? ((wd[i] >> 4) & 0x0F0F0F0Fu)
+                                    : (wd[i] & 0x0F0F0F0Fu);
+            const uint32_t hb = ((hd[i] >> gw) & 0x01010101u) << 4;
+            qx = mq_dp4a(nib | hb, xv[i], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float2 sc2 = xsc[gi];
+        acc[ti] += dsc * (sc2.x * (float)qx) - mnm * sc2.y;
+    }
+}
+
+/* Q6_K: 6-bit fields (ql nibble | qh 2 bits << 4) − 32, with the int8 scale
+ * switching at element 16. Two half accumulators honor that boundary; the
+ * −32 offset cancels against the per-half activation sums. */
+__device__ __forceinline__ void mxd_q6k(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q6_K_SIZE;
+    const uint32_t G = g & 7u;
+    const uint32_t half = G >> 2;
+    const uint32_t j = G & 3u;
+    const float d = mq_f16(blk[208], blk[209]);
+    const uint8_t *ql = blk + (size_t)half * 64u + ((j & 1u) ? 32u : 0u);
+    const uint8_t *qh = blk + 128 + (size_t)half * 32u;
+    const int8_t  *sc = (const int8_t *)(blk + 192) + (size_t)half * 8u
+                      + (size_t)j * 2u;
+    const uint32_t shift = j * 2u;
+    const uint4 l0 = *reinterpret_cast<const uint4 *>(ql);
+    const uint4 l1 = *reinterpret_cast<const uint4 *>(ql + 16);
+    const uint4 h0 = *reinterpret_cast<const uint4 *>(qh);
+    const uint4 h1 = *reinterpret_cast<const uint4 *>(qh + 16);
+    const uint32_t lw[8] = { l0.x, l0.y, l0.z, l0.w, l1.x, l1.y, l1.z, l1.w };
+    const uint32_t hw[8] = { h0.x, h0.y, h0.z, h0.w, h1.x, h1.y, h1.z, h1.w };
+    const float s0 = (float)sc[0], s1 = (float)sc[1];
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t pa = 0, pb = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t lo = (j < 2u) ? (lw[i] & 0x0F0F0F0Fu)
+                                        : ((lw[i] >> 4) & 0x0F0F0F0Fu);
+            const uint32_t hb = ((hw[i] >> shift) & 0x03030303u) << 4;
+            if (i < 4u) pa = mq_dp4a(lo | hb, xv[i], pa);
+            else        pb = mq_dp4a(lo | hb, xv[i], pb);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float xsg = xsc[gi].x;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsg * (s0 * (float)(pa - 32 * q2.x)
+                           + s1 * (float)(pb - 32 * q2.y));
+    }
+}
+
+/* Q8_0: weights are already int8 — a pure s8·s8 dot. */
+__device__ __forceinline__ void mxd_q8_0(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q8_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 2);
+    const uint4 q1 = *reinterpret_cast<const uint4 *>(blk + 18);
+    const uint32_t wd[8] = { q0.x, q0.y, q0.z, q0.w,
+                             q1.x, q1.y, q1.z, q1.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++)
+            qx = mq_dp4a(wd[i], xv[i], qx);
+        const size_t gi = (size_t)t * ng + g;
+        acc[ti] += d * xsc[gi].x * (float)qx;
+    }
+}
+
+/* Q4_0: value = (nibble − 8)*d. Low nibble of byte j → element j, high →
+ * element j+16, matching the fp kernel's pairing. The −8 offset folds into
+ * the whole-group activation sum. */
+__device__ __forceinline__ void mxd_q4_0(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q4_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 2);
+    const uint32_t wd[4] = { q0.x, q0.y, q0.z, q0.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 4u; i++) {
+            qx = mq_dp4a(wd[i] & 0x0F0F0F0Fu, xv[i], qx);
+            qx = mq_dp4a((wd[i] >> 4) & 0x0F0F0F0Fu, xv[i + 4u], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsc[gi].x * (float)(qx - 8 * (q2.x + q2.y));
+    }
+}
+
+/* Q5_0: value = ((nibble | hbit<<4) − 16)*d. The 32 high bits live in a
+ * 4-byte field; mask*0x00204081 scatters bits 0..3 into byte lanes. */
+__device__ __forceinline__ void mxd_q5_0(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q5_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8)
+                      | ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
+    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 6);
+    const uint32_t wd[4] = { q0.x, q0.y, q0.z, q0.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 4u; i++) {
+            const uint32_t hbl =
+                (((qh >> (4u * i)) & 0xFu) * 0x00204081u) & 0x01010101u;
+            const uint32_t hbh =
+                (((qh >> (16u + 4u * i)) & 0xFu) * 0x00204081u) & 0x01010101u;
+            qx = mq_dp4a((wd[i] & 0x0F0F0F0Fu) | (hbl << 4), xv[i], qx);
+            qx = mq_dp4a(((wd[i] >> 4) & 0x0F0F0F0Fu) | (hbh << 4),
+                         xv[i + 4u], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsc[gi].x * (float)(qx - 16 * (q2.x + q2.y));
+    }
+}
+
+/* One warp per output row, same shape as the f32 kernels; the lane strides
+ * groups and keeps a per-token int8/dot accumulator set in registers. */
+#define MQ_DEFINE_MATVEC_XQ(NAME, GRPDOT)                                    \
+__global__ void NAME(const uint8_t *w, const int8_t *xq, const float2 *xsc,\
+                     const int32_t *xqsum, float *out,                       \
+                     uint32_t n_tok, size_t out_stride,                      \
+                     size_t rows, uint32_t n_groups, size_t row_bytes)       \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const uint32_t t0 = blockIdx.x * MQX_MAX_TOK;                            \
+    if (t0 >= n_tok) return;                                                 \
+    const size_t row = (size_t)blockIdx.y * MQ_WARPS + (threadIdx.x >> 5);   \
+    if (row >= rows) return;                                                 \
+    const uint8_t *rw = w + row * row_bytes;                                 \
+    float acc[MQX_MAX_TOK];                                                  \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) acc[i] = 0.0f;               \
+    for (uint32_t g = lane; g < n_groups; g += 32u)                          \
+        GRPDOT(rw, g, xq, xsc, xqsum, t0, n_tok, n_groups, acc);             \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) {                            \
+        const uint32_t t = t0 + i;                                           \
+        if (t >= n_tok) break;                                               \
+        const float v = mq_warp_reduce(acc[i]);                              \
+        if (lane == 0u) out[(size_t)t * out_stride + row] = v;               \
+    }                                                                        \
+}
+
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q4k,  mxd_q4k)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q5k,  mxd_q5k)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q6k,  mxd_q6k)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q8_0, mxd_q8_0)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q4_0, mxd_q4_0)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q5_0, mxd_q5_0)
+
+extern "C" bool oc_cuda_mmq_xq_supported(uint32_t qtype, size_t cols)
+{
+    if (cols == 0 || (cols % 32u) != 0u) return false;
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S: case OC_QUANT_Q4_K_M:
+    case OC_QUANT_Q5_K_S: case OC_QUANT_Q5_K_M:
+    case OC_QUANT_Q6_K:
+    case OC_QUANT_Q8_0:   case OC_QUANT_AL8:
+    case OC_QUANT_Q4_0:   case OC_QUANT_AL5:
+    case OC_QUANT_Q5_0:   case OC_QUANT_AL6:
+        /* K-quants additionally need whole super-blocks per row. */
+        return oc_cuda_mmq_supported(qtype, cols);
+    default:
+        return false;
+    }
+}
+
+extern "C" bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq,
+                                       float *d_xsc,
+                                       int32_t *d_xqsum,
+                                       uint32_t n_tok, size_t cols,
+                                       size_t x_stride, void *stream)
+{
+    if (!d_x || !d_xq || !d_xsc || !d_xqsum || n_tok == 0 ||
+        cols == 0 || (cols % 32u) != 0u || n_tok > 4u * MQX_MAX_TOK)
+        return false;
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    dim3 grid((n_groups + 3u) / 4u, n_tok);
+    k_mmq_quant_x<<<grid, 128u, 0, (cudaStream_t)stream>>>(
+        d_x, d_xq, (float2 *)d_xsc, d_xqsum, n_groups, x_stride);
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
+                                      const int8_t *d_xq, const float *d_xsc,
+                                      const int32_t *d_xqsum,
+                                      float *d_out, uint32_t n_tok,
+                                      size_t out_stride, size_t rows,
+                                      size_t cols, void *stream)
+{
+    if (!d_weights || !d_xq || !d_xsc || !d_xqsum || !d_out ||
+        rows == 0 || n_tok == 0 || n_tok > 4u * MQX_MAX_TOK)
+        return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    const uint32_t block = MQ_WARPS * 32u;
+    const dim3 grid((n_tok + MQX_MAX_TOK - 1u) / MQX_MAX_TOK,
+                    (unsigned)((rows + MQ_WARPS - 1u) / MQ_WARPS));
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_mvx_q4k<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_mvx_q5k<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_mvx_q6k<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_mvx_q8_0<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_mvx_q4_0<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_mvx_q5_0<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
         break;
     default:
         return false;

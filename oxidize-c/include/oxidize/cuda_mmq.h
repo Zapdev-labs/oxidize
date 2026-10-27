@@ -78,6 +78,68 @@ bool oc_cuda_mmq_get_row(uint32_t qtype, const void *d_weights,
                          uint32_t token, float *d_out,
                          size_t cols, void *stream);
 
+/* Same as oc_cuda_mmq_get_row, but the row index is read on the device from
+ * *d_token at kernel execution time. Used by the fast path where the next
+ * token is produced by an on-device argmax and never reaches the host. */
+bool oc_cuda_mmq_get_row_dev(uint32_t qtype, const void *d_weights,
+                             const uint32_t *d_token, float *d_out,
+                             size_t cols, void *stream);
+
+/* Batched embedding lookup: out[t * out_stride ..] = expand(row d_ids[t]).
+ * grid.y selects the token so one launch covers a whole prompt chunk. */
+bool oc_cuda_mmq_get_row_batch(uint32_t qtype, const void *d_weights,
+                               const uint32_t *d_ids, float *d_out,
+                               size_t cols, size_t out_stride,
+                               uint32_t n_tok, void *stream);
+
+/* Batched matvec: out[t*out_stride + row] = dot(dequant(W[row]), x[t]).
+ * One warp per row; the warp sweeps the row's packed bytes once per token
+ * but from L1/L2-resident lines, so DRAM weight traffic is paid ~once per
+ * launch instead of once per token — this is what makes prompt prefill
+ * memory-bound rather than launch-bound. x strides are in floats. */
+bool oc_cuda_mmq_matvec_batch(uint32_t qtype, const void *d_weights,
+                              const float *d_x, float *d_out,
+                              uint32_t n_tok, size_t x_stride,
+                              size_t out_stride,
+                              size_t rows, size_t cols, void *stream);
+
+/* ─── dp4a path: int8-quantized activations ──────────────────────────────
+ *
+ * The f32 matvecs spend ~6 instructions per element on nibble unpack and
+ * int→float conversion, which makes them issue-bound well below peak DRAM
+ * bandwidth. The xq variants quantize each 32-element activation group to
+ * int8 once (scale + exact group sums kept alongside), then dot the packed
+ * weights with __dp4a — ~7x fewer instructions per element. Supported for
+ * Q4_K/Q5_K/Q6_K/Q8_0/Q4_0/Q5_0 (+aliases); check oc_cuda_mmq_xq_supported
+ * and fall back to the f32 entry points otherwise. Results differ from the
+ * f32 path only by the activation's int8 rounding.
+ *
+ * Workspace layout (all indexed [tok * n_groups + group], xq packed x32):
+ *   d_xq    int8   [n_tok * n_groups * 32]
+ *   d_xsc   float2 [n_tok * n_groups]      (x = scale, y = exact fp32 sum)
+ *   d_xqsum int32  [n_tok * n_groups * 2]  (per-16-element int8 sums)
+ */
+
+/* True when the qtype has a dp4a kernel and cols % 32 == 0. */
+bool oc_cuda_mmq_xq_supported(uint32_t qtype, size_t cols);
+
+/* Quantize x (n_tok rows of x_stride floats each) into the workspace. */
+bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq, float *d_xsc,
+                            int32_t *d_xqsum,
+                            uint32_t n_tok, size_t cols,
+                            size_t x_stride, void *stream);
+
+/* out[t*out_stride + row] = dot(dequant(W[row]), unquantize(xq[t])). Each
+ * warp handles a 16-token tile of the row; blockIdx.y walks further tiles,
+ * so the weight row is fetched once per 16 tokens (from L1/L2 for later
+ * tiles) and prompt chunks amortize DRAM traffic like matvec_batch. */
+bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
+                           const int8_t *d_xq, const float *d_xsc,
+                           const int32_t *d_xqsum,
+                           float *d_out, uint32_t n_tok,
+                           size_t out_stride, size_t rows,
+                           size_t cols, void *stream);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

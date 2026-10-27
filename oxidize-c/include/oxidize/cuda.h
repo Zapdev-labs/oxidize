@@ -185,6 +185,34 @@ typedef struct OcCudaContext {
     bool persistent_decode_kernels;
     /* Non-blocking streams for independent GEMVs (Q/K/V or FFN gate/up). */
     void *compute_streams[3];
+    /* ── Fast path (cuda_fast.cu) ──────────────────────────────────────────
+     * Device-resident decode state: a small struct {token,pos,step} lives on
+     * the GPU and every dynamic value a kernel needs is read from it, so a
+     * whole token step is a fixed kernel sequence — submittable without any
+     * host synchronization, and capturable into a CUDA graph. Allocated at
+     * init when the model shape qualifies (dense llama-family, all weights
+     * packed); fast_ok=false otherwise and the CLI keeps the old path. */
+    bool      fast_ok;
+    void     *fast_stream;       /* one non-blocking stream for all fast work */
+    void     *d_fast_state;      /* opaque 16-byte device state struct        */
+    uint32_t *d_fast_ring;       /* emitted-token ring on device              */
+    uint32_t  fast_ring_cap;
+    void     *fast_graph;
+    void     *fast_graph_exec;
+    /* Batched-prefill workspace: activations for up to fast_batch tokens so a
+     * weight row is fetched once and dotted against the whole prompt chunk. */
+    float    *d_bx, *d_bnormed, *d_bq, *d_bk, *d_bv, *d_battn;
+    float    *d_bg, *d_bu, *d_bscores;
+    uint32_t *d_bprompt;
+    uint32_t  fast_batch;
+    /* int8-activation scratch for the dp4a matvecs (cuda_mmq.h xq path):
+     * quantized activations, per-group float2 {scale, exact fp32 sum} pairs,
+     * and per-16 int8 sums. One shared scratch, consumed immediately after
+     * each quantize launch. */
+    int8_t   *d_xq;
+    float    *d_xs;             /* float2 per group: {scale, sum} */
+    int32_t  *d_xqsum;
+    uint32_t  xq_max_groups;    /* groups the scratch is sized for          */
     /* Device memory accounting, filled during init (for --verbose reporting). */
     size_t vram_weight_bytes;   /* all weight tensors                       */
     size_t vram_kv_bytes;       /* KV cache                                 */
@@ -216,6 +244,60 @@ bool oc_cuda_available(void);
 /* Device-side kernel self-test: Qwen3.5 unpack/QK-norm/RoPE/DeltaNet and
  * packed Q4_0 GEMV. No GGUF required. Returns OC_OK on pass. */
 OcError oc_cuda_selftest(void);
+
+/* ─── Fast path (cuda_fast.cu) ────────────────────────────────────────────
+ *
+ * The legacy forward synchronizes the host up to ~60 times per token (three
+ * stream syncs twice per layer plus a full-logits copy) and launches ~400
+ * kernels through the synchronizing default stream, so the GPU idles between
+ * submissions. The fast path instead keeps {token, pos, step} in device
+ * memory and submits the entire token chain on one non-blocking stream:
+ * argmax writes the next token back into the state, so greedy decode never
+ * leaves the GPU except to harvest finished tokens from a device ring. A
+ * fixed-shape step can additionally be captured as a CUDA graph and replayed
+ * at ~one launch per token. Prefill batches up to fast_batch tokens per
+ * weight sweep.
+ *
+ * Gate: dense llama-family only (no MoE/Gemma-4/Qwen3.5/GeGLU/softcap/
+ * sliding-window/per-layer geometry), every used weight resident packed.
+ */
+bool oc_cuda_fast_supported(const OcCudaContext *ctx);
+
+/* Submit the whole prompt asynchronously. Tokens are batched fast_batch at a
+ * time so each weight row feeds n_tok activations per DRAM fetch. When
+ * emit_first is set, the last position's logits are argmaxed on device into
+ * ring slot 0 and the decode state advances (token=best, pos=pos0+n_ids) —
+ * the first generated token. Otherwise the last position's logits stay in
+ * ctx->d_logits for oc_cuda_fast_logits(). Asynchronous: returns after
+ * enqueue; call oc_cuda_fast_wait() to time it. */
+OcError oc_cuda_fast_prefill(OcCudaContext *ctx, const uint32_t *ids,
+                             size_t n_ids, uint32_t pos0, bool emit_first);
+
+/* Submit n greedy decode steps (embed state.token -> layers -> lm_head ->
+ * argmax into ring + state advance). With a usable CUDA graph this is n
+ * graph replays; otherwise n unrolled submissions. Asynchronous. */
+OcError oc_cuda_fast_decode(OcCudaContext *ctx, uint32_t n);
+
+/* Wait for the fast stream, then copy the first n ring tokens to out. */
+OcError oc_cuda_fast_take(OcCudaContext *ctx, uint32_t n, uint32_t *out);
+
+/* Wait for the fast stream, then copy logits[vocab_size] to host. */
+OcError oc_cuda_fast_logits(OcCudaContext *ctx, float *out);
+
+/* Non-greedy path: submit one forward step (embed + layers + lm_head, no
+ * argmax) producing d_logits; pair with oc_cuda_fast_feed + _logits. */
+OcError oc_cuda_fast_step(OcCudaContext *ctx);
+
+/* Feed a host-sampled token into the state (token=t, pos++). */
+OcError oc_cuda_fast_feed(OcCudaContext *ctx, uint32_t token);
+
+/* Wait for all submitted fast-path work. */
+OcError oc_cuda_fast_wait(OcCudaContext *ctx);
+
+/* Internal: called by oc_cuda_init/oc_cuda_free to attach/detach fast-path
+ * resources. Not for callers. */
+void oc_cuda_fast_attach(OcCudaContext *ctx);
+void oc_cuda_fast_detach(OcCudaContext *ctx);
 
 #ifdef __cplusplus
 }
