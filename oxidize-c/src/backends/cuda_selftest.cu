@@ -304,7 +304,7 @@ OcError oc_cuda_selftest(void)
 
     /* ── Q4_K + Q6_K int8-mma batched GEMM (prefill path) ──────────── */
     {
-        const size_t rows = 96, cols = 512, n_tok = 20, ng = cols / 32;
+        const size_t rows = 512, cols = 512, n_tok = 20, ng = cols / 32;
         float *x = (float *)malloc(n_tok * cols * sizeof(float));
         float *want = (float *)malloc(n_tok * rows * sizeof(float));
         float *got = (float *)malloc(n_tok * rows * sizeof(float));

@@ -1809,6 +1809,81 @@ __device__ __forceinline__ void mg_store(float *out, size_t out_stride,
  * half), threads 128-255 copy activations (t2, sc). Total smem stays
  * 32 KB (wt 2x8KB + act 2x8KB) so two blocks still fit per SM. */
 
+/* Decode one 32-element group of a Q4_K block into 4 output uint4s
+ * (8 f16 each). Extracted from the stage path so it stays callable
+ * outside the kernel macros. */
+__device__ __forceinline__ void mg4_decode(uint4 *ov, uint32_t g2_,
+                                           const uint4 *pq,
+                                           const uint4 *phd)
+{
+    const uint8_t *hb = (const uint8_t *)phd;
+    const float d  = mq_f16(hb[0], hb[1]);
+    const float dm = mq_f16(hb[2], hb[3]);
+    uint8_t sc8, mn8;
+    mq_scale_min_k4(g2_, hb + 4, &sc8, &mn8);
+    const float sd = (float)sc8 * d, md = (float)mn8 * dm;
+    const __half2 sd2 = __float2half2_rn(sd);
+    const __half2 md2 = __float2half2_rn(-md);
+    const __half2 bm2 = __float2half2_rn(-1024.f);
+    const uint32_t nsh = (g2_ & 1u) * 4u;
+    const uint32_t *pw = (const uint32_t *)pq;
+    #pragma unroll
+    for (uint32_t i = 0; i < 4; i++) {
+        const uint32_t c0 = (pw[i * 2u]     >> nsh) & 0x0F0F0F0Fu;
+        const uint32_t c1 = (pw[i * 2u + 1u] >> nsh) & 0x0F0F0F0Fu;
+        union { __half2 h; uint32_t u; } p0, p1, p2, p3;
+        p0.u = __byte_perm(c0, 0x64646464u, 0x4140u);
+        p1.u = __byte_perm(c0, 0x64646464u, 0x4342u);
+        p2.u = __byte_perm(c1, 0x64646464u, 0x4140u);
+        p3.u = __byte_perm(c1, 0x64646464u, 0x4342u);
+        union { __half2 h; uint32_t u; } o0, o1, o2, o3;
+        o0.h = __hfma2(__hadd2(p0.h, bm2), sd2, md2);
+        o1.h = __hfma2(__hadd2(p1.h, bm2), sd2, md2);
+        o2.h = __hfma2(__hadd2(p2.h, bm2), sd2, md2);
+        o3.h = __hfma2(__hadd2(p3.h, bm2), sd2, md2);
+        ov[i].x = o0.u; ov[i].y = o1.u; ov[i].z = o2.u; ov[i].w = o3.u;
+    }
+}
+
+/* Same extraction for the 32-element Q6_K group (j = gc selects the
+ * qh bit slice and the scale pair). */
+__device__ __forceinline__ void mg6_decode(uint4 *ov, uint32_t j,
+                                           const uint4 *pql,
+                                           const uint4 *pqh,
+                                           uint32_t psc, uint32_t pdv)
+{
+    const uint32_t *lw = (const uint32_t *)pql;
+    const uint32_t *hw = (const uint32_t *)pqh;
+    const float d   = mq_f16((uint8_t)(pdv & 0xFFu), (uint8_t)(pdv >> 8));
+    const __half2 sda = __float2half2_rn(
+        (float)(int8_t)(psc & 0xFFu) * d);
+    const __half2 sdb = __float2half2_rn(
+        (float)(int8_t)((psc >> 8) & 0xFFu) * d);
+    const __half2 bm2 = __float2half2_rn(-1056.f);
+    const uint32_t sh = j * 2u;
+    const uint32_t sel = (j < 2u) ? 0u : 4u;
+    #pragma unroll
+    for (uint32_t i = 0; i < 4; i++) {
+        union { __half2 h; uint32_t u; } o0, o1, o2, o3;
+        #pragma unroll
+        for (uint32_t q = 0; q < 2; q++) {
+            const uint32_t l = lw[i * 2u + q], h = hw[i * 2u + q];
+            const uint32_t cc =
+                ((l >> sel) & 0x0F0F0F0Fu)
+                | ((((h >> sh) & 0x03030303u)) << 4);
+            union { __half2 h; uint32_t u; } p0, p1;
+            p0.u = __byte_perm(cc, 0x64646464u, 0x4140u);
+            p1.u = __byte_perm(cc, 0x64646464u, 0x4342u);
+            const __half2 sg = (i < 2u) ? sda : sdb;
+            const __half2 w0 = __hmul2(__hadd2(p0.h, bm2), sg);
+            const __half2 w1 = __hmul2(__hadd2(p1.h, bm2), sg);
+            if (q == 0u) { o0.h = w0; o1.h = w1; }
+            else         { o2.h = w0; o3.h = w1; }
+        }
+        ov[i].x = o0.u; ov[i].y = o1.u; ov[i].z = o2.u; ov[i].w = o3.u;
+    }
+}
+
 /* Q4_K: 144B device block = [d f16][dm f16][12B scale table][128B qs].
  * Codes land in fp16 via the integer-bias trick — (1024 + code) is the
  * exact f16 bit pattern 0x6400|code — built by one byte_perm per pair,
@@ -1873,35 +1948,12 @@ k_mmq_gemm_xh_q4k(const uint8_t *w, const __half *xh,
         if (tid < 128u) {                                                    \
             const uint32_t g2_ = h_ * 4u + gc;                               \
             uint8_t *dst = swf + h_ * MGH_H_BYTES + r2 * MGH_HRB;            \
-            const uint8_t *hb = (const uint8_t *)&phd;                       \
-            const float d  = mq_f16(hb[0], hb[1]);                           \
-            const float dm = mq_f16(hb[2], hb[3]);                           \
-            uint8_t sc8, mn8;                                                \
-            mq_scale_min_k4(g2_, hb + 4, &sc8, &mn8);                        \
-            const float sd = (float)sc8 * d, md = (float)mn8 * dm;           \
-            const __half2 sd2 = __float2half2_rn(sd);                        \
-            const __half2 md2 = __float2half2_rn(-md);                       \
-            const __half2 bm2 = __float2half2_rn(-1024.f);                   \
-            const uint32_t nsh = (g2_ & 1u) * 4u;                            \
-            const uint32_t *pw = (const uint32_t *)pq;                       \
+            uint4 ov[4];                                                     \
+            mg4_decode(ov, g2_, pq, &phd);                                   \
             _Pragma("unroll")                                                \
-            for (uint32_t i = 0; i < 4; i++) {                               \
-                const uint32_t c0 = (pw[i * 2u]     >> nsh) & 0x0F0F0F0Fu;   \
-                const uint32_t c1 = (pw[i * 2u + 1u] >> nsh) & 0x0F0F0F0Fu;  \
-                union { __half2 h; uint32_t u; } p0, p1, p2, p3;             \
-                p0.u = __byte_perm(c0, 0x64646464u, 0x4140u);                \
-                p1.u = __byte_perm(c0, 0x64646464u, 0x4342u);                \
-                p2.u = __byte_perm(c1, 0x64646464u, 0x4140u);                \
-                p3.u = __byte_perm(c1, 0x64646464u, 0x4342u);                \
-                uint4 ov;                                                    \
-                union { __half2 h; uint32_t u; } o0, o1, o2, o3;             \
-                o0.h = __hfma2(__hadd2(p0.h, bm2), sd2, md2);                \
-                o1.h = __hfma2(__hadd2(p1.h, bm2), sd2, md2);                \
-                o2.h = __hfma2(__hadd2(p2.h, bm2), sd2, md2);                \
-                o3.h = __hfma2(__hadd2(p3.h, bm2), sd2, md2);                \
-                ov.x = o0.u; ov.y = o1.u; ov.z = o2.u; ov.w = o3.u;          \
-                *(uint4 *)(dst + mg_swz(r2, (gc * 32u + i * 8u) * 2u)) = ov; \
-            }                                                                \
+            for (uint32_t i = 0; i < 4; i++)                                 \
+                *(uint4 *)(dst + mg_swz(r2, (gc * 32u + i * 8u) * 2u))       \
+                    = ov[i];                                                 \
         } else {                                                             \
             mg_stage_xh(sxf + h_ * MGH_H_BYTES, t2, sc, pxh);               \
         }                                                                    \
@@ -2003,39 +2055,12 @@ k_mmq_gemm_xh_q6k(const uint8_t *w, const __half *xh,
         const uint32_t h_ = (IS) & 1u;                                       \
         if (tid < 128u) {                                                    \
             uint8_t *dst = swf + h_ * MGH_H_BYTES + r2 * MGH_HRB;            \
-            const uint32_t *lw = (const uint32_t *)pql;                      \
-            const uint32_t *hw = (const uint32_t *)pqh;                      \
-            const float d   = mq_f16((uint8_t)(pdv & 0xFFu),                 \
-                                     (uint8_t)(pdv >> 8));                   \
-            const __half2 sda = __float2half2_rn(                            \
-                (float)(int8_t)(psc & 0xFFu) * d);                           \
-            const __half2 sdb = __float2half2_rn(                            \
-                (float)(int8_t)((psc >> 8) & 0xFFu) * d);                    \
-            const __half2 bm2 = __float2half2_rn(-1056.f);                   \
-            const uint32_t j = gc, sh = j * 2u;                              \
-            const uint32_t sel = (j < 2u) ? 0u : 4u;                         \
+            uint4 ov[4];                                                     \
+            mg6_decode(ov, gc, pql, pqh, psc, pdv);                          \
             _Pragma("unroll")                                                \
-            for (uint32_t i = 0; i < 4; i++) {                               \
-                uint4 ov;                                                    \
-                union { __half2 h; uint32_t u; } o0, o1, o2, o3;             \
-                _Pragma("unroll")                                            \
-                for (uint32_t q = 0; q < 2; q++) {                           \
-                    const uint32_t l = lw[i * 2u + q], h = hw[i * 2u + q];   \
-                    const uint32_t cc =                                      \
-                        ((l >> sel) & 0x0F0F0F0Fu)                           \
-                        | ((((h >> sh) & 0x03030303u)) << 4);                \
-                    union { __half2 h; uint32_t u; } p0, p1;                 \
-                    p0.u = __byte_perm(cc, 0x64646464u, 0x4140u);            \
-                    p1.u = __byte_perm(cc, 0x64646464u, 0x4342u);            \
-                    const __half2 sg = (i < 2u) ? sda : sdb;                 \
-                    const __half2 w0 = __hmul2(__hadd2(p0.h, bm2), sg);      \
-                    const __half2 w1 = __hmul2(__hadd2(p1.h, bm2), sg);      \
-                    if (q == 0u) { o0.h = w0; o1.h = w1; }                   \
-                    else         { o2.h = w0; o3.h = w1; }                   \
-                }                                                            \
-                ov.x = o0.u; ov.y = o1.u; ov.z = o2.u; ov.w = o3.u;          \
-                *(uint4 *)(dst + mg_swz(r2, (gc * 32u + i * 8u) * 2u)) = ov; \
-            }                                                                \
+            for (uint32_t i = 0; i < 4; i++)                                 \
+                *(uint4 *)(dst + mg_swz(r2, (gc * 32u + i * 8u) * 2u))       \
+                    = ov[i];                                                 \
         } else {                                                             \
             mg_stage_xh(sxf + h_ * MGH_H_BYTES, t2, sc, pxh);               \
         }                                                                    \
