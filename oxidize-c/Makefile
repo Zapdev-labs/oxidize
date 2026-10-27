@@ -235,7 +235,9 @@ avx512: clean oxidize-c
 # CUDA build (for Modal L40S). NVCC compiles .cu files; cuda_stub.c excluded.
 CUDA_LIB_SRCS := $(filter-out src/backends/cuda_stub.c,$(LIB_SRCS))
 CUDA_LIB_OBJS := $(CUDA_LIB_SRCS:.c=.o)
-CUDA_SRCS := $(wildcard src/backends/*.cu)
+# bench_mma.cu is a standalone tool with its own main() — built ad hoc, not
+# linked into oxidize-c.
+CUDA_SRCS := $(filter-out src/backends/bench_mma.cu,$(wildcard src/backends/*.cu))
 # `.cuo`, not `.cu.o`: the latter collides with make's builtin `%: %.o` link
 # rule and produces "Circular src/backends/cuda.cu <- ...cu.o" warnings.
 CUDA_OBJS := $(CUDA_SRCS:.cu=.cuo)

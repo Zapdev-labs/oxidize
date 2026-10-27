@@ -118,6 +118,7 @@ bool oc_cuda_mmq_matvec_batch(uint32_t qtype, const void *d_weights,
  *   d_xq    int8   [n_tok * n_groups * 32]
  *   d_xsc   float2 [n_tok * n_groups]      (x = scale, y = exact fp32 sum)
  *   d_xqsum int32  [n_tok * n_groups * 2]  (per-16-element int8 sums)
+ *   d_xh    f16    [n_tok * n_groups * 32] (xq*scale, for the mma path)
  */
 
 /* True when the qtype has a dp4a kernel and cols % 32 == 0. */
@@ -125,7 +126,7 @@ bool oc_cuda_mmq_xq_supported(uint32_t qtype, size_t cols);
 
 /* Quantize x (n_tok rows of x_stride floats each) into the workspace. */
 bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq, float *d_xsc,
-                            int32_t *d_xqsum,
+                            int32_t *d_xqsum, void *d_xh,
                             uint32_t n_tok, size_t cols,
                             size_t x_stride, void *stream);
 
@@ -135,7 +136,7 @@ bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq, float *d_xsc,
  * tiles) and prompt chunks amortize DRAM traffic like matvec_batch. */
 bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
                            const int8_t *d_xq, const float *d_xsc,
-                           const int32_t *d_xqsum,
+                           const int32_t *d_xqsum, const void *d_xh,
                            float *d_out, uint32_t n_tok,
                            size_t out_stride, size_t rows,
                            size_t cols, void *stream);

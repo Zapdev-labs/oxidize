@@ -212,6 +212,7 @@ typedef struct OcCudaContext {
     int8_t   *d_xq;
     float    *d_xs;             /* float2 per group: {scale, sum} */
     int32_t  *d_xqsum;
+    void     *d_xh;             /* __half per element: xq*scale (mma path)  */
     uint32_t  xq_max_groups;    /* groups the scratch is sized for          */
     /* Device memory accounting, filled during init (for --verbose reporting). */
     size_t vram_weight_bytes;   /* all weight tensors                       */

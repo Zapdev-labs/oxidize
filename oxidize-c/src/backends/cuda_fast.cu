@@ -496,7 +496,7 @@ static void fast_qx(OcCudaContext *ctx, const float *d_x, size_t cols,
                     uint32_t n_tok, cudaStream_t s)
 {
     oc_cuda_mmq_quantize_x(d_x, ctx->d_xq, ctx->d_xs,
-                           ctx->d_xqsum, n_tok, cols, cols, s);
+                           ctx->d_xqsum, ctx->d_xh, n_tok, cols, cols, s);
 }
 
 /* One matvec through the dp4a path when the weight type supports it (the
@@ -508,7 +508,7 @@ static void fast_mv(OcCudaContext *ctx, const OcCudaWeight *w,
 {
     if (oc_cuda_mmq_xq_supported(w->qtype, w->cols)) {
         oc_cuda_mmq_matvec_xq(w->qtype, w->data, ctx->d_xq, ctx->d_xs,
-                              ctx->d_xqsum, d_out, n_tok,
+                              ctx->d_xqsum, ctx->d_xh, d_out, n_tok,
                               out_stride, w->rows, w->cols, s);
     } else if (n_tok == 1u) {
         oc_cuda_mmq_matvec(w->qtype, w->data, d_x, d_out,
@@ -1021,6 +1021,7 @@ extern "C" void oc_cuda_fast_attach(OcCudaContext *ctx)
         FAST_ALLOC(ctx->d_xq,    (size_t)T * mg * 32u);
         FAST_ALLOC(ctx->d_xs,    (size_t)T * mg * 2u * sizeof(float));
         FAST_ALLOC(ctx->d_xqsum, (size_t)T * mg * 2u * sizeof(int32_t));
+        FAST_ALLOC(ctx->d_xh,    (size_t)T * mg * 64u);
     }
 #undef FAST_ALLOC
 
@@ -1046,6 +1047,7 @@ fail:
     cudaFree(ctx->d_xq);     ctx->d_xq = NULL;
     cudaFree(ctx->d_xs);     ctx->d_xs = NULL;
     cudaFree(ctx->d_xqsum);  ctx->d_xqsum = NULL;
+    cudaFree(ctx->d_xh);     ctx->d_xh = NULL;
     cudaStreamDestroy(s);
 }
 
@@ -1075,6 +1077,7 @@ extern "C" void oc_cuda_fast_detach(OcCudaContext *ctx)
     cudaFree(ctx->d_xq);     ctx->d_xq = NULL;
     cudaFree(ctx->d_xs);     ctx->d_xs = NULL;
     cudaFree(ctx->d_xqsum);  ctx->d_xqsum = NULL;
+    cudaFree(ctx->d_xh);     ctx->d_xh = NULL;
     if (ctx->fast_stream) {
         cudaStreamDestroy((cudaStream_t)ctx->fast_stream);
         ctx->fast_stream = NULL;

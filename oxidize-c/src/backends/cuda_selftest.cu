@@ -371,19 +371,21 @@ OcError oc_cuda_selftest(void)
             int8_t *d_xq = NULL;
             float *d_xsc = NULL;
             int32_t *d_xqs = NULL;
+            void *d_xh = NULL;
             cudaMalloc(&d_w, rows * dev_rb);
             cudaMalloc(&d_x, n_tok * cols * sizeof(float));
             cudaMalloc(&d_out, n_tok * rows * sizeof(float));
             cudaMalloc(&d_xq, n_tok * cols);
             cudaMalloc(&d_xsc, n_tok * ng * 2 * sizeof(float));
             cudaMalloc(&d_xqs, n_tok * ng * 2 * sizeof(int32_t));
+            cudaMalloc(&d_xh, n_tok * cols * 2);
             cudaMemcpy(d_w, dev_packed, rows * dev_rb, cudaMemcpyHostToDevice);
             cudaMemcpy(d_x, x, n_tok * cols * sizeof(float),
                        cudaMemcpyHostToDevice);
-            bool ok = oc_cuda_mmq_quantize_x(d_x, d_xq, d_xsc, d_xqs,
+            bool ok = oc_cuda_mmq_quantize_x(d_x, d_xq, d_xsc, d_xqs, d_xh,
                                              (uint32_t)n_tok, cols, cols,
                                              NULL)
-                   && oc_cuda_mmq_matvec_xq(qt, d_w, d_xq, d_xsc, d_xqs,
+                   && oc_cuda_mmq_matvec_xq(qt, d_w, d_xq, d_xsc, d_xqs, d_xh,
                                             d_out, (uint32_t)n_tok, rows,
                                             rows, cols, NULL)
                    && cudaDeviceSynchronize() == cudaSuccess;
@@ -392,7 +394,7 @@ OcError oc_cuda_selftest(void)
                            cudaMemcpyDeviceToHost);
             ok = ok && st_close(got, want, n_tok * rows, 3e-3f);
             cudaFree(d_w); cudaFree(d_x); cudaFree(d_out);
-            cudaFree(d_xq); cudaFree(d_xsc); cudaFree(d_xqs);
+            cudaFree(d_xq); cudaFree(d_xsc); cudaFree(d_xqs); cudaFree(d_xh);
             free(packed); free(dev_packed); free(src);
             if (!ok)
                 return st_fail(ty == 0 ? "gemm_xq q4_k" : "gemm_xq q6_k");
