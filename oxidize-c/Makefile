@@ -124,6 +124,23 @@ src/%.nosan.o: src/%.c
 tests/%.o: tests/%.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
+# oxk_avx2.c mixes AVX2/FMA/F16C intrinsics with per-function target
+# attributes; some GCC versions (observed on GCC 13, Ubuntu 24.04) fail to
+# inline the intrinsic headers when the file is compiled for the baseline
+# target even though every function carries the right attribute. Compiling
+# the whole translation unit for x86-64-v3 sidesteps that, and is safe here
+# because every function in the file requires AVX2 anyway.
+OXK_AVX2_FLAGS := -mavx2 -mfma -mf16c
+
+src/compute/oxk_avx2.o: src/compute/oxk_avx2.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
+src/compute/oxk_avx2.asan.o: src/compute/oxk_avx2.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
+src/compute/oxk_avx2.nosan.o: src/compute/oxk_avx2.c
+	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
 # Default object rule (no ASan).
 src/%.o: src/%.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
@@ -218,7 +235,9 @@ avx512: clean oxidize-c
 # CUDA build (for Modal L40S). NVCC compiles .cu files; cuda_stub.c excluded.
 CUDA_LIB_SRCS := $(filter-out src/backends/cuda_stub.c,$(LIB_SRCS))
 CUDA_LIB_OBJS := $(CUDA_LIB_SRCS:.c=.o)
-CUDA_SRCS := $(wildcard src/backends/*.cu)
+# bench_mma.cu is a standalone tool with its own main() — built ad hoc, not
+# linked into oxidize-c.
+CUDA_SRCS := $(filter-out src/backends/bench_mma.cu,$(wildcard src/backends/*.cu))
 # `.cuo`, not `.cu.o`: the latter collides with make's builtin `%: %.o` link
 # rule and produces "Circular src/backends/cuda.cu <- ...cu.o" warnings.
 CUDA_OBJS := $(CUDA_SRCS:.cu=.cuo)

@@ -656,6 +656,84 @@ MQ_DEFINE_GETROW(k_mmq_getrow_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expa
 MQ_DEFINE_GETROW(k_mmq_getrow_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
 
+/* Fast-path variants: the row index comes from device memory (an on-device
+ * argmax result or a prompt-ids array), never the host. */
+#define MQ_DEFINE_GETROW_DEV(NAME, BLOCK_BYTES, VALS, EXPAND)                \
+__global__ void NAME(const uint8_t *w, const uint32_t *d_token,              \
+                     float *out, size_t cols, size_t row_bytes)              \
+{                                                                            \
+    const uint8_t *rw = w + (size_t)(*d_token) * row_bytes;                  \
+    const size_t n_blocks = cols / (VALS);                                   \
+    for (size_t b = blockIdx.x * blockDim.x + threadIdx.x; b < n_blocks;     \
+         b += (size_t)gridDim.x * blockDim.x)                                \
+        EXPAND(rw + b * (BLOCK_BYTES), out + b * (VALS));                    \
+}
+
+#define MQ_DEFINE_GETROW_BATCH(NAME, BLOCK_BYTES, VALS, EXPAND)              \
+__global__ void NAME(const uint8_t *w, const uint32_t *d_ids, float *out,    \
+                     size_t cols, size_t row_bytes, size_t out_stride)       \
+{                                                                            \
+    const uint8_t *rw = w + (size_t)d_ids[blockIdx.y] * row_bytes;           \
+    const size_t n_blocks = cols / (VALS);                                   \
+    float *o = out + (size_t)blockIdx.y * out_stride;                        \
+    for (size_t b = blockIdx.x; b < n_blocks; b += (size_t)gridDim.x)        \
+        EXPAND(rw + b * (BLOCK_BYTES), o + b * (VALS));                      \
+}
+
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q8_0,   MQ_DEV_Q8_0_SIZE,   MQ_QK8_0, mq_q8_0_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, mq_q4_0_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
+
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q8_0,   MQ_DEV_Q8_0_SIZE,   MQ_QK8_0, mq_q8_0_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, mq_q4_0_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
+
+/* ─── Batched matvec (prompt prefill) ─────────────────────────────────────
+ *
+ * Same warp-per-row structure as the single-token matvec, but the warp then
+ * walks n_tok activation vectors against the row it already fetched. The
+ * row's packed bytes re-read from L1/L2 for tokens 2..n_tok instead of from
+ * DRAM once per token, so the whole prompt chunk costs ~one weight sweep.
+ * The token loop is outermost to keep the accumulator scalar (a per-token
+ * register array would spill); the row stays cache-hot across iterations. */
+#define MQ_DEFINE_MATVEC_BATCH(NAME, DOT)                                    \
+__global__ void NAME(const uint8_t *w, const float *x, float *out,           \
+                     size_t rows, uint32_t n_groups, size_t row_bytes,       \
+                     uint32_t n_tok, size_t x_stride, size_t out_stride)     \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const size_t row = (size_t)blockIdx.x * MQ_WARPS + (threadIdx.x >> 5);   \
+    if (row >= rows) return;                                                 \
+    const uint8_t *rw = w + row * row_bytes;                                 \
+    for (uint32_t t = 0u; t < n_tok; t++) {                                  \
+        const float *xt = x + (size_t)t * x_stride;                          \
+        float partial = 0.0f;                                                \
+        for (uint32_t g = lane; g < n_groups; g += 32u)                      \
+            partial += DOT(rw, g, xt + (size_t)g * 32u);                     \
+        partial = mq_warp_reduce(partial);                                   \
+        if (lane == 0u) out[(size_t)t * out_stride + row] = partial;         \
+    }                                                                        \
+}
+
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q4k,    mq_q4k_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q5k,    mq_q5k_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q6k,    mq_q6k_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q8_0,   mq_q8_0_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q4_0,   mq_q4_0_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q5_0,   mq_q5_0_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_al5_xs, mq_al5_xs_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_iq4_xs, mq_iq4_xs_group_dot)
+
 /* ─── Host API ───────────────────────────────────────────────────────────── */
 
 /* On-disk block bytes / device block bytes / values-per-block, or all zero for
@@ -897,4 +975,1920 @@ extern "C" bool oc_cuda_mmq_get_row(uint32_t qtype, const void *d_weights,
         return false;
     }
     return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_get_row_dev(uint32_t qtype,
+                                        const void *d_weights,
+                                        const uint32_t *d_token,
+                                        float *d_out, size_t cols,
+                                        void *stream)
+{
+    if (!d_weights || !d_token || !d_out) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    size_t sb = 0, db = 0, vals = 0;
+    mq_layout(qtype, &sb, &db, &vals);
+    const size_t n_blocks = cols / vals;
+    const uint32_t block = MQ_BLOCK_THREADS;
+    const uint32_t grid = (uint32_t)((n_blocks + block - 1) / block);
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_getrow_dev_q4k<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_getrow_dev_q5k<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_getrow_dev_q6k<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_getrow_dev_q8_0<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_getrow_dev_q4_0<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_getrow_dev_q5_0<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_getrow_dev_al5_xs<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_getrow_dev_iq4_xs<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_get_row_batch(uint32_t qtype,
+                                          const void *d_weights,
+                                          const uint32_t *d_ids,
+                                          float *d_out, size_t cols,
+                                          size_t out_stride,
+                                          uint32_t n_tok, void *stream)
+{
+    if (!d_weights || !d_ids || !d_out || n_tok == 0) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    size_t sb = 0, db = 0, vals = 0;
+    mq_layout(qtype, &sb, &db, &vals);
+    const size_t n_blocks = cols / vals;
+    const uint32_t block = MQ_BLOCK_THREADS;
+    const uint32_t gx = (uint32_t)((n_blocks + block - 1) / block);
+    dim3 grid(gx, n_tok);
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_getrow_batch_q4k<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_getrow_batch_q5k<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_getrow_batch_q6k<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_getrow_batch_q8_0<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_getrow_batch_q5_0<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_getrow_batch_q4_0<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_getrow_batch_al5_xs<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_getrow_batch_iq4_xs<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+extern "C" bool oc_cuda_mmq_matvec_batch(uint32_t qtype,
+                                         const void *d_weights,
+                                         const float *d_x, float *d_out,
+                                         uint32_t n_tok, size_t x_stride,
+                                         size_t out_stride,
+                                         size_t rows, size_t cols,
+                                         void *stream)
+{
+    if (!d_weights || !d_x || !d_out || rows == 0 || n_tok == 0) return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    const uint32_t block = MQ_WARPS * 32u;
+    const size_t grid = (rows + MQ_WARPS - 1u) / MQ_WARPS;
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_mvb_q4k<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_mvb_q5k<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_mvb_q6k<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_mvb_q8_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_mvb_q4_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_mvb_q5_0<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_AL5_XS:
+        k_mmq_mvb_al5_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_IQ4_XS:
+        k_mmq_mvb_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+/* ─── dp4a path: int8-quantized activations ────────────────────────────────
+ *
+ * The f32 group-dots above spend ~6 instructions per element on nibble
+ * extraction, int→float conversion and scalar FMA — the kernels run at full
+ * SM occupancy yet move ~35% of peak DRAM bandwidth on a T4 because they are
+ * issue-bound, not memory-bound. This section removes that ceiling the same
+ * way every fast int matvec does: quantize the activation to int8 once per
+ * 32-element group (with the group's fp32 scale and exact fp32 sum kept
+ * alongside), then accumulate the weight dot with __dp4a, which retires four
+ * byte-multiply-adds per instruction. The per-group work drops roughly 7x.
+ *
+ * Numerics: the activation is approximated as x ≈ xs*xq (int8, per-group
+ * scale), so results differ slightly from the f32 path — the same class of
+ * approximation llama.cpp's mmq makes. Offset formats (Q4_0's -8, Q5_0's
+ * -16, Q6_K's -32) are corrected with the exact integer activation sums, so
+ * the only loss is the activation's int8 rounding, not the weights'.
+ *
+ * Supported: Q4_K/Q5_K/Q6_K/Q8_0/Q4_0/Q5_0 and aliases. AL5_XS/IQ4_XS keep
+ * the f32 kernels (check oc_cuda_mmq_xq_supported before dispatching). */
+
+#define MQX_MAX_TOK 16u
+
+/* CUDA exposes only __dp4a(int,int,int) and (uint,uint,uint); mixed-sign
+ * calls are ambiguous. Our packed weight bytes are always <= 63 (nibbles
+ * plus carried high bits), so they are positive int8 and the signed
+ * overload computes exactly u8*w × s8*x. */
+__device__ __forceinline__ int32_t mq_dp4a(uint32_t w, uint32_t x, int32_t c)
+{
+    return __dp4a((int)w, (int)x, c);
+}
+
+/* Load one 32-byte int8 activation group as 8 words via two 16B loads. */
+__device__ __forceinline__ void mqx_load8(const int8_t *xq, uint32_t t,
+                                          uint32_t ng, uint32_t g,
+                                          uint32_t v[8])
+{
+    const uint4 a = *reinterpret_cast<const uint4 *>(
+        xq + ((size_t)t * ng + g) * 32u);
+    const uint4 b = *reinterpret_cast<const uint4 *>(
+        xq + ((size_t)t * ng + g) * 32u + 16u);
+    v[0] = a.x; v[1] = a.y; v[2] = a.z; v[3] = a.w;
+    v[4] = b.x; v[5] = b.y; v[6] = b.z; v[7] = b.w;
+}
+
+/* Quantize one [n_tok][n_groups*32] activation tile. One warp per group:
+ * lane l owns element g*32+l, so the amax/sum reductions are pure shuffles.
+ * Produces, per group: xq int8 (amax→127), xs fp32 scale, xsum fp32 exact
+ * group sum (K-quant min term), xqsum int8 sums per 16-elem half (0-quant
+ * offsets). Grid.x covers groups, grid.y tokens. */
+__global__ void k_mmq_quant_x(const float *x, int8_t *xq, float2 *xsc,
+                              int32_t *xqsum, __half *xh,
+                              uint32_t n_groups, size_t x_stride)
+{
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t g = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+    if (g >= n_groups) return;
+    const size_t gi = (size_t)blockIdx.y * n_groups + g;
+    const float *xr = x + (size_t)blockIdx.y * x_stride + (size_t)g * 32u;
+
+    float v = xr[lane];
+    float amax = fabsf(v);
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        amax = fmaxf(amax, __shfl_down_sync(0xffffffffu, amax, o));
+    amax = __shfl_sync(0xffffffffu, amax, 0);
+    const float s = amax > 0.0f ? amax * (1.0f / 127.0f) : 1.0f;
+
+    int32_t qi = __float2int_rn(v / s);
+    qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
+    xq[gi * 32u + lane] = (int8_t)qi;
+    xh[gi * 32u + lane] = __float2half_rn((float)qi * s);
+
+    float sm = v;
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1)
+        sm += __shfl_down_sync(0xffffffffu, sm, o);
+    if (lane == 0u) xsc[gi] = make_float2(s, sm);
+
+    int32_t iq = qi;
+    #pragma unroll
+    for (int o = 8; o > 0; o >>= 1)
+        iq += __shfl_down_sync(0xffffffffu, iq, o, 16);
+    if (lane == 0u || lane == 16u)
+        xqsum[gi * 2u + (lane >> 4)] = iq;
+}
+
+/* ── Per-group int dots. Each returns the group's float contribution for
+ * every token: the weight bytes are loaded once and the token loop stays
+ * inside so prefill amortizes the fetch. `acc` is [MQX_MAX_TOK] registers;
+ * the unrolled loop keeps its indices constant so it never spills. */
+
+/* Q4_K: nibbles are unsigned (bias lives in the min term).
+ * out = d*sc*xs*Σxq·nib − mn*m*xsum. */
+__device__ __forceinline__ void mxd_q4k(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q4_K_SIZE;
+    const uint32_t gw = g & 7u;
+    const float d  = mq_f16(blk[0], blk[1]);
+    const float mn = mq_f16(blk[2], blk[3]);
+    uint8_t sc, m;
+    mq_scale_min_k4(gw, blk + 4, &sc, &m);
+    const uint8_t *qs = blk + 16 + (size_t)(gw >> 1) * 32u;
+    const bool hi = (gw & 1u) != 0u;
+    const uint4 w0 = *reinterpret_cast<const uint4 *>(qs);
+    const uint4 w1 = *reinterpret_cast<const uint4 *>(qs + 16);
+    const uint32_t wd[8] = { w0.x, w0.y, w0.z, w0.w,
+                             w1.x, w1.y, w1.z, w1.w };
+    const float dsc = d * (float)sc;
+    const float mnm = mn * (float)m;
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t nib = hi ? ((wd[i] >> 4) & 0x0F0F0F0Fu)
+                                    : (wd[i] & 0x0F0F0F0Fu);
+            qx = mq_dp4a(nib, xv[i], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float2 sc2 = xsc[gi];
+        acc[ti] += dsc * (sc2.x * (float)qx) - mnm * sc2.y;
+    }
+}
+
+/* Q5_K: nibble | (bit gw of qh byte) << 4 — unsigned 0..31, same
+ * scale/min factoring as Q4_K. */
+__device__ __forceinline__ void mxd_q5k(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q5_K_SIZE;
+    const uint32_t gw = g & 7u;
+    const float d  = mq_f16(blk[0], blk[1]);
+    const float mn = mq_f16(blk[2], blk[3]);
+    uint8_t sc, m;
+    mq_scale_min_k4(gw, blk + 4, &sc, &m);
+    const uint8_t *qh = blk + 16;
+    const uint8_t *qs = blk + 48 + (size_t)(gw >> 1) * 32u;
+    const bool hi = (gw & 1u) != 0u;
+    const uint4 w0 = *reinterpret_cast<const uint4 *>(qs);
+    const uint4 w1 = *reinterpret_cast<const uint4 *>(qs + 16);
+    const uint4 h0 = *reinterpret_cast<const uint4 *>(qh);
+    const uint4 h1 = *reinterpret_cast<const uint4 *>(qh + 16);
+    const uint32_t wd[8] = { w0.x, w0.y, w0.z, w0.w,
+                             w1.x, w1.y, w1.z, w1.w };
+    const uint32_t hd[8] = { h0.x, h0.y, h0.z, h0.w,
+                             h1.x, h1.y, h1.z, h1.w };
+    const float dsc = d * (float)sc;
+    const float mnm = mn * (float)m;
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t nib = hi ? ((wd[i] >> 4) & 0x0F0F0F0Fu)
+                                    : (wd[i] & 0x0F0F0F0Fu);
+            const uint32_t hb = ((hd[i] >> gw) & 0x01010101u) << 4;
+            qx = mq_dp4a(nib | hb, xv[i], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float2 sc2 = xsc[gi];
+        acc[ti] += dsc * (sc2.x * (float)qx) - mnm * sc2.y;
+    }
+}
+
+/* Q6_K: 6-bit fields (ql nibble | qh 2 bits << 4) − 32, with the int8 scale
+ * switching at element 16. Two half accumulators honor that boundary; the
+ * −32 offset cancels against the per-half activation sums. */
+__device__ __forceinline__ void mxd_q6k(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q6_K_SIZE;
+    const uint32_t G = g & 7u;
+    const uint32_t half = G >> 2;
+    const uint32_t j = G & 3u;
+    const float d = mq_f16(blk[208], blk[209]);
+    const uint8_t *ql = blk + (size_t)half * 64u + ((j & 1u) ? 32u : 0u);
+    const uint8_t *qh = blk + 128 + (size_t)half * 32u;
+    const int8_t  *sc = (const int8_t *)(blk + 192) + (size_t)half * 8u
+                      + (size_t)j * 2u;
+    const uint32_t shift = j * 2u;
+    const uint4 l0 = *reinterpret_cast<const uint4 *>(ql);
+    const uint4 l1 = *reinterpret_cast<const uint4 *>(ql + 16);
+    const uint4 h0 = *reinterpret_cast<const uint4 *>(qh);
+    const uint4 h1 = *reinterpret_cast<const uint4 *>(qh + 16);
+    const uint32_t lw[8] = { l0.x, l0.y, l0.z, l0.w, l1.x, l1.y, l1.z, l1.w };
+    const uint32_t hw[8] = { h0.x, h0.y, h0.z, h0.w, h1.x, h1.y, h1.z, h1.w };
+    const float s0 = (float)sc[0], s1 = (float)sc[1];
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t pa = 0, pb = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t lo = (j < 2u) ? (lw[i] & 0x0F0F0F0Fu)
+                                        : ((lw[i] >> 4) & 0x0F0F0F0Fu);
+            const uint32_t hb = ((hw[i] >> shift) & 0x03030303u) << 4;
+            if (i < 4u) pa = mq_dp4a(lo | hb, xv[i], pa);
+            else        pb = mq_dp4a(lo | hb, xv[i], pb);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float xsg = xsc[gi].x;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsg * (s0 * (float)(pa - 32 * q2.x)
+                           + s1 * (float)(pb - 32 * q2.y));
+    }
+}
+
+/* Q8_0: weights are already int8 — a pure s8·s8 dot. */
+__device__ __forceinline__ void mxd_q8_0(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q8_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 2);
+    const uint4 q1 = *reinterpret_cast<const uint4 *>(blk + 18);
+    const uint32_t wd[8] = { q0.x, q0.y, q0.z, q0.w,
+                             q1.x, q1.y, q1.z, q1.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++)
+            qx = mq_dp4a(wd[i], xv[i], qx);
+        const size_t gi = (size_t)t * ng + g;
+        acc[ti] += d * xsc[gi].x * (float)qx;
+    }
+}
+
+/* Q4_0: value = (nibble − 8)*d. Low nibble of byte j → element j, high →
+ * element j+16, matching the fp kernel's pairing. The −8 offset folds into
+ * the whole-group activation sum. */
+__device__ __forceinline__ void mxd_q4_0(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q4_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 2);
+    const uint32_t wd[4] = { q0.x, q0.y, q0.z, q0.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 4u; i++) {
+            qx = mq_dp4a(wd[i] & 0x0F0F0F0Fu, xv[i], qx);
+            qx = mq_dp4a((wd[i] >> 4) & 0x0F0F0F0Fu, xv[i + 4u], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsc[gi].x * (float)(qx - 8 * (q2.x + q2.y));
+    }
+}
+
+/* Q5_0: value = ((nibble | hbit<<4) − 16)*d. The 32 high bits live in a
+ * 4-byte field; mask*0x00204081 scatters bits 0..3 into byte lanes. */
+__device__ __forceinline__ void mxd_q5_0(
+    const uint8_t *row, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_Q5_0_SIZE;
+    const float d = mq_f16(blk[0], blk[1]);
+    const uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8)
+                      | ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
+    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 6);
+    const uint32_t wd[4] = { q0.x, q0.y, q0.z, q0.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 4u; i++) {
+            const uint32_t hbl =
+                (((qh >> (4u * i)) & 0xFu) * 0x00204081u) & 0x01010101u;
+            const uint32_t hbh =
+                (((qh >> (16u + 4u * i)) & 0xFu) * 0x00204081u) & 0x01010101u;
+            qx = mq_dp4a((wd[i] & 0x0F0F0F0Fu) | (hbl << 4), xv[i], qx);
+            qx = mq_dp4a(((wd[i] >> 4) & 0x0F0F0F0Fu) | (hbh << 4),
+                         xv[i + 4u], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsc[gi].x * (float)(qx - 16 * (q2.x + q2.y));
+    }
+}
+
+/* Prefetched-group variant: the lane's next group's packed bytes are
+ * loaded while the current group's dp4a chain runs, hiding one DRAM
+ * latency per stride. LOAD fills a register blob; CALC consumes it. */
+#define MQ_DEFINE_MATVEC_XQ_PF(NAME, BLOB, LOAD, CALC)                       \
+__global__ void NAME(const uint8_t *w, const int8_t *xq, const float2 *xsc,\
+                     const int32_t *xqsum, float *out,                       \
+                     uint32_t n_tok, size_t out_stride,                      \
+                     size_t rows, uint32_t n_groups, size_t row_bytes)       \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const uint32_t t0 = blockIdx.x * MQX_MAX_TOK;                            \
+    if (t0 >= n_tok) return;                                                 \
+    const size_t row = (size_t)blockIdx.y * MQ_WARPS + (threadIdx.x >> 5);   \
+    if (row >= rows) return;                                                 \
+    const uint8_t *rw = w + row * row_bytes;                                 \
+    float acc[MQX_MAX_TOK];                                                  \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) acc[i] = 0.0f;               \
+    BLOB cur;                                                                \
+    if (lane < n_groups) cur = LOAD(rw, lane);                               \
+    for (uint32_t g = lane; g < n_groups; g += 32u) {                        \
+        const uint32_t gn = g + 32u;                                         \
+        BLOB nxt;                                                            \
+        if (gn < n_groups) nxt = LOAD(rw, gn);                               \
+        CALC(&cur, g, xq, xsc, xqsum, t0, n_tok, n_groups, acc);             \
+        cur = nxt;                                                           \
+    }                                                                        \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) {                            \
+        const uint32_t t = t0 + i;                                           \
+        if (t >= n_tok) break;                                               \
+        const float v = mq_warp_reduce(acc[i]);                              \
+        if (lane == 0u) out[(size_t)t * out_stride + row] = v;               \
+    }                                                                        \
+}
+
+/* Q4_K blob: 16B block header (d, dm, scale table) + the lane's 32B
+ * nibble window for this group. */
+typedef struct { uint4 hd, w0, w1; } Mq4Blob;
+
+__device__ __forceinline__ Mq4Blob mxq4_load(const uint8_t *row, uint32_t g)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q4_K_SIZE;
+    const uint8_t *qs = blk + 16 + (size_t)((g & 7u) >> 1) * 32u;
+    Mq4Blob v;
+    v.hd = *reinterpret_cast<const uint4 *>(blk);
+    v.w0 = *reinterpret_cast<const uint4 *>(qs);
+    v.w1 = *reinterpret_cast<const uint4 *>(qs + 16);
+    return v;
+}
+
+/* Byte i of the 12-byte packed scale table (block bytes 4..15) via
+ * register ops — taking a byte pointer into the blob would spill it. */
+__device__ __forceinline__ uint32_t mq4_tab(const Mq4Blob *v, uint32_t i)
+{
+    const uint32_t w = i < 4u ? v->hd.y : (i < 8u ? v->hd.z : v->hd.w);
+    return (w >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+__device__ __forceinline__ void mxq4_calc(
+    const Mq4Blob *v, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const float d  = __half2float(__ushort_as_half((unsigned short)v->hd.x));
+    const float mn = __half2float(__ushort_as_half(
+        (unsigned short)(v->hd.x >> 16)));
+    const uint32_t gw = g & 7u;
+    uint8_t sc, m;
+    if (gw < 4u) {
+        sc = (uint8_t)(mq4_tab(v, gw) & 63u);
+        m  = (uint8_t)(mq4_tab(v, gw + 4u) & 63u);
+    } else {
+        sc = (uint8_t)((mq4_tab(v, gw + 4u) & 0x0Fu)
+                     | ((mq4_tab(v, gw - 4u) >> 6) << 4));
+        m  = (uint8_t)(((mq4_tab(v, gw + 4u) >> 4) & 0x0Fu)
+                     | ((mq4_tab(v, gw) >> 6) << 4));
+    }
+    const bool hi = (gw & 1u) != 0u;
+    const uint32_t wd[8] = { v->w0.x, v->w0.y, v->w0.z, v->w0.w,
+                             v->w1.x, v->w1.y, v->w1.z, v->w1.w };
+    const float dsc = d * (float)sc;
+    const float mnm = mn * (float)m;
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t nib = hi ? ((wd[i] >> 4) & 0x0F0F0F0Fu)
+                                    : (wd[i] & 0x0F0F0F0Fu);
+            qx = mq_dp4a(nib, xv[i], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float2 sc2 = xsc[gi];
+        acc[ti] += dsc * (sc2.x * (float)qx) - mnm * sc2.y;
+    }
+}
+
+/* Q6_K blob: the lane's 32B ql window + 32B qh window + all 16 scale
+ * bytes + the 2B superblock scale. */
+typedef struct { uint4 l0, l1, h0, h1, sc; uint32_t dv; } Mq6Blob;
+
+__device__ __forceinline__ Mq6Blob mxq6_load(const uint8_t *row, uint32_t g)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q6_K_SIZE;
+    const uint32_t G = g & 7u;
+    const uint32_t half = G >> 2;
+    const uint8_t *ql = blk + (size_t)half * 64u + ((G & 1u) ? 32u : 0u);
+    const uint8_t *qh = blk + 128 + (size_t)half * 32u;
+    Mq6Blob v;
+    v.l0 = *reinterpret_cast<const uint4 *>(ql);
+    v.l1 = *reinterpret_cast<const uint4 *>(ql + 16);
+    v.h0 = *reinterpret_cast<const uint4 *>(qh);
+    v.h1 = *reinterpret_cast<const uint4 *>(qh + 16);
+    v.sc = *reinterpret_cast<const uint4 *>(blk + 192);
+    v.dv = *(const uint16_t *)(blk + 208);
+    return v;
+}
+
+__device__ __forceinline__ void mxq6_calc(
+    const Mq6Blob *v, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint32_t G = g & 7u;
+    const uint32_t j = G & 3u;
+    const float d = __half2float(__ushort_as_half(
+        (unsigned short)v->dv));
+    const uint32_t half = G >> 2;
+    const uint32_t si = half * 8u + j * 2u;
+    const uint32_t sw = si < 4u ? v->sc.x : (si < 8u ? v->sc.y
+                      : (si < 12u ? v->sc.z : v->sc.w));
+    const int8_t s0 = (int8_t)((sw >> ((si & 3u) * 8u)) & 0xFFu);
+    const int8_t s1 = (int8_t)((sw >> (((si + 1u) & 3u) * 8u)) & 0xFFu);
+    const uint32_t shift = j * 2u;
+    const uint32_t lw[8] = { v->l0.x, v->l0.y, v->l0.z, v->l0.w,
+                             v->l1.x, v->l1.y, v->l1.z, v->l1.w };
+    const uint32_t hw[8] = { v->h0.x, v->h0.y, v->h0.z, v->h0.w,
+                             v->h1.x, v->h1.y, v->h1.z, v->h1.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t pa = 0, pb = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t lo = (j < 2u) ? (lw[i] & 0x0F0F0F0Fu)
+                                        : ((lw[i] >> 4) & 0x0F0F0F0Fu);
+            const uint32_t hb = ((hw[i] >> shift) & 0x03030303u) << 4;
+            if (i < 4u) pa = mq_dp4a(lo | hb, xv[i], pa);
+            else        pb = mq_dp4a(lo | hb, xv[i], pb);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float xsg = xsc[gi].x;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsg * ((float)s0 * (float)(pa - 32 * q2.x)
+                           + (float)s1 * (float)(pb - 32 * q2.y));
+    }
+}
+
+/* One warp per output row, same shape as the f32 kernels; the lane strides
+ * groups and keeps a per-token int8/dot accumulator set in registers. */
+#define MQ_DEFINE_MATVEC_XQ(NAME, GRPDOT)                                    \
+__global__ void NAME(const uint8_t *w, const int8_t *xq, const float2 *xsc,\
+                     const int32_t *xqsum, float *out,                       \
+                     uint32_t n_tok, size_t out_stride,                      \
+                     size_t rows, uint32_t n_groups, size_t row_bytes)       \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const uint32_t t0 = blockIdx.x * MQX_MAX_TOK;                            \
+    if (t0 >= n_tok) return;                                                 \
+    const size_t row = (size_t)blockIdx.y * MQ_WARPS + (threadIdx.x >> 5);   \
+    if (row >= rows) return;                                                 \
+    const uint8_t *rw = w + row * row_bytes;                                 \
+    float acc[MQX_MAX_TOK];                                                  \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) acc[i] = 0.0f;               \
+    for (uint32_t g = lane; g < n_groups; g += 32u)                          \
+        GRPDOT(rw, g, xq, xsc, xqsum, t0, n_tok, n_groups, acc);             \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) {                            \
+        const uint32_t t = t0 + i;                                           \
+        if (t >= n_tok) break;                                               \
+        const float v = mq_warp_reduce(acc[i]);                              \
+        if (lane == 0u) out[(size_t)t * out_stride + row] = v;               \
+    }                                                                        \
+}
+
+MQ_DEFINE_MATVEC_XQ_PF(k_mmq_mvx_q4k, Mq4Blob, mxq4_load, mxq4_calc)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q5k,  mxd_q5k)
+MQ_DEFINE_MATVEC_XQ_PF(k_mmq_mvx_q6k, Mq6Blob, mxq6_load, mxq6_calc)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q8_0, mxd_q8_0)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q4_0, mxd_q4_0)
+MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q5_0, mxd_q5_0)
+
+extern "C" bool oc_cuda_mmq_xq_supported(uint32_t qtype, size_t cols)
+{
+    if (cols == 0 || (cols % 32u) != 0u) return false;
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S: case OC_QUANT_Q4_K_M:
+    case OC_QUANT_Q5_K_S: case OC_QUANT_Q5_K_M:
+    case OC_QUANT_Q6_K:
+    case OC_QUANT_Q8_0:   case OC_QUANT_AL8:
+    case OC_QUANT_Q4_0:   case OC_QUANT_AL5:
+    case OC_QUANT_Q5_0:   case OC_QUANT_AL6:
+        /* K-quants additionally need whole super-blocks per row. */
+        return oc_cuda_mmq_supported(qtype, cols);
+    default:
+        return false;
+    }
+}
+
+extern "C" bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq,
+                                       float *d_xsc, int32_t *d_xqsum,
+                                       void *d_xh, uint32_t n_tok,
+                                       size_t cols, size_t x_stride,
+                                       void *stream)
+{
+    if (!d_x || !d_xq || !d_xsc || !d_xqsum || !d_xh || n_tok == 0 ||
+        cols == 0 || (cols % 32u) != 0u || n_tok > 16u * MQX_MAX_TOK)
+        return false;
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    dim3 grid((n_groups + 3u) / 4u, n_tok);
+    k_mmq_quant_x<<<grid, 128u, 0, (cudaStream_t)stream>>>(
+        d_x, d_xq, (float2 *)d_xsc, d_xqsum, (__half *)d_xh,
+        n_groups, x_stride);
+    return cudaGetLastError() == cudaSuccess;
+}
+
+/* Tensor-core batch GEMM entry points (defined below, after the
+ * m16n8k8 fp16 fragment helpers and tile constants). */
+static bool mg_mma_capable(void);
+__global__ void k_mmq_gemm_xh_q4k(const uint8_t *, const __half *,
+                                  float *, uint32_t,
+                                  size_t, size_t, uint32_t, size_t);
+__global__ void k_mmq_gemm_xh_q6k(const uint8_t *, const __half *,
+                                  float *, uint32_t,
+                                  size_t, size_t, uint32_t, size_t);
+#define MGH_RT      32u   /* weight rows per block */
+#define MGH_TT      32u   /* tokens per block      */
+#define MGH_THREADS 256u
+#define MGH_SMEM_BYTES (MGH_RT * 512u + MGH_TT * 512u)  /* 32 KB */
+
+/* Slim variant: 64-elem slots halve shared memory to 16KB, letting three
+ * blocks reside per SM (24 warps vs 16). The stage is rebalanced so all
+ * 256 threads carry a half-unit: tid<128 stage a 16-element weight
+ * half-group, tid>=128 stage a 16-element activation half-segment. */
+#define MGQ_HK        64u
+#define MGQ_HRB       (MGQ_HK * 2u)
+#define MGQ_H_BYTES   (MGH_RT * MGQ_HRB)    /* 4 KB per half buffer    */
+#define MGQ_SMEM      (4u * MGQ_H_BYTES)    /* 16 KB total             */
+
+/* int8-MMA (m8n8k16.s8) slim GEMM tiles: raw 48B staged weight row
+ * (16B hdr + 32B qs window), 80B padded int8 x row, float2 x-scales. */
+#define MGI_TT      64u                     /* tokens per int8 block tile */
+#define MGI_WROW    48u
+#define MGI_XROW    80u
+#define MGI_W_BYTES (MGH_RT * MGI_WROW)
+#define MGI_X_BYTES (MGI_TT * MGI_XROW)
+#define MGI_S_CNT   (MGI_TT * 2u)
+#define MGI_S_BYTES (MGI_S_CNT * 8u)
+#define MGI_BUF     (MGI_W_BYTES + MGI_X_BYTES + MGI_S_BYTES)
+#define MGI_SMEM    (2u * MGI_BUF)
+
+__global__ void k_mmq_gemm_xh_q4k_s(const uint8_t *w, const __half *xh,
+                                    float *out, uint32_t n_tok,
+                                    size_t out_stride, size_t rows,
+                                    uint32_t n_groups, size_t row_bytes);
+__global__ void k_mmq_gemm_xi_q4k(const uint8_t *w, const int8_t *xq,
+                                  const float2 *xsc, float *out,
+                                  uint32_t n_tok, size_t out_stride,
+                                  size_t rows, uint32_t n_groups,
+                                  size_t row_bytes);
+__global__ void k_mmq_gemm_xh_q6k_s(const uint8_t *w, const __half *xh,
+                                    float *out, uint32_t n_tok,
+                                    size_t out_stride, size_t rows,
+                                    uint32_t n_groups, size_t row_bytes);
+
+extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
+                                      const int8_t *d_xq, const float *d_xsc,
+                                      const int32_t *d_xqsum,
+                                      const void *d_xh,
+                                      float *d_out, uint32_t n_tok,
+                                      size_t out_stride, size_t rows,
+                                      size_t cols, void *stream)
+{
+    if (!d_weights || !d_xq || !d_xsc || !d_xqsum || !d_xh || !d_out ||
+        rows == 0 || n_tok == 0 || n_tok > 16u * MQX_MAX_TOK)
+        return false;
+    const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
+    if (row_bytes == 0) return false;
+
+    const uint32_t n_groups = (uint32_t)(cols / 32u);
+    const uint32_t block = MQ_WARPS * 32u;
+    cudaStream_t s = (cudaStream_t)stream;
+    const uint8_t *w = (const uint8_t *)d_weights;
+
+    /* Tensor-core path for the two K types Q4_K_M models are built from:
+     * once a tile is large enough that the dp4a kernel re-reads weights
+     * serially, the smem-staged f16 mma wins. Small row counts produce
+     * too few mma blocks to fill the SMs (rows=256 -> 8 blocks), so they
+     * keep the dp4a warp matvec whose grid is ~4x wider. */
+    if (n_tok >= 16u && rows >= 512u && mg_mma_capable()) {
+        const bool i8 = (qtype == (int)OC_QUANT_Q4_K_S ||
+                         qtype == (int)OC_QUANT_Q4_K_M);
+        const unsigned ttile = i8 ? MGI_TT : MGH_TT;
+        const unsigned rblk = (unsigned)((rows + MGH_RT - 1u) / MGH_RT);
+        const unsigned tblk = (unsigned)((n_tok + ttile - 1u) / ttile);
+        const unsigned nblk = rblk * tblk;
+        /* Slim slots are half size and four blocks fit an SM, so the slot
+         * count doubles and the fill target triples. */
+        const uint32_t n_slot = n_groups >> 1;
+        const unsigned target = 480u;
+        const unsigned target2 = 1152u;
+        /* K-split: when row-block x token-tile blocks underfill ~4 waves of
+         * SM residency, the tail wave idles most of the GPU — split the
+         * slot loop across gridDim.z and accumulate into a zeroed
+         * output. */
+        unsigned zsplit = 1u;
+        if (nblk < target && n_slot >= 8u) {
+            zsplit = (target + nblk - 1u) / nblk;
+            const unsigned maxz = n_slot / 4u;
+            if (zsplit > maxz) zsplit = maxz;
+        }
+        /* Long-K shapes tolerate a deeper split while there is ample
+         * parallelism; keep >=6 slots per slice so the pipeline prologue
+         * stays amortized. */
+        if (nblk < target2 && n_slot >= 24u) {
+            const unsigned want = (target2 + nblk - 1u) / nblk;
+            if (want > zsplit) {
+                zsplit = want;
+                const unsigned maxz = n_slot / 6u;
+                if (zsplit > maxz) zsplit = maxz;
+            }
+        }
+        const dim3 ggrid(rblk, tblk, zsplit);
+        if (zsplit > 1u)
+            cudaMemset2DAsync(d_out, out_stride * sizeof(float), 0,
+                              rows * sizeof(float), n_tok, s);
+        switch ((OcGgufQuantizationType)qtype) {
+        case OC_QUANT_Q4_K_S:
+        case OC_QUANT_Q4_K_M:
+            k_mmq_gemm_xi_q4k<<<ggrid, MGH_THREADS, MGI_SMEM, s>>>(
+                w, d_xq, (const float2 *)d_xsc, d_out, n_tok, out_stride,
+                rows, n_groups, row_bytes);
+            return cudaGetLastError() == cudaSuccess;
+        case OC_QUANT_Q6_K:
+            k_mmq_gemm_xh_q6k_s<<<ggrid, MGH_THREADS, MGQ_SMEM, s>>>(
+                w, (const __half *)d_xh, d_out, n_tok, out_stride,
+                rows, n_groups, row_bytes);
+            return cudaGetLastError() == cudaSuccess;
+        default:
+            break;
+        }
+    }
+
+    const dim3 grid((n_tok + MQX_MAX_TOK - 1u) / MQX_MAX_TOK,
+                    (unsigned)((rows + MQ_WARPS - 1u) / MQ_WARPS));
+    switch ((OcGgufQuantizationType)qtype) {
+    case OC_QUANT_Q4_K_S:
+    case OC_QUANT_Q4_K_M:
+        k_mmq_mvx_q4k<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q5_K_S:
+    case OC_QUANT_Q5_K_M:
+        k_mmq_mvx_q5k<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q6_K:
+        k_mmq_mvx_q6k<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q8_0:
+    case OC_QUANT_AL8:
+        k_mmq_mvx_q8_0<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q4_0:
+    case OC_QUANT_AL5:
+        k_mmq_mvx_q4_0<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    case OC_QUANT_Q5_0:
+    case OC_QUANT_AL6:
+        k_mmq_mvx_q5_0<<<grid, block, 0, s>>>(w, d_xq, (const float2 *)d_xsc, d_xqsum,
+            d_out, n_tok, out_stride, rows, n_groups, row_bytes);
+        break;
+    default:
+        return false;
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+
+/* ─── Tensor-core prefill GEMM (m16n8k8 f16·f16→f32 mma) ─────────────
+ *
+ * The first tensor-core revision staged int8 CODES and ran an fp32
+ * scale/min epilogue on the s32 accumulators every 32-element group.
+ * A phase bisection showed that epilogue cost ~75% of kernel time —
+ * the integer accumulators can never roll past a quant-group boundary.
+ * This revision folds every scale into fp16 during shared-memory
+ * staging instead: swf[] holds true weights (code·(sc·d) − mn·dm) and
+ * sxf[] holds scaled activations (xq·xs), so the mma accumulates the
+ * finished dot product directly in fp32. There is no per-group epilogue
+ * at all — the only tail work is the store.
+ *
+ * m16n8k8 is Turing's fp16 shape (sm_75+). Fragment layout (PTX ISA,
+ * mma.m16n8k8.row.col.f32.f16.f16.f32):
+ *   A (16m×8k f16): lane holds 2 u32 — (row lane/4 +{0,8}, k (lane%4)*2+{0,1})
+ *   B (8k×8n  f16): lane holds 1 u32 — (k (lane%4)*2+{0,1}, col lane/4)
+ *   C (16m×8n f32): lane holds 4 f32 — (row lane/4 +{0,8}, col (lane%4)*2+{0,1})
+ * A rows are TOKENS (the activation tile) and B cols are WEIGHT rows,
+ * so each warp owns a 16-token × 8-weight output tile.
+ */
+
+#define MGH_SB        256u                  /* k elems / superblock    */
+#define MGH_HK        128u                  /* k elems / half tile     */
+#define MGH_HRB       (MGH_HK * 2u)         /* f16 half-tile row bytes */
+#define MGH_H_BYTES   (MGH_RT * MGH_HRB)    /* 8 KB per half buffer    */
+
+__device__ __forceinline__ void mg_hmma(float *c, uint32_t a0, uint32_t a1,
+                                        uint32_t b)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a0), "r"(a1), "r"(b));
+#else
+    (void)a0; (void)a1; (void)b;
+#endif
+}
+
+/* Bank-conflict swizzle on a 16-byte segment granularity: a 256B f16
+ * half-tile row strides 64 words ≡ bank 0, so the 8 rows a fragment
+ * touches would all land on one bank. XOR the segment index with the
+ * row's low bits to spread them. The same transform is applied on every
+ * smem write, so the k-order seen by the mma stays exact. */
+__device__ __forceinline__ uint32_t mg_swz(uint32_t row, uint32_t byte_off)
+{
+    return (((byte_off >> 4) ^ (row & 7u)) << 4) | (byte_off & 15u);
+}
+
+/* True when the device can execute m16n8k8 f16 mma (Turing sm_75+). */
+static bool mg_mma_capable(void)
+{
+    static int capable = -1;
+    if (capable < 0) {
+        int dev = -1, maj = 0, min = 0;
+        capable = (cudaGetDevice(&dev) == cudaSuccess &&
+                   cudaDeviceGetAttribute(&maj,
+                       cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+                   cudaDeviceGetAttribute(&min,
+                       cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess &&
+                   (maj > 7 || (maj == 7 && min >= 5))) ? 1 : 0;
+    }
+    return capable != 0;
+}
+
+/* Stage one 32-element activation segment into a half tile: the values
+ * are ALREADY f16 in the xh workspace, so this is a 64B copy (four 16B
+ * swizzled stores). segc is the local 32-elem column (0..3) in the half
+ * tile; the caller's pxh regs hold the prefetched data. */
+__device__ __forceinline__ void mg_stage_xh(uint8_t *xb, uint32_t t_,
+                                            uint32_t segc,
+                                            const uint4 *pxh)
+{
+    #pragma unroll
+    for (uint32_t i = 0; i < 4; i++) {
+        const uint32_t e2 = (segc * 32u + i * 8u) * 2u;
+        *(uint4 *)(xb + t_ * MGH_HRB + mg_swz(t_, e2)) = pxh[i];
+    }
+}
+
+/* ldmatrix wrappers: one instruction fetches a whole 8x8 f16 fragment
+ * per register, taking a per-lane row address. Our swizzled layout keeps
+ * 16B k-segments contiguous per row, so each lane points at
+ * (row, seg^k-slice). */
+#define MG_LDM4(d0, d1, d2, d3, addr)                                        \
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 "                 \
+                 "{%0,%1,%2,%3}, [%4];"                                      \
+                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)                    \
+                 : "r"((uint32_t)__cvta_generic_to_shared(addr)))
+#define MG_LDM2(d0, d1, addr)                                                \
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 "                 \
+                 "{%0,%1}, [%2];"                                            \
+                 : "=r"(d0), "=r"(d1)                                        \
+                 : "r"((uint32_t)__cvta_generic_to_shared(addr)))
+
+/* Half-superblock sweep: 16 k8-steps. Each iteration's LDSM.x4 grabs the
+ * A fragments for two steps (mats = {A0 k, A1 k, A0 k+1, A1 k+1}) and one
+ * LDSM.x2 both B fragments — six LDS.32 loads collapse into two
+ * instructions. The pair feeds two independent accumulator chains so
+ * HMMA latency overlaps; accb folds into acc when the half finishes. */
+__device__ __forceinline__ void mg_sweep_h(const uint8_t *sxf,
+                                           const uint8_t *swf,
+                                           uint32_t mt, uint32_t nt,
+                                           float *acc)
+{
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t am = lane >> 3;
+    const uint32_t arow = mt * 16u + ((am & 1u) << 3) + (lane & 7u);
+    const uint32_t brow = nt * 8u + (lane & 7u);
+    const uint8_t *ap = sxf + arow * MGH_HRB;
+    const uint8_t *bp = swf + brow * MGH_HRB;
+    float accb[4] = { 0.f, 0.f, 0.f, 0.f };
+    uint32_t a0, a1, a2, a3, b0, b1;
+
+#define MG_LPAIR(ks_)                                                        \
+    do {                                                                     \
+        const uint32_t sa_ = ((ks_) + (am >> 1)) * 16u;                      \
+        const uint32_t sb_ = (((ks_) + (lane >> 3)) & 15u) * 16u;            \
+        MG_LDM4(a0, a1, a2, a3, ap + mg_swz(arow, sa_));                     \
+        MG_LDM2(b0, b1, bp + mg_swz(brow, sb_));                             \
+    } while (0)
+
+    MG_LPAIR(0u);
+    #pragma unroll
+    for (uint32_t p = 0; p < MGH_HK / 8u; p += 2u) {
+        const uint32_t ta0 = a0, ta1 = a1, ta2 = a2, ta3 = a3;
+        const uint32_t tb0 = b0, tb1 = b1;
+        if (p + 2u < MGH_HK / 8u)
+            MG_LPAIR(p + 2u);
+        mg_hmma(acc,  ta0, ta1, tb0);
+        mg_hmma(accb, ta2, ta3, tb1);
+    }
+    acc[0] += accb[0]; acc[1] += accb[1];
+    acc[2] += accb[2]; acc[3] += accb[3];
+#undef MG_LPAIR
+}
+
+/* Store the warp's 16x8 tile: acc c0..c3 map to
+ * (tok tr+{0,8}, weight (lane%4)*2+{0,1}) within the warp tile. */
+__device__ __forceinline__ void mg_store(float *out, size_t out_stride,
+                                         uint32_t n_tok, size_t rows,
+                                         uint32_t t0, uint32_t r0,
+                                         uint32_t mt, uint32_t nt,
+                                         uint32_t tr, uint32_t lane,
+                                         const float *acc, bool accum)
+{
+    const uint32_t gt = t0 + mt * 16u + tr;
+    const uint32_t gr = r0 + nt * 8u + (lane & 3u) * 2u;
+    if (gt < n_tok) {
+        if (gr < rows) {
+            if (accum) atomicAdd(out + (size_t)gt * out_stride + gr, acc[0]);
+            else       out[(size_t)gt * out_stride + gr] = acc[0];
+        }
+        if (gr + 1u < rows) {
+            if (accum) atomicAdd(out + (size_t)gt * out_stride + gr + 1u, acc[1]);
+            else       out[(size_t)gt * out_stride + gr + 1u] = acc[1];
+        }
+    }
+    if (gt + 8u < n_tok) {
+        if (gr < rows) {
+            if (accum) atomicAdd(out + (size_t)(gt + 8u) * out_stride + gr, acc[2]);
+            else       out[(size_t)(gt + 8u) * out_stride + gr] = acc[2];
+        }
+        if (gr + 1u < rows) {
+            if (accum) atomicAdd(out + (size_t)(gt + 8u) * out_stride + gr + 1u,
+                                 acc[3]);
+            else       out[(size_t)(gt + 8u) * out_stride + gr + 1u] = acc[3];
+        }
+    }
+}
+
+/* ─── Ping-pong half-superblock pipeline ───────────────────────────────
+ * A phase bisection showed staging (gmem prefetch + dequant + smem
+ * stores) cost ~70% of kernel time once the sweep moved to ldmatrix —
+ * the serial stage -> barrier -> sweep -> barrier chain left the MIO
+ * pipe idle during compute and the tensor pipe idle during staging.
+ * This revision splits every 256-elem superblock into two 128-elem
+ * half tiles and runs them as ping-pong slots i = 0..2*n_sb-1: while
+ * the warps sweep slot i out of buffer i&1, they also stage slot i+1
+ * into buffer (i+1)&1 — decode/copy instructions fill the HMMA stall
+ * slots, and only ONE barrier per half separates producer from
+ * consumer. Stage roles split at warp granularity: threads 0-127
+ * decode weights (r2 = tid>>2 row, gc = tid&3 group column inside the
+ * half), threads 128-255 copy activations (t2, sc). Total smem stays
+ * 32 KB (wt 2x8KB + act 2x8KB) so two blocks still fit per SM. */
+
+/* Decode one 32-element group of a Q4_K block into 4 output uint4s
+ * (8 f16 each). Extracted from the stage path so it stays callable
+ * outside the kernel macros. */
+__device__ __forceinline__ void mg4_decode(uint4 *ov, uint32_t g2_,
+                                           const uint4 *pq,
+                                           const uint4 *phd)
+{
+    const uint8_t *hb = (const uint8_t *)phd;
+    const float d  = mq_f16(hb[0], hb[1]);
+    const float dm = mq_f16(hb[2], hb[3]);
+    uint8_t sc8, mn8;
+    mq_scale_min_k4(g2_, hb + 4, &sc8, &mn8);
+    const float sd = (float)sc8 * d, md = (float)mn8 * dm;
+    const __half2 sd2 = __float2half2_rn(sd);
+    const __half2 md2 = __float2half2_rn(-md);
+    const __half2 bm2 = __float2half2_rn(-1024.f);
+    const uint32_t nsh = (g2_ & 1u) * 4u;
+    const uint32_t *pw = (const uint32_t *)pq;
+    #pragma unroll
+    for (uint32_t i = 0; i < 4; i++) {
+        const uint32_t c0 = (pw[i * 2u]     >> nsh) & 0x0F0F0F0Fu;
+        const uint32_t c1 = (pw[i * 2u + 1u] >> nsh) & 0x0F0F0F0Fu;
+        union { __half2 h; uint32_t u; } p0, p1, p2, p3;
+        p0.u = __byte_perm(c0, 0x64646464u, 0x4140u);
+        p1.u = __byte_perm(c0, 0x64646464u, 0x4342u);
+        p2.u = __byte_perm(c1, 0x64646464u, 0x4140u);
+        p3.u = __byte_perm(c1, 0x64646464u, 0x4342u);
+        union { __half2 h; uint32_t u; } o0, o1, o2, o3;
+        o0.h = __hfma2(__hadd2(p0.h, bm2), sd2, md2);
+        o1.h = __hfma2(__hadd2(p1.h, bm2), sd2, md2);
+        o2.h = __hfma2(__hadd2(p2.h, bm2), sd2, md2);
+        o3.h = __hfma2(__hadd2(p3.h, bm2), sd2, md2);
+        ov[i].x = o0.u; ov[i].y = o1.u; ov[i].z = o2.u; ov[i].w = o3.u;
+    }
+}
+
+/* Same extraction for the 32-element Q6_K group (j = gc selects the
+ * qh bit slice and the scale pair). */
+__device__ __forceinline__ void mg6_decode(uint4 *ov, uint32_t j,
+                                           const uint4 *pql,
+                                           const uint4 *pqh,
+                                           uint32_t psc, uint32_t pdv)
+{
+    const uint32_t *lw = (const uint32_t *)pql;
+    const uint32_t *hw = (const uint32_t *)pqh;
+    const float d   = mq_f16((uint8_t)(pdv & 0xFFu), (uint8_t)(pdv >> 8));
+    const __half2 sda = __float2half2_rn(
+        (float)(int8_t)(psc & 0xFFu) * d);
+    const __half2 sdb = __float2half2_rn(
+        (float)(int8_t)((psc >> 8) & 0xFFu) * d);
+    const __half2 bm2 = __float2half2_rn(-1056.f);
+    const uint32_t sh = j * 2u;
+    const uint32_t sel = (j < 2u) ? 0u : 4u;
+    #pragma unroll
+    for (uint32_t i = 0; i < 4; i++) {
+        union { __half2 h; uint32_t u; } o0, o1, o2, o3;
+        #pragma unroll
+        for (uint32_t q = 0; q < 2; q++) {
+            const uint32_t l = lw[i * 2u + q], h = hw[i * 2u + q];
+            const uint32_t cc =
+                ((l >> sel) & 0x0F0F0F0Fu)
+                | ((((h >> sh) & 0x03030303u)) << 4);
+            union { __half2 h; uint32_t u; } p0, p1;
+            p0.u = __byte_perm(cc, 0x64646464u, 0x4140u);
+            p1.u = __byte_perm(cc, 0x64646464u, 0x4342u);
+            const __half2 sg = (i < 2u) ? sda : sdb;
+            const __half2 w0 = __hmul2(__hadd2(p0.h, bm2), sg);
+            const __half2 w1 = __hmul2(__hadd2(p1.h, bm2), sg);
+            if (q == 0u) { o0.h = w0; o1.h = w1; }
+            else         { o2.h = w0; o3.h = w1; }
+        }
+        ov[i].x = o0.u; ov[i].y = o1.u; ov[i].z = o2.u; ov[i].w = o3.u;
+    }
+}
+
+/* Q4_K: 144B device block = [d f16][dm f16][12B scale table][128B qs].
+ * Codes land in fp16 via the integer-bias trick — (1024 + code) is the
+ * exact f16 bit pattern 0x6400|code — built by one byte_perm per pair,
+ * then hadd2/hfma2 apply (code·sd − md) with fp16-scale precision. */
+__global__ void __launch_bounds__(MGH_THREADS, 2)
+k_mmq_gemm_xh_q4k(const uint8_t *w, const __half *xh,
+                  float *out, uint32_t n_tok, size_t out_stride,
+                  size_t rows, uint32_t n_groups, size_t row_bytes)
+{
+    extern __shared__ uint8_t mg_sm[];
+    uint8_t *swf = mg_sm;                       /* wt A | wt B (2x8KB) */
+    uint8_t *sxf = mg_sm + 2u * MGH_H_BYTES;    /* x  A | x  B (2x8KB) */
+
+    const uint32_t r0   = blockIdx.x * MGH_RT;
+    const uint32_t t0   = blockIdx.y * MGH_TT;
+    const uint32_t tid  = threadIdx.x;
+    const uint32_t lane = tid & 31u, warp = tid >> 5;
+    const uint32_t n_slot = n_groups >> 2;      /* 2 slots / superblock */
+
+    const uint32_t mt = warp & 1u, nt = warp >> 1, tr = lane >> 2;
+
+    const uint32_t r2  = tid >> 2, gc = tid & 3u;
+    const uint32_t t2  = (tid - 128u) >> 2, sc = (tid - 128u) & 3u;
+    const uint32_t gr2 = r0 + r2;
+    const uint32_t gt2 = t0 + t2;
+
+    /* K-split: this z-slice owns a contiguous slot range; empty slices
+     * (more z than slots) retire early. */
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
+    uint4 pq[2], phd, pxh[4];
+
+#define MG4_PRE(IS)                                                          \
+    do {                                                                     \
+        const uint32_t sb_ = (IS) >> 1, h_ = (IS) & 1u;                      \
+        if (tid < 128u) {                                                    \
+            const uint32_t g2_ = h_ * 4u + gc;                               \
+            if (gr2 < rows) {                                                \
+                const uint8_t *blk_ = w + gr2 * row_bytes                    \
+                                      + (size_t)sb_ * 144u;                  \
+                pq[0] = *(const uint4 *)(blk_ + 16u + (g2_ >> 1) * 32u);     \
+                pq[1] = *(const uint4 *)(blk_ + 32u + (g2_ >> 1) * 32u);     \
+                phd   = *(const uint4 *)blk_;                                \
+            } else {                                                         \
+                pq[0] = pq[1] = phd = make_uint4(0u, 0u, 0u, 0u);             \
+            }                                                                \
+        } else {                                                             \
+            const uint32_t sg2_ = h_ * 4u + sc;                              \
+            if (gt2 < n_tok) {                                               \
+                const __half *xh_ = xh + ((size_t)gt2 * n_groups            \
+                                          + (size_t)sb_ * 8u + sg2_) * 32u;  \
+                pxh[0] = *(const uint4 *)xh_;                                \
+                pxh[1] = *(const uint4 *)(xh_ + 8u);                         \
+                pxh[2] = *(const uint4 *)(xh_ + 16u);                        \
+                pxh[3] = *(const uint4 *)(xh_ + 24u);                        \
+            } else {                                                         \
+                pxh[0] = pxh[1] = pxh[2] = pxh[3] =                          \
+                    make_uint4(0u, 0u, 0u, 0u);                              \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define MG4_STAGE(IS)                                                        \
+    do {                                                                     \
+        const uint32_t h_ = (IS) & 1u;                                       \
+        if (tid < 128u) {                                                    \
+            const uint32_t g2_ = h_ * 4u + gc;                               \
+            uint8_t *dst = swf + h_ * MGH_H_BYTES + r2 * MGH_HRB;            \
+            uint4 ov[4];                                                     \
+            mg4_decode(ov, g2_, pq, &phd);                                   \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 4; i++)                                 \
+                *(uint4 *)(dst + mg_swz(r2, (gc * 32u + i * 8u) * 2u))       \
+                    = ov[i];                                                 \
+        } else {                                                             \
+            mg_stage_xh(sxf + h_ * MGH_H_BYTES, t2, sc, pxh);               \
+        }                                                                    \
+    } while (0)
+
+    MG4_PRE(s_lo);
+    MG4_STAGE(s_lo);
+    __syncthreads();
+    float acc[4] = { 0.f, 0.f, 0.f, 0.f };
+    for (uint32_t i = s_lo; i < s_hi; i++) {
+        const uint32_t h_ = i & 1u;
+        if (i + 1u < s_hi)
+            MG4_PRE(i + 1u);
+#ifndef MG_BENCH_STAGE_ONLY
+        mg_sweep_h(sxf + h_ * MGH_H_BYTES, swf + h_ * MGH_H_BYTES,
+                   mt, nt, acc);
+#endif
+        if (i + 1u < s_hi)
+            MG4_STAGE(i + 1u);
+        __syncthreads();
+    }
+    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc,
+             gridDim.z > 1u);
+#undef MG4_PRE
+#undef MG4_STAGE
+}
+
+/* Slim Q4_K GEMM: 64-element slots so three blocks (24 warps) fit an SM —
+ * the fp16 pipeline is stall-bound at four warps per scheduler, so extra
+ * resident warps raise issue utilization directly. Every thread stages a
+ * half-unit: tid<128 decode a 16-element half-group of one weight row,
+ * tid>=128 copy a 16-element activation half-segment. */
+__device__ __forceinline__ void mg4_decode16(uint4 *ov, uint32_t g2_,
+                                             const uint4 *pq,
+                                             const uint4 *phd)
+{
+    const uint8_t *hb = (const uint8_t *)phd;
+    const float d  = mq_f16(hb[0], hb[1]);
+    const float dm = mq_f16(hb[2], hb[3]);
+    uint8_t sc8, mn8;
+    mq_scale_min_k4(g2_, hb + 4, &sc8, &mn8);
+    const float sd = (float)sc8 * d, md = (float)mn8 * dm;
+    const __half2 sd2 = __float2half2_rn(sd);
+    const __half2 md2 = __float2half2_rn(-md);
+    const __half2 bm2 = __float2half2_rn(-1024.f);
+    const uint32_t nsh = (g2_ & 1u) * 4u;
+    const uint32_t *pw = (const uint32_t *)pq;
+    #pragma unroll
+    for (uint32_t i = 0; i < 2; i++) {
+        const uint32_t c0 = (pw[i * 2u]     >> nsh) & 0x0F0F0F0Fu;
+        const uint32_t c1 = (pw[i * 2u + 1u] >> nsh) & 0x0F0F0F0Fu;
+        union { __half2 h; uint32_t u; } p0, p1, p2, p3;
+        p0.u = __byte_perm(c0, 0x64646464u, 0x4140u);
+        p1.u = __byte_perm(c0, 0x64646464u, 0x4342u);
+        p2.u = __byte_perm(c1, 0x64646464u, 0x4140u);
+        p3.u = __byte_perm(c1, 0x64646464u, 0x4342u);
+        union { __half2 h; uint32_t u; } o0, o1, o2, o3;
+        o0.h = __hfma2(__hadd2(p0.h, bm2), sd2, md2);
+        o1.h = __hfma2(__hadd2(p1.h, bm2), sd2, md2);
+        o2.h = __hfma2(__hadd2(p2.h, bm2), sd2, md2);
+        o3.h = __hfma2(__hadd2(p3.h, bm2), sd2, md2);
+        ov[i].x = o0.u; ov[i].y = o1.u; ov[i].z = o2.u; ov[i].w = o3.u;
+    }
+}
+
+__device__ __forceinline__ void mg_sweep_s(const uint8_t *sxf,
+                                           const uint8_t *swf,
+                                           uint32_t mt, uint32_t nt,
+                                           float *acc)
+{
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t am = lane >> 3;
+    const uint32_t arow = mt * 16u + ((am & 1u) << 3) + (lane & 7u);
+    const uint32_t brow = nt * 8u + (lane & 7u);
+    const uint8_t *ap = sxf + arow * MGQ_HRB;
+    const uint8_t *bp = swf + brow * MGQ_HRB;
+    float accb[4] = { 0.f, 0.f, 0.f, 0.f };
+    uint32_t a0, a1, a2, a3, b0, b1;
+
+#define MG_LPAIR(ks_)                                                        \
+    do {                                                                     \
+        const uint32_t sa_ = ((ks_) + (am >> 1)) * 16u;                      \
+        const uint32_t sb_ = (((ks_) + (lane >> 3)) & 7u) * 16u;             \
+        MG_LDM4(a0, a1, a2, a3, ap + mg_swz(arow, sa_));                     \
+        MG_LDM2(b0, b1, bp + mg_swz(brow, sb_));                             \
+    } while (0)
+
+    MG_LPAIR(0u);
+    #pragma unroll
+    for (uint32_t p = 0; p < MGQ_HK / 8u; p += 2u) {
+        const uint32_t ta0 = a0, ta1 = a1, ta2 = a2, ta3 = a3;
+        const uint32_t tb0 = b0, tb1 = b1;
+        if (p + 2u < MGQ_HK / 8u)
+            MG_LPAIR(p + 2u);
+        mg_hmma(acc,  ta0, ta1, tb0);
+        mg_hmma(accb, ta2, ta3, tb1);
+    }
+    acc[0] += accb[0]; acc[1] += accb[1];
+    acc[2] += accb[2]; acc[3] += accb[3];
+#undef MG_LPAIR
+}
+
+__global__ void __launch_bounds__(MGH_THREADS, 4)
+k_mmq_gemm_xh_q4k_s(const uint8_t *w, const __half *xh,
+                    float *out, uint32_t n_tok, size_t out_stride,
+                    size_t rows, uint32_t n_groups, size_t row_bytes)
+{
+    extern __shared__ uint8_t mg_sm[];
+    uint8_t *swf = mg_sm;                        /* wt A | wt B (2x4KB) */
+    uint8_t *sxf = mg_sm + 2u * MGQ_H_BYTES;     /* x  A | x  B (2x4KB) */
+
+    const uint32_t r0   = blockIdx.x * MGH_RT;
+    const uint32_t t0   = blockIdx.y * MGH_TT;
+    const uint32_t tid  = threadIdx.x;
+    const uint32_t lane = tid & 31u, warp = tid >> 5;
+    const uint32_t n_slot = n_groups >> 1;       /* 4 slots / superblock */
+
+    const uint32_t mt = warp & 1u, nt = warp >> 1, tr = lane >> 2;
+
+    const uint32_t r2  = tid >> 2, gc = tid & 3u;
+    const uint32_t t2  = (tid - 128u) >> 2, sc2 = (tid - 128u) & 3u;
+    const uint32_t gr2 = r0 + r2;
+    const uint32_t gt2 = t0 + t2;
+
+    /* K-split: this z-slice owns a contiguous slot range; empty slices
+     * (more z than slots) retire early. */
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
+    uint4 pq, phd, pxh[2];
+
+#define MGQ_PRE(IS)                                                          \
+    do {                                                                     \
+        const uint32_t sb_ = (IS) >> 2, gq_ = (IS) & 3u;                     \
+        if (tid < 128u) {                                                    \
+            if (gr2 < rows) {                                                \
+                const uint8_t *blk_ = w + gr2 * row_bytes                    \
+                                      + (size_t)sb_ * 144u;                  \
+                pq  = *(const uint4 *)(blk_ + 16u + gq_ * 32u                \
+                                       + (gc & 1u) * 16u);                   \
+                phd = *(const uint4 *)blk_;                                  \
+            } else {                                                         \
+                pq = phd = make_uint4(0u, 0u, 0u, 0u);                       \
+            }                                                                \
+        } else {                                                             \
+            if (gt2 < n_tok) {                                               \
+                const __half *xh_ = xh + ((size_t)gt2 * n_groups             \
+                    + (size_t)sb_ * 8u + gq_ * 2u + (sc2 >> 1)) * 32u        \
+                    + (sc2 & 1u) * 16u;                                      \
+                pxh[0] = *(const uint4 *)xh_;                                \
+                pxh[1] = *(const uint4 *)(xh_ + 8u);                         \
+            } else {                                                         \
+                pxh[0] = pxh[1] = make_uint4(0u, 0u, 0u, 0u);                \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define MGQ_STAGE(IS)                                                        \
+    do {                                                                     \
+        const uint32_t h_ = (IS) & 1u;                                       \
+        if (tid < 128u) {                                                    \
+            const uint32_t g2_ = ((IS) & 3u) * 2u + (gc >> 1);               \
+            uint8_t *dst = swf + h_ * MGQ_H_BYTES + r2 * MGQ_HRB;            \
+            uint4 ov[2];                                                     \
+            mg4_decode16(ov, g2_, &pq, &phd);                                \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 2; i++)                                 \
+                *(uint4 *)(dst + mg_swz(r2, gc * 32u + i * 16u))             \
+                    = ov[i];                                                 \
+        } else {                                                             \
+            uint8_t *xb = sxf + h_ * MGQ_H_BYTES + t2 * MGQ_HRB;             \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 2; i++)                                 \
+                *(uint4 *)(xb + mg_swz(t2, sc2 * 32u + i * 16u))             \
+                    = pxh[i];                                                \
+        }                                                                    \
+    } while (0)
+
+    MGQ_PRE(s_lo);
+    MGQ_STAGE(s_lo);
+    __syncthreads();
+    float acc[4] = { 0.f, 0.f, 0.f, 0.f };
+    for (uint32_t i = s_lo; i < s_hi; i++) {
+        const uint32_t h_ = i & 1u;
+        if (i + 1u < s_hi)
+            MGQ_PRE(i + 1u);
+        mg_sweep_s(sxf + h_ * MGQ_H_BYTES, swf + h_ * MGQ_H_BYTES,
+                   mt, nt, acc);
+        if (i + 1u < s_hi)
+            MGQ_STAGE(i + 1u);
+        __syncthreads();
+    }
+    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc,
+             gridDim.z > 1u);
+#undef MGQ_PRE
+#undef MGQ_STAGE
+}
+
+/* ─── int8 tensor-core Q4_K GEMM (mma.m8n8k16.s8) ─────────────────────
+ * The fp16 pipeline dequantizes every weight to fp16 in smem; Turing's
+ * int8 tensor op runs at 2x the fp16 rate, so this kernel keeps weights
+ * packed: the stage is a raw copy of the group's 16B header + 32B
+ * nibble window, an A-fragment load is one LDS.32 + a nibble mask, and
+ * each 32-elem group closes out with the per-group correction
+ *   out += (d*sc) * xs * <w,x> - (dm*min) * sum(x)
+ * applied to the s32 accumulators — the same math the dp4a matvec runs.
+ * Fragment layout (PTX ISA, mma.m8n8k16.row.col.s32.s8.s8.s32):
+ *   A (8m x 16k s8): lane holds 1 u32 = A[lane/4][(lane%4)*4 + 0..3]
+ *   B (16k x 8n s8): lane holds 1 u32 = B[(lane%4)*4 + 0..3][lane/4]
+ *   C (8m x 8n s32): lane holds 2 s32 = C[lane/4][(lane%4)*2 +{0,1}]
+ * A rows are WEIGHT rows, B cols are TOKENS: each warp owns a
+ * 16-row x 32-token output tile (2m x 4n mma tiles). */
+
+__device__ __forceinline__ void mg_imma(int32_t *c, uint32_t a, uint32_t b)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+    asm volatile(
+        "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 "
+        "{%0,%1}, {%2}, {%3}, {%0,%1};"
+        : "+r"(c[0]), "+r"(c[1])
+        : "r"(a), "r"(b));
+#else
+    (void)a; (void)b;
+#endif
+}
+
+/* Byte i of the 12-byte scale table in a staged 16B block header. */
+__device__ __forceinline__ uint32_t mgi_tab(uint4 hd, uint32_t i)
+{
+    const uint32_t w = i < 4u ? hd.y : (i < 8u ? hd.z : hd.w);
+    return (w >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+__device__ __forceinline__ void mgi_scmin(uint4 hd, uint32_t gw,
+                                        float *wsc, float *wmn)
+{
+    const float d  = __half2float(__ushort_as_half((unsigned short)hd.x));
+    const float dm = __half2float(__ushort_as_half(
+        (unsigned short)(hd.x >> 16)));
+    uint32_t sc, mn;
+    if (gw < 4u) {
+        sc = mgi_tab(hd, gw) & 63u;
+        mn = mgi_tab(hd, gw + 4u) & 63u;
+    } else {
+        sc = (mgi_tab(hd, gw + 4u) & 0x0Fu)
+           | ((mgi_tab(hd, gw - 4u) >> 6) << 4);
+        mn = ((mgi_tab(hd, gw + 4u) >> 4) & 0x0Fu)
+           | ((mgi_tab(hd, gw) >> 6) << 4);
+    }
+    *wsc = d * (float)sc;
+    *wmn = dm * (float)mn;
+}
+
+__global__ void __launch_bounds__(MGH_THREADS, 3)
+k_mmq_gemm_xi_q4k(const uint8_t *w, const int8_t *xq, const float2 *xsc,
+                  float *out, uint32_t n_tok, size_t out_stride,
+                  size_t rows, uint32_t n_groups, size_t row_bytes)
+{
+    extern __shared__ uint8_t smem[];
+    uint8_t *swf = smem;                                   /* weight tiles */
+    uint8_t *sxf = swf + 2u * MGI_W_BYTES;                 /* x tiles      */
+    float2  *ssx = (float2 *)(sxf + 2u * MGI_X_BYTES);     /* x scales     */
+
+    const uint32_t r0 = blockIdx.x * MGH_RT;
+    const uint32_t t0 = blockIdx.y * MGH_TT;
+    const uint32_t tid  = threadIdx.x;
+    const uint32_t lane = tid & 31u, warp = tid >> 5;
+    const uint32_t lq = lane >> 2, l4 = lane & 3u;
+    /* 32x64 tile: warp (nt, mt) owns rows nt*8..+7 x tokens
+     * mt*32..+31 — one m8 by four n8 mma tiles. */
+    const uint32_t nt = warp >> 1, mt = warp & 1u;
+    const uint32_t n_slot = n_groups >> 1;          /* group pairs        */
+
+    /* Stage thread map: tid<96 handles weight uint4 j=tid (row j/3,
+     * segment j%3: 0=hdr,1=qs lo,2=qs hi); tid 96..255 stage the x
+     * tile: j=tid-96 covers 160 of the 64-token x 5-segment slots per
+     * iteration (two iterations for 320). */
+    const uint32_t wr = tid / 3u, wseg = tid - wr * 3u;
+    const uint32_t xj  = tid - 96u;
+    const bool    is_x = tid >= 96u;
+
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
+    uint4 pv[2];
+
+#define MGI_PRE(IS)                                                          \
+    do {                                                                     \
+        const uint32_t sb_ = (IS) >> 2, pq_ = (IS) & 3u;                     \
+        if (!is_x) {                                                         \
+            const uint32_t gr_ = r0 + wr;                                    \
+            if (gr_ < rows) {                                                \
+                const uint8_t *blk_ = w + gr_ * row_bytes                    \
+                                      + (size_t)sb_ * 144u;                  \
+                pv[0] = *(const uint4 *)(blk_ + (wseg == 0u                  \
+                        ? 0u : 16u + pq_ * 32u + (wseg - 1u) * 16u));        \
+            } else {                                                         \
+                pv[0] = make_uint4(0u, 0u, 0u, 0u);                          \
+            }                                                                \
+        } else {                                                             \
+            _Pragma("unroll")                                                \
+            for (uint32_t k_ = 0; k_ < 2u; k_++) {                           \
+                const uint32_t j_ = xj + k_ * 160u;                          \
+                const uint32_t xt_ = j_ / 5u, xs_ = j_ - xt_ * 5u;           \
+                const uint32_t gt_ = t0 + xt_;                               \
+                if (gt_ < n_tok) {                                           \
+                    if (xs_ < 4u) {                                          \
+                        pv[k_] = *(const uint4 *)(xq + ((size_t)gt_          \
+                            * n_groups + (IS) * 2u) * 32u + xs_ * 16u);      \
+                    } else {                                                 \
+                        pv[k_] = *(const uint4 *)(xsc + (size_t)gt_          \
+                            * n_groups + (IS) * 2u);                         \
+                    }                                                        \
+                } else {                                                     \
+                    pv[k_] = make_uint4(0u, 0u, 0u, 0u);                     \
+                }                                                            \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define MGI_STAGE(IS)                                                        \
+    do {                                                                     \
+        const uint32_t h_ = (IS) & 1u;                                       \
+        if (!is_x) {                                                         \
+            *(uint4 *)(swf + h_ * MGI_W_BYTES + wr * MGI_WROW                \
+                       + wseg * 16u) = pv[0];                                \
+        } else {                                                             \
+            _Pragma("unroll")                                                \
+            for (uint32_t k_ = 0; k_ < 2u; k_++) {                           \
+                const uint32_t j_ = xj + k_ * 160u;                          \
+                const uint32_t xt_ = j_ / 5u, xs_ = j_ - xt_ * 5u;           \
+                if (xs_ < 4u)                                                \
+                    *(uint4 *)(sxf + h_ * MGI_X_BYTES + xt_ * MGI_XROW       \
+                               + xs_ * 16u) = pv[k_];                        \
+                else                                                         \
+                    *(uint4 *)(ssx + h_ * MGI_S_CNT + xt_ * 2u) = pv[k_];    \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+    MGI_PRE(s_lo);
+    MGI_STAGE(s_lo);
+    __syncthreads();
+
+    /* acc[n][c]: n token tile, c column pair — one m8 row tile. */
+    float acc[4][2] = { { 0.f, 0.f }, { 0.f, 0.f },
+                        { 0.f, 0.f }, { 0.f, 0.f } };
+
+    for (uint32_t i = s_lo; i < s_hi; i++) {
+        const uint32_t h_ = i & 1u;
+        if (i + 1u < s_hi)
+            MGI_PRE(i + 1u);
+
+        const uint8_t *wt = swf + h_ * MGI_W_BYTES;
+        const uint8_t *xp = sxf + h_ * MGI_X_BYTES;
+        const float2  *sx = ssx + h_ * MGI_S_CNT;
+        const uint32_t a_row0 = nt * 8u + lq;
+        const uint32_t b_col0 = mt * 32u + lq;
+
+        #pragma unroll
+        for (uint32_t q = 0; q < 2u; q++) {
+            const uint32_t gw = (i & 3u) * 2u + q;
+            int32_t ci[4][2] = { { 0, 0 }, { 0, 0 },
+                                 { 0, 0 }, { 0, 0 } };
+
+            #pragma unroll
+            for (uint32_t s = 0; s < 2u; s++) {
+                const uint32_t w32 = *(const uint32_t *)(
+                    wt + a_row0 * MGI_WROW + 16u + s * 16u + l4 * 4u);
+                const uint32_t av = q ? ((w32 >> 4) & 0x0F0F0F0Fu)
+                                      : (w32 & 0x0F0F0F0Fu);
+                uint32_t bv[4];
+                #pragma unroll
+                for (uint32_t n = 0; n < 4u; n++)
+                    bv[n] = *(const uint32_t *)(
+                        xp + (b_col0 + n * 8u) * MGI_XROW
+                        + q * 32u + s * 16u + l4 * 4u);
+                #pragma unroll
+                for (uint32_t n = 0; n < 4u; n++)
+                    mg_imma(ci[n], av, bv[n]);
+            }
+
+            /* Per-group fixup: fold weight scale/min and activation
+             * scale/exact-sum into fp32. */
+            float wsc, wmn;
+            mgi_scmin(*(const uint4 *)(wt + a_row0 * MGI_WROW),
+                      gw, &wsc, &wmn);
+            #pragma unroll
+            for (uint32_t n = 0; n < 4u; n++) {
+                #pragma unroll
+                for (uint32_t c = 0; c < 2u; c++) {
+                    const float2 xs = sx[(mt * 32u + n * 8u
+                                         + l4 * 2u + c) * 2u + q];
+                    acc[n][c] += wsc * (xs.x * (float)ci[n][c])
+                               - wmn * xs.y;
+                }
+            }
+        }
+
+        if (i + 1u < s_hi)
+            MGI_STAGE(i + 1u);
+        __syncthreads();
+    }
+
+    /* Store: m8n8k16 C is (row lq, cols l4*2+{0,1}) — out[token][row]. */
+    const bool accum = gridDim.z > 1u;
+    const uint32_t gr = r0 + nt * 8u + lq;
+    if (gr < rows) {
+        #pragma unroll
+        for (uint32_t n = 0; n < 4u; n++) {
+            #pragma unroll
+            for (uint32_t c = 0; c < 2u; c++) {
+                const uint32_t gt = t0 + mt * 32u + n * 8u + l4 * 2u + c;
+                if (gt < n_tok) {
+                    float *po = out + (size_t)gt * out_stride + gr;
+                    if (accum) atomicAdd(po, acc[n][c]);
+                    else       *po = acc[n][c];
+                }
+            }
+        }
+    }
+#undef MGI_PRE
+#undef MGI_STAGE
+}
+
+/* Slim Q6_K GEMM: same 64-element slot / 4-blocks-per-SM structure as the
+ * Q4_K variant; each weight thread decodes a 16-element half-group from
+ * the group's ql/qh windows. */
+__device__ __forceinline__ void mg6_decode16(uint4 *ov, uint32_t j,
+                                             const uint4 *pql,
+                                             const uint4 *pqh,
+                                             uint32_t psc, uint32_t pdv,
+                                             uint32_t half16)
+{
+    const uint32_t *lw = (const uint32_t *)pql;
+    const uint32_t *hw = (const uint32_t *)pqh;
+    const float d   = mq_f16((uint8_t)(pdv & 0xFFu), (uint8_t)(pdv >> 8));
+    /* Group scale pair is (elems 0..15, elems 16..31) — the half flag
+     * selects which of the two int8 scales applies to this slice. */
+    const __half2 sg = __float2half2_rn(
+        (float)(int8_t)((psc >> (half16 * 8u)) & 0xFFu) * d);
+    const __half2 bm2 = __float2half2_rn(-1056.f);
+    const uint32_t sh = j * 2u;
+    const uint32_t sel = (j < 2u) ? 0u : 4u;
+    #pragma unroll
+    for (uint32_t i = 0; i < 2; i++) {
+        union { __half2 h; uint32_t u; } o0, o1, o2, o3;
+        #pragma unroll
+        for (uint32_t q = 0; q < 2; q++) {
+            const uint32_t l = lw[i * 2u + q], h = hw[i * 2u + q];
+            const uint32_t cc =
+                ((l >> sel) & 0x0F0F0F0Fu)
+                | ((((h >> sh) & 0x03030303u)) << 4);
+            union { __half2 h; uint32_t u; } p0, p1;
+            p0.u = __byte_perm(cc, 0x64646464u, 0x4140u);
+            p1.u = __byte_perm(cc, 0x64646464u, 0x4342u);
+            const __half2 w0 = __hmul2(__hadd2(p0.h, bm2), sg);
+            const __half2 w1 = __hmul2(__hadd2(p1.h, bm2), sg);
+            if (q == 0u) { o0.h = w0; o1.h = w1; }
+            else         { o2.h = w0; o3.h = w1; }
+        }
+        ov[i].x = o0.u; ov[i].y = o1.u; ov[i].z = o2.u; ov[i].w = o3.u;
+    }
+}
+
+__global__ void __launch_bounds__(MGH_THREADS, 4)
+k_mmq_gemm_xh_q6k_s(const uint8_t *w, const __half *xh,
+                    float *out, uint32_t n_tok, size_t out_stride,
+                    size_t rows, uint32_t n_groups, size_t row_bytes)
+{
+    extern __shared__ uint8_t mg_sm[];
+    uint8_t *swf = mg_sm;
+    uint8_t *sxf = mg_sm + 2u * MGQ_H_BYTES;
+
+    const uint32_t r0   = blockIdx.x * MGH_RT;
+    const uint32_t t0   = blockIdx.y * MGH_TT;
+    const uint32_t tid  = threadIdx.x;
+    const uint32_t lane = tid & 31u, warp = tid >> 5;
+    const uint32_t n_slot = n_groups >> 1;
+
+    const uint32_t mt = warp & 1u, nt = warp >> 1, tr = lane >> 2;
+
+    const uint32_t r2  = tid >> 2, gc = tid & 3u;
+    const uint32_t t2  = (tid - 128u) >> 2, sc2 = (tid - 128u) & 3u;
+    const uint32_t gr2 = r0 + r2;
+    const uint32_t gt2 = t0 + t2;
+
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
+    uint4 pql, pqh, pxh[2];
+    uint32_t psc, pdv;
+
+#define MG6Q_PRE(IS)                                                         \
+    do {                                                                     \
+        const uint32_t sb_ = (IS) >> 2, gq_ = (IS) & 3u;                     \
+        if (tid < 128u) {                                                    \
+            const uint32_t g2_ = gq_ * 2u + (gc >> 1);                       \
+            const uint32_t hf_ = g2_ >> 2, j_ = g2_ & 3u;                    \
+            if (gr2 < rows) {                                                \
+                const uint8_t *blk_ = w + gr2 * row_bytes                    \
+                                      + (size_t)sb_ * 224u;                  \
+                pql = *(const uint4 *)(blk_ + hf_ * 64u + (j_ & 1u) * 32u    \
+                                       + (gc & 1u) * 16u);                   \
+                pqh = *(const uint4 *)(blk_ + 128u + hf_ * 32u               \
+                                       + (gc & 1u) * 16u);                   \
+                psc = *(const uint16_t *)(blk_ + 192u + hf_ * 8u             \
+                                          + j_ * 2u);                        \
+                pdv = *(const uint16_t *)(blk_ + 208u);                      \
+            } else {                                                         \
+                pql = pqh = make_uint4(0u, 0u, 0u, 0u);                      \
+                psc = pdv = 0u;                                              \
+            }                                                                \
+        } else {                                                             \
+            if (gt2 < n_tok) {                                               \
+                const __half *xh_ = xh + ((size_t)gt2 * n_groups             \
+                    + (size_t)sb_ * 8u + gq_ * 2u + (sc2 >> 1)) * 32u        \
+                    + (sc2 & 1u) * 16u;                                      \
+                pxh[0] = *(const uint4 *)xh_;                                \
+                pxh[1] = *(const uint4 *)(xh_ + 8u);                         \
+            } else {                                                         \
+                pxh[0] = pxh[1] = make_uint4(0u, 0u, 0u, 0u);                \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define MG6Q_STAGE(IS)                                                       \
+    do {                                                                     \
+        const uint32_t h_ = (IS) & 1u;                                       \
+        if (tid < 128u) {                                                    \
+            const uint32_t g2_ = ((IS) & 3u) * 2u + (gc >> 1);               \
+            uint8_t *dst = swf + h_ * MGQ_H_BYTES + r2 * MGQ_HRB;            \
+            uint4 ov[2];                                                     \
+            mg6_decode16(ov, g2_ & 3u, &pql, &pqh, psc, pdv, gc & 1u);       \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 2; i++)                                 \
+                *(uint4 *)(dst + mg_swz(r2, gc * 32u + i * 16u))             \
+                    = ov[i];                                                 \
+        } else {                                                             \
+            uint8_t *xb = sxf + h_ * MGQ_H_BYTES + t2 * MGQ_HRB;             \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 2; i++)                                 \
+                *(uint4 *)(xb + mg_swz(t2, sc2 * 32u + i * 16u))             \
+                    = pxh[i];                                                \
+        }                                                                    \
+    } while (0)
+
+    MG6Q_PRE(s_lo);
+    MG6Q_STAGE(s_lo);
+    __syncthreads();
+    float acc[4] = { 0.f, 0.f, 0.f, 0.f };
+    for (uint32_t i = s_lo; i < s_hi; i++) {
+        const uint32_t h_ = i & 1u;
+        if (i + 1u < s_hi)
+            MG6Q_PRE(i + 1u);
+        mg_sweep_s(sxf + h_ * MGQ_H_BYTES, swf + h_ * MGQ_H_BYTES,
+                   mt, nt, acc);
+        if (i + 1u < s_hi)
+            MG6Q_STAGE(i + 1u);
+        __syncthreads();
+    }
+    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc,
+             gridDim.z > 1u);
+#undef MG6Q_PRE
+#undef MG6Q_STAGE
+}
+
+/* Q6_K: 224B device block = [128B ql][64B qh][16B int8 scales][d f16]
+ * (padded from the 210B on-disk stride for 16B alignment). Same slot
+ * pipeline; per slot a weight thread owns group g2 = h*4+gc: ql window
+ * [(g2>>2)*64 + (g2&1)*32, +32), qh window [128+(g2>>2)*32, +32), two
+ * scales at [192+(g2>>2)*8+(g2&3)*2, +2), d at [208,210). */
+__global__ void __launch_bounds__(MGH_THREADS, 2)
+k_mmq_gemm_xh_q6k(const uint8_t *w, const __half *xh,
+                  float *out, uint32_t n_tok, size_t out_stride,
+                  size_t rows, uint32_t n_groups, size_t row_bytes)
+{
+    extern __shared__ uint8_t mg_sm[];
+    uint8_t *swf = mg_sm;
+    uint8_t *sxf = mg_sm + 2u * MGH_H_BYTES;
+
+    const uint32_t r0   = blockIdx.x * MGH_RT;
+    const uint32_t t0   = blockIdx.y * MGH_TT;
+    const uint32_t tid  = threadIdx.x;
+    const uint32_t lane = tid & 31u, warp = tid >> 5;
+    const uint32_t n_slot = n_groups >> 2;
+
+    const uint32_t mt = warp & 1u, nt = warp >> 1, tr = lane >> 2;
+
+    const uint32_t r2  = tid >> 2, gc = tid & 3u;
+    const uint32_t t2  = (tid - 128u) >> 2, sc = (tid - 128u) & 3u;
+    const uint32_t gr2 = r0 + r2;
+    const uint32_t gt2 = t0 + t2;
+
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
+    uint4 pql[2], pqh[2], pxh[4];
+    uint32_t psc, pdv;
+
+#define MG6_PRE(IS)                                                          \
+    do {                                                                     \
+        const uint32_t sb_ = (IS) >> 1, h_ = (IS) & 1u;                      \
+        if (tid < 128u) {                                                    \
+            const uint32_t g2_ = h_ * 4u + gc;                               \
+            if (gr2 < rows) {                                                \
+                const uint8_t *blk_ = w + gr2 * row_bytes                    \
+                                      + (size_t)sb_ * 224u;                  \
+                pql[0] = *(const uint4 *)(blk_ + (g2_ >> 2) * 64u            \
+                                          + (g2_ & 1u) * 32u);              \
+                pql[1] = *(const uint4 *)(blk_ + (g2_ >> 2) * 64u            \
+                                          + (g2_ & 1u) * 32u + 16u);        \
+                pqh[0] = *(const uint4 *)(blk_ + 128u + (g2_ >> 2) * 32u);   \
+                pqh[1] = *(const uint4 *)(blk_ + 144u + (g2_ >> 2) * 32u);   \
+                psc = (uint32_t)blk_[192u + (g2_ >> 2) * 8u                  \
+                                     + (g2_ & 3u) * 2u]                      \
+                      | ((uint32_t)blk_[193u + (g2_ >> 2) * 8u               \
+                                     + (g2_ & 3u) * 2u] << 8);               \
+                pdv = (uint32_t)blk_[208u] | ((uint32_t)blk_[209u] << 8);    \
+            } else {                                                         \
+                pql[0] = pql[1] = pqh[0] = pqh[1] =                          \
+                    make_uint4(0u, 0u, 0u, 0u);                              \
+                psc = pdv = 0u;                                              \
+            }                                                                \
+        } else {                                                             \
+            const uint32_t sg2_ = h_ * 4u + sc;                              \
+            if (gt2 < n_tok) {                                               \
+                const __half *xh_ = xh + ((size_t)gt2 * n_groups            \
+                                          + (size_t)sb_ * 8u + sg2_) * 32u;  \
+                pxh[0] = *(const uint4 *)xh_;                                \
+                pxh[1] = *(const uint4 *)(xh_ + 8u);                         \
+                pxh[2] = *(const uint4 *)(xh_ + 16u);                        \
+                pxh[3] = *(const uint4 *)(xh_ + 24u);                        \
+            } else {                                                         \
+                pxh[0] = pxh[1] = pxh[2] = pxh[3] =                          \
+                    make_uint4(0u, 0u, 0u, 0u);                              \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define MG6_STAGE(IS)                                                        \
+    do {                                                                     \
+        const uint32_t h_ = (IS) & 1u;                                       \
+        if (tid < 128u) {                                                    \
+            uint8_t *dst = swf + h_ * MGH_H_BYTES + r2 * MGH_HRB;            \
+            uint4 ov[4];                                                     \
+            mg6_decode(ov, gc, pql, pqh, psc, pdv);                          \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 4; i++)                                 \
+                *(uint4 *)(dst + mg_swz(r2, (gc * 32u + i * 8u) * 2u))       \
+                    = ov[i];                                                 \
+        } else {                                                             \
+            mg_stage_xh(sxf + h_ * MGH_H_BYTES, t2, sc, pxh);               \
+        }                                                                    \
+    } while (0)
+
+    MG6_PRE(s_lo);
+    MG6_STAGE(s_lo);
+    __syncthreads();
+    float acc[4] = { 0.f, 0.f, 0.f, 0.f };
+    for (uint32_t i = s_lo; i < s_hi; i++) {
+        const uint32_t h_ = i & 1u;
+        if (i + 1u < s_hi)
+            MG6_PRE(i + 1u);
+#ifndef MG_BENCH_STAGE_ONLY
+        mg_sweep_h(sxf + h_ * MGH_H_BYTES, swf + h_ * MGH_H_BYTES,
+                   mt, nt, acc);
+#endif
+        if (i + 1u < s_hi)
+            MG6_STAGE(i + 1u);
+        __syncthreads();
+    }
+    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc,
+             gridDim.z > 1u);
+#undef MG6_PRE
+#undef MG6_STAGE
 }

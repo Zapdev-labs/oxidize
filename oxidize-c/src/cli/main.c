@@ -480,6 +480,19 @@ static OcError run_generation(const OcCliArgs *args)
     uint32_t recent[RECENT_CAP];
     size_t recent_len = 0;
 
+    /* CUDA fast path: whole-token device-resident decode + batched prefill.
+     * Greedy-without-penalty additionally keeps the sampling on the GPU —
+     * a repeat-penalized greedy still computes on the fast path but samples
+     * on the host so the penalty sees the logits. */
+    const bool fast_cuda = use_cuda && oc_cuda_fast_supported(&cuda_ctx);
+    const bool fast_greedy = fast_cuda &&
+        scfg.type == OC_SAMPLER_GREEDY && repeat_penalty == 1.0f;
+    if (fast_cuda) {
+        oc_log(OC_LOG_INFO, "cuda: fast path%s",
+               fast_greedy ? " (device-resident greedy decode)"
+                           : " (batched prefill, host sampling)");
+    }
+
     /* Prefill. Every prompt token is known up front, so on CPU they go
      * through oc_llama_prefill(), which pushes a chunk of them through each
      * weight matrix together instead of sweeping the whole model once per
@@ -493,6 +506,19 @@ static OcError run_generation(const OcCliArgs *args)
     uint32_t next_tok = ids[n_ids - 1];
     const double prefill_start = wall_now();
     if (use_cuda) {
+        if (fast_cuda) {
+            /* One async submission for the whole prompt: batched weight
+             * sweeps, no per-token sync. emit_first leaves the first
+             * generated token in the device ring for greedy decode. */
+            e = oc_cuda_fast_prefill(&cuda_ctx, ids, n_ids,
+                                     (uint32_t)sess.pos, fast_greedy);
+            if (e == OC_OK) {
+                sess.pos += (int64_t)n_ids;
+                e = oc_cuda_fast_wait(&cuda_ctx);
+            }
+            if (e == OC_OK && !fast_greedy)
+                e = oc_cuda_fast_logits(&cuda_ctx, logits);
+        } else {
         uint32_t advertised = args->prefill_chunk_size;
         if (advertised == 0 && have_plan && args->auto_tune)
             advertised = plan.chunked_prefill_tokens;
@@ -515,6 +541,7 @@ static OcError run_generation(const OcCliArgs *args)
         if (e == OC_OK) {
             e = oc_cuda_forward(&cuda_ctx, next_tok, sess.pos, logits);
             sess.pos++;
+        }
         }
     } else {
         uint32_t prefill_chunk = args->prefill_chunk_size;
@@ -546,6 +573,15 @@ static OcError run_generation(const OcCliArgs *args)
         bool eos_reached = false;
         OcMtpStats mtp_stats;
         memset(&mtp_stats, 0, sizeof mtp_stats);
+        /* Fast greedy decode pulls finished tokens out of the device ring in
+         * 64-token harvests; the GPU stays several chunks ahead because each
+         * oc_cuda_fast_decode call enqueues its whole sequence async. */
+        uint32_t fast_ring[64];
+        size_t fast_have = 0, fast_idx = 0;
+        if (fast_greedy) {
+            e = oc_cuda_fast_take(&cuda_ctx, 1, fast_ring);
+            if (e == OC_OK) fast_have = 1;
+        }
         double decode_start = wall_now();
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
             uint32_t sampled;
@@ -613,9 +649,38 @@ static OcError run_generation(const OcCliArgs *args)
                 }
                 continue;
             }
+            if (fast_greedy) {
+                /* Harvested tokens arrive from the device ring; submit the
+                 * next chunk as soon as the buffer drains so the GPU never
+                 * waits on the host. */
+                if (fast_idx >= fast_have) {
+                    /* Cap the submission by remaining KV room: the device
+                     * state has no n_ctx bound, so the host (which mirrors
+                     * pos 1:1) must stop the chain before overflow. */
+                    int64_t room = (int64_t)cuda_ctx.n_ctx - sess.pos;
+                    if (room <= 0) {
+                        oc_log(OC_LOG_WARN,
+                               "context window full at position %lld",
+                               (long long)sess.pos);
+                        break;
+                    }
+                    uint32_t want = (uint32_t)args->n_predict -
+                                    (uint32_t)emitted;
+                    if (want > 64u) want = 64u;
+                    if ((int64_t)want > room) want = (uint32_t)room;
+                    e = oc_cuda_fast_decode(&cuda_ctx, want);
+                    if (e != OC_OK) break;
+                    e = oc_cuda_fast_take(&cuda_ctx, want, fast_ring);
+                    if (e != OC_OK) break;
+                    fast_have = want;
+                    fast_idx = 0;
+                }
+                sampled = fast_ring[fast_idx++];
+            } else {
             sampled = oc_sample(logits, model.cfg.vocab_size, &scfg,
                                         recent, recent_len);
             scfg.seed++;
+            }
             if (oc_tokenizer_is_eog(&tok, sampled)) { eos_reached = true; break; }
 
             /* Decode + print the sampled token. */
@@ -632,11 +697,27 @@ static OcError run_generation(const OcCliArgs *args)
             else recent[emitted % RECENT_CAP] = sampled;
 
             /* Forward the sampled token to get next logits. */
-            if (use_cuda)
+            if (fast_greedy) {
+                /* The device already embedded this token and advanced pos. */
+                sess.pos++;
+            } else if (fast_cuda) {
+                if (sess.pos >= (int64_t)cuda_ctx.n_ctx) {
+                    oc_log(OC_LOG_WARN,
+                           "context window full at position %lld",
+                           (long long)sess.pos);
+                    break;
+                }
+                e = oc_cuda_fast_feed(&cuda_ctx, sampled);
+                if (e == OC_OK) e = oc_cuda_fast_step(&cuda_ctx);
+                if (e == OC_OK)
+                    e = oc_cuda_fast_logits(&cuda_ctx, logits);
+                sess.pos++;
+            } else if (use_cuda) {
                 e = oc_cuda_forward(&cuda_ctx, sampled, sess.pos, logits);
-            else
+                sess.pos++;
+            } else {
                 e = oc_llama_forward(&sess, sampled, logits);
-            if (use_cuda) sess.pos++;
+            }
             if (e == OC_ERR_INVALID_ARG) {
                 /* Context window exhausted. */
                 oc_log(OC_LOG_WARN, "context window full at position %lld",

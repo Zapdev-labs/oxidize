@@ -13,6 +13,7 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -153,6 +154,7 @@ OcError oc_cuda_selftest(void)
         }
         OcQwen35DeltaParams params = {
             conv_w, conv_dim * KW, ssm_a, NV, dt_bias, NV, norm_w, DV, 1e-6f,
+            false,
         };
         OcQwen35DeltaInput input = { qkv, conv_dim, gate, NV * DV, beta, NV,
                                      alpha, NV };
@@ -298,6 +300,108 @@ OcError oc_cuda_selftest(void)
         free(src); free(x); free(want); free(got); free(packed); free(deq);
         if (!ok) return st_fail("q4_k matvec vs dequant");
         fprintf(stderr, "cuda-selftest: Q4_K GEMV OK\n");
+    }
+
+    /* ── Q4_K + Q6_K int8-mma batched GEMM (prefill path) ──────────── */
+    {
+        const size_t rows = 512, cols = 512, n_tok = 20, ng = cols / 32;
+        float *x = (float *)malloc(n_tok * cols * sizeof(float));
+        float *want = (float *)malloc(n_tok * rows * sizeof(float));
+        float *got = (float *)malloc(n_tok * rows * sizeof(float));
+        float *deq = (float *)malloc(cols * sizeof(float));
+        /* CPU replica of k_mmq_quant_x: per-32 int8 + scale + fp32 sum. */
+        float *xq_s = (float *)malloc(n_tok * cols * sizeof(float));
+        if (!x || !want || !got || !deq || !xq_s) return OC_ERR_OOM;
+        for (size_t i = 0; i < n_tok * cols; i++)
+            x[i] = 0.03f * (float)((int)(i % 23) - 11);
+        for (size_t t = 0; t < n_tok; t++)
+            for (size_t g = 0; g < ng; g++) {
+                float amax = 0.0f;
+                for (size_t j = 0; j < 32; j++)
+                    if (fabsf(x[t*cols+g*32+j]) > amax)
+                        amax = fabsf(x[t*cols+g*32+j]);
+                const float s = amax > 0.0f ? amax * (1.0f / 127.0f) : 1.0f;
+                for (size_t j = 0; j < 32; j++) {
+                    float q = x[t*cols+g*32+j] / s;
+                    int qi = (int)lrintf(q);
+                    if (qi > 127) qi = 127; if (qi < -127) qi = -127;
+                    xq_s[t*cols+g*32+j] = s * (float)qi;
+                }
+            }
+        const OcGgufQuantizationType types[2] = { OC_QUANT_Q4_K_M,
+                                                  OC_QUANT_Q6_K };
+        for (uint32_t ty = 0; ty < 2; ty++) {
+            const OcGgufQuantizationType qt = types[ty];
+            const size_t row_bytes = oc_quantized_size(qt, cols);
+            const size_t dev_rb = oc_cuda_mmq_row_bytes(qt, cols);
+            uint8_t *packed = (uint8_t *)malloc(rows * row_bytes);
+            uint8_t *dev_packed = (uint8_t *)malloc(rows * dev_rb);
+            float *src = (float *)malloc(rows * cols * sizeof(float));
+            if (!packed || !dev_packed || !src) return OC_ERR_OOM;
+            for (size_t i = 0; i < rows * cols; i++)
+                src[i] = 0.02f * (float)((int)(i % 19) - 9);
+            for (size_t r = 0; r < rows; r++) {
+                if (oc_quant_pack_row(qt, src + r * cols, cols,
+                                      packed + r * row_bytes,
+                                      row_bytes) != OC_OK)
+                    return st_fail("gemm pack");
+                memset(dev_packed + r * dev_rb, 0, dev_rb);
+                size_t sb, db, nb;
+                if (!oc_cuda_mmq_block_layout(qt, cols, &sb, &db, &nb))
+                    return st_fail("gemm layout");
+                for (size_t b = 0; b < nb; b++)
+                    memcpy(dev_packed + r * dev_rb + b * db,
+                           packed + r * row_bytes + b * sb, sb);
+            }
+            /* CPU reference: dequant(w) . int8-requantized x, per row+tok */
+            for (size_t r = 0; r < rows; r++) {
+                if (oc_quant_dequant_row_scalar(qt, packed + r * row_bytes,
+                                                row_bytes, deq,
+                                                cols) != OC_OK)
+                    return st_fail("gemm dequant");
+                for (size_t t = 0; t < n_tok; t++) {
+                    double acc = 0.0;
+                    for (size_t c = 0; c < cols; c++)
+                        acc += (double)deq[c] * (double)xq_s[t*cols+c];
+                    want[t * rows + r] = (float)acc;
+                }
+            }
+            uint8_t *d_w = NULL;
+            float *d_x = NULL, *d_out = NULL;
+            int8_t *d_xq = NULL;
+            float *d_xsc = NULL;
+            int32_t *d_xqs = NULL;
+            void *d_xh = NULL;
+            cudaMalloc(&d_w, rows * dev_rb);
+            cudaMalloc(&d_x, n_tok * cols * sizeof(float));
+            cudaMalloc(&d_out, n_tok * rows * sizeof(float));
+            cudaMalloc(&d_xq, n_tok * cols);
+            cudaMalloc(&d_xsc, n_tok * ng * 2 * sizeof(float));
+            cudaMalloc(&d_xqs, n_tok * ng * 2 * sizeof(int32_t));
+            cudaMalloc(&d_xh, n_tok * cols * 2);
+            cudaMemcpy(d_w, dev_packed, rows * dev_rb, cudaMemcpyHostToDevice);
+            cudaMemcpy(d_x, x, n_tok * cols * sizeof(float),
+                       cudaMemcpyHostToDevice);
+            bool ok = oc_cuda_mmq_quantize_x(d_x, d_xq, d_xsc, d_xqs, d_xh,
+                                             (uint32_t)n_tok, cols, cols,
+                                             NULL)
+                   && oc_cuda_mmq_matvec_xq(qt, d_w, d_xq, d_xsc, d_xqs, d_xh,
+                                            d_out, (uint32_t)n_tok, rows,
+                                            rows, cols, NULL)
+                   && cudaDeviceSynchronize() == cudaSuccess;
+            if (ok)
+                cudaMemcpy(got, d_out, n_tok * rows * sizeof(float),
+                           cudaMemcpyDeviceToHost);
+            ok = ok && st_close(got, want, n_tok * rows, 3e-3f);
+            cudaFree(d_w); cudaFree(d_x); cudaFree(d_out);
+            cudaFree(d_xq); cudaFree(d_xsc); cudaFree(d_xqs); cudaFree(d_xh);
+            free(packed); free(dev_packed); free(src);
+            if (!ok)
+                return st_fail(ty == 0 ? "gemm_xq q4_k" : "gemm_xq q6_k");
+            fprintf(stderr, "cuda-selftest: %s MMA GEMM 20x96x512 OK\n",
+                    ty == 0 ? "Q4_K" : "Q6_K");
+        }
+        free(x); free(want); free(got); free(deq); free(xq_s);
     }
 
     fprintf(stderr, "cuda-selftest: all checks passed\n");
