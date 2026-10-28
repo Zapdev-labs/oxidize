@@ -1465,6 +1465,174 @@ __device__ __forceinline__ void mxd_q5_0(
     }
 }
 
+/* Prefetched-group variant: the lane's next group's packed bytes are
+ * loaded while the current group's dp4a chain runs, hiding one DRAM
+ * latency per stride. LOAD fills a register blob; CALC consumes it. */
+#define MQ_DEFINE_MATVEC_XQ_PF(NAME, BLOB, LOAD, CALC)                       \
+__global__ void NAME(const uint8_t *w, const int8_t *xq, const float2 *xsc,\
+                     const int32_t *xqsum, float *out,                       \
+                     uint32_t n_tok, size_t out_stride,                      \
+                     size_t rows, uint32_t n_groups, size_t row_bytes)       \
+{                                                                            \
+    const uint32_t lane = threadIdx.x & 31u;                                 \
+    const uint32_t t0 = blockIdx.x * MQX_MAX_TOK;                            \
+    if (t0 >= n_tok) return;                                                 \
+    const size_t row = (size_t)blockIdx.y * MQ_WARPS + (threadIdx.x >> 5);   \
+    if (row >= rows) return;                                                 \
+    const uint8_t *rw = w + row * row_bytes;                                 \
+    float acc[MQX_MAX_TOK];                                                  \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) acc[i] = 0.0f;               \
+    BLOB cur;                                                                \
+    if (lane < n_groups) cur = LOAD(rw, lane);                               \
+    for (uint32_t g = lane; g < n_groups; g += 32u) {                        \
+        const uint32_t gn = g + 32u;                                         \
+        BLOB nxt;                                                            \
+        if (gn < n_groups) nxt = LOAD(rw, gn);                               \
+        CALC(&cur, g, xq, xsc, xqsum, t0, n_tok, n_groups, acc);             \
+        cur = nxt;                                                           \
+    }                                                                        \
+    _Pragma("unroll")                                                        \
+    for (uint32_t i = 0u; i < MQX_MAX_TOK; i++) {                            \
+        const uint32_t t = t0 + i;                                           \
+        if (t >= n_tok) break;                                               \
+        const float v = mq_warp_reduce(acc[i]);                              \
+        if (lane == 0u) out[(size_t)t * out_stride + row] = v;               \
+    }                                                                        \
+}
+
+/* Q4_K blob: 16B block header (d, dm, scale table) + the lane's 32B
+ * nibble window for this group. */
+typedef struct { uint4 hd, w0, w1; } Mq4Blob;
+
+__device__ __forceinline__ Mq4Blob mxq4_load(const uint8_t *row, uint32_t g)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q4_K_SIZE;
+    const uint8_t *qs = blk + 16 + (size_t)((g & 7u) >> 1) * 32u;
+    Mq4Blob v;
+    v.hd = *reinterpret_cast<const uint4 *>(blk);
+    v.w0 = *reinterpret_cast<const uint4 *>(qs);
+    v.w1 = *reinterpret_cast<const uint4 *>(qs + 16);
+    return v;
+}
+
+/* Byte i of the 12-byte packed scale table (block bytes 4..15) via
+ * register ops — taking a byte pointer into the blob would spill it. */
+__device__ __forceinline__ uint32_t mq4_tab(const Mq4Blob *v, uint32_t i)
+{
+    const uint32_t w = i < 4u ? v->hd.y : (i < 8u ? v->hd.z : v->hd.w);
+    return (w >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+__device__ __forceinline__ void mxq4_calc(
+    const Mq4Blob *v, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t * /*xqsum*/, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const float d  = __half2float(__ushort_as_half((unsigned short)v->hd.x));
+    const float mn = __half2float(__ushort_as_half(
+        (unsigned short)(v->hd.x >> 16)));
+    const uint32_t gw = g & 7u;
+    uint8_t sc, m;
+    if (gw < 4u) {
+        sc = (uint8_t)(mq4_tab(v, gw) & 63u);
+        m  = (uint8_t)(mq4_tab(v, gw + 4u) & 63u);
+    } else {
+        sc = (uint8_t)((mq4_tab(v, gw + 4u) & 0x0Fu)
+                     | ((mq4_tab(v, gw - 4u) >> 6) << 4));
+        m  = (uint8_t)(((mq4_tab(v, gw + 4u) >> 4) & 0x0Fu)
+                     | ((mq4_tab(v, gw) >> 6) << 4));
+    }
+    const bool hi = (gw & 1u) != 0u;
+    const uint32_t wd[8] = { v->w0.x, v->w0.y, v->w0.z, v->w0.w,
+                             v->w1.x, v->w1.y, v->w1.z, v->w1.w };
+    const float dsc = d * (float)sc;
+    const float mnm = mn * (float)m;
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t qx = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t nib = hi ? ((wd[i] >> 4) & 0x0F0F0F0Fu)
+                                    : (wd[i] & 0x0F0F0F0Fu);
+            qx = mq_dp4a(nib, xv[i], qx);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float2 sc2 = xsc[gi];
+        acc[ti] += dsc * (sc2.x * (float)qx) - mnm * sc2.y;
+    }
+}
+
+/* Q6_K blob: the lane's 32B ql window + 32B qh window + all 16 scale
+ * bytes + the 2B superblock scale. */
+typedef struct { uint4 l0, l1, h0, h1, sc; uint32_t dv; } Mq6Blob;
+
+__device__ __forceinline__ Mq6Blob mxq6_load(const uint8_t *row, uint32_t g)
+{
+    const uint8_t *blk = row + (size_t)(g >> 3) * MQ_DEV_Q6_K_SIZE;
+    const uint32_t G = g & 7u;
+    const uint32_t half = G >> 2;
+    const uint8_t *ql = blk + (size_t)half * 64u + ((G & 1u) ? 32u : 0u);
+    const uint8_t *qh = blk + 128 + (size_t)half * 32u;
+    Mq6Blob v;
+    v.l0 = *reinterpret_cast<const uint4 *>(ql);
+    v.l1 = *reinterpret_cast<const uint4 *>(ql + 16);
+    v.h0 = *reinterpret_cast<const uint4 *>(qh);
+    v.h1 = *reinterpret_cast<const uint4 *>(qh + 16);
+    v.sc = *reinterpret_cast<const uint4 *>(blk + 192);
+    v.dv = *(const uint16_t *)(blk + 208);
+    return v;
+}
+
+__device__ __forceinline__ void mxq6_calc(
+    const Mq6Blob *v, uint32_t g,
+    const int8_t *xq, const float2 *xsc,
+    const int32_t *xqsum, uint32_t t0, uint32_t n_tok,
+    uint32_t ng, float *acc)
+{
+    const uint32_t G = g & 7u;
+    const uint32_t j = G & 3u;
+    const float d = __half2float(__ushort_as_half(
+        (unsigned short)v->dv));
+    const uint32_t half = G >> 2;
+    const uint32_t si = half * 8u + j * 2u;
+    const uint32_t sw = si < 4u ? v->sc.x : (si < 8u ? v->sc.y
+                      : (si < 12u ? v->sc.z : v->sc.w));
+    const int8_t s0 = (int8_t)((sw >> ((si & 3u) * 8u)) & 0xFFu);
+    const int8_t s1 = (int8_t)((sw >> (((si + 1u) & 3u) * 8u)) & 0xFFu);
+    const uint32_t shift = j * 2u;
+    const uint32_t lw[8] = { v->l0.x, v->l0.y, v->l0.z, v->l0.w,
+                             v->l1.x, v->l1.y, v->l1.z, v->l1.w };
+    const uint32_t hw[8] = { v->h0.x, v->h0.y, v->h0.z, v->h0.w,
+                             v->h1.x, v->h1.y, v->h1.z, v->h1.w };
+    #pragma unroll
+    for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
+        const uint32_t t = t0 + ti;
+        if (t >= n_tok) break;
+        uint32_t xv[8];
+        mqx_load8(xq, t, ng, g, xv);
+        int32_t pa = 0, pb = 0;
+        #pragma unroll
+        for (uint32_t i = 0u; i < 8u; i++) {
+            const uint32_t lo = (j < 2u) ? (lw[i] & 0x0F0F0F0Fu)
+                                        : ((lw[i] >> 4) & 0x0F0F0F0Fu);
+            const uint32_t hb = ((hw[i] >> shift) & 0x03030303u) << 4;
+            if (i < 4u) pa = mq_dp4a(lo | hb, xv[i], pa);
+            else        pb = mq_dp4a(lo | hb, xv[i], pb);
+        }
+        const size_t gi = (size_t)t * ng + g;
+        const float xsg = xsc[gi].x;
+        const int2 q2 = *reinterpret_cast<const int2 *>(xqsum + gi * 2u);
+        acc[ti] += d * xsg * ((float)s0 * (float)(pa - 32 * q2.x)
+                           + (float)s1 * (float)(pb - 32 * q2.y));
+    }
+}
+
 /* One warp per output row, same shape as the f32 kernels; the lane strides
  * groups and keeps a per-token int8/dot accumulator set in registers. */
 #define MQ_DEFINE_MATVEC_XQ(NAME, GRPDOT)                                    \
@@ -1493,9 +1661,9 @@ __global__ void NAME(const uint8_t *w, const int8_t *xq, const float2 *xsc,\
     }                                                                        \
 }
 
-MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q4k,  mxd_q4k)
+MQ_DEFINE_MATVEC_XQ_PF(k_mmq_mvx_q4k, Mq4Blob, mxq4_load, mxq4_calc)
 MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q5k,  mxd_q5k)
-MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q6k,  mxd_q6k)
+MQ_DEFINE_MATVEC_XQ_PF(k_mmq_mvx_q6k, Mq6Blob, mxq6_load, mxq6_calc)
 MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q8_0, mxd_q8_0)
 MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q4_0, mxd_q4_0)
 MQ_DEFINE_MATVEC_XQ(k_mmq_mvx_q5_0, mxd_q5_0)
