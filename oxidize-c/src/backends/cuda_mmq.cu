@@ -1587,6 +1587,18 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
             const unsigned maxz = n_slot / 4u;
             if (zsplit > maxz) zsplit = maxz;
         }
+        /* Long-K shapes (many slots per block) tolerate a deeper split:
+         * the per-block serial sweep shortens while there is still ample
+         * parallelism; keep >=6 slots per slice so the pipeline prologue
+         * stays amortized. */
+        if (nblk < 768u && n_slot >= 24u) {
+            const unsigned want = (768u + nblk - 1u) / nblk;
+            if (want > zsplit) {
+                zsplit = want;
+                const unsigned maxz = n_slot / 6u;
+                if (zsplit > maxz) zsplit = maxz;
+            }
+        }
         const dim3 ggrid(rblk, tblk, zsplit);
         if (zsplit > 1u)
             cudaMemset2DAsync(d_out, out_stride * sizeof(float), 0,
