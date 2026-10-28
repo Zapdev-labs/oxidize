@@ -1725,10 +1725,27 @@ __global__ void k_mmq_gemm_xh_q6k(const uint8_t *, const __half *,
 #define MGQ_H_BYTES   (MGH_RT * MGQ_HRB)    /* 4 KB per half buffer    */
 #define MGQ_SMEM      (4u * MGQ_H_BYTES)    /* 16 KB total             */
 
+/* int8-MMA (m8n8k16.s8) slim GEMM tiles: raw 48B staged weight row
+ * (16B hdr + 32B qs window), 80B padded int8 x row, float2 x-scales. */
+#define MGI_TT      64u                     /* tokens per int8 block tile */
+#define MGI_WROW    48u
+#define MGI_XROW    80u
+#define MGI_W_BYTES (MGH_RT * MGI_WROW)
+#define MGI_X_BYTES (MGI_TT * MGI_XROW)
+#define MGI_S_CNT   (MGI_TT * 2u)
+#define MGI_S_BYTES (MGI_S_CNT * 8u)
+#define MGI_BUF     (MGI_W_BYTES + MGI_X_BYTES + MGI_S_BYTES)
+#define MGI_SMEM    (2u * MGI_BUF)
+
 __global__ void k_mmq_gemm_xh_q4k_s(const uint8_t *w, const __half *xh,
                                     float *out, uint32_t n_tok,
                                     size_t out_stride, size_t rows,
                                     uint32_t n_groups, size_t row_bytes);
+__global__ void k_mmq_gemm_xi_q4k(const uint8_t *w, const int8_t *xq,
+                                  const float2 *xsc, float *out,
+                                  uint32_t n_tok, size_t out_stride,
+                                  size_t rows, uint32_t n_groups,
+                                  size_t row_bytes);
 __global__ void k_mmq_gemm_xh_q6k_s(const uint8_t *w, const __half *xh,
                                     float *out, uint32_t n_tok,
                                     size_t out_stride, size_t rows,
@@ -1759,8 +1776,11 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
      * too few mma blocks to fill the SMs (rows=256 -> 8 blocks), so they
      * keep the dp4a warp matvec whose grid is ~4x wider. */
     if (n_tok >= 16u && rows >= 512u && mg_mma_capable()) {
+        const bool i8 = (qtype == (int)OC_QUANT_Q4_K_S ||
+                         qtype == (int)OC_QUANT_Q4_K_M);
+        const unsigned ttile = i8 ? MGI_TT : MGH_TT;
         const unsigned rblk = (unsigned)((rows + MGH_RT - 1u) / MGH_RT);
-        const unsigned tblk = (unsigned)((n_tok + MGH_TT - 1u) / MGH_TT);
+        const unsigned tblk = (unsigned)((n_tok + ttile - 1u) / ttile);
         const unsigned nblk = rblk * tblk;
         /* Slim slots are half size and four blocks fit an SM, so the slot
          * count doubles and the fill target triples. */
@@ -1795,8 +1815,8 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
         switch ((OcGgufQuantizationType)qtype) {
         case OC_QUANT_Q4_K_S:
         case OC_QUANT_Q4_K_M:
-            k_mmq_gemm_xh_q4k_s<<<ggrid, MGH_THREADS, MGQ_SMEM, s>>>(
-                w, (const __half *)d_xh, d_out, n_tok, out_stride,
+            k_mmq_gemm_xi_q4k<<<ggrid, MGH_THREADS, MGI_SMEM, s>>>(
+                w, d_xq, (const float2 *)d_xsc, d_out, n_tok, out_stride,
                 rows, n_groups, row_bytes);
             return cudaGetLastError() == cudaSuccess;
         case OC_QUANT_Q6_K:
@@ -2385,6 +2405,235 @@ k_mmq_gemm_xh_q4k_s(const uint8_t *w, const __half *xh,
              gridDim.z > 1u);
 #undef MGQ_PRE
 #undef MGQ_STAGE
+}
+
+/* ─── int8 tensor-core Q4_K GEMM (mma.m8n8k16.s8) ─────────────────────
+ * The fp16 pipeline dequantizes every weight to fp16 in smem; Turing's
+ * int8 tensor op runs at 2x the fp16 rate, so this kernel keeps weights
+ * packed: the stage is a raw copy of the group's 16B header + 32B
+ * nibble window, an A-fragment load is one LDS.32 + a nibble mask, and
+ * each 32-elem group closes out with the per-group correction
+ *   out += (d*sc) * xs * <w,x> - (dm*min) * sum(x)
+ * applied to the s32 accumulators — the same math the dp4a matvec runs.
+ * Fragment layout (PTX ISA, mma.m8n8k16.row.col.s32.s8.s8.s32):
+ *   A (8m x 16k s8): lane holds 1 u32 = A[lane/4][(lane%4)*4 + 0..3]
+ *   B (16k x 8n s8): lane holds 1 u32 = B[(lane%4)*4 + 0..3][lane/4]
+ *   C (8m x 8n s32): lane holds 2 s32 = C[lane/4][(lane%4)*2 +{0,1}]
+ * A rows are WEIGHT rows, B cols are TOKENS: each warp owns a
+ * 16-row x 32-token output tile (2m x 4n mma tiles). */
+
+__device__ __forceinline__ void mg_imma(int32_t *c, uint32_t a, uint32_t b)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
+    asm volatile(
+        "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 "
+        "{%0,%1}, {%2}, {%3}, {%0,%1};"
+        : "+r"(c[0]), "+r"(c[1])
+        : "r"(a), "r"(b));
+#else
+    (void)a; (void)b;
+#endif
+}
+
+/* Byte i of the 12-byte scale table in a staged 16B block header. */
+__device__ __forceinline__ uint32_t mgi_tab(uint4 hd, uint32_t i)
+{
+    const uint32_t w = i < 4u ? hd.y : (i < 8u ? hd.z : hd.w);
+    return (w >> ((i & 3u) * 8u)) & 0xFFu;
+}
+
+__device__ __forceinline__ void mgi_scmin(uint4 hd, uint32_t gw,
+                                        float *wsc, float *wmn)
+{
+    const float d  = __half2float(__ushort_as_half((unsigned short)hd.x));
+    const float dm = __half2float(__ushort_as_half(
+        (unsigned short)(hd.x >> 16)));
+    uint32_t sc, mn;
+    if (gw < 4u) {
+        sc = mgi_tab(hd, gw) & 63u;
+        mn = mgi_tab(hd, gw + 4u) & 63u;
+    } else {
+        sc = (mgi_tab(hd, gw + 4u) & 0x0Fu)
+           | ((mgi_tab(hd, gw - 4u) >> 6) << 4);
+        mn = ((mgi_tab(hd, gw + 4u) >> 4) & 0x0Fu)
+           | ((mgi_tab(hd, gw) >> 6) << 4);
+    }
+    *wsc = d * (float)sc;
+    *wmn = dm * (float)mn;
+}
+
+__global__ void __launch_bounds__(MGH_THREADS, 3)
+k_mmq_gemm_xi_q4k(const uint8_t *w, const int8_t *xq, const float2 *xsc,
+                  float *out, uint32_t n_tok, size_t out_stride,
+                  size_t rows, uint32_t n_groups, size_t row_bytes)
+{
+    extern __shared__ uint8_t smem[];
+    uint8_t *swf = smem;                                   /* weight tiles */
+    uint8_t *sxf = swf + 2u * MGI_W_BYTES;                 /* x tiles      */
+    float2  *ssx = (float2 *)(sxf + 2u * MGI_X_BYTES);     /* x scales     */
+
+    const uint32_t r0 = blockIdx.x * MGH_RT;
+    const uint32_t t0 = blockIdx.y * MGH_TT;
+    const uint32_t tid  = threadIdx.x;
+    const uint32_t lane = tid & 31u, warp = tid >> 5;
+    const uint32_t lq = lane >> 2, l4 = lane & 3u;
+    /* 32x64 tile: warp (nt, mt) owns rows nt*8..+7 x tokens
+     * mt*32..+31 — one m8 by four n8 mma tiles. */
+    const uint32_t nt = warp >> 1, mt = warp & 1u;
+    const uint32_t n_slot = n_groups >> 1;          /* group pairs        */
+
+    /* Stage thread map: tid<96 handles weight uint4 j=tid (row j/3,
+     * segment j%3: 0=hdr,1=qs lo,2=qs hi); tid 96..255 stage the x
+     * tile: j=tid-96 covers 160 of the 64-token x 5-segment slots per
+     * iteration (two iterations for 320). */
+    const uint32_t wr = tid / 3u, wseg = tid - wr * 3u;
+    const uint32_t xj  = tid - 96u;
+    const bool    is_x = tid >= 96u;
+
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
+    uint4 pv[2];
+
+#define MGI_PRE(IS)                                                          \
+    do {                                                                     \
+        const uint32_t sb_ = (IS) >> 2, pq_ = (IS) & 3u;                     \
+        if (!is_x) {                                                         \
+            const uint32_t gr_ = r0 + wr;                                    \
+            if (gr_ < rows) {                                                \
+                const uint8_t *blk_ = w + gr_ * row_bytes                    \
+                                      + (size_t)sb_ * 144u;                  \
+                pv[0] = *(const uint4 *)(blk_ + (wseg == 0u                  \
+                        ? 0u : 16u + pq_ * 32u + (wseg - 1u) * 16u));        \
+            } else {                                                         \
+                pv[0] = make_uint4(0u, 0u, 0u, 0u);                          \
+            }                                                                \
+        } else {                                                             \
+            _Pragma("unroll")                                                \
+            for (uint32_t k_ = 0; k_ < 2u; k_++) {                           \
+                const uint32_t j_ = xj + k_ * 160u;                          \
+                const uint32_t xt_ = j_ / 5u, xs_ = j_ - xt_ * 5u;           \
+                const uint32_t gt_ = t0 + xt_;                               \
+                if (gt_ < n_tok) {                                           \
+                    if (xs_ < 4u) {                                          \
+                        pv[k_] = *(const uint4 *)(xq + ((size_t)gt_          \
+                            * n_groups + (IS) * 2u) * 32u + xs_ * 16u);      \
+                    } else {                                                 \
+                        pv[k_] = *(const uint4 *)(xsc + (size_t)gt_          \
+                            * n_groups + (IS) * 2u);                         \
+                    }                                                        \
+                } else {                                                     \
+                    pv[k_] = make_uint4(0u, 0u, 0u, 0u);                     \
+                }                                                            \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define MGI_STAGE(IS)                                                        \
+    do {                                                                     \
+        const uint32_t h_ = (IS) & 1u;                                       \
+        if (!is_x) {                                                         \
+            *(uint4 *)(swf + h_ * MGI_W_BYTES + wr * MGI_WROW                \
+                       + wseg * 16u) = pv[0];                                \
+        } else {                                                             \
+            _Pragma("unroll")                                                \
+            for (uint32_t k_ = 0; k_ < 2u; k_++) {                           \
+                const uint32_t j_ = xj + k_ * 160u;                          \
+                const uint32_t xt_ = j_ / 5u, xs_ = j_ - xt_ * 5u;           \
+                if (xs_ < 4u)                                                \
+                    *(uint4 *)(sxf + h_ * MGI_X_BYTES + xt_ * MGI_XROW       \
+                               + xs_ * 16u) = pv[k_];                        \
+                else                                                         \
+                    *(uint4 *)(ssx + h_ * MGI_S_CNT + xt_ * 2u) = pv[k_];    \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+    MGI_PRE(s_lo);
+    MGI_STAGE(s_lo);
+    __syncthreads();
+
+    /* acc[n][c]: n token tile, c column pair — one m8 row tile. */
+    float acc[4][2] = { { 0.f, 0.f }, { 0.f, 0.f },
+                        { 0.f, 0.f }, { 0.f, 0.f } };
+
+    for (uint32_t i = s_lo; i < s_hi; i++) {
+        const uint32_t h_ = i & 1u;
+        if (i + 1u < s_hi)
+            MGI_PRE(i + 1u);
+
+        const uint8_t *wt = swf + h_ * MGI_W_BYTES;
+        const uint8_t *xp = sxf + h_ * MGI_X_BYTES;
+        const float2  *sx = ssx + h_ * MGI_S_CNT;
+        const uint32_t a_row0 = nt * 8u + lq;
+        const uint32_t b_col0 = mt * 32u + lq;
+
+        #pragma unroll
+        for (uint32_t q = 0; q < 2u; q++) {
+            const uint32_t gw = (i & 3u) * 2u + q;
+            int32_t ci[4][2] = { { 0, 0 }, { 0, 0 },
+                                 { 0, 0 }, { 0, 0 } };
+
+            #pragma unroll
+            for (uint32_t s = 0; s < 2u; s++) {
+                const uint32_t w32 = *(const uint32_t *)(
+                    wt + a_row0 * MGI_WROW + 16u + s * 16u + l4 * 4u);
+                const uint32_t av = q ? ((w32 >> 4) & 0x0F0F0F0Fu)
+                                      : (w32 & 0x0F0F0F0Fu);
+                uint32_t bv[4];
+                #pragma unroll
+                for (uint32_t n = 0; n < 4u; n++)
+                    bv[n] = *(const uint32_t *)(
+                        xp + (b_col0 + n * 8u) * MGI_XROW
+                        + q * 32u + s * 16u + l4 * 4u);
+                #pragma unroll
+                for (uint32_t n = 0; n < 4u; n++)
+                    mg_imma(ci[n], av, bv[n]);
+            }
+
+            /* Per-group fixup: fold weight scale/min and activation
+             * scale/exact-sum into fp32. */
+            float wsc, wmn;
+            mgi_scmin(*(const uint4 *)(wt + a_row0 * MGI_WROW),
+                      gw, &wsc, &wmn);
+            #pragma unroll
+            for (uint32_t n = 0; n < 4u; n++) {
+                #pragma unroll
+                for (uint32_t c = 0; c < 2u; c++) {
+                    const float2 xs = sx[(mt * 32u + n * 8u
+                                         + l4 * 2u + c) * 2u + q];
+                    acc[n][c] += wsc * (xs.x * (float)ci[n][c])
+                               - wmn * xs.y;
+                }
+            }
+        }
+
+        if (i + 1u < s_hi)
+            MGI_STAGE(i + 1u);
+        __syncthreads();
+    }
+
+    /* Store: m8n8k16 C is (row lq, cols l4*2+{0,1}) — out[token][row]. */
+    const bool accum = gridDim.z > 1u;
+    const uint32_t gr = r0 + nt * 8u + lq;
+    if (gr < rows) {
+        #pragma unroll
+        for (uint32_t n = 0; n < 4u; n++) {
+            #pragma unroll
+            for (uint32_t c = 0; c < 2u; c++) {
+                const uint32_t gt = t0 + mt * 32u + n * 8u + l4 * 2u + c;
+                if (gt < n_tok) {
+                    float *po = out + (size_t)gt * out_stride + gr;
+                    if (accum) atomicAdd(po, acc[n][c]);
+                    else       *po = acc[n][c];
+                }
+            }
+        }
+    }
+#undef MGI_PRE
+#undef MGI_STAGE
 }
 
 /* Slim Q6_K GEMM: same 64-element slot / 4-blocks-per-SM structure as the
