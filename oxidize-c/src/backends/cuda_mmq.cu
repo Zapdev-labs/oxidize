@@ -1524,7 +1524,7 @@ extern "C" bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq,
                                        void *stream)
 {
     if (!d_x || !d_xq || !d_xsc || !d_xqsum || !d_xh || n_tok == 0 ||
-        cols == 0 || (cols % 32u) != 0u || n_tok > 4u * MQX_MAX_TOK)
+        cols == 0 || (cols % 32u) != 0u || n_tok > 16u * MQX_MAX_TOK)
         return false;
     const uint32_t n_groups = (uint32_t)(cols / 32u);
     dim3 grid((n_groups + 3u) / 4u, n_tok);
@@ -1557,7 +1557,7 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
                                       size_t cols, void *stream)
 {
     if (!d_weights || !d_xq || !d_xsc || !d_xqsum || !d_xh || !d_out ||
-        rows == 0 || n_tok == 0 || n_tok > 4u * MQX_MAX_TOK)
+        rows == 0 || n_tok == 0 || n_tok > 16u * MQX_MAX_TOK)
         return false;
     const size_t row_bytes = oc_cuda_mmq_row_bytes(qtype, cols);
     if (row_bytes == 0) return false;

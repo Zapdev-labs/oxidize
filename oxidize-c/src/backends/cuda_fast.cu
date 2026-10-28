@@ -49,7 +49,7 @@
 #define FAST_ATTN_THREADS  128u
 #define FAST_ATTN_SMEM_SCORE_CAP 4096u
 #define FAST_RING_CAP      8192u
-#define FAST_BATCH         64u
+#define FAST_BATCH         128u
 
 /* Device-resident step state. token/pos are consumed by embed/rope/KV/
  * attention; step indexes the emitted-token ring. Written only by the
@@ -355,26 +355,49 @@ __global__ void k_f_attention(const float *q,
     __syncthreads();
 
     const bool pair = ((head_dim & 1u) == 0u) && ((kv_off & 1u) == 0u);
-    /* scores: one warp per position so lanes read each K row coalesced,
-     * then a warp reduction produces the dot product. */
     const uint32_t lane = tid & 31u;
     const uint32_t warp = tid >> 5;
     const uint32_t nw = nthreads >> 5;
-    for (uint32_t p = kv_start + warp; p < n_past; p += nw) {
-        const __half *k = kv_k + (size_t)p * kv_row + kv_off;
-        float s = 0.0f;
-        if (pair) {
-            const __half2 *k2 = reinterpret_cast<const __half2 *>(k);
-            for (uint32_t d = lane; d < head_dim / 2u; d += 32u) {
-                const float2 kv = __half22float2(__ldg(&k2[d]));
-                s += qs[2u * d] * kv.x + qs[2u * d + 1u] * kv.y;
+    if (gridDim.y > 1u) {
+        /* Prefill: plenty of (head, token) blocks already saturate the
+         * GPU, so make each position's K row a coalesced warp-wide read
+         * with a shuffle reduction instead of thread-per-position. */
+        for (uint32_t p = kv_start + warp; p < n_past; p += nw) {
+            const __half *k = kv_k + (size_t)p * kv_row + kv_off;
+            float s = 0.0f;
+            if (pair) {
+                const __half2 *k2 = reinterpret_cast<const __half2 *>(k);
+                for (uint32_t d = lane; d < head_dim / 2u; d += 32u) {
+                    const float2 kv = __half22float2(__ldg(&k2[d]));
+                    s += qs[2u * d] * kv.x + qs[2u * d + 1u] * kv.y;
+                }
+            } else {
+                for (uint32_t d = lane; d < head_dim; d += 32u)
+                    s += qs[d] * __half2float(__ldg(&k[d]));
             }
-        } else {
-            for (uint32_t d = lane; d < head_dim; d += 32u)
-                s += qs[d] * __half2float(__ldg(&k[d]));
+            s = f_warp_sum(s);
+            if (lane == 0u) {
+                const float sv = s * scale;
+                sc[p] = sv;
+                ss[p] = sv;
+            }
         }
-        s = f_warp_sum(s);
-        if (lane == 0u) {
+    } else {
+        /* Decode: only n_head blocks are in flight — maximize memory
+         * parallelism with one position per thread instead. */
+        for (uint32_t p = kv_start + tid; p < n_past; p += nthreads) {
+            const __half *k = kv_k + (size_t)p * kv_row + kv_off;
+            float s = 0.0f;
+            if (pair) {
+                const __half2 *k2 = reinterpret_cast<const __half2 *>(k);
+                for (uint32_t d = 0; d < head_dim / 2u; d++) {
+                    const float2 kv = __half22float2(__ldg(&k2[d]));
+                    s += qs[2u * d] * kv.x + qs[2u * d + 1u] * kv.y;
+                }
+            } else {
+                for (uint32_t d = 0; d < head_dim; d++)
+                    s += qs[d] * __half2float(__ldg(&k[d]));
+            }
             const float sv = s * scale;
             sc[p] = sv;
             ss[p] = sv;
