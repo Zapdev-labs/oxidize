@@ -1716,6 +1716,20 @@ __global__ void k_mmq_gemm_xh_q6k(const uint8_t *, const __half *,
 #define MGH_THREADS 256u
 #define MGH_SMEM_BYTES (MGH_RT * 512u + MGH_TT * 512u)  /* 32 KB */
 
+/* Slim variant: 64-elem slots halve shared memory to 16KB, letting three
+ * blocks reside per SM (24 warps vs 16). The stage is rebalanced so all
+ * 256 threads carry a half-unit: tid<128 stage a 16-element weight
+ * half-group, tid>=128 stage a 16-element activation half-segment. */
+#define MGQ_HK        64u
+#define MGQ_HRB       (MGQ_HK * 2u)
+#define MGQ_H_BYTES   (MGH_RT * MGQ_HRB)    /* 4 KB per half buffer    */
+#define MGQ_SMEM      (4u * MGQ_H_BYTES)    /* 16 KB total             */
+
+__global__ void k_mmq_gemm_xh_q4k_s(const uint8_t *w, const __half *xh,
+                                    float *out, uint32_t n_tok,
+                                    size_t out_stride, size_t rows,
+                                    uint32_t n_groups, size_t row_bytes);
+
 extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
                                       const int8_t *d_xq, const float *d_xsc,
                                       const int32_t *d_xqsum,
@@ -1743,24 +1757,28 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
     if (n_tok >= 16u && rows >= 512u && mg_mma_capable()) {
         const unsigned rblk = (unsigned)((rows + MGH_RT - 1u) / MGH_RT);
         const unsigned tblk = (unsigned)((n_tok + MGH_TT - 1u) / MGH_TT);
-        /* K-split: when row-block x token-tile blocks underfill ~4 waves of
-         * SM residency (80 slots on 40-SM T4), the tail wave idles most of
-         * the GPU — split the slot loop across gridDim.z and accumulate
-         * into a zeroed output. */
         const unsigned nblk = rblk * tblk;
-        const uint32_t n_slot = n_groups >> 2;
+        const bool q6 = (qtype == (int)OC_QUANT_Q6_K);
+        /* Slim Q4_K slots are half size and three blocks fit an SM, so its
+         * slot count doubles and the fill target triples. */
+        const uint32_t n_slot = q6 ? (n_groups >> 2) : (n_groups >> 1);
+        const unsigned target = q6 ? 320u : 480u;
+        const unsigned target2 = q6 ? 768u : 1152u;
+        /* K-split: when row-block x token-tile blocks underfill ~4 waves of
+         * SM residency, the tail wave idles most of the GPU — split the
+         * slot loop across gridDim.z and accumulate into a zeroed
+         * output. */
         unsigned zsplit = 1u;
-        if (nblk < 320u && n_slot >= 8u) {
-            zsplit = (320u + nblk - 1u) / nblk;
+        if (nblk < target && n_slot >= 8u) {
+            zsplit = (target + nblk - 1u) / nblk;
             const unsigned maxz = n_slot / 4u;
             if (zsplit > maxz) zsplit = maxz;
         }
-        /* Long-K shapes (many slots per block) tolerate a deeper split:
-         * the per-block serial sweep shortens while there is still ample
+        /* Long-K shapes tolerate a deeper split while there is ample
          * parallelism; keep >=6 slots per slice so the pipeline prologue
          * stays amortized. */
-        if (nblk < 768u && n_slot >= 24u) {
-            const unsigned want = (768u + nblk - 1u) / nblk;
+        if (nblk < target2 && n_slot >= 24u) {
+            const unsigned want = (target2 + nblk - 1u) / nblk;
             if (want > zsplit) {
                 zsplit = want;
                 const unsigned maxz = n_slot / 6u;
@@ -1774,7 +1792,7 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
         switch ((OcGgufQuantizationType)qtype) {
         case OC_QUANT_Q4_K_S:
         case OC_QUANT_Q4_K_M:
-            k_mmq_gemm_xh_q4k<<<ggrid, MGH_THREADS, MGH_SMEM_BYTES, s>>>(
+            k_mmq_gemm_xh_q4k_s<<<ggrid, MGH_THREADS, MGQ_SMEM, s>>>(
                 w, (const __half *)d_xh, d_out, n_tok, out_stride,
                 rows, n_groups, row_bytes);
             return cudaGetLastError() == cudaSuccess;
@@ -2191,6 +2209,179 @@ k_mmq_gemm_xh_q4k(const uint8_t *w, const __half *xh,
              gridDim.z > 1u);
 #undef MG4_PRE
 #undef MG4_STAGE
+}
+
+/* Slim Q4_K GEMM: 64-element slots so three blocks (24 warps) fit an SM —
+ * the fp16 pipeline is stall-bound at four warps per scheduler, so extra
+ * resident warps raise issue utilization directly. Every thread stages a
+ * half-unit: tid<128 decode a 16-element half-group of one weight row,
+ * tid>=128 copy a 16-element activation half-segment. */
+__device__ __forceinline__ void mg4_decode16(uint4 *ov, uint32_t g2_,
+                                             const uint4 *pq,
+                                             const uint4 *phd)
+{
+    const uint8_t *hb = (const uint8_t *)phd;
+    const float d  = mq_f16(hb[0], hb[1]);
+    const float dm = mq_f16(hb[2], hb[3]);
+    uint8_t sc8, mn8;
+    mq_scale_min_k4(g2_, hb + 4, &sc8, &mn8);
+    const float sd = (float)sc8 * d, md = (float)mn8 * dm;
+    const __half2 sd2 = __float2half2_rn(sd);
+    const __half2 md2 = __float2half2_rn(-md);
+    const __half2 bm2 = __float2half2_rn(-1024.f);
+    const uint32_t nsh = (g2_ & 1u) * 4u;
+    const uint32_t *pw = (const uint32_t *)pq;
+    #pragma unroll
+    for (uint32_t i = 0; i < 2; i++) {
+        const uint32_t c0 = (pw[i * 2u]     >> nsh) & 0x0F0F0F0Fu;
+        const uint32_t c1 = (pw[i * 2u + 1u] >> nsh) & 0x0F0F0F0Fu;
+        union { __half2 h; uint32_t u; } p0, p1, p2, p3;
+        p0.u = __byte_perm(c0, 0x64646464u, 0x4140u);
+        p1.u = __byte_perm(c0, 0x64646464u, 0x4342u);
+        p2.u = __byte_perm(c1, 0x64646464u, 0x4140u);
+        p3.u = __byte_perm(c1, 0x64646464u, 0x4342u);
+        union { __half2 h; uint32_t u; } o0, o1, o2, o3;
+        o0.h = __hfma2(__hadd2(p0.h, bm2), sd2, md2);
+        o1.h = __hfma2(__hadd2(p1.h, bm2), sd2, md2);
+        o2.h = __hfma2(__hadd2(p2.h, bm2), sd2, md2);
+        o3.h = __hfma2(__hadd2(p3.h, bm2), sd2, md2);
+        ov[i].x = o0.u; ov[i].y = o1.u; ov[i].z = o2.u; ov[i].w = o3.u;
+    }
+}
+
+__device__ __forceinline__ void mg_sweep_s(const uint8_t *sxf,
+                                           const uint8_t *swf,
+                                           uint32_t mt, uint32_t nt,
+                                           float *acc)
+{
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t am = lane >> 3;
+    const uint32_t arow = mt * 16u + ((am & 1u) << 3) + (lane & 7u);
+    const uint32_t brow = nt * 8u + (lane & 7u);
+    const uint8_t *ap = sxf + arow * MGQ_HRB;
+    const uint8_t *bp = swf + brow * MGQ_HRB;
+    float accb[4] = { 0.f, 0.f, 0.f, 0.f };
+    uint32_t a0, a1, a2, a3, b0, b1;
+
+#define MG_LPAIR(ks_)                                                        \
+    do {                                                                     \
+        const uint32_t sa_ = ((ks_) + (am >> 1)) * 16u;                      \
+        const uint32_t sb_ = (((ks_) + (lane >> 3)) & 7u) * 16u;             \
+        MG_LDM4(a0, a1, a2, a3, ap + mg_swz(arow, sa_));                     \
+        MG_LDM2(b0, b1, bp + mg_swz(brow, sb_));                             \
+    } while (0)
+
+    MG_LPAIR(0u);
+    #pragma unroll
+    for (uint32_t p = 0; p < MGQ_HK / 8u; p += 2u) {
+        const uint32_t ta0 = a0, ta1 = a1, ta2 = a2, ta3 = a3;
+        const uint32_t tb0 = b0, tb1 = b1;
+        if (p + 2u < MGQ_HK / 8u)
+            MG_LPAIR(p + 2u);
+        mg_hmma(acc,  ta0, ta1, tb0);
+        mg_hmma(accb, ta2, ta3, tb1);
+    }
+    acc[0] += accb[0]; acc[1] += accb[1];
+    acc[2] += accb[2]; acc[3] += accb[3];
+#undef MG_LPAIR
+}
+
+__global__ void __launch_bounds__(MGH_THREADS, 4)
+k_mmq_gemm_xh_q4k_s(const uint8_t *w, const __half *xh,
+                    float *out, uint32_t n_tok, size_t out_stride,
+                    size_t rows, uint32_t n_groups, size_t row_bytes)
+{
+    extern __shared__ uint8_t mg_sm[];
+    uint8_t *swf = mg_sm;                        /* wt A | wt B (2x4KB) */
+    uint8_t *sxf = mg_sm + 2u * MGQ_H_BYTES;     /* x  A | x  B (2x4KB) */
+
+    const uint32_t r0   = blockIdx.x * MGH_RT;
+    const uint32_t t0   = blockIdx.y * MGH_TT;
+    const uint32_t tid  = threadIdx.x;
+    const uint32_t lane = tid & 31u, warp = tid >> 5;
+    const uint32_t n_slot = n_groups >> 1;       /* 4 slots / superblock */
+
+    const uint32_t mt = warp & 1u, nt = warp >> 1, tr = lane >> 2;
+
+    const uint32_t r2  = tid >> 2, gc = tid & 3u;
+    const uint32_t t2  = (tid - 128u) >> 2, sc2 = (tid - 128u) & 3u;
+    const uint32_t gr2 = r0 + r2;
+    const uint32_t gt2 = t0 + t2;
+
+    /* K-split: this z-slice owns a contiguous slot range; empty slices
+     * (more z than slots) retire early. */
+    const uint32_t zlen = (n_slot + gridDim.z - 1u) / gridDim.z;
+    const uint32_t s_lo = blockIdx.z * zlen;
+    const uint32_t s_hi = (s_lo + zlen < n_slot) ? s_lo + zlen : n_slot;
+    if (s_lo >= n_slot) return;
+
+    uint4 pq, phd, pxh[2];
+
+#define MGQ_PRE(IS)                                                          \
+    do {                                                                     \
+        const uint32_t sb_ = (IS) >> 2, gq_ = (IS) & 3u;                     \
+        if (tid < 128u) {                                                    \
+            if (gr2 < rows) {                                                \
+                const uint8_t *blk_ = w + gr2 * row_bytes                    \
+                                      + (size_t)sb_ * 144u;                  \
+                pq  = *(const uint4 *)(blk_ + 16u + gq_ * 32u                \
+                                       + (gc & 1u) * 16u);                   \
+                phd = *(const uint4 *)blk_;                                  \
+            } else {                                                         \
+                pq = phd = make_uint4(0u, 0u, 0u, 0u);                       \
+            }                                                                \
+        } else {                                                             \
+            if (gt2 < n_tok) {                                               \
+                const __half *xh_ = xh + ((size_t)gt2 * n_groups             \
+                    + (size_t)sb_ * 8u + gq_ * 2u + (sc2 >> 1)) * 32u        \
+                    + (sc2 & 1u) * 16u;                                      \
+                pxh[0] = *(const uint4 *)xh_;                                \
+                pxh[1] = *(const uint4 *)(xh_ + 8u);                         \
+            } else {                                                         \
+                pxh[0] = pxh[1] = make_uint4(0u, 0u, 0u, 0u);                \
+            }                                                                \
+        }                                                                    \
+    } while (0)
+
+#define MGQ_STAGE(IS)                                                        \
+    do {                                                                     \
+        const uint32_t h_ = (IS) & 1u;                                       \
+        if (tid < 128u) {                                                    \
+            const uint32_t g2_ = ((IS) & 3u) * 2u + (gc >> 1);               \
+            uint8_t *dst = swf + h_ * MGQ_H_BYTES + r2 * MGQ_HRB;            \
+            uint4 ov[2];                                                     \
+            mg4_decode16(ov, g2_, &pq, &phd);                                \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 2; i++)                                 \
+                *(uint4 *)(dst + mg_swz(r2, gc * 32u + i * 16u))             \
+                    = ov[i];                                                 \
+        } else {                                                             \
+            uint8_t *xb = sxf + h_ * MGQ_H_BYTES + t2 * MGQ_HRB;             \
+            _Pragma("unroll")                                                \
+            for (uint32_t i = 0; i < 2; i++)                                 \
+                *(uint4 *)(xb + mg_swz(t2, sc2 * 32u + i * 16u))             \
+                    = pxh[i];                                                \
+        }                                                                    \
+    } while (0)
+
+    MGQ_PRE(s_lo);
+    MGQ_STAGE(s_lo);
+    __syncthreads();
+    float acc[4] = { 0.f, 0.f, 0.f, 0.f };
+    for (uint32_t i = s_lo; i < s_hi; i++) {
+        const uint32_t h_ = i & 1u;
+        if (i + 1u < s_hi)
+            MGQ_PRE(i + 1u);
+        mg_sweep_s(sxf + h_ * MGQ_H_BYTES, swf + h_ * MGQ_H_BYTES,
+                   mt, nt, acc);
+        if (i + 1u < s_hi)
+            MGQ_STAGE(i + 1u);
+        __syncthreads();
+    }
+    mg_store(out, out_stride, n_tok, rows, t0, r0, mt, nt, tr, lane, acc,
+             gridDim.z > 1u);
+#undef MGQ_PRE
+#undef MGQ_STAGE
 }
 
 /* Q6_K: 224B device block = [128B ql][64B qh][16B int8 scales][d f16]
