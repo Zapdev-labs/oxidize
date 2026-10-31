@@ -1034,6 +1034,15 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         return OC_ERR_BACKEND;
     }
 
+    /* qwen4exp has no device forward: the hybrid path dispatches on
+     * is_qwen35 only, so a qwen4exp model would fall into generic
+     * attention missing its delta-net/PLE/hyper-connection tensors and
+     * emit garbage. Refuse so the CLI falls back to the CPU path. */
+    if (model->cfg.is_qwen4exp) {
+        oc_log(OC_LOG_WARN, "cuda: qwen4exp is CPU-only");
+        return OC_ERR_BACKEND;
+    }
+
     if (!oc_cuda_available()) return OC_ERR_BACKEND;
 
     for (int i = 0; i < 3; i++) {

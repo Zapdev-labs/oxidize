@@ -108,24 +108,22 @@ static void fwht_avx2(float *v, size_t d)
 }
 #endif
 
+#if defined(__x86_64__) || defined(__i386__)
 static int g_kvrq_isa = -1;
 static pthread_once_t g_kvrq_once = PTHREAD_ONCE_INIT;
 static void kvrq_detect_once(void)
 {
-#if defined(__x86_64__) || defined(__i386__)
     g_kvrq_isa = (__builtin_cpu_supports("avx2") &&
                   __builtin_cpu_supports("fma") &&
                   __builtin_cpu_supports("f16c") && getenv("OC_KVRQ_SCALAR") == NULL)
                  ? 1 : 0;
-#else
-    g_kvrq_isa = 0;
-#endif
 }
 static int kvrq_isa(void)
 {
     pthread_once(&g_kvrq_once, kvrq_detect_once);
     return g_kvrq_isa;
 }
+#endif
 
 static void fwht(float *v, size_t d)
 {

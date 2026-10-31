@@ -348,7 +348,7 @@ OcError oc_mmap_fault_range(OcMmap *m, size_t offset, size_t size)
     size_t start = offset & ~(page - 1);
 #ifdef __linux__
 #ifndef MADV_POPULATE_READ
-#define MADV_POPULATE_READ 23
+#define MADV_POPULATE_READ 22
 #endif
     /* Fast path: a single syscall that faults in the range with kernel
      * readahead windows (Linux 5.14+). Byte-per-page touching on a

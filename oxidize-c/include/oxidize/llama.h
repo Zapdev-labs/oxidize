@@ -252,16 +252,18 @@ typedef struct OcLlamaConfig {
     uint32_t indexer_head_size;
     uint32_t indexer_top_k;
     uint32_t indexer_kpool;
-    /* PLE n-gram hash embeddings (see ple.layers). */
+    /* PLE geometry. Hashes the current token with its predecessors into
+     * n-gram table rows and injects a gated dilated conv into the wide
+     * residual. Only one layer is supported. */
     bool     ple_enabled;
     uint32_t ple_layer;          /* the single PLE layer index            */
     uint32_t ple_ngram;          /* token window (3)                      */
     uint32_t ple_heads_per_ngram;
     uint32_t ple_conv_kernel;    /* dilated depthwise conv width (4)      */
     uint32_t ple_n_heads;        /* (ngram-1) * ple_heads_per_ngram       */
-    uint32_t ple_embd_dim;       /* embedding_length_per_layer_input      */
-    uint32_t ple_eos;            /* ple.eos_token_id                      */
-    uint32_t ple_img;            /* ple.image_token_id                    */
+    uint32_t ple_embd_dim;       /* n-gram table width per head           */
+    uint32_t ple_eos;            /* n-gram history is cut at this id      */
+    uint32_t ple_img;            /* image placeholder token id            */
     uint64_t ple_mult[OC_Q4E_PLE_MAX_NGRAM];
     uint64_t ple_head_off[OC_Q4E_PLE_MAX_HEADS];
     uint64_t ple_head_vocab[OC_Q4E_PLE_MAX_HEADS];
@@ -304,7 +306,8 @@ typedef struct OcLlamaLayer {
     OcWeightView ffn_down_exps;           /* [num_experts*n_embd, exp_i_size]    */
     /* Native per-expert EXL3 (qwen4exp SafeTensors): one trellis matrix per
      * expert projection instead of a stacked view. Arrays of num_experts
-     * entries; the matrices are owned by the model's EXL3 overlay. Non-NULL
+     * entries; the matrices' packed backing data is owned by the model's
+     * EXL3 overlay while the struct arrays are layer-owned. Non-NULL
      * only when the layer is a routed-EXL3 MoE (the stacked views above are
      * then left empty). */
     OcExl3Matrix *exl3_gate, *exl3_up, *exl3_down;
@@ -929,6 +932,12 @@ void oc_llama_session_reset(OcLlamaSession *sess);
 void oc_llama_session_rewind(OcLlamaSession *sess, uint32_t pos);
 
 void oc_llama_session_free(OcLlamaSession *sess);
+/* Load a full native (SafeTensors directory) checkpoint — e.g. a qwen4exp
+ * EXL3 tree with config.json, tokenizer and one or more .safetensors
+ * shards — into `out`. Unlike oc_llama_load_exl3(), which attaches an EXL3
+ * overlay directory onto an already-loaded GGUF model, this reads the
+ * complete model: embeddings, heads, MoE experts, hyper-connections and
+ * the optional MTP draft head all come from the SafeTensors files. */
 OcError oc_llama_load_exl3_native(const char *directory, OcLlamaModel *out);
 
 void oc_llama_free(OcLlamaModel *model);

@@ -236,11 +236,13 @@ mod tests {
     use super::*;
 
     fn plan_for(arch: ModelArchitecture) -> ArchPlan {
-        let mut cfg = InferenceConfig::default();
-        cfg.architecture = arch;
-        cfg.num_attention_heads = 8;
-        cfg.num_key_value_heads = 2;
-        cfg.hidden_size = 32;
+        let mut cfg = InferenceConfig {
+            architecture: arch,
+            num_attention_heads: 8,
+            num_key_value_heads: 2,
+            hidden_size: 32,
+            ..Default::default()
+        };
         if arch.uses_moe() {
             cfg.num_experts = 4;
             cfg.num_experts_per_tok = 2;

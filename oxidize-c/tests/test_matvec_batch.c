@@ -391,9 +391,17 @@ static void check_quad_multi(size_t cols, size_t rows, size_t n_act)
     for (size_t v = 0; v < n_act; v++) {
         memcpy(acts2 + v * act_rb2, acts + v * act_rb, act_rb);
         float *dq = (float *)(acts2 + v * act_rb2 + dq_off);
-        for (size_t b = 0; b < blocks; b++)
+        for (size_t b = 0; b < blocks; b++) {
+            /* Keep the true decoded scale in the tail but overwrite the
+             * header with f16 64.0 (0x5000): a kernel that ignores dq_off
+             * reads the bogus header and fails loudly instead of silently
+             * matching the reference. */
+            uint8_t *hdr = acts2 + v * act_rb2 + b * OC_OXK_BLOCK_Q8_0_SIZE;
+            hdr[0] = 0x00;
+            hdr[1] = 0x50;
             dq[b] = oc_oxk_f16_le_to_f32(
                 acts + v * act_rb + b * OC_OXK_BLOCK_Q8_0_SIZE);
+        }
     }
 
     for (size_t r0 = 0; r0 < rows; r0 += 4) {
@@ -508,4 +516,48 @@ Test(matvec_batch, f32_weights)
                                "f32 batch mismatch vec=%zu row=%zu", v, r);
     }
     free(w); free(in); free(out); free(ref);
+}
+
+/* The multi-projection variant walks slices across matrix boundaries and
+ * must match per-matrix oc_matvec_f32, including zero-row matrices. */
+Test(matvec_batch, f32_multi)
+{
+    const size_t cols = 96;
+    const size_t rws[4] = {5, 0, 7, 3};
+    float *d[4] = {0}, *o[4] = {0}, *ref[4] = {0};
+    float *in = malloc(cols * sizeof(float));
+    cr_assert(in);
+    uint32_t seed = 5u;
+    for (size_t i = 0; i < cols; i++) in[i] = frand(&seed);
+    for (size_t k = 0; k < 4; k++) {
+        const size_t nr = rws[k] ? rws[k] : 1;
+        d[k] = malloc(nr * cols * sizeof(float));
+        o[k] = malloc(nr * sizeof(float));
+        ref[k] = malloc(nr * sizeof(float));
+        cr_assert(d[k] && o[k] && ref[k]);
+        for (size_t i = 0; i < rws[k] * cols; i++) d[k][i] = frand(&seed);
+        for (size_t i = 0; i < rws[k]; i++) o[k][i] = -99.0f;
+    }
+    oc_matvec_f32_multi((const float *const *)d, rws, cols, 4, in,
+                        (float *const *)o);
+    for (size_t k = 0; k < 4; k++) {
+        oc_matvec_f32(d[k], rws[k], cols, in, ref[k]);
+        for (size_t r = 0; r < rws[k]; r++)
+            cr_assert_float_eq(o[k][r], ref[k][r], 0.0f,
+                               "f32_multi mismatch matrix=%zu row=%zu", k, r);
+        free(d[k]); free(o[k]); free(ref[k]);
+    }
+    /* cols == 0 is degenerate but valid: every requested output row is
+     * the empty dot 0.0f. */
+    {
+        float z0[3] = {-99.f, -99.f, -99.f}, z1[2] = {-99.f, -99.f};
+        const float *const dz[2] = {NULL, NULL};
+        const size_t rz[2] = {3, 2};
+        float *const oz[2] = {z0, z1};
+        oc_matvec_f32_multi(dz, rz, 0, 2, in, oz);
+        for (size_t k = 0; k < 2; k++)
+            for (size_t r = 0; r < rz[k]; r++)
+                cr_assert_eq(oz[k][r], 0.0f, "cols==0 row %zu:%zu", k, r);
+    }
+    free(in);
 }

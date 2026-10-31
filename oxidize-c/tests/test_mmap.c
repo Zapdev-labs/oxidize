@@ -8,7 +8,7 @@
  *     is built with ASan + UBSan, which substitutes for valgrind locally
  *     (valgrind is not installed). 1000 open/close cycles verify no leaks.
  *
- * These tests use the tiny GGUF fixture `valid-v3.gguf` (132 bytes). The
+ * These tests use the tiny GGUF fixture `valid-v3.gguf` (256 bytes). The
  * mmap path works the same for tiny files as for multi-GB models — the
  * kernel just maps a single page. The MADV_HUGEPAGE call succeeds but
  * doesn't actually collapse to a 2 MiB page (the mapping is too small);
@@ -37,8 +37,8 @@ Test(mmap, open_readonly_returns_mapped_bytes)
     cr_assert_eq(e, OC_OK, "open: %s", oc_error_msg(e));
     cr_assert_not_null(m, "OcMmap should be heap-allocated");
 
-    /* The fixture is 132 bytes (128 header + 4 data). */
-    cr_assert_eq(oc_mmap_len(m), 132, "fixture should be 132 bytes");
+    /* The fixture is 256 bytes (128 header + 128 data). */
+    cr_assert_eq(oc_mmap_len(m), 256, "fixture should be 256 bytes");
     const uint8_t *bytes = oc_mmap_bytes(m);
     cr_assert_not_null(bytes, "mapped bytes should be non-NULL");
 
@@ -94,7 +94,7 @@ Test(mmap, advise_hugepage_best_effort)
 
 Test(mmap, prefault_returns_nonzero_checksum)
 {
-    /* Prefault touches every page and returns XOR checksum. For a 132-byte
+    /* Prefault touches every page and returns XOR checksum. For a 256-byte
      * file, every byte is touched at offsets 0 and 131 (last). */
     OcMmap *m = NULL;
     OcError e = oc_mmap_open_readonly(FIXTURE("valid-v3.gguf"), &m);
@@ -260,7 +260,7 @@ Test(mmap, open_fd_map_failure_closes_fd_no_leak)
 
 Test(mmap, mlock_with_headroom_safe_for_tiny_file)
 {
-    /* For a 132-byte fixture, mlock_with_headroom should succeed (or skip
+    /* For a 256-byte fixture, mlock_with_headroom should succeed (or skip
      * gracefully if MemAvailable is unreadable). Either way, no crash and
      * the mapping remains usable. */
     OcMmap *m = NULL;
@@ -304,7 +304,7 @@ Test(gguf_map, open_via_mmap_returns_unified_view)
     cr_assert_not_null(m.shards, "shards array should be non-NULL");
     cr_assert_not_null(m.shards[0].mmap, "shard 0 mmap should be non-NULL");
     cr_assert_not_null(m.shards[0].bytes, "shard 0 bytes should be non-NULL");
-    cr_assert_eq(m.shards[0].len, 132, "shard 0 len should be 132");
+    cr_assert_eq(m.shards[0].len, 256, "shard 0 len should be 256");
 
     /* Unified view. */
     cr_assert_eq(m.unified.magic, OC_GGUF_MAGIC, "unified magic");
@@ -331,11 +331,9 @@ Test(gguf_map, tensor_data_accessible_via_mmap)
     const OcGgufTensorInfo *t = &m.unified.tensors[0];
     const uint8_t *data = oc_gguf_map_tensor_data(&m, t);
     cr_assert_not_null(data, "tensor data should be non-NULL");
-    /* The tensor's absolute_offset is 128; the fixture stores [1,2,3,4]
-     * there (4 bytes for a 1-element F32 tensor — but the dims say
-     * [32000, 4096] which doesn't match the 4 data bytes. That's expected:
-     * the fixture is a synthetic minimal GGUF, not a real model. We just
-     * verify the pointer arithmetic: data should point at bytes[128]. */
+    /* The tensor's absolute_offset is 128; the fixture stores bytes
+     * [1..128] there for an [8, 4] F32 tensor. We verify the pointer
+     * arithmetic: data should point at bytes[128]. */
     cr_assert_eq(data, m.shards[0].bytes + 128, "tensor data pointer arithmetic");
     cr_assert_eq(data[0], 1, "data[0]");
     cr_assert_eq(data[1], 2, "data[1]");
@@ -414,7 +412,7 @@ Test(gguf_map, total_bytes_matches_file_size)
     OcError e = oc_gguf_map_open(FIXTURE("valid-v3.gguf"), &m);
     cr_assert_eq(e, OC_OK, "map_open: %s", oc_error_msg(e));
 
-    cr_assert_eq(oc_gguf_map_total_bytes(&m), 132, "total bytes should be 132");
+    cr_assert_eq(oc_gguf_map_total_bytes(&m), 256, "total bytes should be 256");
 
     oc_gguf_map_free(&m);
 }
@@ -425,7 +423,7 @@ Test(mmap, open_readonly_flags_no_readahead)
     OcError e = oc_mmap_open_readonly_flags(FIXTURE("valid-v3.gguf"),
                                            OC_MMAP_F_NO_READAHEAD, &m);
     cr_assert_eq(e, OC_OK, "open flags: %s", oc_error_msg(e));
-    cr_assert_eq(oc_mmap_len(m), 132);
+    cr_assert_eq(oc_mmap_len(m), 256);
     cr_assert_eq(oc_mmap_advise_range(m, 0, 32, OC_MMAP_ADVICE_RANDOM), OC_OK);
     cr_assert_eq(oc_mmap_advise_range(m, 0, 32, OC_MMAP_ADVICE_WILLNEED), OC_OK);
     cr_assert_eq(oc_mmap_advise_range(m, 64, 32, OC_MMAP_ADVICE_DONTNEED), OC_OK);
@@ -442,7 +440,7 @@ Test(mmap, advise_range_rejects_bad_args)
                  OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_mmap_advise_range(m, 0, 0, OC_MMAP_ADVICE_RANDOM),
                  OC_ERR_INVALID_ARG);
-    cr_assert_eq(oc_mmap_advise_range(m, 200, 8, OC_MMAP_ADVICE_RANDOM),
+    cr_assert_eq(oc_mmap_advise_range(m, 512, 8, OC_MMAP_ADVICE_RANDOM),
                  OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_mmap_fault_range(NULL, 0, 1), OC_ERR_INVALID_ARG);
     cr_assert_eq(oc_mmap_fault_range(m, 0, 0), OC_ERR_INVALID_ARG);

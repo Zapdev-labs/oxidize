@@ -12,6 +12,14 @@ use thiserror::Error;
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const DEFAULT_ALIGNMENT: u64 = 32;
+/// Minimum bytes one tensor-info record occupies on the wire:
+/// name length (8) + n_dimensions (4) + ggml_type (4) + offset (8).
+const MIN_TENSOR_INFO_WIRE_BYTES: u64 = 24;
+/// Cap on up-front Vec preallocation driven by untrusted counts. Real
+/// models have far fewer entries; excess entries grow incrementally.
+const MAX_GGUF_PREALLOC: usize = 1 << 20;
+/// Maximum nesting depth for GGUF metadata arrays.
+const MAX_METADATA_DEPTH: u32 = 32;
 
 /// Read `MemAvailable` from `/proc/meminfo` (Linux only).
 /// Returns `None` on any parse failure; callers treat that as "unlimited" to be safe.
@@ -486,6 +494,8 @@ pub enum GgufParseError {
     InvalidAlignment(u64),
     #[error("integer overflow while parsing")]
     IntegerOverflow,
+    #[error("tensor data extent out of bounds: {name}")]
+    TensorExtentOutOfBounds { name: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -500,6 +510,10 @@ impl PartialEq for GgufParseError {
             (Self::UnknownMetadataType(a), Self::UnknownMetadataType(b)) => a == b,
             (Self::InvalidAlignment(a), Self::InvalidAlignment(b)) => a == b,
             (Self::IntegerOverflow, Self::IntegerOverflow) => true,
+            (
+                Self::TensorExtentOutOfBounds { name: a },
+                Self::TensorExtentOutOfBounds { name: b },
+            ) => a == b,
             (Self::Io(a), Self::Io(b)) => a.kind() == b.kind(),
             _ => false,
         }
@@ -619,11 +633,19 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
         metadata.insert(key, value);
     }
 
-    let mut tensor_infos = Vec::with_capacity(tensor_count as usize);
+    // Reject declared counts that cannot fit in the remaining bytes before
+    // sizing any allocation from them.
+    if tensor_count > reader.remaining() as u64 / MIN_TENSOR_INFO_WIRE_BYTES {
+        return Err(GgufParseError::UnexpectedEof);
+    }
+    let mut tensor_infos = Vec::with_capacity((tensor_count as usize).min(MAX_GGUF_PREALLOC));
     for _ in 0..tensor_count {
         let name = reader.read_string()?;
         let n_dimensions = reader.read_u32()?;
-        let mut dimensions = Vec::with_capacity(n_dimensions as usize);
+        if n_dimensions as usize > reader.remaining() / 8 {
+            return Err(GgufParseError::UnexpectedEof);
+        }
+        let mut dimensions = Vec::with_capacity((n_dimensions as usize).min(64));
         for _ in 0..n_dimensions {
             dimensions.push(reader.read_u64()?);
         }
@@ -651,12 +673,36 @@ pub fn parse_gguf(bytes: &[u8]) -> Result<GgufFile, GgufParseError> {
         return Err(GgufParseError::UnexpectedEof);
     }
 
+    let file_len = bytes.len() as u64;
     for tensor in &mut tensor_infos {
         tensor.absolute_offset = data_section_start
             .checked_add(tensor.relative_offset)
             .ok_or(GgufParseError::IntegerOverflow)?;
-        if tensor.absolute_offset > bytes.len() as u64 {
+        if tensor.absolute_offset > file_len {
             return Err(GgufParseError::UnexpectedEof);
+        }
+        // Validate the declared extent: dimensions x block layout give the
+        // tensor's byte size, which must end inside the file. Types without
+        // a known block layout are rejected downstream, not here.
+        let qtype = GgufQuantizationType::from_ggml_type(tensor.ggml_type);
+        if !matches!(qtype, GgufQuantizationType::Unknown(_)) {
+            let value_count = tensor
+                .dimensions
+                .iter()
+                .try_fold(1u64, |acc, &d| acc.checked_mul(d))
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(GgufParseError::IntegerOverflow)?;
+            if let Ok(declared_bytes) = crate::quantization::quantized_size(qtype, value_count) {
+                let end = tensor
+                    .absolute_offset
+                    .checked_add(declared_bytes as u64)
+                    .ok_or(GgufParseError::IntegerOverflow)?;
+                if end > file_len {
+                    return Err(GgufParseError::TensorExtentOutOfBounds {
+                        name: tensor.name.clone(),
+                    });
+                }
+            }
         }
     }
 
@@ -851,6 +897,10 @@ impl<'a> ByteReader<'a> {
         self.cursor
     }
 
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.cursor
+    }
+
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8], GgufParseError> {
         let end = self
             .cursor
@@ -937,6 +987,17 @@ impl<'a> ByteReader<'a> {
         &mut self,
         value_type: GgufMetadataType,
     ) -> Result<GgufMetadataValue, GgufParseError> {
+        self.read_value_of_type_at_depth(value_type, 0)
+    }
+
+    fn read_value_of_type_at_depth(
+        &mut self,
+        value_type: GgufMetadataType,
+        depth: u32,
+    ) -> Result<GgufMetadataValue, GgufParseError> {
+        if depth > MAX_METADATA_DEPTH {
+            return Err(GgufParseError::UnexpectedEof);
+        }
         match value_type {
             GgufMetadataType::Uint8 => Ok(GgufMetadataValue::Uint8(self.read_u8()?)),
             GgufMetadataType::Int8 => Ok(GgufMetadataValue::Int8(self.read_i8()?)),
@@ -950,9 +1011,13 @@ impl<'a> ByteReader<'a> {
             GgufMetadataType::Array => {
                 let element_type = GgufMetadataType::try_from(self.read_u32()?)?;
                 let len = self.read_u64()?;
-                let mut values = Vec::with_capacity(len as usize);
+                // Every element consumes >=1 byte on the wire.
+                if len > self.remaining() as u64 {
+                    return Err(GgufParseError::UnexpectedEof);
+                }
+                let mut values = Vec::with_capacity((len as usize).min(MAX_GGUF_PREALLOC));
                 for _ in 0..len {
-                    values.push(self.read_value_of_type(element_type)?);
+                    values.push(self.read_value_of_type_at_depth(element_type, depth + 1)?);
                 }
                 Ok(GgufMetadataValue::Array(GgufMetadataArray {
                     element_type,
@@ -997,7 +1062,7 @@ mod tests {
         assert_eq!(parsed.data_section_start, 128);
         assert_eq!(parsed.tensor_infos.len(), 1);
         assert_eq!(parsed.tensor_infos[0].name, "tok_embeddings.weight");
-        assert_eq!(parsed.tensor_infos[0].dimensions, vec![32000, 4096]);
+        assert_eq!(parsed.tensor_infos[0].dimensions, vec![8, 4]);
         assert_eq!(parsed.tensor_infos[0].absolute_offset, 128);
     }
 

@@ -6,7 +6,7 @@
  *
  * Not installed; build ad hoc:
  *   cc -O2 -Iinclude -o /tmp/dump_hf scripts/dump_hf_truncate.c \
- *       src/format/safetensors.o src/util/mmap.o src/core/*.o -lm -lpthread
+ *       src/format/safetensors.o src/util/mmap.o src/core/star.o -lm -lpthread
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/safetensors.h"
@@ -73,7 +73,11 @@ static void stw_add(Stw *w, const char *name, const char *dtype,
                     const size_t *dims, size_t nd, const void *data,
                     size_t bytes)
 {
-    while (w->hn + bytes + 512 > w->hcap) {
+    /* Grow the header buffer for the header ENTRY (name + dims + offsets,
+     * a few hundred bytes), not the payload `bytes` — multi-GB tensors
+     * would otherwise force a ~4 GiB JSON header allocation. */
+    const size_t entry = strlen(name) + nd * 24 + 160;
+    while (w->hn + entry + 512 > w->hcap) {
         w->hcap *= 2;
         w->hdr = realloc(w->hdr, w->hcap);
         if (!w->hdr) die("oom");
@@ -152,7 +156,12 @@ static const OcSafetensorsTensor *src_find(Src *s, const char *name,
         for (size_t t = 0; t < f->n_tensors; t++) {
             const OcSafetensorsTensor *ten = &f->tensors[t];
             if (!strcmp(ten->name, name)) {
-                /* raw_data points at the start of the data section */
+                /* data section occupies [data_start, file_size); reject
+                 * a header claiming data outside it. */
+                if (ten->data_offset > f->file_size - f->data_start ||
+                    ten->data_length >
+                        f->file_size - f->data_start - ten->data_offset)
+                    die("tensor %s out of bounds", name);
                 *(const uint8_t **)data =
                     (const uint8_t *)f->raw_data + ten->data_offset;
                 return ten;
@@ -218,9 +227,7 @@ static float *src_dequant(Src *s, const char *key, size_t in, size_t out)
     for (size_t c = 0; c < in; c++) x[c * in + c] = 1.0f;
     OcError mm = oc_exl3_matmul(&m, x, in, cols, out, in);
     if (mm != OC_OK) die("matmul %s rc=%d", key, (int)mm);
-    fprintf(stderr, "  dequant %s matmul ok\n", key);
     free(x);
-    fprintf(stderr, "  free x ok\n");
     float *w = malloc(out * in * sizeof(float));
     if (!w) die("oom");
     for (size_t r = 0; r < out; r++)
@@ -238,6 +245,13 @@ static float *src_vector(Src *s, const char *name, size_t n)
     const void *data = NULL;
     const OcSafetensorsTensor *t = src_find(s, name, &data);
     if (!t) die("missing %s", name);
+    /* The header can under-report elements; never read past data_length. */
+    size_t esz = !strcmp(t->dtype, "F32") ? 4 : 2;
+    if (!strcmp(t->dtype, "F32") && !strcmp(t->dtype, "F16") &&
+        strcmp(t->dtype, "BF16"))
+        esz = 0;
+    if (esz == 0 || n > t->data_length / esz)
+        die("short tensor %s (%zu x %s)", name, n, t->dtype);
     float *v = malloc(n * sizeof(float));
     if (!v) die("oom");
     const uint8_t *p = data;
@@ -262,6 +276,9 @@ static void put_f32(Stw *w, const char *name, const size_t *dims, size_t nd,
     stw_add(w, name, "F32", dims, nd, v, n * 4);
 }
 
+static void emit_config_and_tokenizer(const char *src_dir,
+                                      const char *out_dir);
+
 int main(int argc, char **argv)
 {
     if (argc != 3) {
@@ -273,7 +290,7 @@ int main(int argc, char **argv)
     static Stw w0;
     stw_init(&w0);
     Stw *w = &w0;
-    char name[512], key[512];
+    char name[640], key[512];
     size_t d2[2], d3[3];
 
     /* embeddings + head */
@@ -524,5 +541,142 @@ int main(int argc, char **argv)
     stw_write(w, out);
     fprintf(stderr, "wrote %s (%zu tensors, %zu bytes payload)\n", out,
             w->ntensors, w->pn);
+    emit_config_and_tokenizer(argv[1], argv[2]);
     return 0;
+}
+
+/* ── adjusted config.json + tokenizer emission ───────────────────────────
+ * The weights above are truncated (NLAYERS/NEXP) and the indexer tensors
+ * are dropped, so the source config.json is wrong for the dump: emit one
+ * whose expert/layer counts match and whose indexer compression is zeroed
+ * (dense attention), then copy the tokenizer files so the output dir is a
+ * self-contained HF checkpoint the converter can consume directly. */
+
+static char *read_file(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    if (n < 0 || fseek(f, 0, SEEK_SET)) { fclose(f); return NULL; }
+    char *buf = malloc((size_t)n + 1);
+    if (!buf) { fclose(f); die("oom"); }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
+    fclose(f);
+    buf[n] = 0;
+    if (len) *len = (size_t)n;
+    return buf;
+}
+
+static void write_file(const char *path, const char *buf, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) die("cannot write %s", path);
+    if (len && fwrite(buf, 1, len, f) != len) die("short write %s", path);
+    fclose(f);
+}
+
+/* Replace the integer value of `"field": N` in place. */
+static void rewrite_int_field(char *cfg, const char *field, unsigned value)
+{
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", field);
+    char *p = strstr(cfg, pat);
+    if (!p) return;                 /* field absent in source config */
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == ':') p++;
+    char num[32];
+    snprintf(num, sizeof(num), "%u", value);
+    char *e = p;
+    while (*e >= '0' && *e <= '9') e++;
+    if (e == p) return;             /* not an integer field: leave it */
+    const size_t tail = strlen(e);
+    memmove(p + strlen(num), e, tail + 1);
+    memcpy(p, num, strlen(num));
+}
+
+/* Truncate a JSON string array ("field": ["a","b",...]) to `keep`
+ * entries in place; no-op if it has `keep` or fewer entries. */
+static void truncate_str_array(char *cfg, const char *field, unsigned keep)
+{
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\"", field);
+    char *p = strstr(cfg, pat);
+    if (!p) return;
+    p = strchr(p, '[');
+    if (!p) return;
+    char *q = p + 1;
+    unsigned seen = 0;
+    while (*q && *q != ']') {
+        if (*q == '"') {
+            if (seen == keep) {     /* drop this entry and everything after */
+                /* walk back over the preceding comma + whitespace */
+                char *cut = q;
+                while (cut > p + 1 && (cut[-1] == ' ' || cut[-1] == ',')) cut--;
+                char *close = strchr(q, ']');
+                if (!close) return;
+                memmove(cut, close, strlen(close) + 1);
+                return;
+            }
+            seen++;
+            q = strchr(q + 1, '"');
+            if (!q) return;
+        }
+        q++;
+    }
+}
+
+static void copy_file(const char *src_dir, const char *out_dir,
+                      const char *name)
+{
+    char sp[1024], op[1024];
+    snprintf(sp, sizeof(sp), "%s/%s", src_dir, name);
+    size_t len = 0;
+    char *buf = read_file(sp, &len);
+    if (!buf) return;               /* optional file absent in source */
+    snprintf(op, sizeof(op), "%s/%s", out_dir, name);
+    write_file(op, buf, len);
+    fprintf(stderr, "copied %s\n", op);
+    free(buf);
+}
+
+static void emit_config_and_tokenizer(const char *src_dir,
+                                      const char *out_dir)
+{
+    char cfg_path[1024], out_path[1024];
+    snprintf(cfg_path, sizeof(cfg_path), "%s/config.json", src_dir);
+    size_t len = 0;
+    char *cfg = read_file(cfg_path, &len);
+    if (!cfg) die("cannot read %s", cfg_path);
+
+    rewrite_int_field(cfg, "num_experts", NEXP);
+    rewrite_int_field(cfg, "num_local_experts", NEXP);
+    rewrite_int_field(cfg, "n_routed_experts", NEXP);
+    rewrite_int_field(cfg, "moe_num_experts", NEXP);
+    rewrite_int_field(cfg, "num_hidden_layers", NLAYERS);
+    /* The dump carries no indexer tensors: zero the indexer compression
+     * fields so consumers run exact dense attention. */
+    static const char *const idx_fields[] = {
+        "indexer_top_k", "indexer_topk", "index_top_k", "index_topk",
+        "indexer_n_heads", "indexer_head_dim", "qsa_indexer_top_k",
+    };
+    for (size_t i = 0; i < sizeof(idx_fields) / sizeof(idx_fields[0]); i++)
+        rewrite_int_field(cfg, idx_fields[i], 0);
+    /* The dump also drops every mtp.* tensor; advertise no draft head. */
+    rewrite_int_field(cfg, "mtp_num_hidden_layers", 0);
+    truncate_str_array(cfg, "layer_types", NLAYERS);
+    truncate_str_array(cfg, "layers_block_type", NLAYERS);
+
+    snprintf(out_path, sizeof(out_path), "%s/config.json", out_dir);
+    write_file(out_path, cfg, strlen(cfg));
+    fprintf(stderr, "wrote %s (layers=%u experts=%u, indexer zeroed)\n",
+            out_path, NLAYERS, NEXP);
+    free(cfg);
+
+    static const char *const tok_files[] = {
+        "tokenizer.json", "tokenizer_config.json", "vocab.json",
+        "merges.txt", "special_tokens_map.json", "generation_config.json",
+    };
+    for (size_t i = 0; i < sizeof(tok_files) / sizeof(tok_files[0]); i++)
+        copy_file(src_dir, out_dir, tok_files[i]);
 }

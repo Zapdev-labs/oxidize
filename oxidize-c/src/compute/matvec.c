@@ -180,7 +180,11 @@ static void quantize_act_q8_0_dqf(const float *x, size_t n, uint8_t *out)
         const uint16_t dh = oc_f32_to_f16_bits(d);
         dst[0] = (uint8_t)(dh & 0xFF);
         dst[1] = (uint8_t)(dh >> 8);
-        dq[b] = d;
+        /* Store the f16-decoded scale, not the pre-rounding d: the single
+         * row dots all multiply by the header's f16 value, so the quad path
+         * must use the same quantized scale or its results drift off the
+         * reference. */
+        dq[b] = oc_f16_to_f32_bits(dh);
         int8_t *q = (int8_t *)(dst + 2);
         for (size_t i = 0; i < OC_OXK_QK8_0; i++) {
             int v = (int)lrintf(src[i] * id);
@@ -483,7 +487,15 @@ void oc_matvec_f32_multi(const float *const *datas, const size_t *rows,
                          size_t cols, size_t n_outs, const float *input,
                          float *const *outs)
 {
-    if (n_outs == 0 || cols == 0) return;
+    if (n_outs == 0) return;
+    /* cols == 0 is a valid degenerate shape: every output row is the
+     * empty dot 0.0f, matching oc_matvec_f32(). */
+    if (cols == 0) {
+        for (size_t k = 0; k < n_outs; k++)
+            for (size_t r = 0; r < rows[k]; r++)
+                outs[k][r] = 0.0f;
+        return;
+    }
     size_t total_rows = 0;
     for (size_t k = 0; k < n_outs; k++) {
         if (rows[k] > SIZE_MAX - total_rows) return;   /* overflow: bail out */

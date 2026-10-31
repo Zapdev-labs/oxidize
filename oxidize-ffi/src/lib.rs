@@ -13,6 +13,7 @@ use oxidize_core::inference::{InferenceConfig, InferenceModel};
 use oxidize_core::model::{Model, Session};
 use oxidize_core::tensor;
 use std::ffi::{CStr, c_char};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Once;
 
 // ── thread pool init ──────────────────────────────────────────────────────────
@@ -102,13 +103,19 @@ pub unsafe extern "C" fn oxidize_gemv_quantized(
     let Some(qt) = to_gguf_type(quant_type) else {
         return -1;
     };
-    let qb = unsafe { std::slice::from_raw_parts(qbytes, qbytes_len) };
-    let v = unsafe { std::slice::from_raw_parts(vector, cols) };
-    let o = unsafe { std::slice::from_raw_parts_mut(output, rows) };
-    match tensor::gemv_quantized_f32(qt, qb, rows, cols, v, o) {
-        Ok(()) => 0,
-        Err(_) => -1,
+    if qbytes.is_null() || vector.is_null() || output.is_null() {
+        return -1;
     }
+    catch_unwind(AssertUnwindSafe(|| {
+        let qb = unsafe { std::slice::from_raw_parts(qbytes, qbytes_len) };
+        let v = unsafe { std::slice::from_raw_parts(vector, cols) };
+        let o = unsafe { std::slice::from_raw_parts_mut(output, rows) };
+        match tensor::gemv_quantized_f32(qt, qb, rows, cols, v, o) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
+    }))
+    .unwrap_or(-1)
 }
 
 // ── model handle ─────────────────────────────────────────────────────────────
@@ -123,25 +130,31 @@ struct ModelHandle {
 /// `path` must be a valid nul-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oxidize_model_load(path: *const c_char) -> *mut std::ffi::c_void {
+    if path.is_null() {
+        return std::ptr::null_mut();
+    }
     init_thread_pool();
     let Ok(path_str) = unsafe { CStr::from_ptr(path) }.to_str() else {
         return std::ptr::null_mut();
     };
-    let mapped = match load_mapped_gguf(path_str) {
-        Ok(m) => m,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    // Request THP for weight pages to reduce TLB pressure during inference.
-    // Only activates when RAM headroom is sufficient (see advise_huge_pages docs).
-    #[cfg(target_os = "linux")]
-    let _ = mapped.advise_huge_pages();
-    let config = InferenceConfig::from_gguf(&mapped);
-    let model = match InferenceModel::load_from_gguf(&mapped, config, true) {
-        Ok(m) => m,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let handle = Box::new(ModelHandle { model });
-    Box::into_raw(handle) as *mut std::ffi::c_void
+    catch_unwind(AssertUnwindSafe(|| {
+        let mapped = match load_mapped_gguf(path_str) {
+            Ok(m) => m,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        // Request THP for weight pages to reduce TLB pressure during inference.
+        // Only activates when RAM headroom is sufficient (see advise_huge_pages docs).
+        #[cfg(target_os = "linux")]
+        let _ = mapped.advise_huge_pages();
+        let config = InferenceConfig::from_gguf(&mapped);
+        let model = match InferenceModel::load_from_gguf(&mapped, config, true) {
+            Ok(m) => m,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        let handle = Box::new(ModelHandle { model });
+        Box::into_raw(handle) as *mut std::ffi::c_void
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Free a model handle returned by oxidize_model_load.
@@ -222,22 +235,25 @@ pub unsafe extern "C" fn oxidize_model_forward(
     if handle.is_null() || session.is_null() || tokens.is_null() || logits_out.is_null() {
         return -1;
     }
-    let h = unsafe { &mut *(handle as *mut ModelHandle) };
-    let s = unsafe { &mut *(session as *mut Session) };
-    let toks: Vec<u32> = unsafe { std::slice::from_raw_parts(tokens, n_tokens) }.to_vec();
-    match h.model.forward(&toks, s) {
-        Ok(logits) => {
-            // Refuse to copy a partial/truncated result: the caller-provided buffer
-            // length must exactly match the produced logits length.
-            if logits.len() != vocab_size {
-                return -1;
+    catch_unwind(AssertUnwindSafe(|| {
+        let h = unsafe { &mut *(handle as *mut ModelHandle) };
+        let s = unsafe { &mut *(session as *mut Session) };
+        let toks: Vec<u32> = unsafe { std::slice::from_raw_parts(tokens, n_tokens) }.to_vec();
+        match h.model.forward(&toks, s) {
+            Ok(logits) => {
+                // Refuse to copy a partial/truncated result: the caller-provided buffer
+                // length must exactly match the produced logits length.
+                if logits.len() != vocab_size {
+                    return -1;
+                }
+                let out = unsafe { std::slice::from_raw_parts_mut(logits_out, vocab_size) };
+                out.copy_from_slice(&logits);
+                0
             }
-            let out = unsafe { std::slice::from_raw_parts_mut(logits_out, vocab_size) };
-            out.copy_from_slice(&logits);
-            0
+            Err(_) => -1,
         }
-        Err(_) => -1,
-    }
+    }))
+    .unwrap_or(-1)
 }
 
 /// Sample greedily (argmax) from a logits buffer.
@@ -246,6 +262,9 @@ pub unsafe extern "C" fn oxidize_model_forward(
 /// `logits` must be valid for `vocab_size` f32 values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn oxidize_sample_argmax(logits: *const f32, vocab_size: usize) -> u32 {
+    if logits.is_null() {
+        return 0;
+    }
     let l = unsafe { std::slice::from_raw_parts(logits, vocab_size) };
     l.iter()
         .enumerate()

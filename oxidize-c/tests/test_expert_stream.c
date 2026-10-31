@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L  /* mkstemp */
 #include <criterion/criterion.h>
 
 #include "oxidize/error.h"
@@ -8,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 Test(expert_stream, new_on_dense_model)
 {
@@ -172,7 +174,10 @@ Test(expert_stream, prepare_mapping_includes_mtp_layer)
 
 Test(expert_stream, fault_bytes_include_dense_and_unequal_expert_spans)
 {
-    const char *path = "/tmp/oxidize-c-expert-stream-fault.bin";
+    char path[] = "/tmp/oxidize-c-expert-stream-fault-XXXXXX";
+    const int fd = mkstemp(path);
+    cr_assert_geq(fd, 0);
+    close(fd);
     uint8_t blob[1024] = {0};
     FILE *file = fopen(path, "wb");
     cr_assert_not_null(file);
