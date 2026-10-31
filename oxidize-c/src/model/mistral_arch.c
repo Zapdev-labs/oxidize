@@ -4,6 +4,7 @@
  * SwiGLU + RoPE + GQA + SWA (Sliding Window Attention).
  */
 #include "oxidize/mistral_arch.h"
+#include "arch_ops.h"
 #include "oxidize/flash_attention.h"
 
 #include <math.h>
@@ -137,14 +138,7 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
         /* Attention norm. */
         float *normed = malloc(h * sizeof(float));
         if (!normed) { free(hidden); return OC_ERR_OOM; }
-        if (layer->attention_norm) {
-            float ss = 0.0f;
-            for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
-            float rms = 1.0f / sqrtf(ss / h + eps);
-            for (size_t i = 0; i < h; i++) normed[i] = hidden[i] * rms * layer->attention_norm[i];
-        } else {
-            memcpy(normed, hidden, h * sizeof(float));
-        }
+        oc_arch_rms_norm(hidden, layer->attention_norm, normed, h, eps);
 
         /* QKV projections. */
         float *q = calloc(q_size, sizeof(float));
@@ -177,26 +171,10 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
         /* RoPE on Q and K. */
         size_t pos = model->kv_seq_len;
         float theta = cfg->rope_theta;
-        for (size_t hh = 0; hh < n_heads; hh++) {
-            float *qh = q + hh * hd;
-            for (size_t d = 0; d < hd; d += 2) {
-                float freq = pos / powf(theta, (float)(d / 2) / (float)(hd / 2));
-                float c = cosf(freq), s = sinf(freq);
-                float q0 = qh[d], q1 = qh[d + 1];
-                qh[d] = q0 * c - q1 * s;
-                qh[d + 1] = q0 * s + q1 * c;
-            }
-        }
-        for (size_t hh = 0; hh < n_kv_heads; hh++) {
-            float *kh = k + hh * hd;
-            for (size_t d = 0; d < hd; d += 2) {
-                float freq = pos / powf(theta, (float)(d / 2) / (float)(hd / 2));
-                float c = cosf(freq), s = sinf(freq);
-                float k0 = kh[d], k1 = kh[d + 1];
-                kh[d] = k0 * c - k1 * s;
-                kh[d + 1] = k0 * s + k1 * c;
-            }
-        }
+        for (size_t hh = 0; hh < n_heads; hh++)
+            oc_arch_rope_head(q + hh * hd, hd, pos, theta);
+        for (size_t hh = 0; hh < n_kv_heads; hh++)
+            oc_arch_rope_head(k + hh * hd, hd, pos, theta);
 
         /* Append to per-layer KV cache. */
         if (model->kv_seq_len < model->kv_cache_cap) {
@@ -238,14 +216,7 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
         for (size_t i = 0; i < h; i++) hidden[i] += attn_resid[i];
 
         /* FFN norm. */
-        if (layer->ffn_norm) {
-            float ss = 0.0f;
-            for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
-            float rms = 1.0f / sqrtf(ss / h + eps);
-            for (size_t i = 0; i < h; i++) normed[i] = hidden[i] * rms * layer->ffn_norm[i];
-        } else {
-            memcpy(normed, hidden, h * sizeof(float));
-        }
+        oc_arch_rms_norm(hidden, layer->ffn_norm, normed, h, eps);
 
         /* SwiGLU FFN: down(silu(gate(normed)) * up(normed)). */
         float *gate_out = malloc(inter * sizeof(float));
@@ -295,14 +266,7 @@ OcError oc_mistral_forward(OcMistralModel *model, uint32_t token, float *logits)
     /* Final norm + output projection. */
     float *normed = malloc(h * sizeof(float));
     if (!normed) { free(hidden); return OC_ERR_OOM; }
-    if (model->output_norm) {
-        float ss = 0.0f;
-        for (size_t i = 0; i < h; i++) ss += hidden[i] * hidden[i];
-        float rms = 1.0f / sqrtf(ss / h + eps);
-        for (size_t i = 0; i < h; i++) normed[i] = hidden[i] * rms * model->output_norm[i];
-    } else {
-        memcpy(normed, hidden, h * sizeof(float));
-    }
+    oc_arch_rms_norm(hidden, model->output_norm, normed, h, eps);
 
     /* LM head. */
     if (model->output) {
