@@ -316,6 +316,10 @@ CPU decoding.
 
 Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllamav3/blob/058b8630fd081f3ff46fce6246955b157c3a2e3b/tests/testlib/trellis.py).
 
+## Security
+
+See [SECURITY_MODEL.md](SECURITY_MODEL.md) for the threat model, trust boundaries, and existing controls.
+
 ## License
 
 Zapdev labs Fair Use License

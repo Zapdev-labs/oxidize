@@ -1,6 +1,8 @@
 # oxidize — Security Model
 
-_Threat model for oxidize, built from the code at `595f5fa` (master). It is still a draft: the deployment, attacker and out-of-scope sections are inferred from the code and have not yet been confirmed by the maintainers (see Open questions). Keep it up to date as surfaces change; security scans start from this file._
+Threat model for oxidize, as of `595f5fa` (master). Keep it current as surfaces change; security scans start from this file.
+
+oxidize is local-first. The default posture is a single-user process bound to localhost. Binding beyond localhost, sharing an API key across users, or joining a mesh are operator-opt-in.
 
 ## 1. System overview
 
@@ -12,7 +14,7 @@ Trust boundaries:
 3. **Mesh peer → node**: LAN peers found over mDNS exchange gossip and tensor data with each other.
 4. **Host app → FFI/bindings**: C-ABI (`oxidize-ffi`) and PyO3 (`oxidize-py`) callers pass pointers and buffers in.
 
-Infrastructure: no IaC repository. The only deployment artifacts are `Dockerfile.server` (non-root `oxidize` user, `EXPOSE 8080`) and `Dockerfile.cli`.
+Infrastructure: no IaC repository. Deployment artifacts are `Dockerfile.server` (non-root `oxidize` user, `EXPOSE 8080`, entrypoint `oxidize-server` with no `--host` so the process still binds `127.0.0.1` inside the container unless the operator passes `--host 0.0.0.0`) and `Dockerfile.cli`.
 
 ## 2. Components
 
@@ -22,7 +24,7 @@ Infrastructure: no IaC repository. The only deployment artifacts are `Dockerfile
 | **Core Runtime** | `oxidize-core/src/` except `format/` and `mesh/`; `oxidize-kernels/` | Tensor ops, SIMD/unsafe kernels, KV cache, paged attention, backends (CUDA/Metal/Vulkan/WebGPU) |
 | **Model Formats** | `oxidize-core/src/format/` (gguf, safetensors, tokenizer, safetensors_to_gguf), `oxidize-quantize/`, `oxidize-convert/`, `oxidize-prune/`, `oxidize-merge/` | Parsers of untrusted model files |
 | **Mesh** | `oxidize-core/src/mesh/`, `oxidize-server/src/mesh_cluster.rs`, `routes/mesh.rs` | libp2p TCP+Noise+Yamux, mDNS discovery, GossipSub, leader election |
-| **CLI & Model Download** | `oxidize-cli/` (incl. `src/main/model_resolution.rs`), `oxidize-tui/` | Resolves `org/repo` specs against `huggingface.co`, caches under the oxidize cache dir |
+| **CLI & Model Download** | `oxidize-cli/` (incl. `src/main/model_resolution.rs`), `oxidize-tui/` | Resolves `org/repo` specs against `huggingface.co`, caches under the oxidize cache dir. `oxidize run` starts the HTTP server by default. TUI drives or attaches to that server. |
 | **Bindings** | `oxidize-ffi/`, `oxidize-py/` | C-ABI and PyO3 surfaces over oxidize-core |
 | **C/C++ Ports** | `oxidize-c/` (incl. `src/server/` HTTP/WS server, `src/format/` parsers), `oxidize-cpp/` (incl. `src/server/main.cpp`) | Memory-unsafe languages, separate parsers and servers |
 | **Go/Python Ports** | `oxidize-golang/` (`internal/server`, `internal/auth`, `hf/`), `oxidize-python/` (`oxidize_python/hf/hub.py`, server) | Parallel implementations with their own servers and HF resolvers |
@@ -30,47 +32,61 @@ Infrastructure: no IaC repository. The only deployment artifacts are `Dockerfile
 
 ## 3. Entry points and who can reach them
 
-- **Rust Server**: binds `127.0.0.1` by default (`cli.rs`, `--host`). Operators can bind `0.0.0.0`; the Docker image exposes 8080. API-key auth (`auth.rs`) applies only to `/v1/*` and **only when `OXIDIZE_API_KEY(S)` is set**. Otherwise every `/v1/*` route is open to anyone who can reach the port. `/metrics` and `/openapi.json` are never gated. `/v1/realtime` also accepts `?api_key=`. The body limit is 10 MiB (`MAX_BODY_SIZE_BYTES`). Rate limits live in `limits.rs`.
-- **C Server**: `oxidize-c/src/server/http.c` binds `INADDR_ANY` when the host is NULL or `0.0.0.0`. Auth is in `middleware.c` (`ct_streq`) and is enabled only when a key is given.
-- **C++ Server**: `oxidize-cpp/src/server/main.cpp` defaults to `127.0.0.1`.
-- **Go/Python servers**: `oxidize-golang/internal/server`, `oxidize-python` `serve` (default `127.0.0.1`).
-- **Mesh**: `run_mesh_node` listens on `0.0.0.0:<mesh_port>`. Peers are accepted when their namespace string matches (`accept_peer` → `same_namespace`). Noise encrypts traffic but does not authorize peers, so there is no shared secret or peer allow-list.
+- **Rust Server / CLI API**: `oxidize-server` and `oxidize-cli --api-host` default to `127.0.0.1` (`cli.rs`, `--host` / `--api-host`). Operators can bind `0.0.0.0`. API-key auth (`auth.rs`) applies only to `/v1/*` and **only when `OXIDIZE_API_KEY` or `OXIDIZE_API_KEYS` is set**. Otherwise every `/v1/*` route is open to anyone who can reach the port. `/healthz`, `/livez`, `/readyz`, `/metrics` and `/openapi.json` are never gated. `/v1/realtime` also accepts `?api_key=`; other Rust routes do not. The body limit is 10 MiB (`MAX_BODY_SIZE_BYTES`). Rate limits live in `limits.rs` (default 64 req/s, 8 in-flight, queue 128).
+- **C Server**: CLI defaults to `127.0.0.1` (`oxidize-c/src/cli/args.c`). `http.c` binds `INADDR_ANY` only when the host is NULL or `0.0.0.0`. Auth is in `middleware.c` (`ct_streq`) and is enabled only when `--api-key` is given.
+- **C++ Server**: `oxidize-cpp/src/server/main.cpp` defaults to `127.0.0.1`. There is no API-key auth.
+- **Go/Python servers**: `oxidize-golang/internal/server` and `oxidize-python` `serve` default to `127.0.0.1`. Auth is `OXIDIZE_API_KEY` only (not `OXIDIZE_API_KEYS`). Unlike Rust, both accept `?api_key=` on every `/v1/*` route.
+- **Mesh**: Rust `run_mesh_node` listens on `0.0.0.0:<mesh_port>`; C `oc_mesh_listen` binds `INADDR_ANY`. Go/Python mesh listeners bind `127.0.0.1`. Rust peers are accepted when their namespace string matches (`accept_peer` → `same_namespace`). Noise encrypts traffic but does not authorize peers: there is no shared secret or peer allow-list.
 - **Model files**: CLI/server `--model` paths, and `org/repo` specs downloaded from Hugging Face (`model_resolution.rs`, Go `hf/`, Python `hf/hub.py`). Files are memory-mapped and parsed by `format/*.rs` and the C/C++ parsers.
-- **FFI/bindings**: whatever host process links `oxidize-ffi` or imports `oxidize_py`.
+- **FFI/bindings / TUI**: whatever host process links `oxidize-ffi` or imports `oxidize_py`. `oxidize-tui` is a local bun app that talks to the HTTP API.
 
 ## 4. Assets
 
 - Host integrity of the machine running inference (native code; GPU drivers). This is the highest-value asset.
-- Prompts and completions of API users (potentially private), plus KV/prefix caches shared between requests.
+- Prompts and completions of API users (potentially private). Prefix-cache / paged-attention KV snapshots are reused across requests with a matching prefix (`prefix_cache.rs`, paged scheduler).
 - API keys (`OXIDIZE_API_KEY(S)`), the HF token (`HF_TOKEN`), and files reachable by the server process (model cache, `~/.cache/oxidize`).
 - Availability of an expensive inference host (CPU/GPU/RAM).
 - Model weights (usually public; may be private finetunes).
 
-## 5. Attacker profiles (assumed; not confirmed)
+## 5. Attacker profiles
 
-1. Remote unauthenticated client on the network, when a server is bound beyond localhost without an API key, or reaching ungated routes.
-2. Authenticated API user who tries to read other users' data, exhaust resources or escape limits.
+In scope:
+
+1. Remote unauthenticated client on the network, when a server is bound beyond localhost without an API key, or reaching ungated routes (`/metrics`, `/openapi.json`, C++ `/v1/*`).
+2. Authenticated API user who tries to read other users' data (shared prefix/KV cache, one shared key — no per-user isolation), exhaust resources, or escape limits.
 3. Malicious model publisher: a crafted GGUF/SafeTensors/tokenizer/config from a Hugging Face repo, aiming at memory corruption, path traversal in the cache or downloads, or resource exhaustion.
 4. Rogue LAN peer that joins the mesh namespace.
 5. Supply chain: dependencies, vendored `vendor/libp2p-*`, CI.
 
 ## 6. Existing controls
 
-- Constant-time API-key comparison (Rust `subtle`, C `ct_streq`). Key rotation via `OXIDIZE_API_KEYS`. The query-string key is accepted only on `/v1/realtime`.
-- Localhost default bind (Rust, C++, Python servers). The Docker image runs as a non-root user.
-- 10 MiB request-body limit, rate limits and a batching queue (`limits.rs`), audit/metrics middleware.
+- Constant-time API-key comparison (Rust `subtle`, C `ct_streq`, Go `crypto/subtle`, Python `hmac.compare_digest`). Rust key rotation via `OXIDIZE_API_KEYS`. The query-string key is accepted only on `/v1/realtime` in Rust; Go/Python accept it on all `/v1/*`.
+- Localhost default bind on every HTTP server (Rust, C CLI, C++, Go, Python). The Docker images run as a non-root user; the server image still needs `--host 0.0.0.0` to be reachable from outside the container.
+- Rust: 10 MiB request-body limit, rate limits and a batching queue (`limits.rs`). Chat/completions emit audit events; `audit_middleware` exists but is not installed on the router.
 - Hardened HF download path and parsers across ports (PR #63).
-- `cargo-deny` license/advisory audit (`deny.toml`). A fuzz harness exists at `oxidize-core/fuzz/`.
-- Noise-encrypted mesh transport with namespace-isolated topics and election-clock session invalidation.
+- `cargo-deny` license/advisory audit (`deny.toml`). A fuzz harness exists at `oxidize-core/fuzz/` (GGUF parser, tokenizer).
+- Noise-encrypted Rust mesh transport with namespace-isolated topics and election-clock session invalidation.
 
 ## 7. Out of scope / accepted risk
 
-_None stated by the owner yet._
+- Physical access to the host, a compromised OS, and bugs in GPU drivers / CUDA / Metal / Vulkan.
+- Prompt injection as an application-level LLM concern. The engine generates tokens; it does not enforce app policy on model output.
+- Resource exhaustion of a localhost single-user process (the operator is the client). Remote DoS after binding beyond localhost is in scope; rate limits are a best-effort control, not a guarantee.
+- Mesh over an untrusted network. Mesh is a trusted-LAN / operator-controlled cluster feature. Namespace match is not authentication.
+- `scripts/`, `notebooks/`, Modal/Kaggle helpers, and the training crates as a production serving surface. They are in scope for secrets and supply chain in the repo, not as internet-facing APIs.
+- Per-user tenancy. A configured API key (or key list) is a shared secret, not an identity.
 
-## 8. Open questions
+## 8. Baseline for scans
 
-1. How the server is really deployed: localhost-only, trusted LAN, or internet-facing multi-user?
-2. Which attackers matter, and is a malicious Hugging Face model file in scope?
-3. Are `scripts/`, `notebooks/`, the Modal/Kaggle helpers, the training crates, or the Go/Python ports out of scope?
-4. Is DoS on a local single-user server accepted risk?
-5. Is the mesh used only on trusted LANs?
+Treat the facts above as the committed baseline rather than re-deriving them.
+
+Known gaps to score against, not to rediscover:
+
+- Auth is off unless an API key is configured. C++ has no auth at all.
+- Ungated `/metrics` and `/openapi.json` (and C++ `/v1/*` on a non-localhost bind).
+- Go/Python `?api_key=` on every `/v1/*` route (keys in URLs, proxies, history).
+- Rust/C mesh listen on all interfaces with no peer allow-list.
+- Shared prefix/KV cache across requests; no user isolation.
+- `audit_middleware` is unused; Docker `EXPOSE 8080` does not change the localhost default bind.
+
+Update this file when adding a server, an auth scheme, a parser, or a mesh transport.
