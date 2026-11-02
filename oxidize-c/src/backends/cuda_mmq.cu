@@ -1965,6 +1965,7 @@ __device__ __forceinline__ void mg_stage_xh(uint8_t *xb, uint32_t t_,
  * per register, taking a per-lane row address. Our swizzled layout keeps
  * 16B k-segments contiguous per row, so each lane points at
  * (row, seg^k-slice). */
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750
 #define MG_LDM4(d0, d1, d2, d3, addr)                                        \
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 "                 \
                  "{%0,%1,%2,%3}, [%4];"                                      \
@@ -1975,6 +1976,14 @@ __device__ __forceinline__ void mg_stage_xh(uint8_t *xb, uint32_t t_,
                  "{%0,%1}, [%2];"                                            \
                  : "=r"(d0), "=r"(d1)                                        \
                  : "r"((uint32_t)__cvta_generic_to_shared(addr)))
+#else
+/* ldmatrix needs sm_75+. mg_mma_capable() keeps older devices off this path,
+ * so these only have to compile for the older architecture slices. */
+#define MG_LDM4(d0, d1, d2, d3, addr) \
+    do { (void)(addr); (d0) = (d1) = (d2) = (d3) = 0u; } while (0)
+#define MG_LDM2(d0, d1, addr) \
+    do { (void)(addr); (d0) = (d1) = 0u; } while (0)
+#endif
 
 /* Half-superblock sweep: 16 k8-steps. Each iteration's LDSM.x4 grabs the
  * A fragments for two steps (mats = {A0 k, A1 k, A0 k+1, A1 k+1}) and one
