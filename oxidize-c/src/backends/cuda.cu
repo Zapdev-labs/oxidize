@@ -1452,6 +1452,10 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
 
     free(host_temp);
     ctx->initialized = true;
+    /* Fast path: allocates its own stream/state/batch workspace when the
+     * model shape qualifies; fast_ok stays false otherwise and callers keep
+     * the per-token forward above. */
+    oc_cuda_fast_attach(ctx);
 #undef CUDA_INIT_ALLOC
     return OC_OK;
 }
@@ -1745,6 +1749,10 @@ void oc_cuda_reset(OcCudaContext *ctx)
 void oc_cuda_free(OcCudaContext *ctx)
 {
     if (!ctx) return;
+
+    /* Fast-path resources own their stream, state, ring, graph and batch
+     * workspace; released first while the context is still coherent. */
+    oc_cuda_fast_detach(ctx);
 
     cudaFree(ctx->d_tok_embeddings.data);
     /* d_output aliases d_tok_embeddings when embeddings are tied. */
