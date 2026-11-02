@@ -180,7 +180,11 @@ static void quantize_act_q8_0_dqf(const float *x, size_t n, uint8_t *out)
         const uint16_t dh = oc_f32_to_f16_bits(d);
         dst[0] = (uint8_t)(dh & 0xFF);
         dst[1] = (uint8_t)(dh >> 8);
-        dq[b] = d;
+        /* Store the f16-decoded scale, not the pre-rounding d: the single
+         * row dots all multiply by the header's f16 value, so the quad path
+         * must use the same quantized scale or its results drift off the
+         * reference. */
+        dq[b] = oc_f16_to_f32_bits(dh);
         int8_t *q = (int8_t *)(dst + 2);
         for (size_t i = 0; i < OC_OXK_QK8_0; i++) {
             int v = (int)lrintf(src[i] * id);
@@ -483,7 +487,15 @@ void oc_matvec_f32_multi(const float *const *datas, const size_t *rows,
                          size_t cols, size_t n_outs, const float *input,
                          float *const *outs)
 {
-    if (n_outs == 0 || cols == 0) return;
+    if (n_outs == 0) return;
+    /* cols == 0 is a valid degenerate shape: every output row is the
+     * empty dot 0.0f, matching oc_matvec_f32(). */
+    if (cols == 0) {
+        for (size_t k = 0; k < n_outs; k++)
+            for (size_t r = 0; r < rows[k]; r++)
+                outs[k][r] = 0.0f;
+        return;
+    }
     size_t total_rows = 0;
     for (size_t k = 0; k < n_outs; k++) {
         if (rows[k] > SIZE_MAX - total_rows) return;   /* overflow: bail out */
@@ -1403,11 +1415,19 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                     quantize_act_q8_0(in, cols, dst);
             }
             /* L2-resident act sub-tile for the prep path. 128 measured best
-             * on Ryzen 6850H (512 KB L2/core) for Qwen3-4B Q4_K_M prefill:
-             * 128 → 34.6 tok/s, 256 → 31.6, 4096 (off) → 32.1, 38 → 27.4.
-             * Re-prepping each row per sub-tile is ~5% of a sub-tile's dot
-             * work; streaming the act array out of L2 per row costs more. */
+             * on Ryzen 6850H (512 KB L2/core) for Qwen3-4B Q4_K_M prefill
+             * among sizes res[160] can hold: 128 → 34.6 tok/s, 38 → 27.4.
+             * Wider rows shrink that default so the quantized activations
+             * stay inside 512 KB. OXC_PREP_SUBTILE replaces the default and
+             * is clamped to [16, 160]. Re-prepping each row per sub-tile is
+             * ~5% of a sub-tile's dot work; streaming the act array out of
+             * L2 per row costs more. */
             size_t subtile = 128;
+            if (abytes > 0) {
+                const size_t fit = (512u * 1024u) / abytes;
+                if (fit < subtile)
+                    subtile = fit == 0 ? 1 : fit;
+            }
             {
                 const char *env = getenv("OXC_PREP_SUBTILE");
                 if (env != NULL) {

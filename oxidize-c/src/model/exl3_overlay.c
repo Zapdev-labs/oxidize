@@ -754,8 +754,10 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
                      "mtp.layers.0.%s.block_inject_weight",
                      hc_sides[side]) >= (int)sizeof(key))
             do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
-        if (q4e_view(ni, o, key, c->hc_mult, hc_dim, inject) != OC_OK)
-            inject->data = NULL;
+        /* Same contract as the layer path above: a malformed
+         * block_inject must not silently zero the inject projection. */
+        if ((e = q4e_view(ni, o, key, c->hc_mult, hc_dim, inject)))
+            return e;
     }
 
     /* MoE: router + shared expert + per-expert EXL3. */
@@ -820,17 +822,29 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
     if ((e = q4e_exl3_matrix(ni, o, "mtp.fc_embedding", D, D, NULL, NULL,
                              &fc_emb)))
         return e;
+    /* fc_emb/fc_hid stay owned by the overlay — no frees here or model
+     * cleanup would double-free them. */
     if ((e = q4e_exl3_matrix(ni, o, "mtp.fc_hidden", D, D, NULL, NULL,
-                             &fc_hid))) {
-        free(fc_emb); /* owned by the overlay; struct copy only */
+                             &fc_hid)))
         return e;
-    }
+    float *emb = malloc(D * D * sizeof(float));
+    float *hid = malloc(D * D * sizeof(float));
     float *eh = malloc(D * 2 * D * sizeof(float));
-    if (!eh) return OC_ERR_OOM;
-    e = oc_exl3_dequant_f32(fc_emb, eh);
+    if (!emb || !hid || !eh) {
+        free(emb); free(hid); free(eh);
+        return OC_ERR_OOM;
+    }
+    e = oc_exl3_dequant_f32(fc_emb, emb);
     if (e == OC_OK)
-        e = oc_exl3_dequant_f32(fc_hid, eh + D);
-    if (e != OC_OK) { free(eh); return e; }
+        e = oc_exl3_dequant_f32(fc_hid, hid);
+    if (e != OC_OK) { free(emb); free(hid); free(eh); return e; }
+    /* eh_proj is row-major D×2D = [W_emb | W_h]: the two D×D halves must
+     * be interleaved column-wise per output row, not concatenated. */
+    for (size_t r = 0; r < D; r++) {
+        memcpy(eh + r * 2 * D, emb + r * D, D * sizeof(float));
+        memcpy(eh + r * 2 * D + D, hid + r * D, D * sizeof(float));
+    }
+    free(emb); free(hid);
     if (!q4e_owned(o, eh)) { free(eh); return OC_ERR_OOM; }
     m->mtp.eh_proj = (OcWeightView){.data = (const uint8_t *)eh, .rows = D, .cols = 2 * D,
         .row_bytes = 2 * D * sizeof(float), .qtype = OC_QUANT_F32};
@@ -841,13 +855,12 @@ static OcError q4e_load_mtp(OcLlamaModel *m, OcExl3Overlay *o, Q4eIndex *ni,
     return OC_OK;
 }
 
-static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
+static OcError q4e_load_native_body(OcLlamaModel *m, OcExl3Overlay *o,
+                                    Q4eIndex ni)
 {
     OcLlamaConfig *c = &m->cfg;
-    Q4eIndex ni = {0};
     char key[OC_SAFETENSORS_NAME_LEN];
-    OcError e = q4e_index_build(o, &ni);
-    if (e != OC_OK) return e;
+    OcError e = OC_OK;
 
     const size_t D = c->n_embd;
     const size_t hc_dim = (size_t)c->hc_mult * D;
@@ -858,7 +871,9 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
     const size_t conv_dim = 2 * key_dim + c->ssm_inner_size;
     const uint32_t n_exp = c->num_experts;
 
-    /* V-head permutation for the linear-attention layers. */
+    /* V-head permutation for the linear-attention layers. Owned by the
+     * overlay so every error path below frees it. */
+    /* q4e_v_perm registers its buffer with q4e_owned on success. */
     uint32_t *vperm = q4e_v_perm(o, c->ssm_group_count, c->ssm_value_heads);
     if (!vperm) return OC_ERR_OOM;
     /* The trellis row/block perms below treat one V head as exactly one
@@ -998,9 +1013,10 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
                          l, hc_sides[side]) >= (int)sizeof(key))
                 do { oc_log_error("Q4EFMT %s:%d", __func__, __LINE__); return OC_ERR_FORMAT; } while (0);
             /* block_inject is present on every layer of this checkpoint;
-             * treat it as optional to stay honest to the GGUF contract. */
-            if (q4e_view(&ni, o, key, c->hc_mult, hc_dim, inject) != OC_OK)
-                inject->data = NULL;
+             * discarding a view failure would silently drop the inject
+             * projection, so propagate it. */
+            if ((e = q4e_view(&ni, o, key, c->hc_mult, hc_dim, inject)))
+                return e;
         }
 
         if (c->recurrent_layers && c->recurrent_layers[l]) {
@@ -1187,17 +1203,39 @@ static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
         if (!strncmp(nme, "model.visual.", 13)) continue;   /* vision tower */
         if (strstr(nme, ".ple.")) continue;                 /* PLE block    */
         if (strstr(nme, "ngram_embedding.")) continue;      /* PLE table    */
-        if (strstr(nme, "self_attn.indexer.")) continue;    /* QSA: dense attention is exact */
+        if (strstr(nme, "self_attn.indexer.")) {
+            /* QSA indexer tensors mean dense attention is only exact
+             * below indexer_top_k; beyond it the logits attend the wrong
+             * keys. Refuse rather than silently run inexact. */
+            oc_log(OC_LOG_ERROR,
+                   "qwen4exp: QSA indexer tensor %s is unsupported — "
+                   "checkpoint requires sparse attention", nme);
+            return OC_ERR_MODEL;
+        }
         oc_log(OC_LOG_ERROR, "qwen4exp: unconsumed checkpoint tensor %s",
                nme);
         return OC_ERR_MODEL;
     }
-    free(ni.items);
-    free(ni.used);
     oc_log(OC_LOG_INFO, "qwen4exp native EXL3 checkpoint loaded: "
            "%u layers (%u recurrent, %u full), %u experts, ctx %u",
            c->n_layer, n_state, n_kv, n_exp, c->n_ctx);
     return OC_OK;
+}
+
+/* Wrapper: owns the name index so every body error path releases it. */
+static OcError load_native_qwen4exp(OcLlamaModel *m, OcExl3Overlay *o)
+{
+    Q4eIndex ni = {0};
+    OcError e = q4e_index_build(o, &ni);
+    if (e != OC_OK) {
+        free(ni.items);
+        free(ni.used);
+        return e;
+    }
+    e = q4e_load_native_body(m, o, ni);
+    free(ni.items);
+    free(ni.used);
+    return e;
 }
 
 OcError oc_llama_load_exl3_native(const char *directory, OcLlamaModel *out)

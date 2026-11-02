@@ -31,6 +31,7 @@
 #include "oxidize/error.h"
 #include "oxidize/log.h"
 #include "oxidize/model.h"
+#include "oxidize/quant.h"
 #include "oxidize/util/bytes.h"
 #include "oxidize/util/file.h"
 #include "oxidize/util/mmap.h"
@@ -462,6 +463,36 @@ OcError oc_gguf_parse(const uint8_t *buf, size_t len, OcGgufFile *out)
                     t->name, (unsigned long long)t->absolute_offset, len);
             oc_arena_free(arena);
             return OC_ERR_FORMAT;
+        }
+
+        /* Extent check: dims x block layout give the declared byte size,
+         * which must end inside the file. Types without a known layout
+         * (oc_quantized_size == 0) are rejected downstream, not here. */
+        uint64_t numel = 1;
+        bool numel_overflow = false;
+        for (uint32_t d = 0; d < t->n_dims; d++) {
+            if (__builtin_mul_overflow(numel, (uint64_t)t->dims[d], &numel)) {
+                numel_overflow = true;
+                break;
+            }
+        }
+        if (numel_overflow) {
+            oc_log(OC_LOG_ERROR, "gguf: tensor %s dimension product overflows", t->name);
+            oc_arena_free(arena);
+            return OC_ERR_FORMAT;
+        }
+        uint64_t nbytes = (uint64_t)oc_quantized_size(
+            oc_quant_type_from_ggml_id(t->ggml_type), (size_t)numel);
+        if (nbytes > 0) {
+            uint64_t end;
+            if (__builtin_add_overflow(t->absolute_offset, nbytes, &end)
+                    || end > (uint64_t)len) {
+                oc_log(OC_LOG_ERROR, "gguf: tensor %s extent [%llu, +%llu) exceeds file size %zu",
+                        t->name, (unsigned long long)t->absolute_offset,
+                        (unsigned long long)nbytes, len);
+                oc_arena_free(arena);
+                return OC_ERR_FORMAT;
+            }
         }
     }
 

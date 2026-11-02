@@ -278,21 +278,30 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
     uint32_t n_exp = model->cfg.num_experts;
     pool->n_experts = n_exp;
     for (uint32_t i = 0; i < pool->n_layers; i++) {
-        const OcLlamaLayer *L = (i < model->cfg.n_layer) ? &model->layers[i]
-                                                       : &model->mtp.layer;
+        /* The MTP/nextn slot may be backed by the sidecar file rather than
+         * the main mapping: resolve its views against the mapping that owns
+         * them or the spans silently cover the wrong bytes. */
+        const bool is_mtp = (i >= model->cfg.n_layer);
+        const OcLlamaLayer *L = is_mtp ? &model->mtp.layer : &model->layers[i];
+        const OcGgufMmappedFile *g =
+            (is_mtp && model->mtp_gguf_open) ? &model->mtp_gguf
+                                             : &model->gguf;
         pool->layers[i].n_experts = n_exp;
         size_t n_embd = model->cfg.n_embd;
         size_t inter = model->cfg.expert_intermediate_size;
-        (void)span_from_view(&model->gguf, &L->ffn_gate_exps, n_exp, n_embd,
+        (void)span_from_view(g, &L->ffn_gate_exps, n_exp, n_embd,
                              inter, &pool->layers[i].gate);
-        (void)span_from_view(&model->gguf, &L->ffn_up_exps, n_exp, n_embd,
+        (void)span_from_view(g, &L->ffn_up_exps, n_exp, n_embd,
                              inter, &pool->layers[i].up);
-        (void)span_from_view(&model->gguf, &L->ffn_down_exps, n_exp, n_embd,
+        (void)span_from_view(g, &L->ffn_down_exps, n_exp, n_embd,
                              inter, &pool->layers[i].down);
-        collect_dense(&model->gguf, L, &pool->layers[i]);
+        collect_dense(g, L, &pool->layers[i]);
     }
     /* Unlimited mode leaves residency decisions to the kernel's page cache. */
     if (pool->cfg.cache_bytes == UINT64_MAX) {
+        oc_log(OC_LOG_INFO,
+               "expert-stream: cache=unbounded layers=%u experts=%u",
+               pool->n_layers, pool->model->cfg.num_experts);
         *out = pool;
         return OC_OK;
     }

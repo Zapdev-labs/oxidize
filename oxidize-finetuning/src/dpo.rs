@@ -446,6 +446,7 @@ impl DpoTrainer {
     /// positions (shape `[len, vocab]`). The policy is those logits plus the
     /// LM-head LoRA. The reference is the frozen head, unless the example
     /// already carries reference log-probs or `reference_free` is set.
+    #[allow(clippy::too_many_arguments)]
     pub fn train_step_with_base(
         &mut self,
         chosen_targets: &[u32],

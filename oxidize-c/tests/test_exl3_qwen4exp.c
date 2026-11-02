@@ -480,6 +480,44 @@ Test(exl3_qwen4exp, mtp_head)
     cr_assert_not_null(m.mtp.eh_proj.data);
     cr_assert_eq(m.mtp.eh_proj.cols, 2u * D);
     cr_assert_eq(m.mtp.eh_proj.rows, D);
+    /* eh_proj must be the column interleave [W_emb | W_h] of the two
+     * dequantized fc matrices — not the two D×D matrices written
+     * back-to-back. Rebuild the source matrix (same deterministic
+     * contents stw_trellis wrote: packed = i*7+3, mul1 4-bit) and
+     * compare every fused entry against an independent dequant. */
+    {
+        const size_t pbytes = (D / 16) * (D / 16) * 64 * 2;
+        uint8_t *packed = malloc(pbytes);
+        float *suh = malloc(D * sizeof(float));
+        float *svh = malloc(D * sizeof(float));
+        float *emb = malloc(D * D * sizeof(float));
+        float *hid = malloc(D * D * sizeof(float));
+        cr_assert(packed && suh && svh && emb && hid);
+        for (size_t i = 0; i < pbytes; i++)
+            packed[i] = (uint8_t)(i * 7 + 3);
+        static const float scales[4] = {1.0f, 0.5f, 2.0f, 0.25f};
+        for (size_t i = 0; i < D; i++) {
+            suh[i] = scales[i % 4];
+            svh[i] = scales[(i + 1) % 4];
+        }
+        OcExl3Matrix fe = {
+            .input_dim = D, .output_dim = D,
+            .packed = packed, .packed_size = pbytes,
+            .bits_twice = 8, .codebook = 2,
+            .suh = suh, .svh = svh,
+        };
+        cr_assert_eq(oc_exl3_dequant_f32(&fe, emb), OC_OK);
+        cr_assert_eq(oc_exl3_dequant_f32(&fe, hid), OC_OK);
+        const float *eh = (const float *)m.mtp.eh_proj.data;
+        for (size_t r = 0; r < D; r++)
+            for (size_t c = 0; c < 2u * D; c++) {
+                const float want =
+                    c < D ? emb[r * D + c] : hid[r * D + c - D];
+                cr_assert_float_eq(eh[r * 2u * D + c], want, 1e-5f,
+                                   "eh_proj[%zu][%zu]", r, c);
+            }
+        free(packed); free(suh); free(svh); free(emb); free(hid);
+    }
     cr_assert_not_null(m.mtp.enorm);
     cr_assert_not_null(m.mtp.hnorm);
     cr_assert_not_null(m.mtp.hc_head_norm);

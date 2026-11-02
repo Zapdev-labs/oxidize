@@ -3151,8 +3151,12 @@ void oc_llama_free(OcLlamaModel *model)
             free(model->layers[i].ssm_a_f32);
             free(model->layers[i].ssm_dt_f32);
             free(model->layers[i].ssm_norm_f32);
-            /* exl3_gate/up/down are owned by the EXL3 overlay's
-             * ownership list — not freed here. */
+            /* The exl3_* struct arrays are layer-owned; the matrices'
+             * packed backing data is owned by the EXL3 overlay's
+             * ownership list and freed there. */
+            free(model->layers[i].exl3_gate);
+            free(model->layers[i].exl3_up);
+            free(model->layers[i].exl3_down);
         }
         free(model->layers);
     }
@@ -3164,6 +3168,9 @@ void oc_llama_free(OcLlamaModel *model)
     free(model->mtp.layer.hc_ffn_norm);
     free(model->mtp.layer.post_attention_norm);
     free(model->mtp.layer.post_ffw_norm);
+    free(model->mtp.layer.exl3_gate);
+    free(model->mtp.layer.exl3_up);
+    free(model->mtp.layer.exl3_down);
     free(model->mtp.enorm);
     free(model->mtp.hnorm);
     free(model->mtp.shared_head_norm);
@@ -3319,10 +3326,14 @@ static const float *rope_row(OcLlamaSession *s, float theta,
             if (cap > SIZE_MAX / 2u) return NULL;
             cap *= 2u;
         }
+        /* Transactional grow: a failed realloc leaves the old block live,
+         * a successful one must be adopted — never freed and left
+         * dangling in `t`. */
         float *nc = realloc(t->cos_t, cap * t->half * sizeof(float));
-        float *ns = realloc(t->sin_t, cap * t->half * sizeof(float));
-        if (nc == NULL || ns == NULL) { free(nc); free(ns); return NULL; }
+        if (nc == NULL) return NULL;
         t->cos_t = nc;
+        float *ns = realloc(t->sin_t, cap * t->half * sizeof(float));
+        if (ns == NULL) return NULL;
         t->sin_t = ns;
         t->cap = cap;
     }
@@ -5366,6 +5377,16 @@ static OcError forward_layer_qwen4exp(OcLlamaSession *s, uint32_t layer)
     OcError e = OC_OK;
     if (L->kind == OC_LLAMA_LAYER_QWEN35_RECURRENT) {
         e = forward_qwen35_recurrent(s, layer);
+    } else if (c->indexer_top_k > 0 && s->pos >= c->indexer_top_k) {
+        /* Past the QSA budget the reference model routes attention through
+         * the sparse indexer (top_k KV cells); dense full-prefix attention
+         * would silently produce different logits. No QSA implementation
+         * exists yet, so fail loudly instead. */
+        oc_log(OC_LOG_ERROR,
+               "llama: qwen4exp context %lld reached QSA budget %u; "
+               "sparse indexer attention is not implemented",
+               (long long)s->pos, c->indexer_top_k);
+        return OC_ERR_MODEL;
     } else {
         /* Dense attention over the whole prefix — exact while
          * s->pos < cfg.indexer_top_k (the QSA budget). */
@@ -7616,11 +7637,14 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
                                 first_logit, cb, ud);
 
     /* Fall back to the per-token path when batching cannot help or is not
-     * supported: identical results, just the old speed. */
-    if (cb != NULL && (!prefill_batch_supported(m) ||
-                       (n_tokens < 2 && sess->k2mtp == NULL))) {
-        oc_log(OC_LOG_INFO, "prefill: fallback per-token path (all-logits, unsupported=%d)",
-               !prefill_batch_supported(m));
+     * supported: identical results, just the old speed. A one-token prefill
+     * of a supported model is the normal call, so that case stays at DEBUG. */
+    const int unsupported = !prefill_batch_supported(m);
+    const int single = n_tokens < 2 && sess->k2mtp == NULL;
+    if (cb != NULL && (unsupported || single)) {
+        oc_log(unsupported ? OC_LOG_INFO : OC_LOG_DEBUG,
+               "prefill: fallback per-token path (all-logits, unsupported=%d n<2=%d)",
+               unsupported, n_tokens < 2);
         float *lg = malloc(m->cfg.vocab_size * sizeof(float));
         if (lg == NULL) return OC_ERR_OOM;
         for (size_t i = 0; i < n_tokens; i++) {
@@ -7632,9 +7656,10 @@ static OcError prefill_impl(OcLlamaSession *sess, const uint32_t *tokens,
         free(lg);
         return OC_OK;
     }
-    if (!prefill_batch_supported(m) || (n_tokens < 2 && sess->k2mtp == NULL)) {
-        oc_log(OC_LOG_INFO, "prefill: fallback per-token path (unsupported=%d n<2=%d)",
-               !prefill_batch_supported(m), n_tokens < 2);
+    if (unsupported || single) {
+        oc_log(unsupported ? OC_LOG_INFO : OC_LOG_DEBUG,
+               "prefill: fallback per-token path (unsupported=%d n<2=%d)",
+               unsupported, n_tokens < 2);
         for (size_t i = 0; i < n_tokens; i++) {
             float *lg = (i + 1 == n_tokens) ? logits_out : NULL;
             OcError e = oc_llama_forward(sess, tokens[i], lg);

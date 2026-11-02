@@ -39,12 +39,18 @@ int main(int argc, char **argv)
         uint8_t *wb = w + r * row_bytes;
         for (size_t i = 4; i < row_bytes; i++) wb[i] = (uint8_t)rnd();
         for (size_t b = 0; b < blocks; b++) {
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE]     = 0x38;
-            wb[b * OC_OXK_BLOCK_Q4_K_SIZE + 2] = 0x38;
+            uint8_t *bl = wb + b * OC_OXK_BLOCK_Q4_K_SIZE;
+            bl[0] = 0x00; bl[1] = 0x38; /* f16 0.5 */
+            bl[2] = 0x00; bl[3] = 0x38;
         }
     }
-    for (size_t i = 4; i < asize; i++) act[i] = (uint8_t)rnd();
-    { float dq = 0.75f; memcpy(act, &dq, 4); }
+    for (size_t b = 0; b < blocks; b++) {
+        uint8_t *bl = act + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        for (size_t i = 4; i < OC_OXK_BLOCK_Q8_K_SIZE; i++)
+            bl[i] = (uint8_t)rnd();
+        float dq = 0.75f;
+        memcpy(bl, &dq, 4);
+    }
 
     /* warm */
     double t0 = now();

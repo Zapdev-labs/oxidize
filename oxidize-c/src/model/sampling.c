@@ -310,9 +310,23 @@ uint32_t oc_sample(const float *logits_in, size_t vocab_size,
      * different token and must use the copy path. */
     if (is_greedy && pen > 1.0f) {
         const uint32_t top = oc_argmax(logits_in, vocab_size);
+        /* Mark recent tokens in a bitmap so the hit test is O(1) and never
+         * degenerates when a caller passes a very large window; on OOM
+         * fall back to a plain early-exit scan. */
         bool hit = false;
-        for (size_t r = 0; r < n_recent; r++)
-            if (recent_tokens[r] == top) { hit = true; break; }
+        uint8_t *seen = calloc((vocab_size + 7u) / 8u, 1);
+        if (seen != NULL) {
+            for (size_t r = 0; r < n_recent; r++) {
+                const uint32_t t = recent_tokens[r];
+                if (t < vocab_size)
+                    seen[t >> 3] |= (uint8_t)(1u << (t & 7u));
+            }
+            hit = (seen[top >> 3] & (uint8_t)(1u << (top & 7u))) != 0;
+            free(seen);
+        } else {
+            for (size_t r = 0; r < n_recent; r++)
+                if (recent_tokens[r] == top) { hit = true; break; }
+        }
         if (!hit) return top;
     }
 

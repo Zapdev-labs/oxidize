@@ -70,6 +70,19 @@ def _pick_single_gguf(repo: str, revision: str, api_base: str) -> str:
     )
 
 
+def _filename_is_safe(filename: str) -> bool:
+    """True if filename is safe to join under the cache dir: a relative path
+    with no '..', '.', or empty components, no leading '/', and no
+    backslashes. Filenames may come from a remote API response, so a hostile
+    repo must not be able to write outside the cache tree."""
+    if not filename or filename.startswith("/"):
+        return False
+    for comp in filename.split("/"):
+        if comp in ("", ".", "..") or "\\" in comp:
+            return False
+    return True
+
+
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -89,6 +102,8 @@ def resolve_gguf(opts: ResolveOptions) -> str:
         filename = opts.filename
     if not filename:
         filename = _pick_single_gguf(repo, opts.revision or DEFAULT_REVISION, opts.api_base)
+    if not _filename_is_safe(filename):
+        raise ValueError(f"hf: unsafe filename {filename!r}")
     rev = opts.revision or DEFAULT_REVISION
     cache = Path(opts.cache_dir) if opts.cache_dir else _default_cache_dir()
     dest_dir = cache / repo.replace("/", "_")

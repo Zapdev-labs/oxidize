@@ -19,6 +19,8 @@
  */
 /* clock_gettime (phase timing + benchmark clocks). */
 #define _POSIX_C_SOURCE 200809L
+/* MAP_ANONYMOUS / MADV_HUGEPAGE on Linux. */
+#define _DEFAULT_SOURCE
 
 #include "oxidize/dflash2.h"
 #include "oxidize/parallel.h"

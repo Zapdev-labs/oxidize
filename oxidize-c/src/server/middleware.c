@@ -54,6 +54,20 @@ static size_t latency_bucket(uint64_t ms)
 
 /* ─── Auth ────────────────────────────────────────────────────────────────── */
 
+/* Constant-time string equality for API-key comparison — never exits
+ * early on a mismatched byte, so response timing does not leak how much
+ * of the key prefix was correct. */
+static bool ct_streq(const char *a, const char *b)
+{
+    size_t la = strlen(a), lb = strlen(b);
+    size_t n = la < lb ? la : lb;
+    volatile uint8_t d = (la == lb) ? 0u : 1u;
+    for (size_t i = 0; i < n; i++) {
+        d |= (uint8_t)((uint8_t)a[i] ^ (uint8_t)b[i]);
+    }
+    return d == 0;
+}
+
 /* Returns 0 if authorized, 401 otherwise. */
 static int auth_check(const OcAuthConfig *auth, const char *auth_header)
 {
@@ -65,7 +79,7 @@ static int auth_check(const OcAuthConfig *auth, const char *auth_header)
     if (strncasecmp(p, "Bearer", 6) != 0) return 401;
     p += 6;
     while (*p == ' ' || *p == '\t') p++;
-    if (strcmp(p, auth->api_key) != 0) return 401;
+    if (!ct_streq(p, auth->api_key)) return 401;
     return 0;
 }
 

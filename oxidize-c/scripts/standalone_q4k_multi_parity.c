@@ -24,7 +24,9 @@ int main(void)
         uint8_t *row = malloc(row_bytes);
         void *prep = malloc(oc_oxk_q4_k_prep_bytes(blocks));
         const size_t as = blocks * OC_OXK_BLOCK_Q8_K_SIZE;
-        const size_t n_act = 9;
+        /* 37 = 4*8 + 5: the n_act>=32 8-wide pass, then a 4-wide group and
+         * a scalar tail. */
+        const size_t n_act = 37;
         uint8_t *acts = malloc(n_act * as);
 
         for (size_t t = 0; t < 32; t++) {
@@ -34,8 +36,8 @@ int main(void)
                 uint8_t *wb = row + b * OC_OXK_BLOCK_Q4_K_SIZE;
                 for (size_t i = 4; i < OC_OXK_BLOCK_Q4_K_SIZE; i++)
                     wb[i] = (uint8_t)rnd();
-                wb[0] = (uint8_t)(0x38 + (rnd() % 4)); wb[1] = 0x00;
-                wb[2] = (uint8_t)(0x38 + (rnd() % 4)); wb[3] = 0x00;
+                wb[0] = 0x00; wb[1] = (uint8_t)(0x38 + (rnd() % 4));
+                wb[2] = 0x00; wb[3] = (uint8_t)(0x38 + (rnd() % 4));
             }
             for (size_t v = 0; v < n_act; v++) {
                 uint8_t *qb = acts + v * as;
@@ -48,7 +50,7 @@ int main(void)
                 }
             }
             oc_oxk_q4_k_prep_row(row, blocks, prep);
-            float ref[16], got[16];
+            float ref[37], got[37];
             for (size_t v = 0; v < n_act; v++)
                 ref[v] = oc_oxk_dot_q4_k_prepped(prep, blocks,
                                                  acts + v * as);

@@ -1,5 +1,11 @@
 /* test_finetune.c — finetuning tests. */
+/* Expose mkdtemp: BSD on Apple (_DARWIN_C_SOURCE), POSIX elsewhere. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <criterion/criterion.h>
 #include "oxidize/finetune.h"
 #include <string.h>

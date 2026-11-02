@@ -578,11 +578,15 @@ mod tests {
 
     #[test]
     fn sandwich_norm_uses_ffn_norm_not_post_attention() {
-        let mut cfg = InferenceConfig::default();
-        cfg.sandwich_norm = true;
-        let mut layer = LayerWeights::default();
-        layer.ffn_norm = vec![1.0, 2.0];
-        layer.post_attention_norm = vec![3.0, 4.0];
+        let mut cfg = InferenceConfig {
+            sandwich_norm: true,
+            ..Default::default()
+        };
+        let layer = LayerWeights {
+            ffn_norm: vec![1.0, 2.0],
+            post_attention_norm: vec![3.0, 4.0],
+            ..Default::default()
+        };
         assert_eq!(select_ffn_norm(&cfg, &layer), &[1.0, 2.0]);
         cfg.sandwich_norm = false;
         assert_eq!(select_ffn_norm(&cfg, &layer), &[3.0, 4.0]);
@@ -590,12 +594,14 @@ mod tests {
 
     #[test]
     fn mla_cache_stores_decompressed_heads() {
-        let mut cfg = InferenceConfig::default();
-        cfg.architecture = crate::inference::ModelArchitecture::DeepSeek;
-        cfg.num_attention_heads = 8;
-        cfg.num_key_value_heads = 1;
-        cfg.hidden_size = 32;
-        cfg.key_value_head_dim = 4;
+        let cfg = InferenceConfig {
+            architecture: crate::inference::ModelArchitecture::DeepSeek,
+            num_attention_heads: 8,
+            num_key_value_heads: 1,
+            hidden_size: 32,
+            key_value_head_dim: 4,
+            ..Default::default()
+        };
         assert_eq!(kv_cache_geometry(&cfg, true), (8, 4));
         // DeepSeek-tagged but loaded without MLA tensors: plain GQA widths.
         assert_eq!(kv_cache_geometry(&cfg, false), (1, 4));

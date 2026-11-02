@@ -247,6 +247,30 @@ OcError oc_hf_sanitize_repo_id(const char *repo_id, char *out, size_t cap)
     return OC_OK;
 }
 
+/* Returns true if `filename` is safe to join under the cache dir: a
+ * relative path with no '..', '.', or empty components, no leading '/'
+ * and no backslashes. Remote-supplied rfilenames reach this path, so a
+ * hostile repo (or MITM on a plaintext channel) must not be able to
+ * write outside the cache tree. */
+static bool hf_filename_is_safe(const char *filename)
+{
+    if (!filename || filename[0] == '\0' || filename[0] == '/') return false;
+    const char *p = filename;
+    for (;;) {
+        const char *slash = strchr(p, '/');
+        size_t comp = slash ? (size_t)(slash - p) : strlen(p);
+        if (comp == 0) return false;
+        if (comp == 1 && p[0] == '.') return false;
+        if (comp == 2 && p[0] == '.' && p[1] == '.') return false;
+        for (size_t i = 0; i < comp; i++) {
+            if (p[i] == '\\') return false;
+        }
+        if (!slash) break;
+        p = slash + 1;
+    }
+    return true;
+}
+
 OcError oc_hf_cache_path(const OcHfConfig *cfg,
                          const char *repo_id, const char *filename,
                          char *out_path, size_t cap)
@@ -266,6 +290,11 @@ OcError oc_hf_cache_path(const OcHfConfig *cfg,
             return OC_ERR_INTERNAL;
         }
         cache = default_cache;
+    }
+
+    if (!hf_filename_is_safe(filename)) {
+        oc_log_warn("hf: refusing unsafe filename '%s'", filename);
+        return OC_ERR_INVALID_ARG;
     }
 
     int n = snprintf(out_path, cap, "%s/%s/%s", cache, sanitized, filename);
@@ -358,8 +387,12 @@ static OcError parse_url(const char *url,
     /* Skip scheme. */
     if (strncmp(s, "http://", 7) == 0) s += 7;
     else if (strncmp(s, "https://", 8) == 0) {
-        /* We don't speak TLS; treat as plain HTTP (proxy expected). */
-        s += 8;
+        /* Fail closed: this client speaks plain HTTP only, and silently
+         * downgrading an https:// URL would leak the bearer token in
+         * cleartext and fetch unauthenticated content. Point api_base at
+         * an explicit http:// TLS-terminating proxy or mirror instead. */
+        oc_log_warn("hf: refusing https:// URL %s (no TLS support)", url);
+        return OC_ERR_INVALID_ARG;
     }
     /* Find end of host:port (first '/' or end). */
     const char *slash = strchr(s, '/');
@@ -1059,14 +1092,39 @@ OcError oc_hf_download(const OcHfConfig *cfg, const OcHfModel *model,
         if (!oc_mkdir_p(dir)) return OC_ERR_IO;
     }
 
-    /* Already complete? */
+    /* Already complete? Verify the cached file's hash before trusting it
+     * — a truncated or substituted file on disk must not be used as a
+     * model just because it exists and is non-empty. */
     if (model->sha256[0]) {
-        /* If dest exists and matches expected SHA, skip. */
-        struct stat st;
-        if (stat(dest, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
-            /* Optional: verify hash. For now, trust presence. */
-            (void)st;
-            return OC_OK;
+        int fd = open(dest, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+                FILE *df = fdopen(fd, "rb");
+                if (df) {
+                    OcSha256 csha;
+                    oc_sha256_init(&csha);
+                    char buf[OC_HF_DOWNLOAD_CHUNK];
+                    size_t r;
+                    while ((r = fread(buf, 1, sizeof(buf), df)) > 0) {
+                        oc_sha256_update(&csha, (const uint8_t *)buf, r);
+                    }
+                    fclose(df); /* closes fd as well */
+                    uint8_t digest[32];
+                    oc_sha256_final(&csha, digest);
+                    char hex[OC_HF_MAX_SHA256];
+                    oc_sha256_hex(digest, hex, sizeof(hex));
+                    if (strcmp(hex, model->sha256) == 0) {
+                        return OC_OK;
+                    }
+                    oc_log_warn("hf: cached %s failed SHA-256 check; "
+                                "re-downloading", dest);
+                } else {
+                    close(fd);
+                }
+            } else {
+                close(fd);
+            }
         }
     }
 
