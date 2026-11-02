@@ -304,7 +304,7 @@ OcError oc_cuda_selftest(void)
 
     /* ── Q4_K + Q6_K int8-mma batched GEMM (prefill path) ──────────── */
     {
-        const size_t rows = 512, cols = 512, n_tok = 20, ng = cols / 32;
+        const size_t rows = 512, cols = 512, n_tok = 128, ng = cols / 32;
         float *x = (float *)malloc(n_tok * cols * sizeof(float));
         float *want = (float *)malloc(n_tok * rows * sizeof(float));
         float *got = (float *)malloc(n_tok * rows * sizeof(float));
@@ -398,7 +398,7 @@ OcError oc_cuda_selftest(void)
             free(packed); free(dev_packed); free(src);
             if (!ok)
                 return st_fail(ty == 0 ? "gemm_xq q4_k" : "gemm_xq q6_k");
-            fprintf(stderr, "cuda-selftest: %s MMA GEMM 20x96x512 OK\n",
+            fprintf(stderr, "cuda-selftest: %s MMA GEMM 128x512x512 OK\n",
                     ty == 0 ? "Q4_K" : "Q6_K");
         }
         free(x); free(want); free(got); free(deq); free(xq_s);

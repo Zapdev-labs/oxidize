@@ -179,8 +179,8 @@ typedef struct OcCudaContext {
     size_t conv_state_per_layer;
     size_t recurrent_state_per_layer;
     bool initialized;
-    /* Autotune-requested CUDA graph / persistent-decode flags. Stored and
-     * logged; this port does not invent a CUDA graph runtime. */
+    /* Autotune-requested CUDA graph / persistent-decode flags, stored and
+     * logged only. The fast path's graph is driven by oc_cuda_fast_decode. */
     bool cuda_graphs;
     bool persistent_decode_kernels;
     /* Non-blocking streams for independent GEMVs (Q/K/V or FFN gate/up). */
@@ -199,6 +199,7 @@ typedef struct OcCudaContext {
     uint32_t  fast_ring_cap;
     void     *fast_graph;
     void     *fast_graph_exec;
+    bool      fast_graph_failed; /* capture failed; do not retry each decode  */
     /* Batched-prefill workspace: activations for up to fast_batch tokens so a
      * weight row is fetched once and dotted against the whole prompt chunk. */
     float    *d_bx, *d_bnormed, *d_bq, *d_bk, *d_bv, *d_battn;
@@ -276,7 +277,9 @@ OcError oc_cuda_fast_prefill(OcCudaContext *ctx, const uint32_t *ids,
 
 /* Submit n greedy decode steps (embed state.token -> layers -> lm_head ->
  * argmax into ring + state advance). With a usable CUDA graph this is n
- * graph replays; otherwise n unrolled submissions. Asynchronous. */
+ * graph replays; otherwise n unrolled submissions. Asynchronous. Each call
+ * restarts the ring at slot 0, so take the tokens from one call with
+ * oc_cuda_fast_take() before starting the next. */
 OcError oc_cuda_fast_decode(OcCudaContext *ctx, uint32_t n);
 
 /* Wait for the fast stream, then copy the first n ring tokens to out. */

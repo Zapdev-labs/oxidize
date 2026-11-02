@@ -698,8 +698,9 @@ static OcError run_generation(const OcCliArgs *args)
 
             /* Forward the sampled token to get next logits. */
             if (fast_greedy) {
-                /* The device already embedded this token and advanced pos. */
-                sess.pos++;
+                /* Ring slot 0 is the prefill argmax, which no decode step has
+                 * consumed yet. Later tokens each mirror one device step. */
+                if (emitted > 1) sess.pos++;
             } else if (fast_cuda) {
                 if (sess.pos >= (int64_t)cuda_ctx.n_ctx) {
                     oc_log(OC_LOG_WARN,

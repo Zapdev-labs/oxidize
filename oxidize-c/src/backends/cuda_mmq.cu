@@ -676,7 +676,8 @@ __global__ void NAME(const uint8_t *w, const uint32_t *d_ids, float *out,    \
     const uint8_t *rw = w + (size_t)d_ids[blockIdx.y] * row_bytes;           \
     const size_t n_blocks = cols / (VALS);                                   \
     float *o = out + (size_t)blockIdx.y * out_stride;                        \
-    for (size_t b = blockIdx.x; b < n_blocks; b += (size_t)gridDim.x)        \
+    for (size_t b = blockIdx.x * blockDim.x + threadIdx.x; b < n_blocks;     \
+         b += (size_t)gridDim.x * blockDim.x)                                \
         EXPAND(rw + b * (BLOCK_BYTES), o + b * (VALS));                      \
 }
 
@@ -1211,7 +1212,7 @@ __global__ void k_mmq_quant_x(const float *x, int8_t *xq, float2 *xsc,
     int32_t qi = __float2int_rn(v / s);
     qi = qi > 127 ? 127 : (qi < -127 ? -127 : qi);
     xq[gi * 32u + lane] = (int8_t)qi;
-    xh[gi * 32u + lane] = __float2half_rn((float)qi * s);
+    if (xh) xh[gi * 32u + lane] = __float2half_rn((float)qi * s);
 
     float sm = v;
     #pragma unroll
@@ -1369,6 +1370,17 @@ __device__ __forceinline__ void mxd_q6k(
     }
 }
 
+/* 0-quant blocks have 14/18/22/34-byte strides, so their payloads are only
+ * 2-byte aligned and cannot be read through a 16-byte-aligned uint4. */
+__device__ __forceinline__ uint4 mq_load_u4_a2(const uint8_t *p)
+{
+    const uint16_t *h = reinterpret_cast<const uint16_t *>(p);
+    return make_uint4((uint32_t)h[0] | ((uint32_t)h[1] << 16),
+                      (uint32_t)h[2] | ((uint32_t)h[3] << 16),
+                      (uint32_t)h[4] | ((uint32_t)h[5] << 16),
+                      (uint32_t)h[6] | ((uint32_t)h[7] << 16));
+}
+
 /* Q8_0: weights are already int8 — a pure s8·s8 dot. */
 __device__ __forceinline__ void mxd_q8_0(
     const uint8_t *row, uint32_t g,
@@ -1378,8 +1390,8 @@ __device__ __forceinline__ void mxd_q8_0(
 {
     const uint8_t *blk = row + (size_t)g * MQ_DEV_Q8_0_SIZE;
     const float d = mq_f16(blk[0], blk[1]);
-    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 2);
-    const uint4 q1 = *reinterpret_cast<const uint4 *>(blk + 18);
+    const uint4 q0 = mq_load_u4_a2(blk + 2);
+    const uint4 q1 = mq_load_u4_a2(blk + 18);
     const uint32_t wd[8] = { q0.x, q0.y, q0.z, q0.w,
                              q1.x, q1.y, q1.z, q1.w };
     #pragma unroll
@@ -1408,7 +1420,7 @@ __device__ __forceinline__ void mxd_q4_0(
 {
     const uint8_t *blk = row + (size_t)g * MQ_DEV_Q4_0_SIZE;
     const float d = mq_f16(blk[0], blk[1]);
-    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 2);
+    const uint4 q0 = mq_load_u4_a2(blk + 2);
     const uint32_t wd[4] = { q0.x, q0.y, q0.z, q0.w };
     #pragma unroll
     for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
@@ -1440,7 +1452,7 @@ __device__ __forceinline__ void mxd_q5_0(
     const float d = mq_f16(blk[0], blk[1]);
     const uint32_t qh = (uint32_t)blk[2] | ((uint32_t)blk[3] << 8)
                       | ((uint32_t)blk[4] << 16) | ((uint32_t)blk[5] << 24);
-    const uint4 q0 = *reinterpret_cast<const uint4 *>(blk + 6);
+    const uint4 q0 = mq_load_u4_a2(blk + 6);
     const uint32_t wd[4] = { q0.x, q0.y, q0.z, q0.w };
     #pragma unroll
     for (uint32_t ti = 0u; ti < MQX_MAX_TOK; ti++) {
@@ -1697,7 +1709,8 @@ extern "C" bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq,
     const uint32_t n_groups = (uint32_t)(cols / 32u);
     dim3 grid((n_groups + 3u) / 4u, n_tok);
     k_mmq_quant_x<<<grid, 128u, 0, (cudaStream_t)stream>>>(
-        d_x, d_xq, (float2 *)d_xsc, d_xqsum, (__half *)d_xh,
+        d_x, d_xq, (float2 *)d_xsc, d_xqsum,
+        n_tok >= 16u ? (__half *)d_xh : NULL, /* only the mma GEMM reads xh */
         n_groups, x_stride);
     return cudaGetLastError() == cudaSuccess;
 }
@@ -1783,7 +1796,7 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
         const unsigned tblk = (unsigned)((n_tok + ttile - 1u) / ttile);
         const unsigned nblk = rblk * tblk;
         /* Slim slots are half size and four blocks fit an SM, so the slot
-         * count doubles and the fill target triples. */
+         * count doubles and the fill targets grow 1.5x (320/768 -> 480/1152). */
         const uint32_t n_slot = n_groups >> 1;
         const unsigned target = 480u;
         const unsigned target2 = 1152u;
@@ -1801,15 +1814,14 @@ extern "C" bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
          * parallelism; keep >=6 slots per slice so the pipeline prologue
          * stays amortized. */
         if (nblk < target2 && n_slot >= 24u) {
-            const unsigned want = (target2 + nblk - 1u) / nblk;
-            if (want > zsplit) {
-                zsplit = want;
-                const unsigned maxz = n_slot / 6u;
-                if (zsplit > maxz) zsplit = maxz;
-            }
+            unsigned want = (target2 + nblk - 1u) / nblk;
+            const unsigned maxz = n_slot / 6u;
+            if (want > maxz) want = maxz;
+            if (want > zsplit) zsplit = want;
         }
         const dim3 ggrid(rblk, tblk, zsplit);
-        if (zsplit > 1u)
+        if (zsplit > 1u && qtype != (int)OC_QUANT_Q5_K_S &&
+            qtype != (int)OC_QUANT_Q5_K_M)
             cudaMemset2DAsync(d_out, out_stride * sizeof(float), 0,
                               rows * sizeof(float), n_tok, s);
         switch ((OcGgufQuantizationType)qtype) {
@@ -2419,8 +2431,8 @@ k_mmq_gemm_xh_q4k_s(const uint8_t *w, const __half *xh,
  *   A (8m x 16k s8): lane holds 1 u32 = A[lane/4][(lane%4)*4 + 0..3]
  *   B (16k x 8n s8): lane holds 1 u32 = B[(lane%4)*4 + 0..3][lane/4]
  *   C (8m x 8n s32): lane holds 2 s32 = C[lane/4][(lane%4)*2 +{0,1}]
- * A rows are WEIGHT rows, B cols are TOKENS: each warp owns a
- * 16-row x 32-token output tile (2m x 4n mma tiles). */
+ * A rows are WEIGHT rows, B cols are TOKENS: each warp owns an
+ * 8-row x 32-token output tile (1m x 4n mma tiles). */
 
 __device__ __forceinline__ void mg_imma(int32_t *c, uint32_t a, uint32_t b)
 {
@@ -2473,7 +2485,7 @@ k_mmq_gemm_xi_q4k(const uint8_t *w, const int8_t *xq, const float2 *xsc,
     float2  *ssx = (float2 *)(sxf + 2u * MGI_X_BYTES);     /* x scales     */
 
     const uint32_t r0 = blockIdx.x * MGH_RT;
-    const uint32_t t0 = blockIdx.y * MGH_TT;
+    const uint32_t t0 = blockIdx.y * MGI_TT;
     const uint32_t tid  = threadIdx.x;
     const uint32_t lane = tid & 31u, warp = tid >> 5;
     const uint32_t lq = lane >> 2, l4 = lane & 3u;

@@ -121,7 +121,8 @@ bool oc_cuda_mmq_matvec_batch(uint32_t qtype, const void *d_weights,
  *   d_xh    f16    [n_tok * n_groups * 32] (xq*scale, for the mma path)
  */
 
-/* True when the qtype has a dp4a kernel and cols % 32 == 0. */
+/* True when the qtype has a dp4a kernel and cols % 32 == 0. K-quants
+ * (Q4_K/Q5_K/Q6_K) additionally require cols % 256 == 0. */
 bool oc_cuda_mmq_xq_supported(uint32_t qtype, size_t cols);
 
 /* Quantize x (n_tok rows of x_stride floats each) into the workspace. */
@@ -131,9 +132,9 @@ bool oc_cuda_mmq_quantize_x(const float *d_x, int8_t *d_xq, float *d_xsc,
                             size_t x_stride, void *stream);
 
 /* out[t*out_stride + row] = dot(dequant(W[row]), unquantize(xq[t])). Each
- * warp handles a 16-token tile of the row; blockIdx.y walks further tiles,
- * so the weight row is fetched once per 16 tokens (from L1/L2 for later
- * tiles) and prompt chunks amortize DRAM traffic like matvec_batch. */
+ * warp handles a 16-token tile of the row. blockIdx.x walks token tiles and
+ * blockIdx.y walks rows, so later tiles are separate blocks that re-read the
+ * row, and prompt chunks amortize DRAM traffic like matvec_batch. */
 bool oc_cuda_mmq_matvec_xq(uint32_t qtype, const void *d_weights,
                            const int8_t *d_xq, const float *d_xsc,
                            const int32_t *d_xqsum, const void *d_xh,

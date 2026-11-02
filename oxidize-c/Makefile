@@ -149,7 +149,10 @@ tests/%.nosan.o: tests/%.c
 # target even though every function carries the right attribute. Compiling
 # the whole translation unit for x86-64-v3 sidesteps that, and is safe here
 # because every function in the file requires AVX2 anyway.
+OXK_AVX2_FLAGS :=
+ifneq (,$(filter x86_64% i386% i486% i586% i686%,$(shell $(CC) -dumpmachine)))
 OXK_AVX2_FLAGS := -mavx2 -mfma -mf16c
+endif
 
 src/compute/oxk_avx2.o: src/compute/oxk_avx2.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<

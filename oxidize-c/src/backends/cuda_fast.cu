@@ -378,7 +378,6 @@ __global__ void k_f_attention(const float *q,
             s = f_warp_sum(s);
             if (lane == 0u) {
                 const float sv = s * scale;
-                sc[p] = sv;
                 ss[p] = sv;
             }
         }
@@ -399,7 +398,6 @@ __global__ void k_f_attention(const float *q,
                     s += qs[d] * __half2float(__ldg(&k[d]));
             }
             const float sv = s * scale;
-            sc[p] = sv;
             ss[p] = sv;
         }
     }
@@ -840,7 +838,8 @@ extern "C" OcError oc_cuda_fast_logits(OcCudaContext *ctx, float *out)
 
 extern "C" OcError oc_cuda_fast_feed(OcCudaContext *ctx, uint32_t token)
 {
-    if (!ctx || !ctx->fast_stream) return OC_ERR_INVALID_ARG;
+    if (!ctx || !ctx->fast_stream || token >= ctx->vocab_size)
+        return OC_ERR_INVALID_ARG;
     k_f_set<<<1, 1, 0, fast_stream(ctx)>>>(
         (OcFastState *)ctx->d_fast_state, token);
     return cudaGetLastError() == cudaSuccess ? OC_OK : OC_ERR_BACKEND;
@@ -887,15 +886,12 @@ extern "C" OcError oc_cuda_fast_decode(OcCudaContext *ctx, uint32_t n)
 
     k_f_reset_step<<<1, 1, 0, s>>>((OcFastState *)ctx->d_fast_state);
 
-    if (!ctx->fast_graph_exec) {
-        static bool logged = false;
+    if (!ctx->fast_graph_exec && !ctx->fast_graph_failed) {
         const bool ok = fast_build_graph(ctx);
-        if (!logged) {
-            oc_log(ok ? OC_LOG_INFO : OC_LOG_WARN,
-                   "cuda: fast decode CUDA graph capture %s",
-                   ok ? "enabled" : "failed; unrolled submission");
-            logged = true;
-        }
+        ctx->fast_graph_failed = !ok;
+        oc_log(ok ? OC_LOG_INFO : OC_LOG_WARN,
+               "cuda: fast decode CUDA graph capture %s",
+               ok ? "enabled" : "failed; unrolled submission");
     }
     if (ctx->fast_graph_exec) {
         for (uint32_t i = 0; i < n; i++)
@@ -917,7 +913,10 @@ extern "C" OcError oc_cuda_fast_prefill(OcCudaContext *ctx,
 {
     if (!ctx || !ctx->fast_stream || !ids || n_ids == 0)
         return OC_ERR_INVALID_ARG;
-    if (pos0 + n_ids > ctx->n_ctx) return OC_ERR_INVALID_ARG;
+    if (n_ids > ctx->n_ctx || pos0 > ctx->n_ctx - n_ids)
+        return OC_ERR_INVALID_ARG;
+    for (size_t i = 0; i < n_ids; i++)
+        if (ids[i] >= ctx->vocab_size) return OC_ERR_INVALID_ARG;
     cudaStream_t s = fast_stream(ctx);
     const uint32_t embd = ctx->n_embd;
     const uint32_t block = FAST_BLOCK;
@@ -1091,6 +1090,8 @@ extern "C" void oc_cuda_fast_attach(OcCudaContext *ctx)
     return;
 
 fail:
+    oc_log(OC_LOG_WARN, "cuda: fast path setup failed (stream or workspace "
+           "allocation); using the standard CUDA path");
     cudaFree(ctx->d_fast_state); ctx->d_fast_state = NULL;
     cudaFree(ctx->d_fast_ring);  ctx->d_fast_ring = NULL;
     cudaFree(ctx->d_bx);      ctx->d_bx = NULL;
