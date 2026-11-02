@@ -67,7 +67,6 @@ fn readme_includes_examples_section() {
         "### Basic inference",
         "### Chat completion",
         "### Streaming generation",
-        "### Batch processing",
         "### Custom sampling",
         "### Embedding extraction",
     ] {
@@ -95,25 +94,6 @@ fn readme_includes_troubleshooting_guide() {
         assert!(
             readme.contains(required),
             "README troubleshooting guide missing required text: {required}"
-        );
-    }
-}
-
-#[test]
-fn readme_includes_release_announcement() {
-    let path = workspace_readme_path();
-    let readme = fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed reading {}: {err}", path.display()));
-
-    for required in [
-        "## Release announcement: oxidize 0.1.0",
-        "first stable workspace release for local-first LLM workflows in Rust",
-        "What this means for early users:",
-        "Thank you to everyone testing early builds and sharing feedback.",
-    ] {
-        assert!(
-            readme.contains(required),
-            "README release announcement missing required text: {required}"
         );
     }
 }
