@@ -43,6 +43,8 @@
 
 #include "utf8_utils.h"
 
+#include "tokenizer_common.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -412,29 +414,6 @@ OcError oc_wp_decode(const OcWordPieceTokenizer *wp, const uint32_t *ids,
 
 /* ─── Load from GGUF metadata ───────────────────────────────────────── */
 
-static OcError wp_get_string_array(const OcGgufFile *gguf, const char *key,
-                                   OcArena *arena, OcVector *out)
-{
-    const OcGgufMetadataValue *v = oc_gguf_metadata_get(gguf, key);
-    if (!v || v->type != OC_GGUF_MT_ARRAY) {
-        return OC_ERR_TOKENIZER;
-    }
-    OcError e = oc_vector_init(out, sizeof(char *));
-    if (e != OC_OK) return e;
-    for (size_t i = 0; i < v->v.arr.len; ++i) {
-        const OcGgufMetadataValue *elem = &v->v.arr.values[i];
-        if (elem->type != OC_GGUF_MT_STRING) {
-            oc_vector_free(out);
-            return OC_ERR_TOKENIZER;
-        }
-        char *dup = oc_arena_dup_n(arena, elem->v.str.data, elem->v.str.len);
-        if (!dup) { oc_vector_free(out); return OC_ERR_OOM; }
-        e = oc_vector_push(out, &dup);
-        if (e != OC_OK) { oc_vector_free(out); return e; }
-    }
-    return OC_OK;
-}
-
 OcError oc_wp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
                              OcWordPieceTokenizer **out)
 {
@@ -442,7 +421,7 @@ OcError oc_wp_load_from_gguf(const OcGgufFile *gguf, OcArena *arena,
     *out = NULL;
 
     OcVector tokens;
-    OcError e = wp_get_string_array(gguf, "tokenizer.ggml.tokens", arena, &tokens);
+    OcError e = oc_tokenizer_string_array(gguf, "tokenizer.ggml.tokens", arena, &tokens);
     if (e != OC_OK) return e;
 
     size_t vocab_size = oc_vector_len(&tokens);

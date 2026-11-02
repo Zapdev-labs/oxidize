@@ -2105,15 +2105,6 @@ OcError oc_inf_model_forward_tokens(OcInferenceModel *m,
                                 normed_batch, up_batch, batch);
             if (e != OC_OK) goto batch_fail;
 
-            if (cfg->gelu_ffn)
-                for (size_t i = 0; i < batch * i_size; i++)
-                    oc_geglu_inplace_f32(gate_batch + i, up_batch + i, 1);
-            else
-                for (size_t i = 0; i < batch * i_size; i++)
-                    oc_swiglu_inplace_f32(gate_batch + i, up_batch + i, 1);
-
-            /* Actually need to call swiglu/geglu on full vectors, not per-element. */
-            /* Redo properly: */
             for (size_t i = 0; i < batch; i++) {
                 if (cfg->gelu_ffn)
                     oc_geglu_inplace_f32(gate_batch + i * i_size,
@@ -2307,45 +2298,6 @@ OcError oc_inf_model_forward_batch(OcInferenceModel *m,
             /* KV write to SeqKv. */
             if (kv_idx >= 0 && kv_len > 0) {
                 oc_seq_kv_put(&kvs[i], (size_t)kv_idx, kvs[i].len, k, v);
-            }
-        }
-
-        /* Per-sequence attention against each sequence's own KV. */
-        memset(attn_batch, 0, batch * q_len * sizeof(float));
-        if (kv_idx >= 0 && kv_len > 0) {
-            for (size_t i = 0; i < batch; i++) {
-                size_t seq_len = kvs[i].len + 1;  /* current token now written */
-                float *q = q_batch + i * q_len;
-                float *attn_out = attn_batch + i * q_len;
-
-                const float *key_cache = NULL;
-                const float *val_cache = NULL;
-                oc_seq_kv_get(&kvs[i], (size_t)kv_idx, 0, &key_cache, &val_cache);
-
-                if (key_cache && val_cache) {
-                    uint32_t eff_seq = (uint32_t)seq_len;
-                    const float *eff_k = key_cache;
-                    const float *eff_v = val_cache;
-
-                    if (layer_window > 0 && seq_len > layer_window) {
-                        size_t skip = (seq_len - layer_window) * kv_len;
-                        eff_k = key_cache + skip;
-                        eff_v = val_cache + skip;
-                        eff_seq = layer_window;
-                    }
-
-                    uint32_t n_rep = n_heads / (kvh > 0 ? kvh : 1);
-                    for (uint32_t hd = 0; hd < n_heads; hd++) {
-                        uint32_t kv_hd = hd / n_rep;
-                        const float *q_head = q + hd * head_dim;
-                        const float *k_head = eff_k + kv_hd * kv_head_dim;
-                        const float *v_head = eff_v + kv_hd * kv_head_dim;
-                        float *out_head = attn_out + hd * head_dim;
-                        oc_scaled_dot_product_attention_f32(
-                            q_head, k_head, v_head, eff_seq,
-                            kv_head_dim, out_head);
-                    }
-                }
             }
         }
 
