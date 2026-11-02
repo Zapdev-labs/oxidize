@@ -424,4 +424,4 @@ See [SECURITY_MODEL.md](SECURITY_MODEL.md) for the threat model, trust boundarie
 
 ## License
 
-Zapdev labs Fair Use License
+MIT. See [LICENSE](LICENSE).
