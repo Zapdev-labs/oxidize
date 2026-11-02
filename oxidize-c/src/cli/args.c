@@ -233,6 +233,9 @@ static bool parse_value_flag(OcCliArgs *a, const char *arg, const char *val,
     else if (match(arg, "--prerouter"))     { a->prerouter_path = val; *consumed_val = true; }
     else if (match(arg, "--lora"))          { a->lora_path = val; *consumed_val = true; }
     else if (match(arg, "--exl3"))          { a->exl3_path = val; *consumed_val = true; }
+    else if (match(arg, "--eagle-dump"))    { a->eagle_dump = val; *consumed_val = true; }
+    else if (match(arg, "--eagle-layers"))  { a->eagle_layers = val; *consumed_val = true; }
+    else if (match(arg, "--eagle4"))        { a->eagle4 = val; *consumed_val = true; }
     else if (match(arg, "--experts-per-tok")) {
         uint32_t n;
         if (!oc_parse_u32(val, &n) || n == 0) {
