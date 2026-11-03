@@ -90,6 +90,7 @@ typedef struct E4Impl {
     size_t feat_width;
     size_t q_size;
     size_t kv_size;
+    size_t snap_layers; /* layer stride of snap_kv */
     E4Scored *heap;
     E4Kv kv[OC_EAGLE4_MAX_LAYERS];
     void *owned[E4_OWNED];
@@ -372,7 +373,7 @@ static void capture_node(OcEagle4Draft *m, E4State *s, const E4State *parent)
     im->snap_parent[s->snap] = (int32_t)parent->snap;
     for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++) {
         E4Kv *c = &im->kv[i];
-        float *dst = im->snap_kv + ((size_t)s->snap * OC_EAGLE4_MAX_LAYERS + i) * 2u * kvl;
+        float *dst = im->snap_kv + ((size_t)s->snap * im->snap_layers + i) * 2u * kvl;
         size_t row = c->seq_len - 1u;
         im->snap_pos[s->snap][i] = c->base + row;
         memcpy(dst, c->keys + row * kvl, kvl * sizeof(float));
@@ -402,7 +403,7 @@ static void restore_state(OcEagle4Draft *m, const E4State *s)
             for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++) {
                 E4Kv *c = &im->kv[i];
                 const float *src =
-                    im->snap_kv + ((size_t)sn * OC_EAGLE4_MAX_LAYERS + i) * 2u * kvl;
+                    im->snap_kv + ((size_t)sn * im->snap_layers + i) * 2u * kvl;
                 size_t pos = im->snap_pos[sn][i];
                 if (pos < c->base || pos - c->base >= c->seq_len) continue;
                 memcpy(c->keys + (pos - c->base) * kvl, src, kvl * sizeof(float));
@@ -854,11 +855,19 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
     if (cap < 32u) cap = 32u;
     {
         size_t cells;
-        if (!e4_mul_ok(cap, kv_len, &cells) || cells > SIZE_MAX / sizeof(float)) {
+        size_t kv_total, snap_total;
+        /* KV ring (keys+values per layer) plus the per-node snapshot copy;
+         * reject anything past a 16 GiB budget before allocating. */
+        const size_t cap_floats = ((size_t)16u << 30) / sizeof(float);
+        if (!e4_mul_ok(cap, kv_len, &cells) || cells > SIZE_MAX / sizeof(float) ||
+            !e4_mul_ok(cells, layers * 2u, &kv_total) ||
+            !e4_mul_ok(snaps * layers * 2u, kv_len, &snap_total) ||
+            kv_total > cap_floats || snap_total > cap_floats - kv_total) {
             oc_eagle4_model_free(m);
             return OC_ERR_INVALID_ARG;
         }
     }
+    im->snap_layers = layers;
     for (i = 0; i < layers; i++) {
         im->kv[i].kv_len = kv_len;
         im->kv[i].window = c.sliding_window;
@@ -872,7 +881,7 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
     }
     {
         size_t n;
-        if (!e4_mul_ok(snaps * OC_EAGLE4_MAX_LAYERS * 2u, kvsz, &n) ||
+        if (!e4_mul_ok(snaps * layers * 2u, kvsz, &n) ||
             n > SIZE_MAX / sizeof(float)) {
             oc_eagle4_model_free(m);
             return OC_ERR_INVALID_ARG;
@@ -2331,15 +2340,20 @@ OcError oc_eagle4_train_step(OcEagle4Draft *m, const float *features, size_t n_f
     return OC_OK;
 }
 
-static uint32_t example_at(const void *data, const char *dtype, size_t i)
+/* Returns 0 on success; -1 if an F32 id is non-finite, non-integral, or out
+ * of uint32 range (casting such a float is undefined behaviour). */
+static int example_at(const void *data, const char *dtype, size_t i, uint32_t *out)
 {
     if (strcmp(dtype, "U32") == 0 || strcmp(dtype, "I32") == 0) {
         const uint32_t *p = (const uint32_t *)data;
-        return p[i];
+        *out = p[i];
+        return 0;
     }
     {
-        const float *p = (const float *)data;
-        return (uint32_t)(p[i] + 0.5f);
+        float v = ((const float *)data)[i];
+        if (!isfinite(v) || v < 0.0f || v >= 4294967296.0f || floorf(v) != v) return -1;
+        *out = (uint32_t)v;
+        return 0;
     }
 }
 
@@ -2400,8 +2414,12 @@ OcError oc_eagle4_train_safetensors(OcEagle4Draft *m, const char *examples_path,
     for (ep = 0; ep < epochs; ep++) {
         for (row = 0; row < n; row++) {
             const float *feat = (const float *)fd + row * width;
-            uint32_t token = example_at(td, tt->dtype, row);
-            uint32_t target = example_at(yd, yt->dtype, row);
+            uint32_t token, target;
+            if (example_at(td, tt->dtype, row, &token) != 0 ||
+                example_at(yd, yt->dtype, row, &target) != 0) {
+                oc_safetensors_close(&st);
+                return OC_ERR_FORMAT;
+            }
             err = oc_eagle4_train_step(m, feat, width, token, target, lr, &last);
             if (err != OC_OK) {
                 oc_safetensors_close(&st);

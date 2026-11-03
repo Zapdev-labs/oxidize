@@ -63,6 +63,11 @@ typedef struct OcStParser {
 static bool parser_emit(OcStParser *p)
 {
     if (!p->cur_valid) return true;
+    if (p->bad || p->shape_count > OC_SAFETENSORS_MAX_DIMS) {
+        /* Over-long shape or an overflowing integer. */
+        p->bad = true;
+        return false;
+    }
     if (p->out_len == p->out_cap) {
         size_t new_cap = p->out_cap == 0 ? 8 : p->out_cap * 2;
         OcSafetensorsTensor *na = realloc(p->out_arr, new_cap * sizeof(*na));
@@ -144,11 +149,13 @@ static int json_decode_string(const char *src, const char *end,
 
 /* Parse a JSON unsigned integer. `*endp` points past the last digit. */
 static uint64_t json_decode_uint(const char *src, const char *end,
-                                 const char **endp)
+                                 const char **endp, bool *overflow)
 {
     uint64_t v = 0;
     while (src < end && isdigit((unsigned char)*src)) {
-        v = v * 10 + (uint64_t)(*src - '0');
+        uint64_t d = (uint64_t)(*src - '0');
+        if (v > (UINT64_MAX - d) / 10u) *overflow = true;
+        v = v * 10 + d;
         src++;
     }
     *endp = src;
@@ -224,11 +231,12 @@ static void parser_handle_value(OcStParser *p, const char *src,
                  * spin without consuming input. */
                 if (!isdigit((unsigned char)*src)) break;
                 const char *e;
-                uint64_t v = json_decode_uint(src, end, &e);
+                uint64_t v = json_decode_uint(src, end, &e, &p->bad);
                 if (e == src) break;
                 if (p->shape_count < OC_SAFETENSORS_MAX_DIMS) {
-                    p->shape_vals[p->shape_count++] = v;
+                    p->shape_vals[p->shape_count] = v;
                 }
+                if (p->shape_count <= OC_SAFETENSORS_MAX_DIMS) p->shape_count++;
                 src = e;
                 while (src < end && isspace((unsigned char)*src)) src++;
                 if (src < end && *src == ',') src++;
@@ -244,7 +252,7 @@ static void parser_handle_value(OcStParser *p, const char *src,
                 if (src >= end || *src == ']') break;
                 if (!isdigit((unsigned char)*src)) break;
                 const char *e;
-                uint64_t v = json_decode_uint(src, end, &e);
+                uint64_t v = json_decode_uint(src, end, &e, &p->bad);
                 if (e == src) break;
                 if (p->offset_count < 2) {
                     p->offsets[p->offset_count] = v;

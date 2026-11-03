@@ -2293,14 +2293,20 @@ OcError oc_cli_run_eagle4_train(OcCliContext *ctx)
          * truncates the input draft (out_path defaults to --model). */
         size_t len = strlen(out_path);
         char *tmp = (char *)malloc(len + 5u);
+        struct stat dst_st;
         if (!tmp) {
             oc_eagle4_model_free(&draft);
+            cli_error("failed to save draft (%s)", oc_error_msg(OC_ERR_OOM));
             return OC_ERR_OOM;
         }
         memcpy(tmp, out_path, len);
         memcpy(tmp + len, ".tmp", 5u);
         err = oc_eagle4_save_safetensors(&draft, tmp);
         oc_eagle4_model_free(&draft);
+        /* Keep the existing destination's permission bits across the rename. */
+        if (err == OC_OK && stat(out_path, &dst_st) == 0 &&
+            chmod(tmp, dst_st.st_mode & 07777) != 0)
+            err = OC_ERR_IO;
         if (err == OC_OK && rename(tmp, out_path) != 0) err = OC_ERR_IO;
         if (err != OC_OK) {
             remove(tmp);

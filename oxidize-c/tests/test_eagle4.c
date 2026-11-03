@@ -739,3 +739,14 @@ Test(eagle4, train_rejects_short_examples)
     oc_eagle4_model_free(&m);
     unlink(path);
 }
+
+/* A KV ring past the 16 GiB budget must be refused before allocation. */
+Test(eagle4, init_rejects_oversized_kv)
+{
+    OcEagle4Config cfg;
+    OcEagle4Draft m;
+    tiny(&cfg);
+    cfg.head_dim = 1u << 20;
+    cfg.sliding_window = 1u << 14;
+    cr_assert_eq(oc_eagle4_model_init(&m, &cfg), OC_ERR_INVALID_ARG);
+}
