@@ -97,28 +97,32 @@ static void cli_info(const char *fmt, ...)
 static size_t json_escape(const char *s, char *buf, size_t cap)
 {
     if (cap == 0) return 0;
+    buf[0] = '\0';
     size_t n = 0;
     while (*s && n + 2 < cap) {
         char c = *s++;
         switch (c) {
-        case '"':  if (n + 2 >= cap) return 0; buf[n++] = '\\'; buf[n++] = '"'; break;
-        case '\\': if (n + 2 >= cap) return 0; buf[n++] = '\\'; buf[n++] = '\\'; break;
-        case '\n': if (n + 2 >= cap) return 0; buf[n++] = '\\'; buf[n++] = 'n'; break;
-        case '\r': if (n + 2 >= cap) return 0; buf[n++] = '\\'; buf[n++] = 'r'; break;
-        case '\t': if (n + 2 >= cap) return 0; buf[n++] = '\\'; buf[n++] = 't'; break;
+        case '"':  if (n + 2 >= cap) goto fail; buf[n++] = '\\'; buf[n++] = '"'; break;
+        case '\\': if (n + 2 >= cap) goto fail; buf[n++] = '\\'; buf[n++] = '\\'; break;
+        case '\n': if (n + 2 >= cap) goto fail; buf[n++] = '\\'; buf[n++] = 'n'; break;
+        case '\r': if (n + 2 >= cap) goto fail; buf[n++] = '\\'; buf[n++] = 'r'; break;
+        case '\t': if (n + 2 >= cap) goto fail; buf[n++] = '\\'; buf[n++] = 't'; break;
         default:
             if ((unsigned char)c < 0x20) {
                 int w = snprintf(buf + n, cap - n, "\\u%04x", (unsigned)(unsigned char)c);
-                if (w < 0 || (size_t)w >= cap - n) return 0;
+                if (w < 0 || (size_t)w >= cap - n) goto fail;
                 n += (size_t)w;
             } else {
                 buf[n++] = c;
             }
         }
     }
-    if (*s) return 0; /* ran out of room: never report a truncated value */
+    if (*s) goto fail; /* ran out of room: never report a truncated value */
     buf[n] = '\0';
     return n;
+fail:
+    buf[0] = '\0'; /* callers may print buf even on failure */
+    return 0;
 }
 
 /* Print a progress message to stderr. */
