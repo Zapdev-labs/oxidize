@@ -2199,13 +2199,16 @@ OcError oc_cli_run_eagle4(OcCliContext *ctx)
             return err;
         }
         if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+            char model_esc[4096];
+            if (json_escape(ctx->model_path, model_esc, sizeof(model_esc)) == 0)
+                snprintf(model_esc, sizeof(model_esc), "?");
             printf("{\"command\":\"eagle4\",\"model\":\"%s\",\"hidden\":%zu,"
                    "\"vocab\":%zu,\"params\":%zu,\"threads\":%d,"
                    "\"token_us\":%.1f,\"tok_per_s\":%.2f,"
                    "\"qkv_us\":%.1f,\"mlp_us\":%.1f,\"attn_us\":%.1f,"
                    "\"head_us\":%.1f,\"encode_us\":%.1f,\"fault_us\":%.1f,"
                    "\"top_token\":%u}\n",
-                   ctx->model_path, hf.hidden, hf.vocab, hf.params, hf.threads,
+                   model_esc, hf.hidden, hf.vocab, hf.params, hf.threads,
                    hf.token_us, hf.tok_per_s, hf.qkv_us, hf.mlp_us, hf.attn_us,
                    hf.head_us, hf.encode_us, hf.fault_us, hf.top_token);
         } else {
@@ -2285,11 +2288,27 @@ OcError oc_cli_run_eagle4_train(OcCliContext *ctx)
         oc_eagle4_model_free(&draft);
         return err;
     }
-    err = oc_eagle4_save_safetensors(&draft, out_path);
-    oc_eagle4_model_free(&draft);
-    if (err != OC_OK) {
-        cli_error("failed to save draft (%s)", oc_error_msg(err));
-        return err;
+    {
+        /* Stage beside the target and rename, so a failed write never
+         * truncates the input draft (out_path defaults to --model). */
+        size_t len = strlen(out_path);
+        char *tmp = (char *)malloc(len + 5u);
+        if (!tmp) {
+            oc_eagle4_model_free(&draft);
+            return OC_ERR_OOM;
+        }
+        memcpy(tmp, out_path, len);
+        memcpy(tmp + len, ".tmp", 5u);
+        err = oc_eagle4_save_safetensors(&draft, tmp);
+        oc_eagle4_model_free(&draft);
+        if (err == OC_OK && rename(tmp, out_path) != 0) err = OC_ERR_IO;
+        if (err != OC_OK) {
+            remove(tmp);
+            free(tmp);
+            cli_error("failed to save draft (%s)", oc_error_msg(err));
+            return err;
+        }
+        free(tmp);
     }
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"eagle4-train\",\"steps\":%u,\"loss\":%.6f,\"pred\":%u,\"target\":%u}\n",
@@ -2326,6 +2345,13 @@ OcError oc_cli_run_eagle4_export(OcCliContext *ctx)
         cli_error("export failed (%s)", oc_error_msg(err));
         return err;
     }
-    printf("exported %s\n", ctx->output_path);
+    if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+        char out_esc[4096];
+        if (json_escape(ctx->output_path, out_esc, sizeof(out_esc)) == 0)
+            snprintf(out_esc, sizeof(out_esc), "?");
+        printf("{\"command\":\"eagle4-export\",\"output\":\"%s\"}\n", out_esc);
+    } else {
+        printf("exported %s\n", ctx->output_path);
+    }
     return OC_OK;
 }

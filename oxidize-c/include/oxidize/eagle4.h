@@ -61,6 +61,9 @@ typedef struct OcEagle4Config {
     float rms_norm_eps;
     float rope_theta;
     bool use_rope;
+    /* Round-tripped for EAGLE-3 config compatibility only. The EAGLE-4
+     * forward fuses [embed|g] through eh_proj and uses that fused vector as
+     * the layer residual, so there is no separate g residual to select. */
     bool norm_before_residual;
 } OcEagle4Config;
 

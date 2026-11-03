@@ -75,7 +75,12 @@ static bool parser_emit(OcStParser *p)
     for (uint32_t i = 0; i < p->shape_count && i < OC_SAFETENSORS_MAX_DIMS; i++) {
         p->cur.shape[i] = p->shape_vals[i];
     }
-    if (p->offset_count == 2) {
+    if (p->offset_count != 2) {
+        /* Missing, short, or over-long data_offsets. */
+        p->bad = true;
+        return false;
+    }
+    {
         if (p->offsets[1] < p->offsets[0]) {
             p->bad = true;
             return false;
@@ -242,8 +247,9 @@ static void parser_handle_value(OcStParser *p, const char *src,
                 uint64_t v = json_decode_uint(src, end, &e);
                 if (e == src) break;
                 if (p->offset_count < 2) {
-                    p->offsets[p->offset_count++] = v;
+                    p->offsets[p->offset_count] = v;
                 }
+                if (p->offset_count < 3) p->offset_count++;
                 src = e;
                 while (src < end && isspace((unsigned char)*src)) src++;
                 if (src < end && *src == ',') src++;
@@ -500,6 +506,7 @@ OcError oc_safetensors_get_tensor_data(const OcSafetensorsFile *st,
 bool oc_st_tensor_bytes_ok(const OcSafetensorsTensor *t, size_t elem_size)
 {
     if (t == NULL || elem_size == 0) return false;
+    if (t->n_dims > OC_SAFETENSORS_MAX_DIMS) return false;
     uint64_t n = 1;
     for (uint32_t i = 0; i < t->n_dims; i++) {
         uint64_t d = t->shape[i];

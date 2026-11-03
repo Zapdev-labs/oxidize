@@ -43,6 +43,7 @@ typedef struct E4Kv {
     size_t kv_len;
     size_t window; /* rows kept after a trim; 0 = unbounded */
     size_t base;   /* rows trimmed off the front so far */
+    int hold;      /* nonzero: never trim (a snapshot may roll back) */
 } E4Kv;
 
 typedef struct E4State {
@@ -78,6 +79,12 @@ typedef struct E4Impl {
     float *logits;
     float *dh;
     float *snaps;
+    /* Per-snapshot KV row each tree node appended (k then v per layer),
+     * its absolute position, and the parent snapshot (-1 = root). Tree
+     * siblings share KV offsets, so restoring a node rewrites its path. */
+    float *snap_kv;
+    size_t snap_pos[OC_EAGLE4_MAX_NODES + 2u][OC_EAGLE4_MAX_LAYERS];
+    int32_t snap_parent[OC_EAGLE4_MAX_NODES + 2u];
     size_t n_snaps;
     size_t snap_used;
     size_t feat_width;
@@ -311,7 +318,7 @@ static void rope_inplace(float *q, size_t n_heads, size_t hd, size_t pos, float 
 static OcError kv_append(E4Kv *c, const float *k, const float *v)
 {
     size_t bytes;
-    if (c->window > 0 && c->seq_len >= c->window + 16u) {
+    if (!c->hold && c->window > 0 && c->seq_len >= c->window + 16u) {
         /* Attention only reads the last `window` rows; drop the rest. */
         size_t drop = c->seq_len - c->window;
         memmove(c->keys, c->keys + drop * c->kv_len, c->window * c->kv_len * sizeof(float));
@@ -351,6 +358,32 @@ static void capture_state(OcEagle4Draft *m, E4State *s)
     if (im->snap_used >= im->n_snaps) s->snap = (uint32_t)im->n_snaps - 1u;
     else s->snap = (uint32_t)im->snap_used++;
     memcpy(im->snaps + (size_t)s->snap * h, im->g, h * sizeof(float));
+    im->snap_parent[s->snap] = -1;
+}
+
+/* Record the KV row the last forward appended, as a child of `parent`. */
+static void capture_node(OcEagle4Draft *m, E4State *s, const E4State *parent)
+{
+    E4Impl *im = impl_of(m);
+    size_t kvl = im->kv_size;
+    size_t i;
+    capture_state(m, s);
+    if (!im->snap_kv || s->snap == parent->snap) return;
+    im->snap_parent[s->snap] = (int32_t)parent->snap;
+    for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++) {
+        E4Kv *c = &im->kv[i];
+        float *dst = im->snap_kv + ((size_t)s->snap * OC_EAGLE4_MAX_LAYERS + i) * 2u * kvl;
+        size_t row = c->seq_len - 1u;
+        im->snap_pos[s->snap][i] = c->base + row;
+        memcpy(dst, c->keys + row * kvl, kvl * sizeof(float));
+        memcpy(dst + kvl, c->values + row * kvl, kvl * sizeof(float));
+    }
+}
+
+static void set_hold(E4Impl *im, int on)
+{
+    size_t i;
+    for (i = 0; i < OC_EAGLE4_MAX_LAYERS; i++) im->kv[i].hold = on;
 }
 
 static void restore_state(OcEagle4Draft *m, const E4State *s)
@@ -361,6 +394,23 @@ static void restore_state(OcEagle4Draft *m, const E4State *s)
     m->position = s->position;
     for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++)
         im->kv[i].seq_len = s->seq[i] >= im->kv[i].base ? s->seq[i] - im->kv[i].base : 0;
+    if (im->snap_kv) {
+        int32_t sn = im->snap_parent[s->snap];
+        sn = (sn < 0) ? -1 : (int32_t)s->snap;
+        while (sn >= 0) {
+            size_t kvl = im->kv_size;
+            for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++) {
+                E4Kv *c = &im->kv[i];
+                const float *src =
+                    im->snap_kv + ((size_t)sn * OC_EAGLE4_MAX_LAYERS + i) * 2u * kvl;
+                size_t pos = im->snap_pos[sn][i];
+                if (pos < c->base || pos - c->base >= c->seq_len) continue;
+                memcpy(c->keys + (pos - c->base) * kvl, src, kvl * sizeof(float));
+                memcpy(c->values + (pos - c->base) * kvl, src + kvl, kvl * sizeof(float));
+            }
+            sn = im->snap_parent[sn];
+        }
+    }
     memcpy(im->g, im->snaps + (size_t)s->snap * h, h * sizeof(float));
     m->g_embeddings = im->g;
     m->kv_seq0 = im->kv[0].seq_len;
@@ -820,6 +870,19 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
             return OC_ERR_OOM;
         }
     }
+    {
+        size_t n;
+        if (!e4_mul_ok(snaps * OC_EAGLE4_MAX_LAYERS * 2u, kvsz, &n) ||
+            n > SIZE_MAX / sizeof(float)) {
+            oc_eagle4_model_free(m);
+            return OC_ERR_INVALID_ARG;
+        }
+        im->snap_kv = (float *)calloc(n ? n : 1, sizeof(float));
+        if (!im->snap_kv) {
+            oc_eagle4_model_free(m);
+            return OC_ERR_OOM;
+        }
+    }
     m->g_embeddings = im->g;
     m->loaded = true;
     return OC_OK;
@@ -838,6 +901,7 @@ void oc_eagle4_model_free(OcEagle4Draft *m)
             free(im->kv[i].values);
         }
         free(im->arena);
+        free(im->snap_kv);
         free(im->heap);
         free(im);
     }
@@ -848,6 +912,7 @@ OcError oc_eagle4_alloc_f32(OcEagle4Draft *m, float **dst, size_t n)
 {
     float *p;
     if (!m || !m->impl || !dst || n == 0) return OC_ERR_INVALID_ARG;
+    if (n > SIZE_MAX / sizeof(float)) return OC_ERR_INVALID_ARG;
     p = (float *)e4_own(m, n * sizeof(float));
     if (!p) return OC_ERR_OOM;
     *dst = p;
@@ -858,7 +923,8 @@ OcError oc_eagle4_alloc_weight(OcEagle4Draft *m, OcEagle4Weight *w, size_t rows,
 {
     float *p;
     if (!m || !m->impl || !w || rows == 0 || cols == 0) return OC_ERR_INVALID_ARG;
-    if (rows > SIZE_MAX / cols) return OC_ERR_INVALID_ARG;
+    if (rows > SIZE_MAX / cols || rows * cols > SIZE_MAX / sizeof(float))
+        return OC_ERR_INVALID_ARG;
     p = (float *)e4_own(m, rows * cols * sizeof(float));
     if (!p) return OC_ERR_OOM;
     w->data = p;
@@ -1150,6 +1216,7 @@ OcError oc_eagle4_propose(OcEagle4Draft *m, const OcEagle4Harness *h,
     im->snap_used = 0;
     err = oc_eagle4_forward(m, prefix_token, NULL, 0);
     if (err != OC_OK) return err;
+    set_hold(im, 1);
     capture_state(m, &prefix);
     cur[0].tree_idx = -1;
     cur[0].state = prefix;
@@ -1203,11 +1270,12 @@ OcError oc_eagle4_propose(OcEagle4Draft *m, const OcEagle4Harness *h,
             err = oc_eagle4_forward(m, node->token, NULL, 0);
             if (err != OC_OK) {
                 restore_state(m, &prefix);
+                set_hold(im, 0);
                 return err;
             }
             if (nnext < OC_EAGLE4_MAX_NODES) {
                 next[nnext].tree_idx = (int32_t)out->n_nodes;
-                capture_state(m, &next[nnext].state);
+                capture_node(m, &next[nnext].state, &parent->state);
                 copy_top_into(im, &next[nnext], node->path_prob);
                 nnext++;
             }
@@ -1217,6 +1285,7 @@ OcError oc_eagle4_propose(OcEagle4Draft *m, const OcEagle4Harness *h,
         if (ncur) memcpy(cur, next, ncur * sizeof(cur[0]));
     }
     restore_state(m, &prefix);
+    set_hold(im, 0);
     return OC_OK;
 }
 
@@ -1295,9 +1364,12 @@ static uint32_t sample_dist(const float *p, uint32_t n, uint32_t *rng)
     if (sum <= 0.0f) return 0;
     u = rng_unit(rng) * sum;
     for (i = 0; i < n; i++) {
-        if (p[i] > 0.0f) acc += p[i];
+        if (p[i] <= 0.0f) continue; /* u may be 0: never pick a zero-mass entry */
+        acc += p[i];
         if (acc >= u) return i;
     }
+    for (i = n; i-- > 0;)
+        if (p[i] > 0.0f) return i;
     return n - 1u;
 }
 
@@ -1678,9 +1750,12 @@ static OcError write_safetensors(const char *path, const E4Blob *blobs, size_t n
                 return OC_ERR_IO;
             }
         }
-        fclose(fp);
-        free(json);
-        free(raw);
+        {
+            int cerr = fclose(fp);
+            free(json);
+            free(raw);
+            if (cerr != 0) return OC_ERR_IO;
+        }
     }
     return OC_OK;
 }
@@ -1890,35 +1965,30 @@ OcError oc_eagle4_load_safetensors(OcEagle4Draft *m, const char *path)
                 vecp = &m->fc_norm[idx];
         } else if (strncmp(t->name, "eagle4.layer.", 13) == 0) {
             unsigned L = 0, E = 0;
-            if (sscanf(t->name, "eagle4.layer.%u.q", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                w = &m->layers[L].q_proj;
-            else if (sscanf(t->name, "eagle4.layer.%u.k", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                w = &m->layers[L].k_proj;
-            else if (sscanf(t->name, "eagle4.layer.%u.v", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                w = &m->layers[L].v_proj;
-            else if (sscanf(t->name, "eagle4.layer.%u.o", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                w = &m->layers[L].o_proj;
-            else if (sscanf(t->name, "eagle4.layer.%u.attn_norm", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                vecp = &m->layers[L].attn_norm;
-            else if (sscanf(t->name, "eagle4.layer.%u.ffn_norm", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                vecp = &m->layers[L].ffn_norm;
-            else if (sscanf(t->name, "eagle4.layer.%u.gate", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                w = &m->layers[L].mlp_gate;
-            else if (sscanf(t->name, "eagle4.layer.%u.up", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                w = &m->layers[L].mlp_up;
-            else if (sscanf(t->name, "eagle4.layer.%u.down", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                w = &m->layers[L].mlp_down;
-            else if (sscanf(t->name, "eagle4.layer.%u.router", &L) == 1 && L < OC_EAGLE4_MAX_LAYERS)
-                vecp = &m->layers[L].router;
-            else if (sscanf(t->name, "eagle4.layer.%u.expert.%u.gate", &L, &E) == 2 &&
-                     L < OC_EAGLE4_MAX_LAYERS && E < OC_EAGLE4_MAX_EXPERTS)
-                w = &m->layers[L].expert_gate[E];
-            else if (sscanf(t->name, "eagle4.layer.%u.expert.%u.up", &L, &E) == 2 &&
-                     L < OC_EAGLE4_MAX_LAYERS && E < OC_EAGLE4_MAX_EXPERTS)
-                w = &m->layers[L].expert_up[E];
-            else if (sscanf(t->name, "eagle4.layer.%u.expert.%u.down", &L, &E) == 2 &&
-                     L < OC_EAGLE4_MAX_LAYERS && E < OC_EAGLE4_MAX_EXPERTS)
-                w = &m->layers[L].expert_down[E];
+            int pos = -1, epos = -1;
+            const char *sfx;
+            if (sscanf(t->name, "eagle4.layer.%u.%n", &L, &pos) == 1 && pos > 0 &&
+                L < OC_EAGLE4_MAX_LAYERS) {
+                OcEagle4Layer *ly = &m->layers[L];
+                sfx = t->name + pos;
+                if (strcmp(sfx, "q") == 0) w = &ly->q_proj;
+                else if (strcmp(sfx, "k") == 0) w = &ly->k_proj;
+                else if (strcmp(sfx, "v") == 0) w = &ly->v_proj;
+                else if (strcmp(sfx, "o") == 0) w = &ly->o_proj;
+                else if (strcmp(sfx, "attn_norm") == 0) vecp = &ly->attn_norm;
+                else if (strcmp(sfx, "ffn_norm") == 0) vecp = &ly->ffn_norm;
+                else if (strcmp(sfx, "gate") == 0) w = &ly->mlp_gate;
+                else if (strcmp(sfx, "up") == 0) w = &ly->mlp_up;
+                else if (strcmp(sfx, "down") == 0) w = &ly->mlp_down;
+                else if (strcmp(sfx, "router") == 0) vecp = &ly->router;
+                else if (sscanf(sfx, "expert.%u.%n", &E, &epos) == 1 && epos > 0 &&
+                         E < OC_EAGLE4_MAX_EXPERTS) {
+                    sfx += epos;
+                    if (strcmp(sfx, "gate") == 0) w = &ly->expert_gate[E];
+                    else if (strcmp(sfx, "up") == 0) w = &ly->expert_up[E];
+                    else if (strcmp(sfx, "down") == 0) w = &ly->expert_down[E];
+                }
+            }
         }
         if (!w && !vecp) continue;
         if (vecp && (!vec || rows != e4_vec_len(m, t->name))) {
@@ -2210,6 +2280,8 @@ OcError oc_eagle4_train_step(OcEagle4Draft *m, const float *features, size_t n_f
     if (!m || !m->loaded) return OC_ERR_INVALID_ARG;
     if ((size_t)target >= m->config.vocab_size) return OC_ERR_INVALID_ARG;
     if (!m->lm_head.data) return OC_ERR_INVALID_ARG;
+    /* No target->draft inverse map yet: a d2t draft would train the wrong row. */
+    if (m->d2t) return OC_ERR_INVALID_ARG;
     im = impl_of(m);
     im->snap_used = 0;
     capture_state(m, &st);
@@ -2271,6 +2343,13 @@ static uint32_t example_at(const void *data, const char *dtype, size_t i)
     }
 }
 
+/* example_at reads every element as 4 bytes. */
+static int e4_example_dtype_ok(const char *dtype)
+{
+    return strcmp(dtype, "U32") == 0 || strcmp(dtype, "I32") == 0 ||
+           strcmp(dtype, "F32") == 0;
+}
+
 OcError oc_eagle4_train_safetensors(OcEagle4Draft *m, const char *examples_path,
                                     float lr, uint32_t epochs, OcEagle4TrainResult *out)
 {
@@ -2307,6 +2386,12 @@ OcError oc_eagle4_train_safetensors(OcEagle4Draft *m, const char *examples_path,
     width = (size_t)ft->shape[1];
     if (tt->n_dims != 1 || yt->n_dims != 1 || (size_t)tt->shape[0] != n ||
         (size_t)yt->shape[0] != n) {
+        oc_safetensors_close(&st);
+        return OC_ERR_FORMAT;
+    }
+    if (!e4_example_dtype_ok(tt->dtype) || !e4_example_dtype_ok(yt->dtype) ||
+        !oc_st_tensor_bytes_ok(ft, sizeof(float)) || !oc_st_tensor_bytes_ok(tt, 4u) ||
+        !oc_st_tensor_bytes_ok(yt, 4u)) {
         oc_safetensors_close(&st);
         return OC_ERR_FORMAT;
     }

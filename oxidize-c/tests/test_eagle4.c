@@ -518,3 +518,224 @@ Test(eagle4, hf_rejects_bad_shape_and_slides_kv)
     cr_assert_eq(oc_eagle4_hf_bench(path, 1, 1, &b), OC_ERR_FORMAT);
     unlink(path);
 }
+
+/* Every eagle4.layer.<L>.* tensor must bind to its own slot, not q_proj. */
+Test(eagle4, load_binds_each_layer_tensor)
+{
+    OcEagle4Config cfg;
+    OcEagle4Draft m, loaded;
+    OcEagle4Layer *a, *b;
+    char path[64];
+    OcEagle4Weight *ws[10];
+    float **vs[3];
+    size_t i;
+    tiny(&cfg);
+    cfg.n_experts = 2;
+    cfg.top_k_experts = 1;
+    snprintf(path, sizeof(path), "/tmp/oc-eagle4-bind-%d.safetensors", (int)getpid());
+    cr_assert_eq(oc_eagle4_model_init(&m, &cfg), OC_OK);
+    a = &m.layers[0];
+    ws[0] = &a->q_proj; ws[1] = &a->k_proj; ws[2] = &a->v_proj; ws[3] = &a->o_proj;
+    ws[4] = &a->mlp_gate; ws[5] = &a->mlp_up; ws[6] = &a->mlp_down;
+    ws[7] = &a->expert_gate[1]; ws[8] = &a->expert_up[1]; ws[9] = &a->expert_down[1];
+    for (i = 0; i < 10; i++) {
+        cr_assert_eq(oc_eagle4_alloc_weight(&m, ws[i], 4, 4), OC_OK);
+        ws[i]->data[0] = (float)(i + 1);
+    }
+    vs[0] = &a->attn_norm; vs[1] = &a->ffn_norm; vs[2] = &a->router;
+    for (i = 0; i < 3; i++) {
+        cr_assert_eq(oc_eagle4_alloc_f32(&m, vs[i], i == 2 ? 8 : 4), OC_OK);
+        (*vs[i])[0] = (float)(20 + i);
+    }
+    cr_assert_eq(oc_eagle4_save_safetensors(&m, path), OC_OK);
+    memset(&loaded, 0, sizeof(loaded));
+    cr_assert_eq(oc_eagle4_load_safetensors(&loaded, path), OC_OK);
+    b = &loaded.layers[0];
+    {
+        OcEagle4Weight *lw[10] = { &b->q_proj, &b->k_proj, &b->v_proj, &b->o_proj,
+                                   &b->mlp_gate, &b->mlp_up, &b->mlp_down,
+                                   &b->expert_gate[1], &b->expert_up[1],
+                                   &b->expert_down[1] };
+        float *lv[3] = { b->attn_norm, b->ffn_norm, b->router };
+        for (i = 0; i < 10; i++) {
+            cr_assert_not_null(lw[i]->data, "weight %zu unbound", i);
+            cr_assert_float_eq(lw[i]->data[0], (float)(i + 1), 1e-6, "weight %zu", i);
+        }
+        for (i = 0; i < 3; i++) {
+            cr_assert_not_null(lv[i], "vec %zu unbound", i);
+            cr_assert_float_eq(lv[i][0], (float)(20 + i), 1e-6, "vec %zu", i);
+        }
+        cr_assert_null(b->expert_gate[0].data);
+    }
+    oc_eagle4_model_free(&loaded);
+    oc_eagle4_model_free(&m);
+    unlink(path);
+}
+
+static void fill_det(float *p, size_t n, uint32_t seed)
+{
+    size_t i;
+    for (i = 0; i < n; i++) {
+        seed = seed * 1664525u + 1013904223u;
+        p[i] = (float)((seed >> 8) & 1023) / 512.0f - 1.0f;
+    }
+}
+
+static void kv_draft(OcEagle4Draft *m)
+{
+    OcEagle4Config cfg;
+    OcEagle4Layer *ly;
+    tiny(&cfg);
+    cfg.candidate_k = 4;
+    cfg.sliding_window = 16;
+    cr_assert_eq(oc_eagle4_model_init(m, &cfg), OC_OK);
+    ly = &m->layers[0];
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &m->tok_embeddings, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &m->lm_head, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &m->lm_down, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &m->lm_score, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &ly->q_proj, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &ly->k_proj, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &ly->v_proj, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(m, &ly->o_proj, 4, 4), OC_OK);
+    fill_det(m->tok_embeddings.data, 16, 1);
+    fill_det(m->lm_head.data, 16, 2);
+    fill_det(m->lm_down.data, 16, 3);
+    fill_det(m->lm_score.data, 16, 4);
+    fill_det(ly->q_proj.data, 16, 5);
+    fill_det(ly->k_proj.data, 16, 6);
+    fill_det(ly->v_proj.data, 16, 7);
+    fill_det(ly->o_proj.data, 16, 8);
+}
+
+/* A tree node's children must see that node's own KV row, not the row a
+ * later sibling wrote at the same offset. Compare against a chain. */
+Test(eagle4, tree_children_see_own_branch_kv)
+{
+    OcEagle4Draft m;
+    OcEagle4Harness h;
+    OcEagle4Tree chain, tree;
+    uint32_t i, j, p;
+    int checked = 0;
+    kv_draft(&m);
+    oc_eagle4_harness_init(&h);
+    h.min_gain_per_us = 0.0f;
+    h.tree_batch_max = 4;
+    h.max_depth = 3;
+    for (p = 0; p < 4; p++) {
+        oc_eagle4_reset_cache(&m);
+        h.max_branch = 1;
+        h.verify_cap = 3;
+        cr_assert_eq(oc_eagle4_propose(&m, &h, p, 1, 8, &chain), OC_OK);
+        cr_assert_eq(chain.n_nodes, 3);
+
+        oc_eagle4_reset_cache(&m);
+        h.max_branch = 4;
+        h.verify_cap = 64;
+        cr_assert_eq(oc_eagle4_propose(&m, &h, p, 1, 8, &tree), OC_OK);
+        cr_assert_eq(oc_eagle4_kv_len(&m), 1);
+        cr_assert_eq(tree.nodes[0].token, chain.nodes[0].token);
+        cr_assert(tree.n_nodes > 2 && tree.nodes[1].depth == 1, "need a sibling after node 0");
+        /* Grandchildren of node 0 along the chain path were drafted from a
+         * forward that attends to node 0's KV row after siblings wrote theirs. */
+        for (i = 0; i < tree.n_nodes; i++) {
+            if (tree.nodes[i].parent != 0 || tree.nodes[i].token != chain.nodes[1].token)
+                continue;
+            for (j = 0; j < tree.n_nodes; j++) {
+                if (tree.nodes[j].parent == (int32_t)i &&
+                    tree.nodes[j].token == chain.nodes[2].token) {
+                    cr_assert_float_eq(tree.nodes[j].cond_prob, chain.nodes[2].cond_prob,
+                                       1e-5, "prefix %u", p);
+                    checked++;
+                }
+            }
+        }
+    }
+    cr_assert(checked > 0);
+    oc_eagle4_model_free(&m);
+}
+
+/* q.rows > 6*hidden used to under-size the HF scratch arena. */
+Test(eagle4, hf_wide_query_fits_arena)
+{
+    StSpec s[] = {
+        { "embed_tokens.weight", "BF16", {8, 2}, 2, 2, -1 },
+        { "fc.weight", "BF16", {2, 2}, 2, 2, -1 },
+        { "layers.0.self_attn.q_proj.weight", "BF16", {16, 4}, 2, 2, -1 },
+        { "layers.0.self_attn.k_proj.weight", "BF16", {2, 4}, 2, 2, -1 },
+        { "layers.0.self_attn.v_proj.weight", "BF16", {2, 4}, 2, 2, -1 },
+        { "layers.0.self_attn.o_proj.weight", "BF16", {2, 16}, 2, 2, -1 },
+        { "layers.0.mlp.gate_proj.weight", "BF16", {2, 2}, 2, 2, -1 },
+        { "layers.0.mlp.up_proj.weight", "BF16", {2, 2}, 2, 2, -1 },
+        { "layers.0.mlp.down_proj.weight", "BF16", {2, 2}, 2, 2, -1 },
+        { "efficient_lm_head_down_proj.weight", "BF16", {2, 2}, 2, 2, -1 },
+        { "efficient_lm_head.weight", "BF16", {8, 2}, 2, 2, -1 },
+        { "lm_head.weight", "BF16", {8, 2}, 2, 2, -1 },
+        { "norm.weight", "BF16", {2, 0}, 1, 2, -1 },
+    };
+    OcEagle4HfBench b;
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/oc-eagle4-hfq-%d.safetensors", (int)getpid());
+    write_st(path, s, 13);
+    cr_assert_eq(oc_eagle4_hf_bench(path, 1, 2, &b), OC_OK);
+    cr_assert_eq(b.hidden, 2);
+    unlink(path);
+}
+
+static void write_raw_st(const char *path, const char *json, size_t data_len)
+{
+    FILE *fp = fopen(path, "wb");
+    size_t used = strlen(json), i;
+    uint8_t le[8];
+    int k;
+    cr_assert_not_null(fp);
+    for (k = 0; k < 8; k++) le[k] = (uint8_t)(((uint64_t)used >> (8 * k)) & 0xff);
+    fwrite(le, 1, 8, fp);
+    fwrite(json, 1, used, fp);
+    for (i = 0; i < data_len; i++) fputc(0, fp);
+    fclose(fp);
+}
+
+Test(eagle4, safetensors_rejects_bad_offset_count)
+{
+    char path[64];
+    OcSafetensorsFile st;
+    snprintf(path, sizeof(path), "/tmp/oc-eagle4-off-%d.safetensors", (int)getpid());
+    write_raw_st(path, "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[4]}}", 8);
+    memset(&st, 0, sizeof(st));
+    cr_assert_eq(oc_safetensors_open(path, &st), OC_ERR_FORMAT);
+    write_raw_st(path, "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4,8]}}", 8);
+    memset(&st, 0, sizeof(st));
+    cr_assert_eq(oc_safetensors_open(path, &st), OC_ERR_FORMAT);
+    write_raw_st(path, "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}", 8);
+    memset(&st, 0, sizeof(st));
+    cr_assert_eq(oc_safetensors_open(path, &st), OC_OK);
+    oc_safetensors_close(&st);
+    unlink(path);
+}
+
+/* Short example payloads and 2-byte token dtypes must be refused. */
+Test(eagle4, train_rejects_short_examples)
+{
+    OcEagle4Config cfg;
+    OcEagle4Draft m;
+    char path[64];
+    StSpec s[] = {
+        { "features", "F32", {2, 4}, 2, 4, 8 },
+        { "tokens", "U32", {2, 0}, 1, 4, -1 },
+        { "targets", "U32", {2, 0}, 1, 4, -1 },
+    };
+    tiny(&cfg);
+    snprintf(path, sizeof(path), "/tmp/oc-eagle4-ex-bad-%d.safetensors", (int)getpid());
+    cr_assert_eq(oc_eagle4_model_init(&m, &cfg), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(&m, &m.lm_head, 4, 4), OC_OK);
+    write_st(path, s, 3);
+    cr_assert_eq(oc_eagle4_train_safetensors(&m, path, 0.1f, 1, NULL), OC_ERR_FORMAT);
+    s[0].len = -1;
+    s[1].dtype = "U16";
+    s[1].esz = 2;
+    write_st(path, s, 3);
+    cr_assert_eq(oc_eagle4_train_safetensors(&m, path, 0.1f, 1, NULL), OC_ERR_FORMAT);
+    oc_eagle4_model_free(&m);
+    unlink(path);
+}

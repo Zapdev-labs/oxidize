@@ -111,6 +111,7 @@ static uint16_t f32_bf16(float f)
 {
     uint32_t u;
     memcpy(&u, &f, sizeof(u));
+    if ((u & 0x7fffffffu) > 0x7f800000u) return (uint16_t)((u >> 16) | 0x0040u);
     uint32_t lsb = (u >> 16) & 1u;
     uint32_t rounding = 0x7fffu + lsb;
     if (u > 0xffff0000u - rounding) return (uint16_t)(u >> 16);
@@ -332,6 +333,20 @@ static int bind_tensor(const OcSafetensorsFile *st, const char *name, E4HfW *w, 
     return 1;
 }
 
+static int hf_mul(size_t a, size_t b, size_t *out)
+{
+    if (a != 0 && b > SIZE_MAX / a) return 0;
+    *out = a * b;
+    return 1;
+}
+
+static int hf_add(size_t *acc, size_t v)
+{
+    if (*acc > SIZE_MAX - v) return 0;
+    *acc += v;
+    return 1;
+}
+
 static void hf_free(E4HfModel *m)
 {
     if (!m) return;
@@ -346,7 +361,7 @@ static void hf_free(E4HfModel *m)
 
 static OcError hf_open(E4HfModel *m, const char *path)
 {
-    size_t h, max_cols, kv_len, cap, total;
+    size_t h, max_cols, kv_len, cap, total, cursor_n;
     float *cursor;
     OcError err;
     memset(m, 0, sizeof(*m));
@@ -443,21 +458,42 @@ static OcError hf_open(E4HfModel *m, const char *path)
     kv_len = m->n_kv * m->head_dim;
     cap = m->window + 8u;
     m->kv_cap = cap;
+    {
+        /* Overflow-safe sizes: tensor dims come from an untrusted file. */
+        size_t parts[] = { h, 16u, m->q.rows, m->q.rows, m->k.rows, m->v.rows,
+                           m->inter, 3u, m->rank, m->lm_score.rows, m->fc.cols };
+        size_t hh = 0, ii = 0;
+        int ok = kv_len == 0 || cap <= SIZE_MAX / sizeof(float) / kv_len;
+        ok = ok && hf_mul(parts[0], parts[1], &hh) && hf_mul(parts[6], parts[7], &ii);
+        total = hh;
+        ok = ok && hf_add(&total, ii);
+        for (size_t pi = 2; ok && pi < sizeof(parts) / sizeof(parts[0]); pi++)
+            if (pi != 6 && pi != 7) ok = hf_add(&total, parts[pi]);
+        if (!ok || total > SIZE_MAX / sizeof(float)) {
+            hf_free(m);
+            return OC_ERR_FORMAT;
+        }
+    }
     m->kv_k = (float *)calloc(cap * kv_len, sizeof(float));
     m->kv_v = (float *)calloc(cap * kv_len, sizeof(float));
     m->inv_freq = (float *)malloc((m->head_dim / 2u + 1u) * sizeof(float));
     for (size_t d = 0; m->inv_freq && d < m->head_dim / 2u; d++)
         m->inv_freq[d] = 1.0f / powf(m->rope_theta,
                                      (float)(2u * d) / (float)m->head_dim);
-    total = h * 16u + m->q.rows + m->k.rows + m->v.rows + m->inter * 3u +
-            m->rank + m->lm_score.rows + m->fc.cols;
     m->arena = (float *)calloc(total ? total : 1u, sizeof(float));
     if (!m->x_bf || !m->kv_k || !m->kv_v || !m->arena || !m->inv_freq) {
         hf_free(m);
         return OC_ERR_OOM;
     }
     cursor = m->arena;
-#define TAKE(dst, n) do { (dst) = cursor; cursor += (n); } while (0)
+    cursor_n = total;
+#define TAKE(dst, n) do { \
+        size_t _n = (n); \
+        if (cursor_n < _n) { hf_free(m); return OC_ERR_INTERNAL; } \
+        (dst) = cursor; \
+        cursor += _n; \
+        cursor_n -= _n; \
+    } while (0)
     TAKE(m->g, h);
     TAKE(m->emb, h);
     TAKE(m->emb_n, h);
