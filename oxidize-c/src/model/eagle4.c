@@ -858,11 +858,12 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
         size_t kv_total, snap_total;
         /* KV ring (keys+values per layer) plus the per-node snapshot copy;
          * reject anything past a 16 GiB budget before allocating. */
-        const size_t cap_floats = ((size_t)16u << 30) / sizeof(float);
+        const uint64_t cap_floats = (UINT64_C(16) << 30) / sizeof(float);
         if (!e4_mul_ok(cap, kv_len, &cells) || cells > SIZE_MAX / sizeof(float) ||
             !e4_mul_ok(cells, layers * 2u, &kv_total) ||
             !e4_mul_ok(snaps * layers * 2u, kv_len, &snap_total) ||
-            kv_total > cap_floats || snap_total > cap_floats - kv_total) {
+            (uint64_t)kv_total > cap_floats ||
+            (uint64_t)snap_total > cap_floats - (uint64_t)kv_total) {
             oc_eagle4_model_free(m);
             return OC_ERR_INVALID_ARG;
         }
@@ -1028,8 +1029,10 @@ OcError oc_eagle4_forward(OcEagle4Draft *m, uint32_t token, float *out_logits, s
         memcpy(im->x, im->emb_n, h * sizeof(float));
 
     for (li = 0; li < m->config.num_hidden_layers; li++) {
-        const float *in = (li == 0) ? im->x : im->hidden;
-        err = layer_forward(m, li, in);
+        /* layer_forward overwrites im->hidden before adding the residual,
+         * so later layers need their input in a separate buffer. */
+        if (li > 0) memcpy(im->x, im->hidden, h * sizeof(float));
+        err = layer_forward(m, li, im->x);
         if (err != OC_OK) return err;
     }
     memcpy(im->g, im->hidden, h * sizeof(float));
@@ -1210,6 +1213,7 @@ OcError oc_eagle4_propose(OcEagle4Draft *m, const OcEagle4Harness *h,
     OcEagle4Policy policy;
     E4Impl *im;
     E4State prefix;
+    E4State pre;
     E4Ready cur[OC_EAGLE4_MAX_NODES];
     uint32_t ncur = 0;
     uint32_t depth;
@@ -1223,8 +1227,13 @@ OcError oc_eagle4_propose(OcEagle4Draft *m, const OcEagle4Harness *h,
     oc_eagle4_policy_for_batch(h, batch, context_len, &policy);
     memset(out, 0, sizeof(*out));
     im->snap_used = 0;
+    capture_state(m, &pre);
     err = oc_eagle4_forward(m, prefix_token, NULL, 0);
-    if (err != OC_OK) return err;
+    if (err != OC_OK) {
+        /* A later layer may fail after earlier layers appended a row. */
+        restore_state(m, &pre);
+        return err;
+    }
     set_hold(im, 1);
     capture_state(m, &prefix);
     cur[0].tree_idx = -1;
@@ -1607,8 +1616,10 @@ static int collect_blobs(const OcEagle4Draft *m, E4Blob *b, size_t *n, size_t ca
     return 1;
 }
 
-static OcError write_safetensors(const char *path, const E4Blob *blobs, size_t nblobs,
-                                 const float *cfg, int with_cfg)
+/* Write to `path`, or to `ext` when non-NULL (path may then be NULL). An
+ * external stream is flushed but not closed; the caller owns it. */
+static OcError write_safetensors(const char *path, FILE *ext, const E4Blob *blobs,
+                                 size_t nblobs, const float *cfg, int with_cfg)
 {
     FILE *fp;
     char *json;
@@ -1622,7 +1633,7 @@ static OcError write_safetensors(const char *path, const E4Blob *blobs, size_t n
     size_t cursor = 0;
     size_t n = nblobs;
     if (n > 96) return OC_ERR_INVALID_ARG;
-    if (oc_eagle4_path_is_gguf(path)) return OC_ERR_INVALID_ARG;
+    if (!ext && (!path || oc_eagle4_path_is_gguf(path))) return OC_ERR_INVALID_ARG;
     json = (char *)malloc(json_cap);
     if (!json) return OC_ERR_OOM;
     used = 0;
@@ -1740,7 +1751,7 @@ static OcError write_safetensors(const char *path, const E4Blob *blobs, size_t n
         }
         if (with_cfg) memcpy(raw + cfg_off_b, cfg, (size_t)E4_CFG_N * sizeof(float));
 
-        fp = fopen(path, "wb");
+        fp = ext ? ext : fopen(path, "wb");
         if (!fp) {
             free(json);
             free(raw);
@@ -1753,14 +1764,14 @@ static OcError write_safetensors(const char *path, const E4Blob *blobs, size_t n
             for (k = 0; k < 8; k++) le[k] = (uint8_t)((len >> (8 * k)) & 0xff);
             if (fwrite(le, 1, 8, fp) != 8 || fwrite(json, 1, used, fp) != used ||
                 (data_bytes && fwrite(raw, 1, data_bytes, fp) != data_bytes)) {
-                fclose(fp);
+                if (!ext) fclose(fp);
                 free(json);
                 free(raw);
                 return OC_ERR_IO;
             }
         }
         {
-            int cerr = fclose(fp);
+            int cerr = ext ? fflush(fp) : fclose(fp);
             free(json);
             free(raw);
             if (cerr != 0) return OC_ERR_IO;
@@ -1778,7 +1789,18 @@ OcError oc_eagle4_save_safetensors(const OcEagle4Draft *m, const char *path)
     if (oc_eagle4_path_is_gguf(path)) return OC_ERR_INVALID_ARG;
     cfg_store(m, cfg);
     if (!collect_blobs(m, blobs, &n, 96)) return OC_ERR_OOM;
-    return write_safetensors(path, blobs, n, cfg, 1);
+    return write_safetensors(path, NULL, blobs, n, cfg, 1);
+}
+
+OcError oc_eagle4_save_safetensors_fp(const OcEagle4Draft *m, FILE *fp)
+{
+    E4Blob blobs[96];
+    size_t n = 0;
+    float cfg[E4_CFG_N];
+    if (!m || !m->loaded || !fp) return OC_ERR_INVALID_ARG;
+    cfg_store(m, cfg);
+    if (!collect_blobs(m, blobs, &n, 96)) return OC_ERR_OOM;
+    return write_safetensors(NULL, fp, blobs, n, cfg, 1);
 }
 
 /* Expected length of a named norm/router vector. */
@@ -2032,7 +2054,7 @@ OcError oc_eagle4_write_examples(const char *path, const float *features, size_t
     if (!blob_add(blobs, &nb, 3, "features", features, n, width, 0, 0)) return OC_ERR_OOM;
     if (!blob_add(blobs, &nb, 3, "tokens", tokens, n, 1, 1, 1)) return OC_ERR_OOM;
     if (!blob_add(blobs, &nb, 3, "targets", targets, n, 1, 1, 1)) return OC_ERR_OOM;
-    return write_safetensors(path, blobs, nb, NULL, 0);
+    return write_safetensors(path, NULL, blobs, nb, NULL, 0);
 }
 
 OcError oc_eagle4_export_gguf(const OcEagle4Draft *m, const char *path)
@@ -2340,17 +2362,26 @@ OcError oc_eagle4_train_step(OcEagle4Draft *m, const float *features, size_t n_f
     return OC_OK;
 }
 
-/* Returns 0 on success; -1 if an F32 id is non-finite, non-integral, or out
- * of uint32 range (casting such a float is undefined behaviour). */
+/* Returns 0 on success; -1 if an I32 id is negative, or an F32 id is
+ * non-finite, non-integral, or out of uint32 range (casting such a float is
+ * undefined behaviour). Data offsets are byte offsets, so read via memcpy. */
 static int example_at(const void *data, const char *dtype, size_t i, uint32_t *out)
 {
-    if (strcmp(dtype, "U32") == 0 || strcmp(dtype, "I32") == 0) {
-        const uint32_t *p = (const uint32_t *)data;
-        *out = p[i];
+    const uint8_t *b = (const uint8_t *)data + i * 4u;
+    if (strcmp(dtype, "U32") == 0) {
+        memcpy(out, b, sizeof(*out));
+        return 0;
+    }
+    if (strcmp(dtype, "I32") == 0) {
+        int32_t v;
+        memcpy(&v, b, sizeof(v));
+        if (v < 0) return -1;
+        *out = (uint32_t)v;
         return 0;
     }
     {
-        float v = ((const float *)data)[i];
+        float v;
+        memcpy(&v, b, sizeof(v));
         if (!isfinite(v) || v < 0.0f || v >= 4294967296.0f || floorf(v) != v) return -1;
         *out = (uint32_t)v;
         return 0;
@@ -2410,16 +2441,25 @@ OcError oc_eagle4_train_safetensors(OcEagle4Draft *m, const char *examples_path,
         return OC_ERR_FORMAT;
     }
     if (epochs == 0) epochs = 1;
+    /* Validate every row before the first step, so a bad row cannot leave
+     * the draft partially trained. */
+    for (row = 0; row < n; row++) {
+        uint32_t token, target;
+        if (example_at(td, tt->dtype, row, &token) != 0 ||
+            example_at(yd, yt->dtype, row, &target) != 0 ||
+            (size_t)token >= m->config.vocab_size ||
+            (size_t)target >= m->config.vocab_size) {
+            oc_safetensors_close(&st);
+            return OC_ERR_FORMAT;
+        }
+    }
     memset(&last, 0, sizeof(last));
     for (ep = 0; ep < epochs; ep++) {
         for (row = 0; row < n; row++) {
             const float *feat = (const float *)fd + row * width;
-            uint32_t token, target;
-            if (example_at(td, tt->dtype, row, &token) != 0 ||
-                example_at(yd, yt->dtype, row, &target) != 0) {
-                oc_safetensors_close(&st);
-                return OC_ERR_FORMAT;
-            }
+            uint32_t token = 0, target = 0;
+            (void)example_at(td, tt->dtype, row, &token);
+            (void)example_at(yd, yt->dtype, row, &target);
             err = oc_eagle4_train_step(m, feat, width, token, target, lr, &last);
             if (err != OC_OK) {
                 oc_safetensors_close(&st);

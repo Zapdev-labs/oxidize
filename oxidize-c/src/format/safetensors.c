@@ -59,7 +59,10 @@ typedef struct OcStParser {
 } OcStParser;
 
 /* Append the in-progress tensor descriptor to the parser's output array.
- * Returns false on OOM. */
+ * Returns false on OOM, and also when the descriptor is malformed: a shape
+ * longer than OC_SAFETENSORS_MAX_DIMS, an overflowed integer, or a bad
+ * data_offsets pair. Malformed descriptors set p->bad; callers use that to
+ * tell a format error from OOM. */
 static bool parser_emit(OcStParser *p)
 {
     if (!p->cur_valid) return true;

@@ -116,6 +116,7 @@ static size_t json_escape(const char *s, char *buf, size_t cap)
             }
         }
     }
+    if (*s) return 0; /* ran out of room: never report a truncated value */
     buf[n] = '\0';
     return n;
 }
@@ -2289,32 +2290,44 @@ OcError oc_cli_run_eagle4_train(OcCliContext *ctx)
         return err;
     }
     {
-        /* Stage beside the target and rename, so a failed write never
-         * truncates the input draft (out_path defaults to --model). */
+        /* Stage in a unique O_EXCL file beside the target and rename, so a
+         * failed write never truncates the input draft (out_path defaults to
+         * --model) and nothing follows a planted symlink. */
         size_t len = strlen(out_path);
-        char *tmp = (char *)malloc(len + 5u);
+        char *tmp = (char *)malloc(len + 8u);
         struct stat dst_st;
+        FILE *fp = NULL;
+        int fd;
         if (!tmp) {
             oc_eagle4_model_free(&draft);
             cli_error("failed to save draft (%s)", oc_error_msg(OC_ERR_OOM));
             return OC_ERR_OOM;
         }
         memcpy(tmp, out_path, len);
-        memcpy(tmp + len, ".tmp", 5u);
-        err = oc_eagle4_save_safetensors(&draft, tmp);
-        oc_eagle4_model_free(&draft);
-        /* Keep the existing destination's permission bits across the rename. */
-        if (err == OC_OK && stat(out_path, &dst_st) == 0 &&
-            chmod(tmp, dst_st.st_mode & 07777) != 0)
+        memcpy(tmp + len, ".XXXXXX", 8u);
+        fd = mkstemp(tmp);
+        if (fd < 0) {
             err = OC_ERR_IO;
-        if (err == OC_OK && rename(tmp, out_path) != 0) err = OC_ERR_IO;
+        } else {
+            /* Keep the existing destination's permission bits. */
+            if (stat(out_path, &dst_st) == 0 && fchmod(fd, dst_st.st_mode & 07777) != 0)
+                err = OC_ERR_IO;
+            if (err == OC_OK && !(fp = fdopen(fd, "wb"))) err = OC_ERR_IO;
+            if (err == OC_OK) err = oc_eagle4_save_safetensors_fp(&draft, fp);
+            if (fp) {
+                if (fclose(fp) != 0 && err == OC_OK) err = OC_ERR_IO;
+            } else {
+                close(fd);
+            }
+            if (err == OC_OK && rename(tmp, out_path) != 0) err = OC_ERR_IO;
+            if (err != OC_OK) remove(tmp);
+        }
+        oc_eagle4_model_free(&draft);
+        free(tmp);
         if (err != OC_OK) {
-            remove(tmp);
-            free(tmp);
             cli_error("failed to save draft (%s)", oc_error_msg(err));
             return err;
         }
-        free(tmp);
     }
     if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
         printf("{\"command\":\"eagle4-train\",\"steps\":%u,\"loss\":%.6f,\"pred\":%u,\"target\":%u}\n",

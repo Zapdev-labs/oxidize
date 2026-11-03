@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "oxidize/error.h"
 
@@ -231,6 +232,8 @@ uint32_t oc_eagle4_speculative_accept(const OcEagle4Step *steps, uint32_t n_step
  * not read GGUF and it is not called by the trainer. */
 bool oc_eagle4_path_is_gguf(const char *path);
 OcError oc_eagle4_save_safetensors(const OcEagle4Draft *m, const char *path);
+/* Same, writing to an open stream; flushed, not closed. */
+OcError oc_eagle4_save_safetensors_fp(const OcEagle4Draft *m, FILE *fp);
 OcError oc_eagle4_load_safetensors(OcEagle4Draft *m, const char *path);
 OcError oc_eagle4_write_examples(const char *path, const float *features,
                                  size_t n, size_t width, const uint32_t *tokens,
