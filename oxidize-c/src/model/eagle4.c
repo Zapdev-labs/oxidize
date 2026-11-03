@@ -12,6 +12,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,14 @@
 #define E4_OWNED 96
 #define E4_CFG_N 28
 #define E4_SEL_MAX 512
+#define E4_MAX_DIM (1u << 24)
+
+static int e4_mul_ok(size_t a, size_t b, size_t *out)
+{
+    if (a != 0 && b > SIZE_MAX / a) return 0;
+    *out = a * b;
+    return 1;
+}
 
 typedef struct E4Scored {
     float score;
@@ -32,6 +41,8 @@ typedef struct E4Kv {
     size_t seq_len;
     size_t capacity;
     size_t kv_len;
+    size_t window; /* rows kept after a trim; 0 = unbounded */
+    size_t base;   /* rows trimmed off the front so far */
 } E4Kv;
 
 typedef struct E4State {
@@ -300,6 +311,15 @@ static void rope_inplace(float *q, size_t n_heads, size_t hd, size_t pos, float 
 static OcError kv_append(E4Kv *c, const float *k, const float *v)
 {
     size_t bytes;
+    if (c->window > 0 && c->seq_len >= c->window + 16u) {
+        /* Attention only reads the last `window` rows; drop the rest. */
+        size_t drop = c->seq_len - c->window;
+        memmove(c->keys, c->keys + drop * c->kv_len, c->window * c->kv_len * sizeof(float));
+        memmove(c->values, c->values + drop * c->kv_len,
+                c->window * c->kv_len * sizeof(float));
+        c->seq_len = c->window;
+        c->base += drop;
+    }
     if (c->seq_len >= c->capacity) {
         size_t ncap = c->capacity ? c->capacity * 2u : 32u;
         float *nk;
@@ -327,7 +347,7 @@ static void capture_state(OcEagle4Draft *m, E4State *s)
     size_t i;
     s->position = m->position;
     for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++)
-        s->seq[i] = im->kv[i].seq_len;
+        s->seq[i] = im->kv[i].base + im->kv[i].seq_len;
     if (im->snap_used >= im->n_snaps) s->snap = (uint32_t)im->n_snaps - 1u;
     else s->snap = (uint32_t)im->snap_used++;
     memcpy(im->snaps + (size_t)s->snap * h, im->g, h * sizeof(float));
@@ -340,7 +360,7 @@ static void restore_state(OcEagle4Draft *m, const E4State *s)
     size_t i;
     m->position = s->position;
     for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++)
-        im->kv[i].seq_len = s->seq[i];
+        im->kv[i].seq_len = s->seq[i] >= im->kv[i].base ? s->seq[i] - im->kv[i].base : 0;
     memcpy(im->g, im->snaps + (size_t)s->snap * h, h * sizeof(float));
     m->g_embeddings = im->g;
     m->kv_seq0 = im->kv[0].seq_len;
@@ -430,7 +450,8 @@ static void fill_head(OcEagle4Draft *m, const float *hidden)
             uint32_t id = im->heap[i].id;
             float exact;
             uint32_t dst;
-            if (m->lm_head.data && m->lm_head.rows == dv && (size_t)id < dv)
+            if (m->lm_head.data && m->lm_head.rows == dv && m->lm_head.cols == h &&
+                (size_t)id < dv)
                 exact = dot_f(m->lm_head.data + (size_t)id * h, hidden, h);
             else
                 exact = im->scores[id];
@@ -667,6 +688,13 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
     if (c.hidden_size == 0 || c.vocab_size == 0 || c.num_attention_heads == 0 ||
         c.num_key_value_heads == 0 || c.intermediate_size == 0)
         return OC_ERR_INVALID_ARG;
+    if (c.hidden_size > E4_MAX_DIM || c.vocab_size > E4_MAX_DIM ||
+        c.intermediate_size > E4_MAX_DIM || c.num_attention_heads > E4_MAX_DIM ||
+        c.num_key_value_heads > E4_MAX_DIM || c.head_dim > E4_MAX_DIM ||
+        c.draft_vocab_size > E4_MAX_DIM || c.target_hidden_size > E4_MAX_DIM ||
+        c.rank > E4_MAX_DIM || c.sliding_window > E4_MAX_DIM ||
+        c.candidate_k > E4_MAX_DIM)
+        return OC_ERR_INVALID_ARG;
     if (c.head_dim == 0) c.head_dim = c.hidden_size / c.num_attention_heads;
     if (c.head_dim == 0 || (c.num_attention_heads % c.num_key_value_heads) != 0)
         return OC_ERR_INVALID_ARG;
@@ -706,8 +734,29 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
     im->kv_size = kvsz;
     im->n_snaps = snaps;
 
-    total = feat + h * 8u + h + qsz * 2u + kvsz * 2u + h * 3u + inter * 3u + h +
-            R + dv + V + h + snaps * h + h * 4u + qsz;
+    {
+        /* Each term is a product of dims capped at E4_MAX_DIM (2^24). */
+        size_t terms[][2] = {
+            { c.n_extract_layers, c.target_hidden_size }, { h, 18u },
+            { c.num_attention_heads, hd }, { c.num_attention_heads, hd },
+            { c.num_attention_heads, hd }, { c.num_key_value_heads, hd },
+            { c.num_key_value_heads, hd }, { inter, 3u }, { R, 1u }, { dv, 1u },
+            { V, 1u }, { snaps, h },
+        };
+        total = 0;
+        for (i = 0; i < sizeof(terms) / sizeof(terms[0]); i++) {
+            size_t t;
+            if (!e4_mul_ok(terms[i][0], terms[i][1], &t) || total > SIZE_MAX - t) {
+                oc_eagle4_model_free(m);
+                return OC_ERR_INVALID_ARG;
+            }
+            total += t;
+        }
+        if (total > SIZE_MAX / sizeof(float)) {
+            oc_eagle4_model_free(m);
+            return OC_ERR_INVALID_ARG;
+        }
+    }
     im->arena = (float *)calloc(total ? total : 1, sizeof(float));
     im->heap = (E4Scored *)calloc(c.candidate_k ? c.candidate_k : 1, sizeof(E4Scored));
     if (!im->arena || !im->heap) {
@@ -753,8 +802,16 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
     kv_len = kvsz;
     cap = c.sliding_window + 16u;
     if (cap < 32u) cap = 32u;
+    {
+        size_t cells;
+        if (!e4_mul_ok(cap, kv_len, &cells) || cells > SIZE_MAX / sizeof(float)) {
+            oc_eagle4_model_free(m);
+            return OC_ERR_INVALID_ARG;
+        }
+    }
     for (i = 0; i < layers; i++) {
         im->kv[i].kv_len = kv_len;
+        im->kv[i].window = c.sliding_window;
         im->kv[i].capacity = cap;
         im->kv[i].keys = (float *)calloc(cap * kv_len, sizeof(float));
         im->kv[i].values = (float *)calloc(cap * kv_len, sizeof(float));
@@ -818,7 +875,10 @@ void oc_eagle4_reset_cache(OcEagle4Draft *m)
     im = impl_of(m);
     if (!im) return;
     for (i = 0; i < m->config.num_hidden_layers && i < OC_EAGLE4_MAX_LAYERS; i++)
+    {
         im->kv[i].seq_len = 0;
+        im->kv[i].base = 0;
+    }
     m->position = 0;
     m->kv_seq0 = 0;
     if (im->g && m->config.hidden_size)
@@ -1323,9 +1383,14 @@ static void cfg_store(const OcEagle4Draft *m, float *c)
         c[20 + i] = (float)m->config.extract_layers[i];
 }
 
+static int f_size_ok(float v)
+{
+    return isfinite(v) && v >= 0.0f && v <= (float)E4_MAX_DIM;
+}
+
 static size_t f_size(float v)
 {
-    if (!(v > 0.0f)) return 0;
+    if (!(v > 0.0f) || !f_size_ok(v)) return 0;
     return (size_t)(v + 0.5f);
 }
 
@@ -1333,6 +1398,13 @@ static int cfg_load(OcEagle4Config *cfg, size_t *n_d2t, const float *c, size_t n
 {
     size_t i;
     if (n < E4_CFG_N) return 0;
+    for (i = 0; i < E4_CFG_N; i++) {
+        if (i == 12 || i == 13 || i == 14 || i == 18) {
+            if (!isfinite(c[i])) return 0;
+        } else if (!f_size_ok(c[i])) {
+            return 0;
+        }
+    }
     memset(cfg, 0, sizeof(*cfg));
     cfg->hidden_size = f_size(c[0]);
     cfg->target_hidden_size = f_size(c[1]);
@@ -1356,7 +1428,8 @@ static int cfg_load(OcEagle4Config *cfg, size_t *n_d2t, const float *c, size_t n
     *n_d2t = f_size(c[19]);
     for (i = 0; i < OC_EAGLE4_MAX_EXTRACT; i++)
         cfg->extract_layers[i] = f_size(c[20 + i]);
-    return cfg->hidden_size > 0;
+    return cfg->hidden_size > 0 && cfg->num_key_value_heads > 0 &&
+           cfg->num_attention_heads > 0;
 }
 
 typedef struct E4Blob {
@@ -1624,6 +1697,53 @@ OcError oc_eagle4_save_safetensors(const OcEagle4Draft *m, const char *path)
     return write_safetensors(path, blobs, n, cfg, 1);
 }
 
+/* Expected length of a named norm/router vector. */
+static size_t e4_vec_len(const OcEagle4Draft *m, const char *name)
+{
+    if (strncmp(name, "eagle4.fc_norm.", 15) == 0) return m->config.target_hidden_size;
+    if (strstr(name, ".router") != NULL)
+        return m->config.n_experts * m->config.hidden_size;
+    return m->config.hidden_size;
+}
+
+static int e4_w_ok(const OcEagle4Weight *w, size_t rows, size_t cols)
+{
+    if (!w->data) return 1;
+    return (rows == 0 || w->rows == rows) && w->cols == cols;
+}
+
+/* Validate every bound weight against the config once at load time. */
+static int e4_shapes_ok(const OcEagle4Draft *m)
+{
+    const OcEagle4Config *c = &m->config;
+    size_t h = c->hidden_size;
+    size_t qsz = c->num_attention_heads * c->head_dim;
+    size_t kvsz = c->num_key_value_heads * c->head_dim;
+    size_t inter = c->intermediate_size;
+    size_t L, e;
+    if (!e4_w_ok(&m->fc, h, c->n_extract_layers * c->target_hidden_size)) return 0;
+    if (!e4_w_ok(&m->eh_proj, h, h * 2u)) return 0;
+    if (!e4_w_ok(&m->tok_embeddings, 0, h)) return 0;
+    if (!e4_w_ok(&m->lm_head, 0, h)) return 0;
+    if (!e4_w_ok(&m->lm_down, c->rank, h)) return 0;
+    if (!e4_w_ok(&m->lm_score, c->draft_vocab_size, c->rank)) return 0;
+    for (L = 0; L < c->num_hidden_layers && L < OC_EAGLE4_MAX_LAYERS; L++) {
+        const OcEagle4Layer *ly = &m->layers[L];
+        if (!e4_w_ok(&ly->q_proj, qsz, h) || !e4_w_ok(&ly->k_proj, kvsz, h) ||
+            !e4_w_ok(&ly->v_proj, kvsz, h) || !e4_w_ok(&ly->o_proj, h, qsz) ||
+            !e4_w_ok(&ly->mlp_gate, inter, h) || !e4_w_ok(&ly->mlp_up, inter, h) ||
+            !e4_w_ok(&ly->mlp_down, h, inter))
+            return 0;
+        for (e = 0; e < OC_EAGLE4_MAX_EXPERTS; e++) {
+            if (!e4_w_ok(&ly->expert_gate[e], inter, h) ||
+                !e4_w_ok(&ly->expert_up[e], inter, h) ||
+                !e4_w_ok(&ly->expert_down[e], h, inter))
+                return 0;
+        }
+    }
+    return 1;
+}
+
 static float bf16_to_f32(uint16_t b)
 {
     uint32_t u = (uint32_t)b << 16;
@@ -1633,12 +1753,17 @@ static float bf16_to_f32(uint16_t b)
 }
 
 static OcError copy_tensor_f32(OcEagle4Draft *m, float **vec, OcEagle4Weight *w,
-                               const void *data, const char *dtype, size_t rows, size_t cols)
+                               const OcSafetensorsTensor *t, const void *data,
+                               size_t rows, size_t cols)
 {
+    const char *dtype = t->dtype;
     size_t n = rows * cols;
     size_t i;
+    size_t esz;
     float *dst;
     if (n == 0) return OC_ERR_FORMAT;
+    esz = strcmp(dtype, "F32") == 0 ? sizeof(float) : sizeof(uint16_t);
+    if (!oc_st_tensor_bytes_ok(t, esz)) return OC_ERR_FORMAT;
     dst = (float *)e4_own(m, n * sizeof(float));
     if (!dst) return OC_ERR_OOM;
     if (strcmp(dtype, "F32") == 0) {
@@ -1698,7 +1823,8 @@ OcError oc_eagle4_load_safetensors(OcEagle4Draft *m, const char *path)
         return err;
     }
     err = oc_safetensors_get_tensor_data(&st, cfg_t, &cfg_data);
-    if (err != OC_OK || strcmp(cfg_t->dtype, "F32") != 0) {
+    if (err != OC_OK || strcmp(cfg_t->dtype, "F32") != 0 || cfg_t->n_dims != 1 ||
+        !oc_st_tensor_bytes_ok(cfg_t, sizeof(float))) {
         oc_safetensors_close(&st);
         return OC_ERR_FORMAT;
     }
@@ -1730,7 +1856,8 @@ OcError oc_eagle4_load_safetensors(OcEagle4Draft *m, const char *path)
             size_t n = rows;
             uint32_t *dst;
             size_t k;
-            if (strcmp(t->dtype, "U32") != 0 && strcmp(t->dtype, "I32") != 0) {
+            if ((strcmp(t->dtype, "U32") != 0 && strcmp(t->dtype, "I32") != 0) ||
+                t->n_dims != 1 || !oc_st_tensor_bytes_ok(t, sizeof(uint32_t))) {
                 oc_eagle4_model_free(m);
                 oc_safetensors_close(&st);
                 return OC_ERR_FORMAT;
@@ -1794,7 +1921,12 @@ OcError oc_eagle4_load_safetensors(OcEagle4Draft *m, const char *path)
                 w = &m->layers[L].expert_down[E];
         }
         if (!w && !vecp) continue;
-        err = copy_tensor_f32(m, vecp, w, data, t->dtype, rows, cols);
+        if (vecp && (!vec || rows != e4_vec_len(m, t->name))) {
+            oc_eagle4_model_free(m);
+            oc_safetensors_close(&st);
+            return OC_ERR_FORMAT;
+        }
+        err = copy_tensor_f32(m, vecp, w, t, data, rows, cols);
         if (err != OC_OK) {
             oc_eagle4_model_free(m);
             oc_safetensors_close(&st);
@@ -1802,6 +1934,10 @@ OcError oc_eagle4_load_safetensors(OcEagle4Draft *m, const char *path)
         }
     }
     oc_safetensors_close(&st);
+    if (!e4_shapes_ok(m)) {
+        oc_eagle4_model_free(m);
+        return OC_ERR_FORMAT;
+    }
     m->loaded = true;
     return OC_OK;
 }

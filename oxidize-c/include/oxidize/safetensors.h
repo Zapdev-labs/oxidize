@@ -92,6 +92,10 @@ OcError oc_safetensors_get_tensor_data(const OcSafetensorsFile *st,
                                        const OcSafetensorsTensor *tensor,
                                        const void **out_data);
 
+/* True iff the product of `t->shape` times `elem_size` (overflow-checked)
+ * equals `t->data_length`. */
+bool oc_st_tensor_bytes_ok(const OcSafetensorsTensor *t, size_t elem_size);
+
 /* Return the number of tensors in the file. Returns 0 if `st` is NULL. */
 size_t oc_safetensors_n_tensors(const OcSafetensorsFile *st);
 

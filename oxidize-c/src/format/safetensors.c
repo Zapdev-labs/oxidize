@@ -55,6 +55,7 @@ typedef struct OcStParser {
     OcSafetensorsTensor *out_arr;
     size_t               out_cap;
     size_t               out_len;
+    bool                 bad;      /* malformed descriptor (end < start) */
 } OcStParser;
 
 /* Append the in-progress tensor descriptor to the parser's output array.
@@ -75,6 +76,10 @@ static bool parser_emit(OcStParser *p)
         p->cur.shape[i] = p->shape_vals[i];
     }
     if (p->offset_count == 2) {
+        if (p->offsets[1] < p->offsets[0]) {
+            p->bad = true;
+            return false;
+        }
         p->cur.data_offset = p->offsets[0];
         p->cur.data_length = p->offsets[1] - p->offsets[0];
     }
@@ -293,7 +298,7 @@ static OcError parse_header(const char *json, size_t json_len,
                 break;
             }
             /* New tensor descriptor. */
-            if (!parser_emit(p)) return OC_ERR_OOM;
+            if (!parser_emit(p)) return p->bad ? OC_ERR_FORMAT : OC_ERR_OOM;
             memset(&p->cur, 0, sizeof(p->cur));
             size_t nl = strlen(namebuf);
             if (nl >= OC_SAFETENSORS_NAME_LEN) nl = OC_SAFETENSORS_NAME_LEN - 1;
@@ -314,7 +319,7 @@ static OcError parse_header(const char *json, size_t json_len,
             else if (c == '}') {
                 /* End of this descriptor object. */
                 s++;
-                if (!parser_emit(p)) return OC_ERR_OOM;
+                if (!parser_emit(p)) return p->bad ? OC_ERR_FORMAT : OC_ERR_OOM;
                 st = OC_STJ_TOP;
             }
             else if (c == ',') { s++; st = OC_STJ_FIELD_KEY; }
@@ -345,7 +350,7 @@ static OcError parse_header(const char *json, size_t json_len,
     }
     /* Emit any trailing in-progress tensor (defensive; well-formed JSON
      * emits on the closing '}' of each descriptor). */
-    if (!parser_emit(p)) return OC_ERR_OOM;
+    if (!parser_emit(p)) return p->bad ? OC_ERR_FORMAT : OC_ERR_OOM;
     return OC_OK;
 }
 
@@ -490,6 +495,19 @@ OcError oc_safetensors_get_tensor_data(const OcSafetensorsFile *st,
     if (end_off > avail) return OC_ERR_FORMAT;
     *out_data = (const uint8_t *)st->raw_data + tensor->data_offset;
     return OC_OK;
+}
+
+bool oc_st_tensor_bytes_ok(const OcSafetensorsTensor *t, size_t elem_size)
+{
+    if (t == NULL || elem_size == 0) return false;
+    uint64_t n = 1;
+    for (uint32_t i = 0; i < t->n_dims; i++) {
+        uint64_t d = t->shape[i];
+        if (d != 0 && n > UINT64_MAX / d) return false;
+        n *= d;
+    }
+    if (n > UINT64_MAX / elem_size) return false;
+    return n * elem_size == t->data_length;
 }
 
 size_t oc_safetensors_n_tensors(const OcSafetensorsFile *st)

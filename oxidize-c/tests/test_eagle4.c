@@ -1,6 +1,7 @@
 #include <criterion/criterion.h>
 #include "oxidize/eagle4.h"
 #include "oxidize/gguf.h"
+#include "oxidize/safetensors.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -367,4 +368,139 @@ Test(eagle4, safetensors_roundtrip_trains_and_exports_gguf)
     unlink(st_path);
     unlink(ex_path);
     unlink(gg_path);
+}
+
+typedef struct StSpec {
+    const char *name;
+    const char *dtype;
+    uint64_t shape[2];
+    int ndims;
+    size_t esz;
+    int64_t len; /* < 0: derive from shape */
+} StSpec;
+
+/* Write a zero-filled SafeTensors file. A spec with len == -2 writes
+ * data_offsets with end < start. */
+static void write_st(const char *path, const StSpec *s, size_t n)
+{
+    char json[4096];
+    size_t used = 0, off = 0, i, total = 0;
+    FILE *fp;
+    uint8_t le[8];
+    int k;
+    used += (size_t)snprintf(json + used, sizeof(json) - used, "{");
+    for (i = 0; i < n; i++) {
+        size_t len = s[i].len >= 0 ? (size_t)s[i].len
+                                   : (size_t)(s[i].shape[0] * (s[i].ndims > 1 ? s[i].shape[1] : 1)) * s[i].esz;
+        size_t a = off, b = off + len;
+        if (s[i].len == -2) { a = 8; b = 0; len = 0; }
+        if (s[i].ndims == 1)
+            used += (size_t)snprintf(json + used, sizeof(json) - used,
+                "%s\"%s\":{\"dtype\":\"%s\",\"shape\":[%llu],\"data_offsets\":[%zu,%zu]}",
+                i ? "," : "", s[i].name, s[i].dtype, (unsigned long long)s[i].shape[0], a, b);
+        else
+            used += (size_t)snprintf(json + used, sizeof(json) - used,
+                "%s\"%s\":{\"dtype\":\"%s\",\"shape\":[%llu,%llu],\"data_offsets\":[%zu,%zu]}",
+                i ? "," : "", s[i].name, s[i].dtype, (unsigned long long)s[i].shape[0],
+                (unsigned long long)s[i].shape[1], a, b);
+        off += len;
+    }
+    used += (size_t)snprintf(json + used, sizeof(json) - used, "}");
+    while (used & 7u) json[used++] = ' ';
+    total = off + 8;
+    fp = fopen(path, "wb");
+    cr_assert_not_null(fp);
+    for (k = 0; k < 8; k++) le[k] = (uint8_t)(((uint64_t)used >> (8 * k)) & 0xff);
+    fwrite(le, 1, 8, fp);
+    fwrite(json, 1, used, fp);
+    for (i = 0; i < total; i++) fputc(0, fp);
+    fclose(fp);
+}
+
+Test(eagle4, safetensors_rejects_short_data_and_reversed_offsets)
+{
+    char path[64];
+    OcSafetensorsFile st;
+    const OcSafetensorsTensor *t = NULL;
+    OcEagle4Draft m;
+    StSpec small = { "a", "F32", {4, 4}, 2, 4, 8 };
+    StSpec rev = { "a", "F32", {2, 0}, 1, 4, -2 };
+    StSpec cfg = { "eagle4.config", "F32", {28, 0}, 1, 4, 16 };
+    snprintf(path, sizeof(path), "/tmp/oc-eagle4-st-%d.safetensors", (int)getpid());
+
+    write_st(path, &small, 1);
+    memset(&st, 0, sizeof(st));
+    cr_assert_eq(oc_safetensors_open(path, &st), OC_OK);
+    cr_assert_eq(oc_safetensors_get_tensor(&st, "a", &t), OC_OK);
+    cr_assert(!oc_st_tensor_bytes_ok(t, sizeof(float)));
+    cr_assert(!oc_st_tensor_bytes_ok(t, 2)); /* 16 elems * 2 != 8 */
+    oc_safetensors_close(&st);
+
+    write_st(path, &cfg, 1);
+    memset(&m, 0, sizeof(m));
+    cr_assert_eq(oc_eagle4_load_safetensors(&m, path), OC_ERR_FORMAT);
+
+    write_st(path, &rev, 1);
+    memset(&st, 0, sizeof(st));
+    cr_assert_eq(oc_safetensors_open(path, &st), OC_ERR_FORMAT);
+    unlink(path);
+}
+
+Test(eagle4, load_rejects_mismatched_projection)
+{
+    OcEagle4Config cfg;
+    OcEagle4Draft m, loaded;
+    char path[64];
+    tiny(&cfg);
+    snprintf(path, sizeof(path), "/tmp/oc-eagle4-bad-%d.safetensors", (int)getpid());
+    cr_assert_eq(oc_eagle4_model_init(&m, &cfg), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(&m, &m.tok_embeddings, 4, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_alloc_weight(&m, &m.layers[0].q_proj, 3, 4), OC_OK);
+    cr_assert_eq(oc_eagle4_save_safetensors(&m, path), OC_OK);
+    memset(&loaded, 0, sizeof(loaded));
+    cr_assert_eq(oc_eagle4_load_safetensors(&loaded, path), OC_ERR_FORMAT);
+    oc_eagle4_model_free(&m);
+    unlink(path);
+}
+
+static void hf_specs(StSpec *s, uint64_t o_cols)
+{
+    StSpec base[] = {
+        { "embed_tokens.weight", "BF16", {8, 4}, 2, 2, -1 },
+        { "fc.weight", "BF16", {4, 4}, 2, 2, -1 },
+        { "layers.0.self_attn.q_proj.weight", "BF16", {4, 8}, 2, 2, -1 },
+        { "layers.0.self_attn.k_proj.weight", "BF16", {4, 8}, 2, 2, -1 },
+        { "layers.0.self_attn.v_proj.weight", "BF16", {4, 8}, 2, 2, -1 },
+        { "layers.0.self_attn.o_proj.weight", "BF16", {4, 4}, 2, 2, -1 },
+        { "layers.0.mlp.gate_proj.weight", "BF16", {4, 4}, 2, 2, -1 },
+        { "layers.0.mlp.up_proj.weight", "BF16", {4, 4}, 2, 2, -1 },
+        { "layers.0.mlp.down_proj.weight", "BF16", {4, 4}, 2, 2, -1 },
+        { "efficient_lm_head_down_proj.weight", "BF16", {4, 4}, 2, 2, -1 },
+        { "efficient_lm_head.weight", "BF16", {8, 4}, 2, 2, -1 },
+        { "lm_head.weight", "BF16", {8, 4}, 2, 2, -1 },
+        { "norm.weight", "BF16", {4, 0}, 1, 2, -1 },
+    };
+    memcpy(s, base, sizeof(base));
+    s[5].shape[1] = o_cols;
+}
+
+Test(eagle4, hf_rejects_bad_shape_and_slides_kv)
+{
+    StSpec s[13];
+    OcEagle4HfBench b;
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/oc-eagle4-hf-%d.safetensors", (int)getpid());
+    hf_specs(s, 4);
+    write_st(path, s, 13);
+    /* 4200 tokens pushes past the 4096+8 KV capacity and forces a slide. */
+    cr_assert_eq(oc_eagle4_hf_bench(path, 1, 4200, &b), OC_OK);
+    cr_assert_eq(b.hidden, 4);
+    hf_specs(s, 6);
+    write_st(path, s, 13);
+    cr_assert_eq(oc_eagle4_hf_bench(path, 1, 1, &b), OC_ERR_FORMAT);
+    s[12].shape[0] = 3;
+    s[5].shape[1] = 4;
+    write_st(path, s, 13);
+    cr_assert_eq(oc_eagle4_hf_bench(path, 1, 1, &b), OC_ERR_FORMAT);
+    unlink(path);
 }

@@ -82,6 +82,7 @@ typedef struct E4HfModel {
     float *fc_out;
     float *kv_k;
     float *kv_v;
+    float *inv_freq;
     size_t kv_seq;
     size_t kv_cap;
     size_t position;
@@ -287,20 +288,22 @@ static void rms_bf16(const float *x, const uint16_t *w, float *out, size_t n, fl
     for (i = 0; i < n; i++) out[i] = x[i] * inv * bf16_f32(w[i]);
 }
 
-static void rope_pair(float *q, size_t n_heads, size_t hd, size_t pos, float theta)
+/* HF Qwen rotate-half RoPE: dimension d pairs with d + hd/2. */
+static void rope_half(float *q, size_t n_heads, size_t hd, size_t pos,
+                      const float *inv_freq)
 {
-    size_t h, d;
+    size_t h, d, half = hd / 2;
     if (hd < 2) return;
-    for (h = 0; h < n_heads; h++) {
-        float *qh = q + h * hd;
-        for (d = 0; d + 1 < hd; d += 2) {
-            float freq = (float)pos / powf(theta, (float)(d / 2) / (float)(hd / 2));
-            float c = cosf(freq);
-            float s = sinf(freq);
+    for (d = 0; d < half; d++) {
+        float ang = (float)pos * inv_freq[d];
+        float c = cosf(ang);
+        float s = sinf(ang);
+        for (h = 0; h < n_heads; h++) {
+            float *qh = q + h * hd;
             float a = qh[d];
-            float b = qh[d + 1];
+            float b = qh[d + half];
             qh[d] = a * c - b * s;
-            qh[d + 1] = a * s + b * c;
+            qh[d + half] = b * c + a * s;
         }
     }
 }
@@ -311,6 +314,7 @@ static int bind_tensor(const OcSafetensorsFile *st, const char *name, E4HfW *w, 
     const void *data = NULL;
     if (oc_safetensors_get_tensor(st, name, &t) != OC_OK) return required ? 0 : 1;
     if (strcmp(t->dtype, "BF16") != 0) return 0;
+    if (!oc_st_tensor_bytes_ok(t, sizeof(uint16_t))) return 0;
     if (oc_safetensors_get_tensor_data(st, t, &data) != OC_OK) return 0;
     if (((uintptr_t)data & 1u) != 0) return 0;
     w->data = (const uint16_t *)data;
@@ -334,6 +338,7 @@ static void hf_free(E4HfModel *m)
     free(m->x_bf);
     free(m->kv_k);
     free(m->kv_v);
+    free(m->inv_freq);
     memset(m, 0, sizeof(*m));
 }
 
@@ -366,18 +371,39 @@ static OcError hf_open(E4HfModel *m, const char *path)
         hf_free(m);
         return OC_ERR_FORMAT;
     }
-    bind_tensor(&m->st, "fc_norm.0.weight", &m->fc_norm[0], 0);
-    bind_tensor(&m->st, "fc_norm.1.weight", &m->fc_norm[1], 0);
-    bind_tensor(&m->st, "fc_norm.2.weight", &m->fc_norm[2], 0);
-    bind_tensor(&m->st, "layers.0.hidden_norm.weight", &m->hidden_norm, 0);
-    bind_tensor(&m->st, "layers.0.input_layernorm.weight", &m->input_ln, 0);
-    bind_tensor(&m->st, "layers.0.post_attention_layernorm.weight", &m->post_ln, 0);
-    bind_tensor(&m->st, "norm.weight", &m->out_norm, 0);
-
-    h = m->embed.cols;
-    if (h == 0 || m->fc.rows != h || m->q.cols != h * 2u || m->q.rows == 0) {
+    if (!bind_tensor(&m->st, "fc_norm.0.weight", &m->fc_norm[0], 0) ||
+        !bind_tensor(&m->st, "fc_norm.1.weight", &m->fc_norm[1], 0) ||
+        !bind_tensor(&m->st, "fc_norm.2.weight", &m->fc_norm[2], 0) ||
+        !bind_tensor(&m->st, "layers.0.hidden_norm.weight", &m->hidden_norm, 0) ||
+        !bind_tensor(&m->st, "layers.0.input_layernorm.weight", &m->input_ln, 0) ||
+        !bind_tensor(&m->st, "layers.0.post_attention_layernorm.weight", &m->post_ln, 0) ||
+        !bind_tensor(&m->st, "norm.weight", &m->out_norm, 0)) {
         hf_free(m);
         return OC_ERR_FORMAT;
+    }
+
+    h = m->embed.cols;
+    if (h == 0 || h > E4_HF_MAX_DIM || m->fc.rows != h || m->q.cols != h * 2u ||
+        m->q.rows == 0 ||
+        m->k.cols != h * 2u || m->v.cols != h * 2u || m->k.rows != m->v.rows ||
+        m->o.cols != m->q.rows || m->o.rows != h ||
+        m->gate.cols != h || m->up.cols != h || m->up.rows != m->gate.rows ||
+        m->down.cols != m->gate.rows || m->down.rows != h ||
+        m->lm_down.cols != h || m->lm_score.cols != m->lm_down.rows ||
+        m->lm_score.rows == 0 || m->lm_head.cols != h) {
+        hf_free(m);
+        return OC_ERR_FORMAT;
+    }
+    {
+        const E4HfW *norms[7] = { &m->fc_norm[0], &m->fc_norm[1], &m->fc_norm[2],
+                                  &m->hidden_norm, &m->input_ln, &m->post_ln,
+                                  &m->out_norm };
+        for (size_t ni = 0; ni < 7; ni++) {
+            if (norms[ni]->data && (norms[ni]->cols != 1 || norms[ni]->rows != h)) {
+                hf_free(m);
+                return OC_ERR_FORMAT;
+            }
+        }
     }
     m->hidden = h;
     m->vocab = m->embed.rows;
@@ -385,6 +411,10 @@ static OcError hf_open(E4HfModel *m, const char *path)
     m->inter = m->gate.rows;
     m->head_dim = 128;
     if (h % m->head_dim != 0) m->head_dim = h;
+    if (m->q.rows % m->head_dim != 0 || m->k.rows % m->head_dim != 0) {
+        hf_free(m);
+        return OC_ERR_FORMAT;
+    }
     m->n_heads = m->q.rows / m->head_dim;
     m->n_kv = m->k.rows / m->head_dim;
     if (m->n_heads == 0 || m->n_kv == 0 || (m->n_heads % m->n_kv) != 0) {
@@ -401,18 +431,26 @@ static OcError hf_open(E4HfModel *m, const char *path)
     m->rope_theta = 10000000.0f;
 
     max_cols = m->fc.cols;
-    if (m->q.cols > max_cols) max_cols = m->q.cols;
-    if (m->down.cols > max_cols) max_cols = m->down.cols;
+    {
+        const E4HfW *gw[10] = { &m->q, &m->k, &m->v, &m->o, &m->gate, &m->up,
+                                &m->down, &m->lm_down, &m->lm_score, &m->lm_head };
+        for (size_t gi = 0; gi < 10; gi++)
+            if (gw[gi]->cols > max_cols) max_cols = gw[gi]->cols;
+    }
     m->x_bf = (uint16_t *)malloc(max_cols * sizeof(uint16_t));
     kv_len = m->n_kv * m->head_dim;
     cap = m->window + 8u;
     m->kv_cap = cap;
     m->kv_k = (float *)calloc(cap * kv_len, sizeof(float));
     m->kv_v = (float *)calloc(cap * kv_len, sizeof(float));
+    m->inv_freq = (float *)malloc((m->head_dim / 2u + 1u) * sizeof(float));
+    for (size_t d = 0; m->inv_freq && d < m->head_dim / 2u; d++)
+        m->inv_freq[d] = 1.0f / powf(m->rope_theta,
+                                     (float)(2u * d) / (float)m->head_dim);
     total = h * 16u + m->q.rows + m->k.rows + m->v.rows + m->inter * 3u +
-            m->rank + m->vocab + m->fc.cols;
+            m->rank + m->lm_score.rows + m->fc.cols;
     m->arena = (float *)calloc(total ? total : 1u, sizeof(float));
-    if (!m->x_bf || !m->kv_k || !m->kv_v || !m->arena) {
+    if (!m->x_bf || !m->kv_k || !m->kv_v || !m->arena || !m->inv_freq) {
         hf_free(m);
         return OC_ERR_OOM;
     }
@@ -434,7 +472,7 @@ static OcError hf_open(E4HfModel *m, const char *path)
     TAKE(m->act, m->inter);
     TAKE(m->mlp, h);
     TAKE(m->proj, m->rank);
-    TAKE(m->scores, m->vocab);
+    TAKE(m->scores, m->lm_score.rows);
     TAKE(m->fused_in, m->fc.cols);
     TAKE(m->fc_out, h);
 #undef TAKE
@@ -461,15 +499,18 @@ static uint32_t top1(const float *s, size_t n)
     return (uint32_t)best;
 }
 
-static void forward_token(E4HfModel *m, uint32_t token)
+static OcError forward_token(E4HfModel *m, uint32_t token)
 {
     size_t h = m->hidden;
     size_t hd = m->head_dim;
     size_t kv_len = m->n_kv * hd;
     size_t seq, start, nwin;
     double t0;
-    const uint16_t *erow = m->embed.data + (size_t)token * h;
+    const uint16_t *erow;
     size_t i;
+
+    if ((size_t)token >= m->vocab) return OC_ERR_INVALID_ARG;
+    erow = m->embed.data + (size_t)token * h;
 
     for (i = 0; i < h; i++) m->emb[i] = bf16_f32(erow[i]);
     rms_bf16(m->emb, m->input_ln.data, m->emb_n, h, m->eps);
@@ -483,13 +524,19 @@ static void forward_token(E4HfModel *m, uint32_t token)
     gemv_bf16(m, &m->v, m->cat, m->vbuf);
     m->us_qkv += now_us() - t0;
 
-    rope_pair(m->qbuf, m->n_heads, hd, m->position, m->rope_theta);
-    rope_pair(m->kbuf, m->n_kv, hd, m->position, m->rope_theta);
-    if (m->kv_seq < m->kv_cap) {
-        memcpy(m->kv_k + m->kv_seq * kv_len, m->kbuf, kv_len * sizeof(float));
-        memcpy(m->kv_v + m->kv_seq * kv_len, m->vbuf, kv_len * sizeof(float));
-        m->kv_seq++;
+    rope_half(m->qbuf, m->n_heads, hd, m->position, m->inv_freq);
+    rope_half(m->kbuf, m->n_kv, hd, m->position, m->inv_freq);
+    if (m->kv_seq >= m->kv_cap) {
+        /* Slide: keep the last window-1 rows so the new row lands at window. */
+        size_t keep = m->window - 1u;
+        size_t drop = m->kv_seq - keep;
+        memmove(m->kv_k, m->kv_k + drop * kv_len, keep * kv_len * sizeof(float));
+        memmove(m->kv_v, m->kv_v + drop * kv_len, keep * kv_len * sizeof(float));
+        m->kv_seq = keep;
     }
+    memcpy(m->kv_k + m->kv_seq * kv_len, m->kbuf, kv_len * sizeof(float));
+    memcpy(m->kv_v + m->kv_seq * kv_len, m->vbuf, kv_len * sizeof(float));
+    m->kv_seq++;
     seq = m->kv_seq;
     start = 0;
     if (seq > m->window) start = seq - m->window;
@@ -520,6 +567,7 @@ static void forward_token(E4HfModel *m, uint32_t token)
     gemv_bf16(m, &m->lm_score, m->proj, m->scores);
     m->us_head += now_us() - t0;
     m->position++;
+    return OC_OK;
 }
 
 OcError oc_eagle4_hf_bench(const char *path, int warmup, int iters, OcEagle4HfBench *out)
@@ -546,7 +594,12 @@ OcError oc_eagle4_hf_bench(const char *path, int warmup, int iters, OcEagle4HfBe
 
     fault0 = now_us();
     encode(&model, features);
-    forward_token(&model, 1);
+    err = forward_token(&model, model.vocab > 1 ? 1u : 0u);
+    if (err != OC_OK) {
+        free(features);
+        hf_free(&model);
+        return err;
+    }
     out->fault_us = now_us() - fault0;
     model.kv_seq = 0;
     model.position = 0;
@@ -557,11 +610,11 @@ OcError oc_eagle4_hf_bench(const char *path, int warmup, int iters, OcEagle4HfBe
     t1 = now_us();
     out->encode_us = t1 - t0;
 
-    for (i = 0; i < warmup; i++) forward_token(&model, (uint32_t)(i + 1));
+    for (i = 0; i < warmup; i++) (void)forward_token(&model, (uint32_t)((size_t)(i + 1) % model.vocab));
     model.us_qkv = model.us_mlp = model.us_attn = model.us_head = 0;
     t0 = now_us();
     for (i = 0; i < iters; i++)
-        forward_token(&model, (uint32_t)((i * 17 + 3) % 4096));
+        (void)forward_token(&model, (uint32_t)((size_t)((i * 17 + 3) % 4096) % model.vocab));
     t1 = now_us();
     out->token_us = (t1 - t0) / (double)iters;
     out->tok_per_s = out->token_us > 0.0 ? 1e6 / out->token_us : 0.0;
@@ -571,7 +624,7 @@ OcError oc_eagle4_hf_bench(const char *path, int warmup, int iters, OcEagle4HfBe
     out->head_us = model.us_head / (double)iters;
     out->hidden = model.hidden;
     out->vocab = model.vocab;
-    out->top_token = top1(model.scores, model.vocab);
+    out->top_token = top1(model.scores, model.lm_score.rows);
     out->threads = (int)oc_parallel_n_threads();
     params = model.embed.rows * model.embed.cols;
     params += model.fc.rows * model.fc.cols;
