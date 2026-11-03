@@ -36,6 +36,7 @@ typedef enum {
     OC_SPEC_MODE_DFLASH = 2,
     OC_SPEC_MODE_TREE = 3,
     OC_SPEC_MODE_LOOKUP = 4,
+    OC_SPEC_MODE_EAGLE4 = 5,
 } OcSpecMode;
 
 typedef struct {

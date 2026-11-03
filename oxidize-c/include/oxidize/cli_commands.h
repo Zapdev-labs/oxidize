@@ -58,6 +58,9 @@ typedef enum {
     OC_CLI_CMD_PERPLEXITY      = 15, /* compute perplexity                 */
     OC_CLI_CMD_SERVE_REALTIME  = 16, /* start WebSocket realtime server    */
     OC_CLI_CMD_DFLASH2         = 17, /* DFlash2 draft propose benchmark    */
+    OC_CLI_CMD_EAGLE4          = 18, /* EAGLE-4 drafter microbench         */
+    OC_CLI_CMD_EAGLE4_TRAIN    = 19, /* Train an EAGLE-4 draft from SafeTensors */
+    OC_CLI_CMD_EAGLE4_EXPORT   = 20, /* Export a trained draft to GGUF     */
 } OcCliCommand;
 
 /* ─── Output format ────────────────────────────────────────────────────── */
@@ -280,6 +283,15 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx);
  * and lm_head), and reports step latency + throughput. Synthetic harness
  * because the GLM-5.3-Flash target (321B) does not fit on the host. */
 OcError oc_cli_run_dflash2(OcCliContext *ctx);
+
+/* EAGLE-4 drafter microbench. No checkpoint required. */
+OcError oc_cli_run_eagle4(OcCliContext *ctx);
+
+/* Train a draft from a SafeTensors example shard. Refuses .gguf inputs. */
+OcError oc_cli_run_eagle4_train(OcCliContext *ctx);
+
+/* Write a GGUF package from a SafeTensors draft. Does not train. */
+OcError oc_cli_run_eagle4_export(OcCliContext *ctx);
 
 #ifdef __cplusplus
 }

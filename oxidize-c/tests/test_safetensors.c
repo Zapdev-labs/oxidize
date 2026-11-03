@@ -417,3 +417,38 @@ Test(safetensors, special_chars_in_name)
     oc_safetensors_close(&st);
     unlink(path);
 }
+
+/* Write a raw header (no tensor data needed: parsing must fail first). */
+static OcError open_raw_header(const char *name, const char *json)
+{
+    const char *path = tmp_path(name);
+    FILE *fp = fopen(path, "wb");
+    cr_assert_not_null(fp);
+    uint64_t len = strlen(json);
+    fwrite(&len, 1, 8, fp);
+    fwrite(json, 1, len, fp);
+    fclose(fp);
+    OcSafetensorsFile st;
+    memset(&st, 0, sizeof(st));
+    OcError e = oc_safetensors_open(path, &st);
+    if (e == OC_OK) oc_safetensors_close(&st);
+    unlink(path);
+    return e;
+}
+
+Test(safetensors, rejects_shape_over_max_dims)
+{
+    cr_assert_eq(open_raw_header("ninedims.safetensors",
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[1,1,1,1,1,1,1,1,1],\"data_offsets\":[0,0]}}"),
+        OC_ERR_FORMAT);
+}
+
+Test(safetensors, rejects_uint64_overflow)
+{
+    cr_assert_eq(open_raw_header("u64ovf.safetensors",
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[18446744073709551616],\"data_offsets\":[0,0]}}"),
+        OC_ERR_FORMAT);
+    cr_assert_eq(open_raw_header("u64ovf2.safetensors",
+        "{\"t\":{\"dtype\":\"U8\",\"shape\":[1],\"data_offsets\":[0,18446744073709551617]}}"),
+        OC_ERR_FORMAT);
+}

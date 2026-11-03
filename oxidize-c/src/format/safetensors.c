@@ -55,13 +55,22 @@ typedef struct OcStParser {
     OcSafetensorsTensor *out_arr;
     size_t               out_cap;
     size_t               out_len;
+    bool                 bad;      /* malformed descriptor (end < start) */
 } OcStParser;
 
 /* Append the in-progress tensor descriptor to the parser's output array.
- * Returns false on OOM. */
+ * Returns false on OOM, and also when the descriptor is malformed: a shape
+ * longer than OC_SAFETENSORS_MAX_DIMS, an overflowed integer, or a bad
+ * data_offsets pair. Malformed descriptors set p->bad; callers use that to
+ * tell a format error from OOM. */
 static bool parser_emit(OcStParser *p)
 {
     if (!p->cur_valid) return true;
+    if (p->bad || p->shape_count > OC_SAFETENSORS_MAX_DIMS) {
+        /* Over-long shape or an overflowing integer. */
+        p->bad = true;
+        return false;
+    }
     if (p->out_len == p->out_cap) {
         size_t new_cap = p->out_cap == 0 ? 8 : p->out_cap * 2;
         OcSafetensorsTensor *na = realloc(p->out_arr, new_cap * sizeof(*na));
@@ -74,7 +83,16 @@ static bool parser_emit(OcStParser *p)
     for (uint32_t i = 0; i < p->shape_count && i < OC_SAFETENSORS_MAX_DIMS; i++) {
         p->cur.shape[i] = p->shape_vals[i];
     }
-    if (p->offset_count == 2) {
+    if (p->offset_count != 2) {
+        /* Missing, short, or over-long data_offsets. */
+        p->bad = true;
+        return false;
+    }
+    {
+        if (p->offsets[1] < p->offsets[0]) {
+            p->bad = true;
+            return false;
+        }
         p->cur.data_offset = p->offsets[0];
         p->cur.data_length = p->offsets[1] - p->offsets[0];
     }
@@ -134,11 +152,13 @@ static int json_decode_string(const char *src, const char *end,
 
 /* Parse a JSON unsigned integer. `*endp` points past the last digit. */
 static uint64_t json_decode_uint(const char *src, const char *end,
-                                 const char **endp)
+                                 const char **endp, bool *overflow)
 {
     uint64_t v = 0;
     while (src < end && isdigit((unsigned char)*src)) {
-        v = v * 10 + (uint64_t)(*src - '0');
+        uint64_t d = (uint64_t)(*src - '0');
+        if (v > (UINT64_MAX - d) / 10u) *overflow = true;
+        v = v * 10 + d;
         src++;
     }
     *endp = src;
@@ -214,11 +234,12 @@ static void parser_handle_value(OcStParser *p, const char *src,
                  * spin without consuming input. */
                 if (!isdigit((unsigned char)*src)) break;
                 const char *e;
-                uint64_t v = json_decode_uint(src, end, &e);
+                uint64_t v = json_decode_uint(src, end, &e, &p->bad);
                 if (e == src) break;
                 if (p->shape_count < OC_SAFETENSORS_MAX_DIMS) {
-                    p->shape_vals[p->shape_count++] = v;
+                    p->shape_vals[p->shape_count] = v;
                 }
+                if (p->shape_count <= OC_SAFETENSORS_MAX_DIMS) p->shape_count++;
                 src = e;
                 while (src < end && isspace((unsigned char)*src)) src++;
                 if (src < end && *src == ',') src++;
@@ -234,11 +255,12 @@ static void parser_handle_value(OcStParser *p, const char *src,
                 if (src >= end || *src == ']') break;
                 if (!isdigit((unsigned char)*src)) break;
                 const char *e;
-                uint64_t v = json_decode_uint(src, end, &e);
+                uint64_t v = json_decode_uint(src, end, &e, &p->bad);
                 if (e == src) break;
                 if (p->offset_count < 2) {
-                    p->offsets[p->offset_count++] = v;
+                    p->offsets[p->offset_count] = v;
                 }
+                if (p->offset_count < 3) p->offset_count++;
                 src = e;
                 while (src < end && isspace((unsigned char)*src)) src++;
                 if (src < end && *src == ',') src++;
@@ -293,7 +315,7 @@ static OcError parse_header(const char *json, size_t json_len,
                 break;
             }
             /* New tensor descriptor. */
-            if (!parser_emit(p)) return OC_ERR_OOM;
+            if (!parser_emit(p)) return p->bad ? OC_ERR_FORMAT : OC_ERR_OOM;
             memset(&p->cur, 0, sizeof(p->cur));
             size_t nl = strlen(namebuf);
             if (nl >= OC_SAFETENSORS_NAME_LEN) nl = OC_SAFETENSORS_NAME_LEN - 1;
@@ -314,7 +336,7 @@ static OcError parse_header(const char *json, size_t json_len,
             else if (c == '}') {
                 /* End of this descriptor object. */
                 s++;
-                if (!parser_emit(p)) return OC_ERR_OOM;
+                if (!parser_emit(p)) return p->bad ? OC_ERR_FORMAT : OC_ERR_OOM;
                 st = OC_STJ_TOP;
             }
             else if (c == ',') { s++; st = OC_STJ_FIELD_KEY; }
@@ -345,7 +367,7 @@ static OcError parse_header(const char *json, size_t json_len,
     }
     /* Emit any trailing in-progress tensor (defensive; well-formed JSON
      * emits on the closing '}' of each descriptor). */
-    if (!parser_emit(p)) return OC_ERR_OOM;
+    if (!parser_emit(p)) return p->bad ? OC_ERR_FORMAT : OC_ERR_OOM;
     return OC_OK;
 }
 
@@ -490,6 +512,20 @@ OcError oc_safetensors_get_tensor_data(const OcSafetensorsFile *st,
     if (end_off > avail) return OC_ERR_FORMAT;
     *out_data = (const uint8_t *)st->raw_data + tensor->data_offset;
     return OC_OK;
+}
+
+bool oc_st_tensor_bytes_ok(const OcSafetensorsTensor *t, size_t elem_size)
+{
+    if (t == NULL || elem_size == 0) return false;
+    if (t->n_dims > OC_SAFETENSORS_MAX_DIMS) return false;
+    uint64_t n = 1;
+    for (uint32_t i = 0; i < t->n_dims; i++) {
+        uint64_t d = t->shape[i];
+        if (d != 0 && n > UINT64_MAX / d) return false;
+        n *= d;
+    }
+    if (n > UINT64_MAX / elem_size) return false;
+    return n * elem_size == t->data_length;
 }
 
 size_t oc_safetensors_n_tensors(const OcSafetensorsFile *st)
