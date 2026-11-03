@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <criterion/criterion.h>
 #include "oxidize/eagle4.h"
 #include "oxidize/gguf.h"
@@ -381,6 +382,19 @@ typedef struct StSpec {
 
 /* Write a zero-filled SafeTensors file. A spec with len == -2 writes
  * data_offsets with end < start. */
+/* Append formatted text, failing the test instead of overflowing json[]. */
+static size_t st_append(char *buf, size_t cap, size_t used, const char *fmt, ...)
+{
+    va_list ap;
+    int w;
+    cr_assert_lt(used, cap);
+    va_start(ap, fmt);
+    w = vsnprintf(buf + used, cap - used, fmt, ap);
+    va_end(ap);
+    cr_assert(w >= 0 && (size_t)w < cap - used);
+    return used + (size_t)w;
+}
+
 static void write_st(const char *path, const StSpec *s, size_t n)
 {
     char json[4096];
@@ -388,25 +402,25 @@ static void write_st(const char *path, const StSpec *s, size_t n)
     FILE *fp;
     uint8_t le[8];
     int k;
-    used += (size_t)snprintf(json + used, sizeof(json) - used, "{");
+    used = st_append(json, sizeof(json), used, "{");
     for (i = 0; i < n; i++) {
         size_t len = s[i].len >= 0 ? (size_t)s[i].len
                                    : (size_t)(s[i].shape[0] * (s[i].ndims > 1 ? s[i].shape[1] : 1)) * s[i].esz;
         size_t a = off, b = off + len;
         if (s[i].len == -2) { a = 8; b = 0; len = 0; }
         if (s[i].ndims == 1)
-            used += (size_t)snprintf(json + used, sizeof(json) - used,
+            used = st_append(json, sizeof(json), used,
                 "%s\"%s\":{\"dtype\":\"%s\",\"shape\":[%llu],\"data_offsets\":[%zu,%zu]}",
                 i ? "," : "", s[i].name, s[i].dtype, (unsigned long long)s[i].shape[0], a, b);
         else
-            used += (size_t)snprintf(json + used, sizeof(json) - used,
+            used = st_append(json, sizeof(json), used,
                 "%s\"%s\":{\"dtype\":\"%s\",\"shape\":[%llu,%llu],\"data_offsets\":[%zu,%zu]}",
                 i ? "," : "", s[i].name, s[i].dtype, (unsigned long long)s[i].shape[0],
                 (unsigned long long)s[i].shape[1], a, b);
         off += len;
     }
-    used += (size_t)snprintf(json + used, sizeof(json) - used, "}");
-    while (used & 7u) json[used++] = ' ';
+    used = st_append(json, sizeof(json), used, "}");
+    while ((used & 7u) && used < sizeof(json)) json[used++] = ' ';
     total = off + 8;
     fp = fopen(path, "wb");
     cr_assert_not_null(fp);

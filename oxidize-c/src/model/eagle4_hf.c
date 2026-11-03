@@ -202,7 +202,9 @@ static float dot_f32_bf16_row(const uint16_t *w, const float *x, size_t n)
     return r;
 }
 
+#if defined(__x86_64__)
 static int g_avx512_bf16 = -1;
+#endif
 
 static int have_avx512_bf16(void)
 {
