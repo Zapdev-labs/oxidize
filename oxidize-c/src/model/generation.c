@@ -4,6 +4,7 @@
  */
 #include "oxidize/generation.h"
 #include "oxidize/inf_model.h"
+#include "oxidize/util/clock.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -115,14 +116,6 @@ uint64_t oc_gen_total_tokens(const OcGenResult *result)
 
 /* ─── Full generation loop ────────────────────────────────────────────── */
 
-/* Get monotonic time in seconds. */
-static double get_time_sec(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
-
 OcError oc_gen_run(void *model_ptr,
                     const uint32_t *prompt, size_t n_prompt,
                     const OcGenConfig *cfg,
@@ -159,7 +152,7 @@ OcError oc_gen_run(void *model_ptr,
     size_t logits_len = 0;
 
     if (n_prompt > 0) {
-        prefill_start = get_time_sec();
+        prefill_start = oc_clock_mono_sec();
         for (size_t i = 0; i < n_prompt; i++) {
             OcError e = oc_inf_model_forward_token(model, prompt[i], i);
             if (e != OC_OK) return e;
@@ -167,16 +160,16 @@ OcError oc_gen_run(void *model_ptr,
         /* Get logits from the last prompt token. */
         OcError e = oc_inf_model_final_head_from_workspace(model, &logits, &logits_len);
         if (e != OC_OK) return e;
-        result->prefill_time_sec = get_time_sec() - prefill_start;
+        result->prefill_time_sec = oc_clock_mono_sec() - prefill_start;
         result->prefill_tokens_per_sec = n_prompt / result->prefill_time_sec;
     } else {
         /* No prompt: embed token 0 and get logits. */
-        prefill_start = get_time_sec();
+        prefill_start = oc_clock_mono_sec();
         OcError e = oc_inf_model_forward_token(model, 0, 0);
         if (e != OC_OK) return e;
         e = oc_inf_model_final_head_from_workspace(model, &logits, &logits_len);
         if (e != OC_OK) return e;
-        result->prefill_time_sec = get_time_sec() - prefill_start;
+        result->prefill_time_sec = oc_clock_mono_sec() - prefill_start;
         result->prefill_tokens_per_sec = 1.0 / result->prefill_time_sec;
         n_prompt = 1;
     }
@@ -200,7 +193,7 @@ OcError oc_gen_run(void *model_ptr,
     }
 
     /* 3. Decode loop. */
-    double decode_start = get_time_sec();
+    double decode_start = oc_clock_mono_sec();
     size_t pos = n_prompt;
 
     for (size_t i = 1; i < cfg->max_tokens; i++) {
@@ -222,7 +215,7 @@ OcError oc_gen_run(void *model_ptr,
         }
     }
 
-    double total_decode = get_time_sec() - decode_start;
+    double total_decode = oc_clock_mono_sec() - decode_start;
     result->eval_time_sec = total_decode + result->prefill_time_sec;
     result->tokens_per_sec = (double)result->n_tokens / total_decode;
 
@@ -267,7 +260,7 @@ OcError oc_gen_run_mtp(void *model_ptr,
     result->n_tokens = 0;
 
     /* Prefill. */
-    double prefill_start = get_time_sec();
+    double prefill_start = oc_clock_mono_sec();
     float *logits = NULL;
     size_t logits_len = 0;
 
@@ -277,12 +270,12 @@ OcError oc_gen_run_mtp(void *model_ptr,
             if (e != OC_OK) return e;
         }
         oc_inf_model_final_head_from_workspace(model, &logits, &logits_len);
-        result->prefill_time_sec = get_time_sec() - prefill_start;
+        result->prefill_time_sec = oc_clock_mono_sec() - prefill_start;
         result->prefill_tokens_per_sec = n_prompt / result->prefill_time_sec;
     } else {
         oc_inf_model_forward_token(model, 0, 0);
         oc_inf_model_final_head_from_workspace(model, &logits, &logits_len);
-        result->prefill_time_sec = get_time_sec() - prefill_start;
+        result->prefill_time_sec = oc_clock_mono_sec() - prefill_start;
         n_prompt = 1;
     }
 
@@ -293,7 +286,7 @@ OcError oc_gen_run_mtp(void *model_ptr,
     if (callback) callback(token, NULL, user);
 
     /* Decode loop with MTP speculative decoding. */
-    double decode_start = get_time_sec();
+    double decode_start = oc_clock_mono_sec();
     size_t pos = n_prompt;
     size_t vocab = oc_inf_model_config(model)->vocab_size;
 
@@ -365,7 +358,7 @@ OcError oc_gen_run_mtp(void *model_ptr,
 mtp_done:
     free(draft_logits);
 
-    double total_decode = get_time_sec() - decode_start;
+    double total_decode = oc_clock_mono_sec() - decode_start;
     result->eval_time_sec = total_decode + result->prefill_time_sec;
     result->tokens_per_sec = (double)result->n_tokens / total_decode;
 

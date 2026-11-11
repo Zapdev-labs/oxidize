@@ -3,26 +3,12 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/progress.h"
+#include "oxidize/util/string.h"
+#include "oxidize/util/clock.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-static uint64_t now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-}
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) return;
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 OcError oc_progress_init(OcProgress *prog)
 {
@@ -38,7 +24,7 @@ OcError oc_progress_add_stage(OcProgress *prog, const char *name, uint64_t total
 
     OcProgressStage *s = &prog->stages[prog->n_stages];
     memset(s, 0, sizeof(*s));
-    copy_str(s->name, sizeof(s->name), name);
+    oc_str_copy(s->name, sizeof(s->name), name);
     s->total = total;
     s->completed = 0;
     s->done = false;
@@ -48,7 +34,7 @@ OcError oc_progress_add_stage(OcProgress *prog, const char *name, uint64_t total
     if (!prog->running) {
         prog->running = true;
         prog->current_stage = 0;
-        prog->start_time_ms = now_ms();
+        prog->start_time_ms = oc_clock_mono_ms_u64();
     }
     return OC_OK;
 }
@@ -62,7 +48,7 @@ OcError oc_progress_update(OcProgress *prog, uint64_t completed)
     if (s->total > 0 && completed >= s->total) {
         s->done = true;
     }
-    prog->elapsed_ms = now_ms() - prog->start_time_ms;
+    prog->elapsed_ms = oc_clock_mono_ms_u64() - prog->start_time_ms;
     return OC_OK;
 }
 
@@ -85,7 +71,7 @@ OcError oc_progress_complete(OcProgress *prog)
         prog->stages[i].done = true;
     prog->running = false;
     prog->current_stage = prog->n_stages;
-    prog->elapsed_ms = now_ms() - prog->start_time_ms;
+    prog->elapsed_ms = oc_clock_mono_ms_u64() - prog->start_time_ms;
     return OC_OK;
 }
 
@@ -133,7 +119,7 @@ uint64_t oc_progress_elapsed_ms(const OcProgress *prog)
 {
     if (!prog) return 0;
     if (prog->running)
-        return now_ms() - prog->start_time_ms;
+        return oc_clock_mono_ms_u64() - prog->start_time_ms;
     return prog->elapsed_ms;
 }
 

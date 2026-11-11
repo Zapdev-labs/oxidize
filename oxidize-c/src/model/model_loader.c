@@ -7,19 +7,11 @@
 #include "oxidize/model_loader.h"
 #include "oxidize/gguf.h"
 #include "oxidize/quant.h"
+#include "oxidize/util/string.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) return;
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 static bool tensor_byte_size(const OcGgufTensorInfo *info, uint64_t *out)
 {
@@ -49,7 +41,7 @@ OcError oc_model_loader_init(OcModelLoader *loader, const char *path)
 {
     if (!loader || !path) return OC_ERR_INVALID_ARG;
     memset(loader, 0, sizeof(*loader));
-    copy_str(loader->path, sizeof(loader->path), path);
+    oc_str_copy(loader->path, sizeof(loader->path), path);
     loader->arch = OC_ARCH_UNKNOWN;
     return OC_OK;
 }
@@ -70,7 +62,7 @@ OcError oc_model_loader_load(OcModelLoader *loader)
     size_t arch_len = 0;
     if (oc_gguf_metadata_get_str(gguf, "general.architecture", &arch_str, &arch_len)) {
         loader->arch = oc_model_arch_from_str(arch_str);
-        copy_str(loader->metadata.arch, sizeof(loader->metadata.arch), arch_str);
+        oc_str_copy(loader->metadata.arch, sizeof(loader->metadata.arch), arch_str);
     }
 
     /* Extract common metadata. */
@@ -113,7 +105,7 @@ OcError oc_model_loader_load(OcModelLoader *loader)
     for (size_t i = 0; i < n; i++) {
         OcLoadedTensor *t = &loader->tensors[i];
         const OcGgufTensorInfo *info = &gguf->tensors[i];
-        copy_str(t->name, sizeof(t->name), info->name);
+        oc_str_copy(t->name, sizeof(t->name), info->name);
         t->n_dims = info->n_dims;
         for (uint32_t d = 0; d < t->n_dims && d < 4; d++)
             t->dims[d] = info->dims[d];

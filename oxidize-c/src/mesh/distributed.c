@@ -34,6 +34,7 @@
 #define _DARWIN_C_SOURCE 1  /* BSD socket opts (IP_MULTICAST_TTL, etc.) on macOS */
 #endif
 #include "oxidize/distributed.h"
+#include "oxidize/util/clock.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,13 +64,6 @@
 /* ------------------------------------------------------------------ */
 /* Helpers: timing                                                    */
 /* ------------------------------------------------------------------ */
-
-static double now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
-}
 
 static void update_latency(OcDistributedStats *st, double lat)
 {
@@ -376,7 +370,7 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
         uint32_t timeout_ms = cfg->connect_timeout_ms
                             ? cfg->connect_timeout_ms
                             : OC_DIST_CONNECT_TIMEOUT_MS;
-        double deadline = now_ms() + (double)timeout_ms;
+        double deadline = oc_clock_mono_ms() + (double)timeout_ms;
 
         if (cfg->node_rank == 0) {
             /* Pipeline master: listen on listen_port (or default). */
@@ -413,7 +407,7 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
              * A worker may reconnect after a failed handshake, so keep
              * accepting until every rank is online or the deadline passes. */
             uint32_t connected = 0;
-            while (connected + 1 < cfg->n_nodes && now_ms() < deadline) {
+            while (connected + 1 < cfg->n_nodes && oc_clock_mono_ms() < deadline) {
                 struct sockaddr_in caddr;
                 socklen_t clen = sizeof(caddr);
                 int cfd = accept(lfd, (struct sockaddr *)&caddr, &clen);
@@ -459,7 +453,7 @@ OcError oc_distributed_init(OcDistributedScheduler *sched,
             for (;;) {
                 fd = tcp_connect(cfg->coordinator_addr);
                 if (fd >= 0) break;
-                if (now_ms() >= deadline) {
+                if (oc_clock_mono_ms() >= deadline) {
                     oc_distributed_free(sched);
                     return OC_ERR_NETWORK;
                 }
@@ -832,12 +826,12 @@ double oc_distributed_get_latency(OcDistributedScheduler *sched)
 
     /* Single-node: measure local overhead (essentially zero). */
     if (sched->config.n_nodes <= 1) {
-        double t0 = now_ms();
+        double t0 = oc_clock_mono_ms();
         /* Tiny no-op work to measure timer resolution. */
         volatile uint64_t sink = 0;
         for (int i = 0; i < 100; i++) sink += (uint64_t)i;
         (void)sink;
-        double lat = now_ms() - t0;
+        double lat = oc_clock_mono_ms() - t0;
         update_latency(&sched->stats, lat);
         return lat;
     }
@@ -853,7 +847,7 @@ double oc_distributed_get_latency(OcDistributedScheduler *sched)
         return sched->stats.latency_ms;
     }
 
-    double t0 = now_ms();
+    double t0 = oc_clock_mono_ms();
 
     uint8_t ping = 0x50;
     uint64_t hdr = 1;
@@ -881,7 +875,7 @@ double oc_distributed_get_latency(OcDistributedScheduler *sched)
         return sched->stats.latency_ms;
     }
 
-    double lat = now_ms() - t0;
+    double lat = oc_clock_mono_ms() - t0;
     update_latency(&sched->stats, lat);
 
     sched->stats.bytes_sent += 1 + sizeof(hdr);

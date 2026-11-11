@@ -2,19 +2,11 @@
  * vision_prompt.c — Multimodal prompt construction implementation.
  */
 #include "oxidize/vision_prompt.h"
+#include "oxidize/util/string.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 OcError oc_vision_prompt_init(OcVisionPrompt *vp, OcVisionPromptFormat fmt)
 {
@@ -27,7 +19,7 @@ OcError oc_vision_prompt_init(OcVisionPrompt *vp, OcVisionPromptFormat fmt)
 OcError oc_vision_prompt_set_text(OcVisionPrompt *vp, const char *text)
 {
     if (!vp || !text) return OC_ERR_INVALID_ARG;
-    copy_str(vp->text, sizeof(vp->text), text);
+    oc_str_copy(vp->text, sizeof(vp->text), text);
     return OC_OK;
 }
 

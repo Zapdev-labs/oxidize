@@ -19,6 +19,7 @@
 #include "oxidize/middleware.h"
 
 #include "oxidize/log.h"
+#include "oxidize/util/clock.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -29,13 +30,6 @@
 #include <time.h>
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
-
-static uint64_t now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
-}
 
 /* Bucket for a latency value into histogram index 0..N-1.
  * Bucket edges (ms): [0,10), [10,50), [50,100), [100,250), [250,500),
@@ -133,7 +127,7 @@ bool oc_rate_limiter_allow(OcRateLimiter *rl, const char *client_ip)
         return true;
     }
     const char *ip = (client_ip != NULL) ? client_ip : "0.0.0.0";
-    uint64_t now = now_ms();
+    uint64_t now = oc_clock_mono_ms_u64();
     pthread_mutex_lock(&rl->lock);
     OcRateBucket *b;
     if (rl->cfg.per_ip) {

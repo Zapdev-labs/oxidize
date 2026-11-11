@@ -96,3 +96,21 @@ Test(string, parse_u32)
     cr_assert(!oc_parse_u32(NULL, &n), "");
 }
 
+Test(string, str_copy_fits_truncates_and_handles_null)
+{
+    char buf[6] = "zzzzz";
+
+    oc_str_copy(buf, sizeof(buf), "abc");
+    cr_assert_str_eq(buf, "abc", "");
+
+    oc_str_copy(buf, sizeof(buf), "abcdefgh");
+    cr_assert_str_eq(buf, "abcde", "");
+
+    oc_str_copy(buf, sizeof(buf), NULL);
+    cr_assert_str_eq(buf, "", "");
+
+    buf[0] = 'q';
+    oc_str_copy(buf, 0, "abc");
+    cr_assert_eq(buf[0], 'q', "");
+    oc_str_copy(NULL, 4, "abc");
+}

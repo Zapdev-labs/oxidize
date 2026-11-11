@@ -16,6 +16,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #include "oxidize/k8s.h"
+#include "oxidize/util/string.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -34,23 +35,14 @@
 #define NI_MAXSERV 32
 #endif
 
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) return;
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 OcError oc_k8s_init(OcK8sCluster *cluster, const char *namespace,
                    const char *service_name)
 {
     if (!cluster) return OC_ERR_INVALID_ARG;
     memset(cluster, 0, sizeof(*cluster));
-    if (namespace) copy_str(cluster->namespace, sizeof(cluster->namespace), namespace);
+    if (namespace) oc_str_copy(cluster->namespace, sizeof(cluster->namespace), namespace);
     else strcpy(cluster->namespace, "default");
-    if (service_name) copy_str(cluster->service_name, sizeof(cluster->service_name), service_name);
+    if (service_name) oc_str_copy(cluster->service_name, sizeof(cluster->service_name), service_name);
     cluster->available = false;
     return OC_OK;
 }
@@ -72,8 +64,8 @@ OcError oc_k8s_add_pod(OcK8sCluster *cluster, const char *name,
 
     OcK8sPod *pod = &cluster->pods[cluster->n_pods];
     memset(pod, 0, sizeof(*pod));
-    copy_str(pod->name, sizeof(pod->name), name);
-    if (ip) copy_str(pod->ip, sizeof(pod->ip), ip);
+    oc_str_copy(pod->name, sizeof(pod->name), name);
+    if (ip) oc_str_copy(pod->ip, sizeof(pod->ip), ip);
     pod->port = port;
     pod->ready = false;
     pod->restarts = 0;

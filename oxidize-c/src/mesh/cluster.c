@@ -2,18 +2,10 @@
  * cluster.c — GPU cluster management implementation.
  */
 #include "oxidize/cluster.h"
+#include "oxidize/util/string.h"
 
 #include <stdlib.h>
 #include <string.h>
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) return;
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 OcError oc_cluster_init(OcGpuCluster *cluster, uint64_t self_id)
 {
@@ -40,8 +32,8 @@ OcError oc_cluster_add_node(OcGpuCluster *cluster, const char *name,
     OcClusterNode *n = &cluster->nodes[cluster->n_nodes];
     memset(n, 0, sizeof(*n));
     n->id = (uint64_t)cluster->n_nodes + 1;
-    copy_str(n->name, sizeof(n->name), name);
-    if (addr) copy_str(n->addr, sizeof(n->addr), addr);
+    oc_str_copy(n->name, sizeof(n->name), name);
+    if (addr) oc_str_copy(n->addr, sizeof(n->addr), addr);
     n->port = port;
     n->type = type;
     n->n_gpus = n_gpus;

@@ -3,19 +3,13 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/perplexity.h"
+#include "oxidize/util/clock.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-static double wall_now(void)
-{
-    struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
 
 OcError oc_perplexity_evaluate(OcLlamaModel *model, OcTokenizer *tok,
                                 const char *text, size_t max_tokens,
@@ -46,7 +40,7 @@ OcError oc_perplexity_evaluate(OcLlamaModel *model, OcTokenizer *tok,
      * and evaluate the log-probability of token[i]. */
     double total_nll = 0.0;
     size_t n_evaluated = 0;
-    double start = wall_now();
+    double start = oc_clock_wall_sec();
 
     if (ids[0] >= model->cfg.vocab_size) {
         oc_llama_session_free(&sess);
@@ -96,7 +90,7 @@ OcError oc_perplexity_evaluate(OcLlamaModel *model, OcTokenizer *tok,
         }
     }
 
-    double elapsed = wall_now() - start;
+    double elapsed = oc_clock_wall_sec() - start;
     oc_llama_session_free(&sess);
     free(ids);
 

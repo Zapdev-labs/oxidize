@@ -6,6 +6,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mesh_chat.h"
+#include "oxidize/util/string.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -13,19 +14,6 @@
 /* ------------------------------------------------------------------ */
 /* Helpers.                                                            */
 /* ------------------------------------------------------------------ */
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0) return;
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 static bool role_valid(OcMeshChatRole r)
 {
@@ -41,9 +29,9 @@ OcError oc_mesh_chat_init(OcMeshChatConversation *conv, const char *conversation
     if (!conv) return OC_ERR_INVALID_ARG;
     memset(conv, 0, sizeof(*conv));
     if (conversation_id) {
-        copy_str(conv->conversation_id, sizeof(conv->conversation_id), conversation_id);
+        oc_str_copy(conv->conversation_id, sizeof(conv->conversation_id), conversation_id);
     } else {
-        copy_str(conv->conversation_id, sizeof(conv->conversation_id), "anonymous");
+        oc_str_copy(conv->conversation_id, sizeof(conv->conversation_id), "anonymous");
     }
     conv->count = 0;
     conv->next_timestamp = 0;
@@ -60,8 +48,8 @@ OcError oc_mesh_chat_add_message(OcMeshChatConversation *conv, OcMeshChatRole ro
     OcMeshChatMessage *m = &conv->messages[conv->count];
     memset(m, 0, sizeof(*m));
     m->role = role;
-    copy_str(m->content, sizeof(m->content), content ? content : "");
-    copy_str(m->sender_id, sizeof(m->sender_id), sender_id ? sender_id : "");
+    oc_str_copy(m->content, sizeof(m->content), content ? content : "");
+    oc_str_copy(m->sender_id, sizeof(m->sender_id), sender_id ? sender_id : "");
     m->timestamp = conv->next_timestamp++;
     conv->count++;
     return OC_OK;

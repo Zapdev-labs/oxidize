@@ -36,6 +36,7 @@
 #include "oxidize/quant.h"
 #include "oxidize/sampling.h"
 #include "oxidize/util/mmap.h"
+#include "oxidize/util/clock.h"
 
 #include <math.h>
 #include <stdatomic.h>
@@ -52,7 +53,6 @@ static void k2_mtp_free(struct OcK2Mtp *k);
 static void k2_mtp_resync(struct OcK2Mtp *k, int64_t synced_pos);
 static void q4e_mtp_free(struct OcQ4eMtp *k);
 static void q4e_mtp_resync(struct OcQ4eMtp *k, int64_t synced_pos);
-static double k2m_now(void);
 
 /* qwen4exp MTP verify: per-row snapshots of the mutable recurrent and PLE
  * convolution state, indexed [row][flat state across all recurrent
@@ -5723,13 +5723,6 @@ typedef struct {
 
 static PrefillTimers g_pf_t;
 
-static double pf_now(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 
 typedef struct {
     size_t cap;             /* tokens per chunk                          */
@@ -5952,11 +5945,11 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
     uint32_t layer = moe_layer_index(s, L);
 
     /* 1. Router logits for every token in one matmul. */
-    double t_r0 = pf_now();
+    double t_r0 = oc_clock_mono_sec();
     mm_batch(&L->ffn_gate_inp, b->normed, b->n_embd, b->router, b->n_slots,
              n, b);
 
-    g_pf_t.router += pf_now() - t_r0;
+    g_pf_t.router += oc_clock_mono_sec() - t_r0;
     memset(b->expert_out, 0, n * b->n_embd * sizeof(float));
     memset(b->ex_fill, 0, n_slots * sizeof(uint32_t));
     for (uint32_t e = 0; e <= n_slots; e++) b->ex_off[e] = 0;
@@ -6139,13 +6132,13 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         }
 
         /* Gather this expert's tokens so the matmul sees them contiguously. */
-        double t_g0 = pf_now();
+        double t_g0 = oc_clock_mono_sec();
         for (uint32_t t = 0; t < m; t++) {
             memcpy(b->gath + (size_t)t * b->n_embd,
                    b->normed + (size_t)toks[t] * b->n_embd,
                    b->n_embd * sizeof(float));
         }
-        g_pf_t.gather += pf_now() - t_g0;
+        g_pf_t.gather += oc_clock_mono_sec() - t_g0;
 
         OcWeightView gate_v = L->ffn_gate_exps;
         gate_v.data = L->ffn_gate_exps.data + (size_t)e * i_size * gate_rb;
@@ -6157,7 +6150,7 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         down_v.data = L->ffn_down_exps.data + (size_t)e * b->n_embd * down_rb;
         down_v.rows = b->n_embd;
 
-        double t_m0 = pf_now();
+        double t_m0 = oc_clock_mono_sec();
         mm_batch(&gate_v, b->gath, b->n_embd, b->ffn_a, b->ffw, m, b);
         mm_batch(&up_v,   b->gath, b->n_embd, b->ffn_b, b->ffw, m, b);
         for (uint32_t t = 0; t < m; t++) {
@@ -6166,15 +6159,15 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
         }
         /* down → gath (free again now that gate/up have consumed it). */
         mm_batch(&down_v, b->ffn_a, b->ffw, b->gath, b->n_embd, m, b);
-        g_pf_t.expert_mm += pf_now() - t_m0;
-        double t_s0 = pf_now();
+        g_pf_t.expert_mm += oc_clock_mono_sec() - t_m0;
+        double t_s0 = oc_clock_mono_sec();
         for (uint32_t t = 0; t < m; t++) {
             const float *src = b->gath + (size_t)t * b->n_embd;
             float *dst = b->expert_out + (size_t)toks[t] * b->n_embd;
             const float w = ws[t];
             for (size_t i = 0; i < b->n_embd; i++) dst[i] += w * src[i];
         }
-        g_pf_t.scatter += pf_now() - t_s0;
+        g_pf_t.scatter += oc_clock_mono_sec() - t_s0;
     }
 
     /* 7. Shared expert (always active), batched over every token. */
@@ -6718,14 +6711,14 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
     const size_t key_dim = (size_t)c->ssm_group_count * c->ssm_state_size;
     const size_t conv_dim = 2u * key_dim + c->ssm_inner_size;
 
-    double t_n0 = pf_now();
+    double t_n0 = oc_clock_mono_sec();
     for (size_t j = 0; j < n; j++)
         oc_rms_norm_f32(b->x + j * b->n_embd, L->attn_norm,
                         b->normed + j * b->n_embd, c->n_embd,
                         c->rms_norm_eps);
-    g_pf_t.norm += pf_now() - t_n0;
+    g_pf_t.norm += oc_clock_mono_sec() - t_n0;
 
-    double t_q0 = pf_now();
+    double t_q0 = oc_clock_mono_sec();
     mm_batch(&L->attn_qkv, b->normed, b->n_embd, b->q35_rqkv, conv_dim, n, b);
     mm_batch(&L->attn_gate, b->normed, b->n_embd, b->q35_rgate,
              c->ssm_inner_size, n, b);
@@ -6746,7 +6739,7 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
                           b->q35_ralpha + j * c->ssm_value_heads);
         }
     }
-    g_pf_t.qkv += pf_now() - t_q0;
+    g_pf_t.qkv += oc_clock_mono_sec() - t_q0;
 
     const OcQwen35DeltaParams params = {
         .conv_weight = (const float *)L->ssm_conv1d.data,
@@ -6759,7 +6752,7 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
         .norm_weight_len = L->ssm_norm.rows * L->ssm_norm.cols,
         .norm_eps = c->rms_norm_eps,
     };
-    double t_d0 = pf_now();
+    double t_d0 = oc_clock_mono_sec();
     for (size_t j = 0; j < n; j++) {
         const OcQwen35DeltaInput input = {
             .qkv = b->q35_rqkv + j * conv_dim,
@@ -6777,8 +6770,8 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
             b->q35_delta + j * c->ssm_inner_size, c->ssm_inner_size);
         if (e != OC_OK) return e;
     }
-    g_pf_t.attn += pf_now() - t_d0;
-    double t_p0 = pf_now();
+    g_pf_t.attn += oc_clock_mono_sec() - t_d0;
+    double t_p0 = oc_clock_mono_sec();
     mm_batch(&L->ssm_out, b->q35_delta, c->ssm_inner_size,
              b->proj, b->n_embd, n, b);
     if (s->lora) {
@@ -6793,10 +6786,10 @@ static OcError prefill_qwen35_recurrent(OcLlamaSession *s, uint32_t layer,
         const float *p = b->proj + j * b->n_embd;
         for (size_t i = 0; i < b->n_embd; i++) x[i] += p[i];
     }
-    g_pf_t.proj += pf_now() - t_p0;
-    double t_f0 = pf_now();
+    g_pf_t.proj += oc_clock_mono_sec() - t_p0;
+    double t_f0 = oc_clock_mono_sec();
     prefill_qwen35_ffn(s, L, b, n);
-    g_pf_t.expert_mm += pf_now() - t_f0;
+    g_pf_t.expert_mm += oc_clock_mono_sec() - t_f0;
     return OC_OK;
 }
 
@@ -7303,9 +7296,9 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     if (c->is_qwen35) {
         if (L->kind == OC_LLAMA_LAYER_QWEN35_RECURRENT)
             return prefill_qwen35_recurrent(s, layer, b, n);
-        double t_a0 = pf_now();
+        double t_a0 = oc_clock_mono_sec();
         prefill_qwen35_attention(s, layer, b, n, pos0);
-        g_pf_t.rope_kv += pf_now() - t_a0;
+        g_pf_t.rope_kv += oc_clock_mono_sec() - t_a0;
         return OC_OK;
     }
 
@@ -7320,7 +7313,7 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     }
 
     /* Q/K/V for the whole chunk. */
-    double t_qkv0 = pf_now();
+    double t_qkv0 = oc_clock_mono_sec();
     mm_batch(&L->attn_q, b->normed, b->n_embd, b->q,     b->n_qo,   n, b);
     mm_batch(&L->attn_k, b->normed, b->n_embd, b->k_buf, b->kv_row, n, b);
     if (L->attn_v_exps.data != NULL && b->mova.n_exp > 0) {
@@ -7336,8 +7329,8 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     if (c->attn_out_gate && L->attn_gate.data != NULL) {
         mm_batch(&L->attn_gate, b->normed, b->n_embd, b->mgate, b->n_qo, n, b);
     }
-    g_pf_t.qkv += pf_now() - t_qkv0;
-    double t_rk0 = pf_now();
+    g_pf_t.qkv += oc_clock_mono_sec() - t_qkv0;
+    double t_rk0 = oc_clock_mono_sec();
 
     /* Per-token: biases, Q/K norms, RoPE, KV cache write. */
     for (size_t j = 0; j < n; j++) {
@@ -7444,7 +7437,7 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
         kv_store_pos(s, layer, pos, kj, vj, b->dequant_temp);
     }
 
-    g_pf_t.rope_kv += pf_now() - t_rk0;
+    g_pf_t.rope_kv += oc_clock_mono_sec() - t_rk0;
 
     /* Attention over the whole chunk, parallel across (token, head).
      *
@@ -7454,7 +7447,7 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
      * batched matmuls just saved — for a 500-token chunk it is ~200 GB of
      * cache reads on one core. Each pair writes only its own head slice of
      * attn_out, so there is nothing to synchronize. */
-    double t0 = pf_now();
+    double t0 = oc_clock_mono_sec();
     AttnJob ajob = { s, b, layer, pos0, hd, c->n_head, NULL,
                      c->attn_out_gate ? b->mgate : NULL, OC_OK,
                      c->attn_gate_kind };
@@ -7492,7 +7485,7 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     } else {
         (void)prefill_attention(&ajob, n);
     }
-    g_pf_t.attn += pf_now() - t0;
+    g_pf_t.attn += oc_clock_mono_sec() - t0;
     if (atomic_load(&ajob.error) != OC_OK) {
         OcError ae = (OcError)atomic_load(&ajob.error);
         if (use_compressed_attn(s, layer))
@@ -7501,9 +7494,9 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
     }
 
     /* Output projection + residual. */
-    double t_pr0 = pf_now();
+    double t_pr0 = oc_clock_mono_sec();
     mm_batch(&L->attn_output, b->attn_out, b->n_qo, b->proj, b->n_embd, n, b);
-    g_pf_t.proj += pf_now() - t_pr0;
+    g_pf_t.proj += oc_clock_mono_sec() - t_pr0;
     for (size_t j = 0; j < n; j++) {
         float *p = b->proj + j * b->n_embd;
         if (L->post_attention_norm != NULL) {
@@ -7525,14 +7518,14 @@ static OcError prefill_layer(OcLlamaSession *s, uint32_t layer, PrefillBuf *b,
         }
     }
 
-    double t_f0 = pf_now();
+    double t_f0 = oc_clock_mono_sec();
     if (c->num_experts > 0 && L->ffn_gate_inp.data != NULL &&
         L->ffn_gate_exps.data != NULL) {
         prefill_moe_ffn(s, L, b, n);
     } else {
         prefill_dense_ffn(s, L, b, n);
     }
-    g_pf_t.ffn += pf_now() - t_f0;
+    g_pf_t.ffn += oc_clock_mono_sec() - t_f0;
 
     if (L->layer_output_scale != 0.0f && L->layer_output_scale != 1.0f) {
         const float os = L->layer_output_scale;
@@ -8182,7 +8175,7 @@ static OcError q4e_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
     const uint32_t t = oc_argmax(logits, V);
     uint32_t d[OC_K2_MTP_MAX_K];
     uint32_t g[OC_K2_MTP_MAX_K + 1];
-    double t0 = k2m_now();
+    double t0 = oc_clock_mono_sec();
 
     /* RQ cache: this step stores main rows at P..P+k and head rows up to
      * P+1+k. Checkpoint the ring pages so rejected rows can be undone
@@ -8225,7 +8218,7 @@ static OcError q4e_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
         K->draft = q4e_mtp_head_argmax(sess, K->s_prev, K->lg_draft);
         K->have_draft = true;
     }
-    double t1 = k2m_now();
+    double t1 = oc_clock_mono_sec();
     if (st) st->t_mtp += t1 - t0;
     if (k > 0) {
         d[0] = K->draft;
@@ -8243,7 +8236,7 @@ static OcError q4e_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
             d[i] = q4e_mtp_head_argmax(sess, K->s_prev, K->lg_draft);
         }
     }
-    double t2 = k2m_now();
+    double t2 = oc_clock_mono_sec();
     if (st) st->t_draft += t2 - t1;
 
     /* Verify [t, d_1..d_k] in one batched forward with per-row state
@@ -8261,7 +8254,7 @@ static OcError q4e_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
     for (uint32_t i = 0; i <= k; i++)
         g[i] = oc_argmax(K->lg + (size_t)i * V, V);
     const uint32_t acc = oc_mtp_accept_prefix(d, g, k);
-    double t3 = k2m_now();
+    double t3 = oc_clock_mono_sec();
     if (st) st->t_verify += t3 - t2;
     {
         static int dbg = -1;
@@ -8338,7 +8331,7 @@ static OcError q4e_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
            hc_dim * sizeof(float));
     K->synced_pos = P2;
     if (st) {
-        st->t_mtp += k2m_now() - t3;
+        st->t_mtp += oc_clock_mono_sec() - t3;
         st->steps++;
         st->drafted += k;
         st->accepted += acc;
@@ -8520,12 +8513,12 @@ static OcError k2_main_rows(OcLlamaSession *s, PrefillBuf *b,
                              b->rope_sin + j * (b->rope_half + 1u));
     }
     memset(&g_pf_t, 0, sizeof g_pf_t);
-    const double t0 = pf_now();
+    const double t0 = oc_clock_mono_sec();
     for (uint32_t l = 0; l < c->n_layer; l++) {
         OcError e = prefill_layer(s, l, b, n, pos0);
         if (e != OC_OK) return e;
     }
-    const double t1 = pf_now();
+    const double t1 = oc_clock_mono_sec();
     for (size_t j = 0; j < n; j++)
         model_rms_norm(c, b->x + j * D, m->final_norm, hid + j * D);
     if (lg != NULL) {
@@ -8534,7 +8527,7 @@ static OcError k2_main_rows(OcLlamaSession *s, PrefillBuf *b,
                "mtp verify n=%zu (ms): layers=%.1f head=%.1f | qkv=%.1f "
                "rope_kv=%.1f attn=%.1f proj=%.1f router=%.1f gather=%.1f "
                "expert_mm=%.1f scatter=%.1f", n, (t1 - t0) * 1e3,
-               (pf_now() - t1) * 1e3, g_pf_t.qkv * 1e3, g_pf_t.rope_kv * 1e3,
+               (oc_clock_mono_sec() - t1) * 1e3, g_pf_t.qkv * 1e3, g_pf_t.rope_kv * 1e3,
                g_pf_t.attn * 1e3, g_pf_t.proj * 1e3, g_pf_t.router * 1e3,
                g_pf_t.gather * 1e3, g_pf_t.expert_mm * 1e3,
                g_pf_t.scatter * 1e3);
@@ -8630,13 +8623,6 @@ OcError oc_llama_mtp_kv_row(const OcLlamaSession *sess, int64_t pos,
     return OC_OK;
 }
 
-static double k2m_now(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
                           uint32_t *out_tokens, size_t max_out, size_t *n_out,
                           OcMtpStats *st)
@@ -8667,7 +8653,7 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
     const uint32_t t = oc_argmax(logits, V);
     uint32_t d[OC_K2_MTP_MAX_K];
     uint32_t g[OC_K2_MTP_MAX_K + 1];
-    double t0 = k2m_now();
+    double t0 = oc_clock_mono_sec();
 
     /* RQ cache: this step stores rows at P..P+k+1 (main verify rows up to
      * P+k, head rows up to P+1+k). Each overwrites the exact-ring slot of
@@ -8710,7 +8696,7 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
         K->draft = k2_mtp_head_argmax(sess, K->s_prev, K->lg_draft);
         K->have_draft = true;
     }
-    double t1 = k2m_now();
+    double t1 = oc_clock_mono_sec();
     if (st) st->t_mtp += t1 - t0;
     if (k > 0) {
         d[0] = K2_MTP_HOOK(K, P + 1, K->draft);
@@ -8728,7 +8714,7 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
             d[i] = K2_MTP_HOOK(K, P + 1 + (int64_t)i, d[i]);
         }
     }
-    double t2 = k2m_now();
+    double t2 = oc_clock_mono_sec();
     if (st) st->t_draft += t2 - t1;
 
     /* Verify [t, d_1..d_k] in one batched forward. */
@@ -8744,7 +8730,7 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
     }
     for (uint32_t i = 0; i <= k; i++) g[i] = oc_argmax(K->lg + (size_t)i * V, V);
     const uint32_t acc = oc_mtp_accept_prefix(d, g, k);
-    double t3 = k2m_now();
+    double t3 = oc_clock_mono_sec();
     if (st) st->t_verify += t3 - t2;
 
     out_tokens[(*n_out)++] = t;
@@ -8793,7 +8779,7 @@ OcError oc_llama_mtp_step(OcLlamaSession *sess, uint32_t k, float *logits,
     memcpy(sess->mtp_hidden, K->hid + (size_t)acc * D, D * sizeof(float));
     K->synced_pos = P2;
     if (st) {
-        st->t_mtp += k2m_now() - t3;
+        st->t_mtp += oc_clock_mono_sec() - t3;
         st->steps++;
         st->drafted += k;
         st->accepted += acc;

@@ -21,6 +21,7 @@
  * Compile: cc -std=c11 -Wall -Wextra -Werror -O2 -c src/cli/commands.c -I include
  */
 #include "oxidize/cli_commands.h"
+#include "oxidize/util/clock.h"
 
 #include "args.h"
 #include "oxidize/autotune.h"
@@ -63,13 +64,6 @@
 #include <sys/stat.h>
 
 /* ─── Helpers ──────────────────────────────────────────────────────────── */
-
-static double wall_now(void)
-{
-    struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
 
 /* Case-insensitive string equality. */
 static bool ieq(const char *a, const char *b)
@@ -775,9 +769,9 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         }
         float *logits = sess.logits;
 
-        double pf_start = wall_now();
+        double pf_start = oc_clock_wall_sec();
         e = oc_llama_prefill(&sess, bench_ids, n_ids, 0, logits);
-        double pf_elapsed = wall_now() - pf_start;
+        double pf_elapsed = oc_clock_wall_sec() - pf_start;
         if (e != OC_OK) {
             cli_error("benchmark prefill failed (%s)", oc_error_msg(e));
             oc_llama_session_free(&sess);
@@ -787,7 +781,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
         double pf_tps = (pf_elapsed > 0)
                       ? (double)n_ids / pf_elapsed : 0.0;
 
-        double start = wall_now();
+        double start = oc_clock_wall_sec();
         size_t emitted = 0;
         while (emitted < decode_tokens) {
             uint32_t toks[8];
@@ -810,7 +804,7 @@ OcError oc_cli_run_bench(OcCliContext *ctx)
                 emitted += n;
             }
         }
-        double elapsed = wall_now() - start;
+        double elapsed = oc_clock_wall_sec() - start;
         double tps = (elapsed > 0) ? (double)emitted / elapsed : 0.0;
 
         if (iter >= ctx->bench_warmup && ctx->output_format == OC_CLI_OUTPUT_JSON) {
@@ -1828,13 +1822,6 @@ OcError oc_cli_run_serve_realtime(OcCliContext *ctx)
 
 #include <time.h>
 
-static double dflash2_now_sec(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 /* Deterministic LCG so runs are reproducible without a real target. */
 static uint32_t dflash2_lcg(uint32_t *s)
 {
@@ -1936,13 +1923,13 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     }
 
     OcDFlash2Model model;
-    double t0 = dflash2_now_sec();
+    double t0 = oc_clock_mono_sec();
     OcError e = oc_dflash2_model_load(&model, st_path, cfg_path);
     if (e != OC_OK) {
         cli_error("failed to load DFlash2 checkpoint (%s)", oc_error_msg(e));
         return e;
     }
-    double load_s = dflash2_now_sec() - t0;
+    double load_s = oc_clock_mono_sec() - t0;
     cli_info("draft loaded in %.2fs (5 layers, hidden %zu, vocab %zu)",
              load_s, model.cfg.hidden_size, model.cfg.vocab_size);
 
@@ -2087,13 +2074,13 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
     double bb_total = 0.0;
     if (bb_hidden) {
         for (uint32_t it = 0; it < iters; it++) {
-            double s0 = dflash2_now_sec();
+            double s0 = oc_clock_mono_sec();
             if (oc_dflash2_forward_debug(&model, noise, block, bb_hidden)
                     != OC_OK) {
                 s0 = 0.0; /* exclude failed calls from the average */
                 break;
             }
-            bb_total += dflash2_now_sec() - s0;
+            bb_total += oc_clock_mono_sec() - s0;
         }
     }
     double bb_avg = iters ? bb_total / (double)iters : 0.0;
@@ -2122,10 +2109,10 @@ OcError oc_cli_run_dflash2(OcCliContext *ctx)
         if (e != OC_OK) break;
         anchors[0] = block_ids[0];
 
-        double s0 = dflash2_now_sec();
+        double s0 = oc_clock_mono_sec();
         e = oc_dflash2_propose(&model, anchors, 1, noise, block, block_ids,
                                &lm, 0.0f, out_tok, out_cand, out_probs);
-        double dt = dflash2_now_sec() - s0;
+        double dt = oc_clock_mono_sec() - s0;
         if (e != OC_OK) break;
         if (it >= warmup) {
             total += dt;

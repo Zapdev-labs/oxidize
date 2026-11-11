@@ -6,6 +6,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "oxidize/mesh_progress.h"
+#include "oxidize/util/string.h"
 
 #include <math.h>
 #include <string.h>
@@ -13,19 +14,6 @@
 /* ------------------------------------------------------------------ */
 /* Helpers.                                                            */
 /* ------------------------------------------------------------------ */
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0) return;
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 static bool state_valid(OcProgressState s)
 {
@@ -70,8 +58,8 @@ OcError oc_mesh_progress_add(OcMeshProgressTracker *tracker,
 
     OcMeshProgress *e = &tracker->entries[tracker->count];
     memset(e, 0, sizeof(*e));
-    copy_str(e->node_id, sizeof(e->node_id), node_id);
-    copy_str(e->task_id, sizeof(e->task_id), task_id);
+    oc_str_copy(e->node_id, sizeof(e->node_id), node_id);
+    oc_str_copy(e->task_id, sizeof(e->task_id), task_id);
     e->state = OC_PROGRESS_PENDING;
     e->progress = 0.0f;
     e->message[0] = '\0';
@@ -93,7 +81,7 @@ OcError oc_mesh_progress_update(OcMeshProgressTracker *tracker,
 
     e->state = state;
     e->progress = clamp01(progress);
-    if (message) copy_str(e->message, sizeof(e->message), message);
+    if (message) oc_str_copy(e->message, sizeof(e->message), message);
     e->updated_at = tracker->clock;
     tracker->clock++;
     return OC_OK;

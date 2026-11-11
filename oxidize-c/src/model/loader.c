@@ -15,6 +15,7 @@
 #include "oxidize/gguf.h"
 #include "oxidize/model.h"
 #include "oxidize/model_loader.h"
+#include "oxidize/util/string.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,19 +41,10 @@ static const char *const OC_LOADER_ARCHS[] = {
 
 /* ─── Helpers ───────────────────────────────────────────────────────── */
 
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) return;
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 static void set_error(OcLoaderResult *result, const char *msg)
 {
     if (!result || !msg) return;
-    copy_str(result->error_msg, sizeof(result->error_msg), msg);
+    oc_str_copy(result->error_msg, sizeof(result->error_msg), msg);
     result->loaded = false;
 }
 
@@ -95,7 +87,7 @@ OcError oc_loader_load(const char *path, OcLoaderResult *result)
     }
 
     /* Populate the result from the loaded metadata. */
-    copy_str(result->arch_name, sizeof(result->arch_name), ml.metadata.arch);
+    oc_str_copy(result->arch_name, sizeof(result->arch_name), ml.metadata.arch);
     result->n_tensors = (uint32_t)ml.n_tensors;
     result->n_layers = ml.metadata.n_layers;
     result->model_size = ml.file_size;
@@ -136,7 +128,7 @@ OcError oc_loader_load_with_arch(const char *path, const char *arch,
     /* If the detected arch was empty (no general.architecture key), stamp
      * the requested architecture into the result. */
     if (result->arch_name[0] == '\0') {
-        copy_str(result->arch_name, sizeof(result->arch_name), arch);
+        oc_str_copy(result->arch_name, sizeof(result->arch_name), arch);
     }
 
     return OC_OK;
@@ -158,7 +150,7 @@ OcError oc_loader_detect_arch(const char *path, char *out_arch,
     size_t arch_len = 0;
     if (oc_gguf_metadata_get_str(&gguf, "general.architecture",
                                   &arch_str, &arch_len) && arch_str) {
-        copy_str(out_arch, out_size, arch_str);
+        oc_str_copy(out_arch, out_size, arch_str);
     }
 
     oc_gguf_free(&gguf);

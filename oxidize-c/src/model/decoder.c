@@ -48,12 +48,6 @@ static bool is_eos_token(const char *text)
 
 /* ─── String helpers ────────────────────────────────────────────────────── */
 
-__attribute__((unused))
-static size_t str_len(const char *s)
-{
-    return s ? strlen(s) : 0;
-}
-
 /* Append src to dst at position *pos, up to out_size - 1 chars. Updates *pos.
  * Returns OC_ERR_OOM if not enough space (still writes what fits). */
 static OcError append_str(char *dst, size_t out_size, size_t *pos,

@@ -9,6 +9,7 @@
 #include "oxidize/parallel.h"
 #include "oxidize/safetensors.h"
 #include "oxidize/simd.h"
+#include "oxidize/util/clock.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -2473,13 +2474,6 @@ OcError oc_eagle4_train_safetensors(OcEagle4Draft *m, const char *examples_path,
     return OC_OK;
 }
 
-static double now_sec(void)
-{
-    struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 static void fill_unit(float *p, size_t n, uint32_t *seed)
 {
     size_t i;
@@ -2535,17 +2529,17 @@ OcError oc_eagle4_bench(int iters, OcEagle4BenchReport *out)
 
     m.full_lm_head = true;
     fill_head(&m, impl_of(&m)->g);
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) fill_head(&m, impl_of(&m)->g);
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->head_full_us = (t1 - t0) * 1e6 / (double)iters;
 
     m.full_lm_head = false;
     oc_eagle4_reset_stats(&m);
     fill_head(&m, impl_of(&m)->g);
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) fill_head(&m, impl_of(&m)->g);
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->head_lowrank_us = (t1 - t0) * 1e6 / (double)iters;
     if (out->head_lowrank_us > 0.0)
         out->head_speedup = out->head_full_us / out->head_lowrank_us;
@@ -2565,20 +2559,20 @@ OcError oc_eagle4_bench(int iters, OcEagle4BenchReport *out)
     fill_unit(q, heads * hd, &seed);
     fill_unit(k, seq * heads * hd, &seed);
     fill_unit(v, seq * heads * hd, &seed);
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) {
         oc_flash_attention_decode_heads_f32(q, k, v, seq, hd, heads * hd, heads, heads, ao);
     }
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->attn_full_us = (t1 - t0) * 1e6 / (double)iters;
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) {
         size_t start = seq - window;
         oc_flash_attention_decode_heads_f32(
             q, k + start * heads * hd, v + start * heads * hd, window, hd,
             heads * hd, heads, heads, ao);
     }
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->attn_window_us = (t1 - t0) * 1e6 / (double)iters;
     if (out->attn_window_us > 0.0)
         out->attn_speedup = out->attn_full_us / out->attn_window_us;

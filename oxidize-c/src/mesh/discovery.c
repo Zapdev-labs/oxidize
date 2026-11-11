@@ -8,6 +8,7 @@
 #define _DARWIN_C_SOURCE 1  /* BSD socket opts (IP_MULTICAST_TTL, etc.) on macOS */
 #endif
 #include "oxidize/discovery.h"
+#include "oxidize/util/string.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -17,15 +18,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 OcError oc_discovery_init(OcDiscoveryState *state, uint64_t self_id,
                          const char *multicast_addr, uint16_t port)
 {
@@ -33,7 +25,7 @@ OcError oc_discovery_init(OcDiscoveryState *state, uint64_t self_id,
     memset(state, 0, sizeof(*state));
     state->self_id = self_id;
     if (multicast_addr)
-        copy_str(state->multicast_addr, sizeof(state->multicast_addr), multicast_addr);
+        oc_str_copy(state->multicast_addr, sizeof(state->multicast_addr), multicast_addr);
     else
         strcpy(state->multicast_addr, "239.0.0.1");
     state->port = port ? port : 7946;
@@ -56,7 +48,7 @@ OcError oc_discovery_add_seed(OcDiscoveryState *state, uint64_t id,
     OcPeerInfo *p = &state->peers[state->n_peers];
     memset(p, 0, sizeof(*p));
     p->id = id;
-    copy_str(p->addr, sizeof(p->addr), addr);
+    oc_str_copy(p->addr, sizeof(p->addr), addr);
     p->port = port;
     p->alive = false;
     p->last_seen_ms = 0;
@@ -112,7 +104,7 @@ OcError oc_discovery_receive_peer(OcDiscoveryState *state, uint64_t id,
             state->peers[i].alive = true;
             state->peers[i].last_seen_ms = state->current_ms;
             state->peers[i].capabilities = capabilities;
-            copy_str(state->peers[i].addr, sizeof(state->peers[i].addr), addr);
+            oc_str_copy(state->peers[i].addr, sizeof(state->peers[i].addr), addr);
             state->peers[i].port = port;
             return OC_OK;
         }
@@ -123,7 +115,7 @@ OcError oc_discovery_receive_peer(OcDiscoveryState *state, uint64_t id,
     OcPeerInfo *p = &state->peers[state->n_peers];
     memset(p, 0, sizeof(*p));
     p->id = id;
-    copy_str(p->addr, sizeof(p->addr), addr);
+    oc_str_copy(p->addr, sizeof(p->addr), addr);
     p->port = port;
     p->capabilities = capabilities;
     p->alive = true;

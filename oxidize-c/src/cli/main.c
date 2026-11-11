@@ -37,6 +37,7 @@
 #include "oxidize/quantize_tool.h"
 #include "oxidize/sampling.h"
 #include "oxidize/tokenizer.h"
+#include "oxidize/util/clock.h"
 
 #include "args.h"
 
@@ -93,13 +94,6 @@ static void init_compute_threads(int requested)
     }
     oc_log(OC_LOG_INFO, "parallel: %zu compute threads",
            oc_parallel_n_threads());
-}
-
-static double wall_now(void)
-{
-    struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
 /* Flag parsing + OcCliArgs live in args.c (extracted for testability). */
@@ -504,7 +498,7 @@ static OcError run_generation(const OcCliArgs *args)
      * CUDA batched prefill runtime. */
     float *logits = sess.logits;
     uint32_t next_tok = ids[n_ids - 1];
-    const double prefill_start = wall_now();
+    const double prefill_start = oc_clock_wall_sec();
     if (use_cuda) {
         if (fast_cuda) {
             /* One async submission for the whole prompt: batched weight
@@ -552,7 +546,7 @@ static OcError run_generation(const OcCliArgs *args)
         }
     }
     if (e == OC_OK) {
-        const double pf = wall_now() - prefill_start;
+        const double pf = oc_clock_wall_sec() - prefill_start;
         if (pf > 0.0) {
             oc_log(OC_LOG_INFO, "prefill: %zu tokens in %.3fs = %.2f tok/s",
                    n_ids, pf, (double)n_ids / pf);
@@ -582,7 +576,7 @@ static OcError run_generation(const OcCliArgs *args)
             e = oc_cuda_fast_take(&cuda_ctx, 1, fast_ring);
             if (e == OC_OK) fast_have = 1;
         }
-        double decode_start = wall_now();
+        double decode_start = oc_clock_wall_sec();
         while (emitted < (size_t)args->n_predict && !eos_reached && e == OC_OK) {
             uint32_t sampled;
             if (k2_mtp) {
@@ -752,7 +746,7 @@ static OcError run_generation(const OcCliArgs *args)
                    oc_expert_stream_fault_ms(model.expert_stream));
         }
         if (decode_start > 0 && emitted > 0) {
-            double elapsed = wall_now() - decode_start;
+            double elapsed = oc_clock_wall_sec() - decode_start;
             if (elapsed > 0) {
                 double tps = (double)emitted / elapsed;
                 fprintf(stderr, "\n%.2f tok/s (%zu tokens in %.3fs)\n",
@@ -1285,7 +1279,7 @@ int main(int argc, char **argv)
                 setup_failed = 1;
                 break;
             }
-            double start = wall_now();
+            double start = oc_clock_wall_sec();
             size_t emitted = 0;
             while (emitted < (size_t)args.n_predict) {
                 uint32_t sampled = oc_argmax(logits, model.cfg.vocab_size);
@@ -1293,10 +1287,10 @@ int main(int argc, char **argv)
                 emitted++;
                 if (oc_llama_forward(&sess, sampled, logits) != OC_OK) break;
             }
-            double elapsed = wall_now() - start;
+            double elapsed = oc_clock_wall_sec() - start;
             double tps = (elapsed > 0) ? (double)emitted / elapsed : 0.0;
             /* Also measure prompt processing (prefill) speed. */
-            double pf_start = wall_now();
+            double pf_start = oc_clock_wall_sec();
             OcLlamaSession pf_sess;
             memset(&pf_sess, 0, sizeof(pf_sess));
             if (oc_llama_session_init_with_compress(&model, &pf_sess, bench_kv,
@@ -1304,7 +1298,7 @@ int main(int argc, char **argv)
                 for (size_t i = 0; i < n_ids; i++)
                     oc_llama_forward(&pf_sess, ids[i], NULL);
             }
-            double pf_elapsed = wall_now() - pf_start;
+            double pf_elapsed = oc_clock_wall_sec() - pf_start;
             double pf_tps = (pf_elapsed > 0) ? (double)n_ids / pf_elapsed : 0.0;
             oc_llama_session_free(&pf_sess);
             printf("  iter %d: %zu tokens in %.3fs = %.2f tok/s (prefill: %.2f tok/s)\n",

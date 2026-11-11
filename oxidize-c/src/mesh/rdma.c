@@ -3,24 +3,16 @@
  * staging-buffer design note.
  */
 #include "oxidize/rdma.h"
+#include "oxidize/util/string.h"
 
 #include <stdlib.h>
 #include <string.h>
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 OcError oc_rdma_init(OcRdmaDevice *dev, const char *device_name)
 {
     if (!dev) return OC_ERR_INVALID_ARG;
     memset(dev, 0, sizeof(*dev));
-    if (device_name) copy_str(dev->device_name, sizeof(dev->device_name), device_name);
+    if (device_name) oc_str_copy(dev->device_name, sizeof(dev->device_name), device_name);
     else strcpy(dev->device_name, "ib0");
     dev->active = false;
     dev->port = 0;

@@ -7,16 +7,6 @@
 #include <string.h>
 #include <stdio.h>
 
-__attribute__((unused))
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 OcError oc_inf_config_init(OcInfConfig *cfg)
 {
     if (!cfg) return OC_ERR_INVALID_ARG;
