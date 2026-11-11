@@ -2,6 +2,7 @@
  * dflash.c — DFlash speculative decoding implementation.
  */
 #include "oxidize/dflash.h"
+#include "arch_ops.h"
 #include "oxidize/flash_attention.h"
 
 #include <math.h>
@@ -153,57 +154,6 @@ size_t oc_dflash_config_target_hidden_width(const OcDFlashModelConfig *cfg)
     return cfg->hidden_size * cfg->num_target_layers;
 }
 
-static void dflash_gemv(const float *w, size_t rows, size_t cols,
-                        const float *x, float *out)
-{
-    for (size_t r = 0; r < rows; r++) {
-        const float *wrow = w + r * cols;
-        float dot = 0.0f;
-        for (size_t c = 0; c < cols; c++)
-            dot += wrow[c] * x[c];
-        out[r] = dot;
-    }
-}
-
-static void dflash_rms_norm(const float *x, const float *weight, float *out,
-                             size_t n, float eps)
-{
-    float ss = 0.0f;
-    for (size_t i = 0; i < n; i++) ss += x[i] * x[i];
-    float rms = 1.0f / sqrtf(ss / n + eps);
-    for (size_t i = 0; i < n; i++) out[i] = x[i] * rms * weight[i];
-}
-
-static float dflash_silu(float x)
-{
-    return x / (1.0f + expf(-x));
-}
-
-static void dflash_apply_rope(float *q, float *k, size_t n_heads, size_t n_kv_heads,
-                               size_t head_dim, size_t pos, float theta)
-{
-    for (size_t h = 0; h < n_heads; h++) {
-        float *qh = q + h * head_dim;
-        for (size_t d = 0; d < head_dim; d += 2) {
-            float freq = pos / powf(theta, (float)(d / 2) / (float)(head_dim / 2));
-            float c = cosf(freq), s = sinf(freq);
-            float q0 = qh[d], q1 = qh[d + 1];
-            qh[d]     = q0 * c - q1 * s;
-            qh[d + 1] = q0 * s + q1 * c;
-        }
-    }
-    for (size_t h = 0; h < n_kv_heads; h++) {
-        float *kh = k + h * head_dim;
-        for (size_t d = 0; d < head_dim; d += 2) {
-            float freq = pos / powf(theta, (float)(d / 2) / (float)(head_dim / 2));
-            float c = cosf(freq), s = sinf(freq);
-            float k0 = kh[d], k1 = kh[d + 1];
-            kh[d]     = k0 * c - k1 * s;
-            kh[d + 1] = k0 * s + k1 * c;
-        }
-    }
-}
-
 OcError oc_dflash_model_init(OcDFlashDraftModel *m, const OcDFlashModelConfig *cfg)
 {
     if (!m || !cfg) return OC_ERR_INVALID_ARG;
@@ -299,14 +249,14 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
     if (target_hidden && target_hidden_len > 0 && m->fc.data) {
         float *fused = malloc(h * sizeof(float));
         if (!fused) { free(hidden); return OC_ERR_OOM; }
-        dflash_gemv(m->fc.data, h, target_hidden_len, target_hidden, fused);
+        oc_arch_matvec(m->fc.data, target_hidden, fused, h, target_hidden_len);
         if (m->fc_bias) {
             for (size_t i = 0; i < h; i++) fused[i] += m->fc_bias[i];
         }
         if (m->hidden_norm) {
             float *normed = malloc(h * sizeof(float));
             if (!normed) { free(hidden); free(fused); return OC_ERR_OOM; }
-            dflash_rms_norm(fused, m->hidden_norm, normed, h, cfg->rms_norm_eps);
+            oc_arch_rms_norm(fused, m->hidden_norm, normed, h, cfg->rms_norm_eps);
             free(fused);
             target_context = normed;
         } else {
@@ -326,7 +276,7 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
         float *normed = malloc(h * sizeof(float));
         if (!normed) { free(hidden); free(target_context); return OC_ERR_OOM; }
         if (layer->input_layernorm)
-            dflash_rms_norm(hidden, layer->input_layernorm, normed, h, cfg->rms_norm_eps);
+            oc_arch_rms_norm(hidden, layer->input_layernorm, normed, h, cfg->rms_norm_eps);
         else
             memcpy(normed, hidden, h * sizeof(float));
 
@@ -340,14 +290,14 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
             return OC_ERR_OOM;
         }
         if (layer->attention.q_proj.data)
-            dflash_gemv(layer->attention.q_proj.data, q_size, h, normed, q);
+            oc_arch_matvec(layer->attention.q_proj.data, normed, q, q_size, h);
         if (layer->attention.k_proj.data)
-            dflash_gemv(layer->attention.k_proj.data, kv_size, h, normed, k);
+            oc_arch_matvec(layer->attention.k_proj.data, normed, k, kv_size, h);
         if (layer->attention.v_proj.data)
-            dflash_gemv(layer->attention.v_proj.data, kv_size, h, normed, v);
+            oc_arch_matvec(layer->attention.v_proj.data, normed, v, kv_size, h);
 
         /* RoPE. */
-        dflash_apply_rope(q, k, n_heads, n_kv_heads, layer_hd, m->position_offset, cfg->rope_theta);
+        oc_arch_rope_qk(q, k, n_heads, n_kv_heads, layer_hd, m->position_offset, cfg->rope_theta);
 
         /* KV cache append. */
         OcDFlashKvCache *cache = &m->kv_cache[li];
@@ -380,7 +330,7 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
             return OC_ERR_OOM;
         }
         if (layer->attention.o_proj.data && layer->attention.o_proj.rows == h)
-            dflash_gemv(layer->attention.o_proj.data, h, q_size, attn_out, attn_resid);
+            oc_arch_matvec(layer->attention.o_proj.data, attn_out, attn_resid, h, q_size);
         else if (q_size == h)
             memcpy(attn_resid, attn_out, h * sizeof(float));
         else
@@ -395,7 +345,7 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
             return OC_ERR_OOM;
         }
         if (layer->post_attention_layernorm)
-            dflash_rms_norm(hidden, layer->post_attention_layernorm, normed_ffn, h, cfg->rms_norm_eps);
+            oc_arch_rms_norm(hidden, layer->post_attention_layernorm, normed_ffn, h, cfg->rms_norm_eps);
         else
             memcpy(normed_ffn, hidden, h * sizeof(float));
 
@@ -411,14 +361,14 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
             return OC_ERR_OOM;
         }
         if (layer->mlp_gate.data)
-            dflash_gemv(layer->mlp_gate.data, inter, h, normed_ffn, gate_out);
+            oc_arch_matvec(layer->mlp_gate.data, normed_ffn, gate_out, inter, h);
         else memset(gate_out, 0, inter * sizeof(float));
         if (layer->mlp_up.data)
-            dflash_gemv(layer->mlp_up.data, inter, h, normed_ffn, up_out);
+            oc_arch_matvec(layer->mlp_up.data, normed_ffn, up_out, inter, h);
         else memset(up_out, 0, inter * sizeof(float));
-        for (size_t i = 0; i < inter; i++) act[i] = dflash_silu(gate_out[i]) * up_out[i];
+        for (size_t i = 0; i < inter; i++) act[i] = oc_arch_silu(gate_out[i]) * up_out[i];
         if (layer->mlp_down.data)
-            dflash_gemv(layer->mlp_down.data, h, inter, act, mlp_out);
+            oc_arch_matvec(layer->mlp_down.data, act, mlp_out, h, inter);
         else memset(mlp_out, 0, h * sizeof(float));
         for (size_t i = 0; i < h; i++) hidden[i] += mlp_out[i];
 
@@ -430,7 +380,7 @@ OcError oc_dflash_forward_token(OcDFlashDraftModel *m,
     if (m->norm) {
         float *normed = malloc(h * sizeof(float));
         if (!normed) { free(hidden); free(target_context); return OC_ERR_OOM; }
-        dflash_rms_norm(hidden, m->norm, normed, h, cfg->rms_norm_eps);
+        oc_arch_rms_norm(hidden, m->norm, normed, h, cfg->rms_norm_eps);
         memcpy(hidden, normed, h * sizeof(float));
         free(normed);
     }
@@ -458,13 +408,13 @@ OcError oc_dflash_logits(const OcDFlashDraftModel *m,
     float *normed = malloc(h * sizeof(float));
     if (!normed) return OC_ERR_OOM;
     if (m->norm)
-        dflash_rms_norm(hidden, m->norm, normed, h, m->config.rms_norm_eps);
+        oc_arch_rms_norm(hidden, m->norm, normed, h, m->config.rms_norm_eps);
     else
         memcpy(normed, hidden, h * sizeof(float));
 
     size_t vocab = m->config.vocab_size;
     if (m->output.data && m->output.rows == vocab && m->output.cols == h)
-        dflash_gemv(m->output.data, vocab, h, normed, out_logits);
+        oc_arch_matvec(m->output.data, normed, out_logits, vocab, h);
     else
         memset(out_logits, 0, logits_len * sizeof(float));
 

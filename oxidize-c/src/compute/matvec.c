@@ -7,6 +7,7 @@
  * AVX2/AVX-512 speedups on capable hosts.
  */
 #include "oxidize/matvec.h"
+#include "oxidize/util/checked.h"
 #include "oxidize/attn_kernels.h"
 #include "oxidize/flash_attention.h"
 #include "oxidize/oxk.h"
@@ -22,13 +23,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-static bool size_mul(size_t a, size_t b, size_t *out)
-{
-    if (a != 0 && b > SIZE_MAX / a) return false;
-    *out = a * b;
-    return true;
-}
 
 /* ─── Fused integer GEMV ─────────────────────────────────────────────────
  *
@@ -806,7 +800,7 @@ static void matvec_quant_slice(size_t begin, size_t end, size_t tid, void *ud)
     float *temp = j->temp;
     if (tid != 0) {
         size_t bytes;
-        if (!size_mul(j->cols, sizeof(float), &bytes)) return;
+        if (!oc_size_mul(j->cols, sizeof(float), &bytes)) return;
         temp = (float *)oc_parallel_scratch(tid, bytes);
         if (temp == NULL) return;   /* see the OOM note in the caller */
     }
@@ -839,7 +833,7 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
         return;
     }
     size_t temp_bytes;
-    if (!size_mul(cols, sizeof(float), &temp_bytes)) return;
+    if (!oc_size_mul(cols, sizeof(float), &temp_bytes)) return;
     /* Fused integer path, when the weight type has an OXK kernel and the row
      * divides evenly into blocks. The activation is quantized once here and
      * then shared by every row and every thread. */
@@ -849,9 +843,7 @@ void oc_matvec_quantized(OcGgufQuantizationType qtype, const uint8_t *data,
         const size_t blocks = (act_kind == ACT_Q8_K)
                             ? cols / OC_OXK_QK_K : cols / OC_OXK_QK8_0;
         size_t act_bytes;
-        if (!size_mul(blocks, (act_kind == ACT_Q8_K)
-                            ? OC_OXK_BLOCK_Q8_K_SIZE : OC_OXK_BLOCK_Q8_0_SIZE,
-                      &act_bytes))
+        if (!oc_size_mul(blocks, (act_kind == ACT_Q8_K) ? OC_OXK_BLOCK_Q8_K_SIZE : OC_OXK_BLOCK_Q8_0_SIZE, &act_bytes))
             act_kind = ACT_NONE;
         /* Only trust the fused kernel when the weight stride is exactly what
          * it assumes; a padded or interleaved row would be read wrong. */
@@ -981,7 +973,7 @@ static bool fused_stride_ok(OcGgufQuantizationType qtype, size_t blocks,
                         : (qtype == OC_QUANT_IQ1_XXXS) ? OC_BLOCK_IQ1_XXXS_SIZE
                         : (qtype == OC_QUANT_IQ3_S) ? OC_OXK_BLOCK_IQ3_S_SIZE
                                                    : OC_OXK_BLOCK_Q4_K_SIZE);
-    return size_mul(blocks, block_bytes, &expect) && row_bytes == expect;
+    return oc_size_mul(blocks, block_bytes, &expect) && row_bytes == expect;
 }
 
 /* Activations per tile, clamped so the tile always fits `budget` bytes. */
@@ -1001,8 +993,8 @@ size_t oc_matvec_batch_scratch_bytes(size_t max_cols)
      * fused_act_kind(), so the bound does not depend on `max_cols` itself
      * being block-aligned. */
     size_t q8k, q80;
-    if (!size_mul(max_cols / OC_OXK_QK_K, OC_OXK_BLOCK_Q8_K_SIZE, &q8k) ||
-        !size_mul(max_cols / OC_OXK_QK8_0, OC_OXK_BLOCK_Q8_0_SIZE, &q80))
+    if (!oc_size_mul(max_cols / OC_OXK_QK_K, OC_OXK_BLOCK_Q8_K_SIZE, &q8k) ||
+        !oc_size_mul(max_cols / OC_OXK_QK8_0, OC_OXK_BLOCK_Q8_0_SIZE, &q80))
         return SIZE_MAX;
     /* The quad path extends each Q8_0 activation with an f32 dq tail. */
     const size_t nb80 = max_cols / OC_OXK_QK8_0;
@@ -1234,7 +1226,7 @@ static void matvec_batch_dequant_slice(size_t begin, size_t end, size_t tid,
     float *temp = j->temp;
     if (tid != 0) {
         size_t bytes;
-        if (!size_mul(j->cols, sizeof(float), &bytes)) return;
+        if (!oc_size_mul(j->cols, sizeof(float), &bytes)) return;
         temp = (float *)oc_parallel_scratch(tid, bytes);
         if (temp == NULL) return;   /* pre-reserved by the caller */
     }
@@ -1270,7 +1262,7 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
 {
     if (n_vec == 0 || rows == 0) return;
     size_t temp_bytes;
-    if (!size_mul(cols, sizeof(float), &temp_bytes)) return;
+    if (!oc_size_mul(cols, sizeof(float), &temp_bytes)) return;
 
     ActKind act_kind = oc_matvec_fused_enabled()
                      ? fused_act_kind(qtype, cols) : ACT_NONE;
@@ -1278,14 +1270,14 @@ void oc_matvec_quantized_batch(OcGgufQuantizationType qtype,
                         ? act_blocks_for(act_kind, cols) : 0;
     size_t abytes = 0;
     if (act_kind != ACT_NONE &&
-        !size_mul(blocks, act_block_bytes(act_kind), &abytes))
+        !oc_size_mul(blocks, act_block_bytes(act_kind), &abytes))
         act_kind = ACT_NONE;
     /* The quad-blocked Q4_0/AL5 path wants the f32 dq tail per act. */
     size_t dq_off = 0;
     if (act_kind == ACT_Q8_0 &&
         (qtype == OC_QUANT_Q4_0 || qtype == OC_QUANT_AL5)) {
         size_t ext;
-        if (size_mul(blocks, 4u, &ext))
+        if (oc_size_mul(blocks, 4u, &ext))
             dq_off = act_dqf_off(blocks), abytes = dq_off + ext;
     }
     /* A buffer too small for even one activation cannot use the fused path. */
@@ -1551,7 +1543,7 @@ void oc_matvec_quantized_fused(const OcGgufQuantizationType *qtypes,
 
     if (compatible && total_rows != 0) {
         size_t act_bytes;
-        if (!size_mul(blocks, act_block_bytes(act_kind), &act_bytes))
+        if (!oc_size_mul(blocks, act_block_bytes(act_kind), &act_bytes))
             compatible = false;
         const bool use_qs = act_kind == ACT_Q8_0 && qtype_uses_qsums(qtype);
         const size_t want_bytes = use_qs
@@ -1623,7 +1615,7 @@ void oc_matvec_quantized_multi_input(
 
     if (compatible && total_rows != 0) {
         size_t one_act_bytes;
-        if (size_mul(blocks, act_block_bytes(act_kind), &one_act_bytes) &&
+        if (oc_size_mul(blocks, act_block_bytes(act_kind), &one_act_bytes) &&
             one_act_bytes != 0 && n_outs <= SIZE_MAX / one_act_bytes) {
             const size_t act_bytes = n_outs * one_act_bytes;
             /* qs arrays are per input, appended after the act regions. */

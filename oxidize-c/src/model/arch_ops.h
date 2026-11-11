@@ -1,11 +1,8 @@
 /*
- * arch_ops.h — small private helpers shared by the per-architecture
+ * arch_ops.h — small private scalar helpers shared by the per-architecture
  * reference engines (qwen_arch.c / mistral_arch.c / gemma_arch.c /
- * phi_arch.c). These engines are test/reference implementations; the
- * production inference path lives in llama.c / inf_model.c.
- *
- * Each helper is a byte-identical extraction of code that previously
- * appeared in all four files. No behavior change.
+ * phi_arch.c) and the draft models (dflash.c / dflash2.c / eagle3.c /
+ * eagle4.c). The production target forward lives in llama.c / inf_model.c.
  */
 #ifndef OXIDIZE_C_MODEL_ARCH_OPS_H
 #define OXIDIZE_C_MODEL_ARCH_OPS_H
@@ -59,6 +56,22 @@ static inline void oc_arch_rope_head(float *head, size_t head_dim,
         head[d] = h0 * c - h1 * s;
         head[d + 1] = h0 * s + h1 * c;
     }
+}
+
+/* RoPE over every query head and every key head of one token. */
+static inline void oc_arch_rope_qk(float *q, float *k, size_t n_heads,
+                                   size_t n_kv_heads, size_t head_dim,
+                                   size_t pos, float theta)
+{
+    for (size_t h = 0; h < n_heads; h++)
+        oc_arch_rope_head(q + h * head_dim, head_dim, pos, theta);
+    for (size_t h = 0; h < n_kv_heads; h++)
+        oc_arch_rope_head(k + h * head_dim, head_dim, pos, theta);
+}
+
+static inline float oc_arch_silu(float x)
+{
+    return x / (1.0f + expf(-x));
 }
 
 /* tanh-approximation GELU used by Gemma / Phi FFNs. */

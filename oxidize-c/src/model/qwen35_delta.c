@@ -1,4 +1,5 @@
 #include "oxidize/qwen35_delta.h"
+#include "oxidize/util/checked.h"
 
 #include "oxidize/attn_kernels.h"
 
@@ -129,13 +130,6 @@ static void delta_head_avx512(float *matrix, const float *q, const float *k,
 }
 #endif
 
-static bool checked_mul(size_t a, size_t b, size_t *out)
-{
-    if (a != 0 && b > SIZE_MAX / a) return false;
-    *out = a * b;
-    return true;
-}
-
 static bool geometry_sizes(const OcQwen35DeltaGeometry *g,
                            size_t *key_dim, size_t *value_dim,
                            size_t *conv_dim, size_t *conv_state_len,
@@ -147,15 +141,15 @@ static bool geometry_sizes(const OcQwen35DeltaGeometry *g,
         g->conv_kernel < 2 || g->n_value_heads % g->n_key_heads != 0) {
         return false;
     }
-    if (!checked_mul(g->n_key_heads, g->key_head_dim, key_dim) ||
-        !checked_mul(g->n_value_heads, g->value_head_dim, value_dim) ||
-        !checked_mul(*key_dim, 2, &twice_key) ||
+    if (!oc_size_mul(g->n_key_heads, g->key_head_dim, key_dim) ||
+        !oc_size_mul(g->n_value_heads, g->value_head_dim, value_dim) ||
+        !oc_size_mul(*key_dim, 2, &twice_key) ||
         twice_key > SIZE_MAX - *value_dim) {
         return false;
     }
     *conv_dim = twice_key + *value_dim;
-    if (!checked_mul(*conv_dim, g->conv_kernel - 1, conv_state_len) ||
-        !checked_mul(*value_dim, g->key_head_dim, recurrent_state_len)) {
+    if (!oc_size_mul(*conv_dim, g->conv_kernel - 1, conv_state_len) ||
+        !oc_size_mul(*value_dim, g->key_head_dim, recurrent_state_len)) {
         return false;
     }
     return true;

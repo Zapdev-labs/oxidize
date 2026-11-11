@@ -2,6 +2,7 @@
  * eagle3.c — Eagle-3 speculative decoding implementation.
  */
 #include "oxidize/eagle3.h"
+#include "arch_ops.h"
 #include "oxidize/flash_attention.h"
 
 #include <stdlib.h>
@@ -172,61 +173,6 @@ size_t oc_eagle3_config_encoder_input_width(const OcEagle3Config *cfg)
     return cfg->n_extract_layers * cfg->target_hidden_size;
 }
 
-/* Simple GEMV: out[m] = W[m,n] * x[n] */
-static void eagle3_gemv(const float *w, size_t rows, size_t cols,
-                         const float *x, float *out)
-{
-    for (size_t r = 0; r < rows; r++) {
-        const float *wrow = w + r * cols;
-        float dot = 0.0f;
-        for (size_t c = 0; c < cols; c++)
-            dot += wrow[c] * x[c];
-        out[r] = dot;
-    }
-}
-
-/* RMSNorm: out = x / rms(x) * weight */
-static void eagle3_rms_norm(const float *x, const float *weight, float *out,
-                             size_t n, float eps)
-{
-    float ss = 0.0f;
-    for (size_t i = 0; i < n; i++) ss += x[i] * x[i];
-    float rms = 1.0f / sqrtf(ss / n + eps);
-    for (size_t i = 0; i < n; i++) out[i] = x[i] * rms * weight[i];
-}
-
-/* Apply RoPE to q and k for a single position. */
-static void eagle3_apply_rope(float *q, float *k, size_t n_heads, size_t n_kv_heads,
-                               size_t head_dim, size_t pos, float theta)
-{
-    for (size_t h = 0; h < n_heads; h++) {
-        float *qh = q + h * head_dim;
-        for (size_t d = 0; d < head_dim; d += 2) {
-            float freq = pos / powf(theta, (float)(d / 2) / (float)(head_dim / 2));
-            float c = cosf(freq), s = sinf(freq);
-            float q0 = qh[d], q1 = qh[d + 1];
-            qh[d]     = q0 * c - q1 * s;
-            qh[d + 1] = q0 * s + q1 * c;
-        }
-    }
-    for (size_t h = 0; h < n_kv_heads; h++) {
-        float *kh = k + h * head_dim;
-        for (size_t d = 0; d < head_dim; d += 2) {
-            float freq = pos / powf(theta, (float)(d / 2) / (float)(head_dim / 2));
-            float c = cosf(freq), s = sinf(freq);
-            float k0 = kh[d], k1 = kh[d + 1];
-            kh[d]     = k0 * c - k1 * s;
-            kh[d + 1] = k0 * s + k1 * c;
-        }
-    }
-}
-
-/* SiLU: x * sigmoid(x) */
-static float silu(float x)
-{
-    return x / (1.0f + expf(-x));
-}
-
 OcError oc_eagle3_model_init(OcEagle3DraftModel *m, const OcEagle3Config *cfg)
 {
     if (!m || !cfg) return OC_ERR_INVALID_ARG;
@@ -273,7 +219,7 @@ OcError oc_eagle3_encode_features(OcEagle3DraftModel *m,
 
     size_t h = m->config.hidden_size;
     if (m->fc.data && m->fc.rows == h && m->fc.cols == expected) {
-        eagle3_gemv(m->fc.data, h, expected, target_features, m->g_embeddings);
+        oc_arch_matvec(m->fc.data, target_features, m->g_embeddings, h, expected);
     } else {
         /* No fc weight loaded - just copy first h elements. */
         size_t copy_len = n_features < h ? n_features : h;
@@ -297,7 +243,7 @@ OcError oc_eagle3_logits_from_hidden(const OcEagle3DraftModel *m,
     if (!normed) return OC_ERR_OOM;
 
     if (m->output_norm) {
-        eagle3_rms_norm(hidden, m->output_norm, normed, h, m->config.rms_norm_eps);
+        oc_arch_rms_norm(hidden, m->output_norm, normed, h, m->config.rms_norm_eps);
     } else {
         memcpy(normed, hidden, h * sizeof(float));
     }
@@ -305,7 +251,7 @@ OcError oc_eagle3_logits_from_hidden(const OcEagle3DraftModel *m,
     /* LM head GEMV. */
     size_t dv = m->config.draft_vocab_size;
     if (m->output.data && m->output.rows == dv && m->output.cols == h) {
-        eagle3_gemv(m->output.data, dv, h, normed, out_logits);
+        oc_arch_matvec(m->output.data, normed, out_logits, dv, h);
     } else {
         memset(out_logits, 0, logits_len * sizeof(float));
     }
@@ -362,7 +308,7 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     float *embd_norm = malloc(h * sizeof(float));
     if (!embd_norm) { free(embd); return OC_ERR_OOM; }
     if (m->layer.attn_norm)
-        eagle3_rms_norm(embd, m->layer.attn_norm, embd_norm, h, cfg->rms_norm_eps);
+        oc_arch_rms_norm(embd, m->layer.attn_norm, embd_norm, h, cfg->rms_norm_eps);
     else
         memcpy(embd_norm, embd, h * sizeof(float));
 
@@ -370,7 +316,7 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     float *g_norm = malloc(h * sizeof(float));
     if (!g_norm) { free(embd); free(embd_norm); return OC_ERR_OOM; }
     if (m->layer.attn_norm_2)
-        eagle3_rms_norm(m->g_embeddings, m->layer.attn_norm_2, g_norm, h, cfg->rms_norm_eps);
+        oc_arch_rms_norm(m->g_embeddings, m->layer.attn_norm_2, g_norm, h, cfg->rms_norm_eps);
     else
         memcpy(g_norm, m->g_embeddings, h * sizeof(float));
 
@@ -395,17 +341,17 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
     }
 
     if (m->layer.attention.q_proj.data)
-        eagle3_gemv(m->layer.attention.q_proj.data, q_size, concat_len, concat, q);
+        oc_arch_matvec(m->layer.attention.q_proj.data, concat, q, q_size, concat_len);
     else memset(q, 0, q_size * sizeof(float));
     if (m->layer.attention.k_proj.data)
-        eagle3_gemv(m->layer.attention.k_proj.data, kv_size, concat_len, concat, k);
+        oc_arch_matvec(m->layer.attention.k_proj.data, concat, k, kv_size, concat_len);
     else memset(k, 0, kv_size * sizeof(float));
     if (m->layer.attention.v_proj.data)
-        eagle3_gemv(m->layer.attention.v_proj.data, kv_size, concat_len, concat, v);
+        oc_arch_matvec(m->layer.attention.v_proj.data, concat, v, kv_size, concat_len);
     else memset(v, 0, kv_size * sizeof(float));
 
     /* 7. RoPE. */
-    eagle3_apply_rope(q, k, n_heads, n_kv_heads, hd, m->position_offset, cfg->rope_theta);
+    oc_arch_rope_qk(q, k, n_heads, n_kv_heads, hd, m->position_offset, cfg->rope_theta);
 
     /* 8. KV cache append. */
     OcEagle3KvCache *cache = &m->kv_caches[0];
@@ -440,7 +386,7 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         return OC_ERR_OOM;
     }
     if (m->layer.attention.o_proj.data && m->layer.attention.o_proj.rows == h)
-        eagle3_gemv(m->layer.attention.o_proj.data, h, q_size, attn_out, hidden);
+        oc_arch_matvec(m->layer.attention.o_proj.data, attn_out, hidden, h, q_size);
     else if (q_size == h)
         memcpy(hidden, attn_out, h * sizeof(float));
     else
@@ -456,11 +402,11 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         return OC_ERR_OOM;
     }
     if (m->layer.ffn_norm)
-        eagle3_rms_norm(hidden, m->layer.ffn_norm, normed_ffn, h, cfg->rms_norm_eps);
+        oc_arch_rms_norm(hidden, m->layer.ffn_norm, normed_ffn, h, cfg->rms_norm_eps);
     else
         memcpy(normed_ffn, hidden, h * sizeof(float));
 
-    /* 12. MLP: gate * silu(gate) * up -> down. */
+    /* 12. MLP: gate * oc_arch_silu(gate) * up -> down. */
     size_t inter = cfg->intermediate_size;
     float *gate_out = malloc(inter * sizeof(float));
     float *up_out = malloc(inter * sizeof(float));
@@ -472,12 +418,12 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         return OC_ERR_OOM;
     }
     if (m->layer.mlp_gate.data)
-        eagle3_gemv(m->layer.mlp_gate.data, inter, h, normed_ffn, gate_out);
+        oc_arch_matvec(m->layer.mlp_gate.data, normed_ffn, gate_out, inter, h);
     else memset(gate_out, 0, inter * sizeof(float));
     if (m->layer.mlp_up.data)
-        eagle3_gemv(m->layer.mlp_up.data, inter, h, normed_ffn, up_out);
+        oc_arch_matvec(m->layer.mlp_up.data, normed_ffn, up_out, inter, h);
     else memset(up_out, 0, inter * sizeof(float));
-    for (size_t i = 0; i < inter; i++) act[i] = silu(gate_out[i]) * up_out[i];
+    for (size_t i = 0; i < inter; i++) act[i] = oc_arch_silu(gate_out[i]) * up_out[i];
 
     float *mlp_out = malloc(h * sizeof(float));
     if (!mlp_out) {
@@ -487,7 +433,7 @@ OcError oc_eagle3_forward_decoder(OcEagle3DraftModel *m,
         return OC_ERR_OOM;
     }
     if (m->layer.mlp_down.data)
-        eagle3_gemv(m->layer.mlp_down.data, h, inter, act, mlp_out);
+        oc_arch_matvec(m->layer.mlp_down.data, act, mlp_out, h, inter);
     else memset(mlp_out, 0, h * sizeof(float));
     for (size_t i = 0; i < h; i++) hidden[i] += mlp_out[i];
 
