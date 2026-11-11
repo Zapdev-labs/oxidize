@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "oxidize/expert_stream.h"
+#include "oxidize/util/checked.h"
 
 #include "oxidize/llama.h"
 #include "oxidize/log.h"
@@ -74,13 +75,6 @@ void oc_expert_stream_config_init(OcExpertStreamConfig *cfg)
     cfg->reclaim = true;
 }
 
-static bool mul_size(size_t a, size_t b, size_t *out)
-{
-    if (b != 0 && a > SIZE_MAX / b) return false;
-    *out = a * b;
-    return true;
-}
-
 static bool span_from_view(const OcGgufMmappedFile *gguf, const OcWeightView *view,
                            size_t n_experts, size_t n_embd, size_t inter,
                            OcExpertTensorSpan *out)
@@ -88,7 +82,7 @@ static bool span_from_view(const OcGgufMmappedFile *gguf, const OcWeightView *vi
     memset(out, 0, sizeof(*out));
     if (!view || !view->data || n_experts == 0) return false;
     size_t packed = 0;
-    if (!mul_size((size_t)view->rows, view->row_bytes, &packed)) return false;
+    if (!oc_size_mul((size_t)view->rows, view->row_bytes, &packed)) return false;
     size_t expert_bytes;
     if ((inter > 0 && view->rows == inter) ||
         (n_embd > 0 && view->rows == n_embd)) {
@@ -100,7 +94,7 @@ static bool span_from_view(const OcGgufMmappedFile *gguf, const OcWeightView *vi
     }
     if (expert_bytes == 0) return false;
     size_t total = 0;
-    if (!mul_size(expert_bytes, n_experts, &total)) return false;
+    if (!oc_size_mul(expert_bytes, n_experts, &total)) return false;
     out->base = view->data;
     out->expert_bytes = expert_bytes;
     if (!gguf || !gguf->shards) return true;

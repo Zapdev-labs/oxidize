@@ -24,6 +24,11 @@ char *oc_strdup(const char *s);
  * NULL on NULL input or OOM. Caller must free(). */
 char *oc_strndup(const char *s, size_t n);
 
+/* Copy `src` into the fixed buffer `dst` of capacity `cap`, truncating to
+ * fit and always NUL-terminating. NULL `src` yields an empty string. No-op
+ * when `dst` is NULL or `cap` is 0. */
+void oc_str_copy(char *dst, size_t cap, const char *src);
+
 /* Length of a NUL-terminated string. Returns 0 on NULL. */
 size_t oc_strlen(const char *s);
 

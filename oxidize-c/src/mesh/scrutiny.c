@@ -3,19 +3,11 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/scrutiny.h"
+#include "oxidize/util/string.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 static bool contains_phrase(const char *text, const char *phrase)
 {
@@ -84,7 +76,7 @@ OcError oc_scrutiny_add_banned_phrase(OcScrutinyConfig *cfg, const char *phrase)
     OcScrutinyRule *r = &cfg->rules[cfg->n_rules++];
     memset(r, 0, sizeof(*r));
     r->type = OC_SCRUTINY_RULE_BANNED_PHRASE;
-    copy_str(r->pattern, sizeof(r->pattern), phrase);
+    oc_str_copy(r->pattern, sizeof(r->pattern), phrase);
     r->enabled = true;
     return OC_OK;
 }
@@ -174,7 +166,7 @@ OcError oc_scrutiny_check(const OcScrutinyConfig *cfg, const char *text,
             out->n_violations++;
             if (out->n_violations == 1) {
                 out->violation_type = r->type;
-                copy_str(out->first_violation, sizeof(out->first_violation),
+                oc_str_copy(out->first_violation, sizeof(out->first_violation),
                          r->type == OC_SCRUTINY_RULE_BANNED_PHRASE ? r->pattern : "");
             }
             if (cfg->block_on_violation) return OC_OK;

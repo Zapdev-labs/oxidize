@@ -151,3 +151,12 @@ bool oc_parse_f64(const char *s, double *out)
     *out = v;
     return true;
 }
+
+void oc_str_copy(char *dst, size_t cap, const char *src)
+{
+    if (!dst || cap == 0) return;
+    size_t n = src ? strlen(src) : 0;
+    if (n >= cap) n = cap - 1;
+    if (n > 0) memcpy(dst, src, n);
+    dst[n] = '\0';
+}

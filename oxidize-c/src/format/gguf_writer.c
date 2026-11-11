@@ -350,3 +350,48 @@ void oc_gguf_writer_free(OcGgufWriter *w)
     }
     memset(w, 0, sizeof(*w));
 }
+
+OcError oc_gguf_writer_init_from(const OcGgufFile *gf, const char *output_path,
+                                 OcGgufWriter *w)
+{
+    if (!gf || !w) return OC_ERR_INVALID_ARG;
+
+    char arch[64] = "llama";
+    const char *arch_p = NULL;
+    size_t arch_len = 0;
+    if (oc_gguf_metadata_get_str(gf, "general.architecture", &arch_p, &arch_len) &&
+        arch_len > 0 && arch_len < sizeof(arch)) {
+        memcpy(arch, arch_p, arch_len);
+        arch[arch_len] = '\0';
+    }
+    OcError e = oc_gguf_writer_init(output_path, arch, w);
+    if (e != OC_OK) return e;
+
+    for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
+        const OcGgufMetadataKV *kv = &gf->metadata[i];
+        if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
+        /* The writer lays tensors out on its own fixed alignment, so the
+         * source's value would point a reader at the wrong offsets. */
+        if (strcmp(kv->key, "general.alignment") == 0) continue;
+        switch (kv->value.type) {
+        case OC_GGUF_MT_UINT32:
+            oc_gguf_writer_add_uint32(w, kv->key, kv->value.v.u32); break;
+        case OC_GGUF_MT_UINT64:
+            oc_gguf_writer_add_uint64(w, kv->key, kv->value.v.u64); break;
+        case OC_GGUF_MT_FLOAT32:
+            oc_gguf_writer_add_float32(w, kv->key, kv->value.v.f32); break;
+        case OC_GGUF_MT_STRING: {
+            char *s = malloc(kv->value.v.str.len + 1);
+            if (!s) { oc_gguf_writer_free(w); return OC_ERR_OOM; }
+            memcpy(s, kv->value.v.str.data, kv->value.v.str.len);
+            s[kv->value.v.str.len] = '\0';
+            oc_gguf_writer_add_string(w, kv->key, s);
+            free(s);
+            break;
+        }
+        default:
+            break; /* skipped: unsupported KV types */
+        }
+    }
+    return OC_OK;
+}

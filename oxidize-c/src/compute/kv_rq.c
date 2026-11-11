@@ -10,6 +10,7 @@
 #endif
 
 #include "oxidize/kv_rq.h"
+#include "oxidize/util/checked.h"
 #include "oxidize/flash_attention.h"   /* oc_f16/f32 bit conversions */
 
 #include <math.h>
@@ -1220,20 +1221,6 @@ static void unmap_lazy(void *p, size_t bytes)
     if (p != NULL && bytes != 0) munmap(p, bytes);
 }
 
-static int kvrq_mul(size_t a, size_t b, size_t *o)
-{
-    if (a != 0 && b > SIZE_MAX / a) return 0;
-    *o = a * b;
-    return 1;
-}
-
-static int kvrq_add(size_t a, size_t b, size_t *o)
-{
-    if (a > SIZE_MAX - b) return 0;
-    *o = a + b;
-    return 1;
-}
-
 OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
                            size_t d, size_t n_ctx, const OcKvRqParams *p)
 {
@@ -1254,9 +1241,9 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
         return e;
     }
     size_t blk_sum, per_head;
-    if (!kvrq_add(c->kc.block_bytes, c->vc.block_bytes, &blk_sum) ||
-        !kvrq_mul(n_ctx, blk_sum, &per_head) ||
-        !kvrq_mul(n_kv, per_head, &c->layer_bytes)) {
+    if (!oc_size_add(c->kc.block_bytes, c->vc.block_bytes, &blk_sum) ||
+        !oc_size_mul(n_ctx, blk_sum, &per_head) ||
+        !oc_size_mul(n_kv, per_head, &c->layer_bytes)) {
         oc_kvrq_cache_free(c);
         return OC_ERR_INVALID_ARG;
     }
@@ -1268,7 +1255,7 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
     }
     size_t ring_sum = 0;
     if (p->window > 0 &&
-        !kvrq_add((size_t)p->window, (size_t)p->ring_extra, &ring_sum)) {
+        !oc_size_add((size_t)p->window, (size_t)p->ring_extra, &ring_sum)) {
         oc_kvrq_cache_free(c);
         return OC_ERR_INVALID_ARG;
     }
@@ -1280,13 +1267,13 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
     c->n_slots = (size_t)p->n_sink + c->ring;
     if (c->n_slots > 0) {
         size_t slots_kv;
-        if (!kvrq_mul(n_layers, 2u, &slots_kv) ||
-            !kvrq_mul(slots_kv, n_kv, &slots_kv) ||
-            !kvrq_mul(slots_kv, c->n_slots, &slots_kv) ||
-            !kvrq_mul(slots_kv, d, &c->xq_bytes) ||
-            !kvrq_mul(slots_kv, sizeof(float), &c->xs_bytes) ||
-            !kvrq_mul(n_layers, c->n_slots, &c->tag_bytes) ||
-            !kvrq_mul(c->tag_bytes, sizeof(int64_t), &c->tag_bytes)) {
+        if (!oc_size_mul(n_layers, 2u, &slots_kv) ||
+            !oc_size_mul(slots_kv, n_kv, &slots_kv) ||
+            !oc_size_mul(slots_kv, c->n_slots, &slots_kv) ||
+            !oc_size_mul(slots_kv, d, &c->xq_bytes) ||
+            !oc_size_mul(slots_kv, sizeof(float), &c->xs_bytes) ||
+            !oc_size_mul(n_layers, c->n_slots, &c->tag_bytes) ||
+            !oc_size_mul(c->tag_bytes, sizeof(int64_t), &c->tag_bytes)) {
             oc_kvrq_cache_free(c);
             return OC_ERR_INVALID_ARG;
         }
@@ -1306,15 +1293,15 @@ OcError oc_kvrq_cache_init(OcKvRqCache *c, size_t n_layers, size_t n_kv,
         }
         c->n_pages = (n_ctx + c->page - 1) / c->page;
         size_t mu;
-        if (!kvrq_mul(n_layers, c->n_pages, &mu) || !kvrq_mul(mu, 2u, &mu) ||
-            !kvrq_mul(mu, n_kv, &mu) || !kvrq_mul(mu, d, &mu) ||
-            !kvrq_mul(mu, sizeof(float), &c->mu_bytes)) {
+        if (!oc_size_mul(n_layers, c->n_pages, &mu) || !oc_size_mul(mu, 2u, &mu) ||
+            !oc_size_mul(mu, n_kv, &mu) || !oc_size_mul(mu, d, &mu) ||
+            !oc_size_mul(mu, sizeof(float), &c->mu_bytes)) {
             oc_kvrq_cache_free(c);
             return OC_ERR_INVALID_ARG;
         }
         c->mu = map_lazy(c->mu_bytes);
         size_t nfix;
-        if (!kvrq_mul(n_layers, c->n_pages, &nfix)) {
+        if (!oc_size_mul(n_layers, c->n_pages, &nfix)) {
             oc_kvrq_cache_free(c);
             return OC_ERR_INVALID_ARG;
         }

@@ -12,6 +12,7 @@
 #include "oxidize/oxk.h"
 #include "oxidize/sampling.h"
 #include "oxidize/tokenizer.h"
+#include "oxidize/util/clock.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -20,13 +21,6 @@
 #include <time.h>
 
 /* ─── Timing helpers ────────────────────────────────────────────────────── */
-
-static double now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
-}
 
 /* ─── Main benchmark ────────────────────────────────────────────────────── */
 
@@ -71,7 +65,7 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
         uint32_t prompt_len = cfg->prompt_length;
         double prefill_ms = 0.0;
         if (prompt_len > 0) {
-            double prefill_start = now_ms();
+            double prefill_start = oc_clock_mono_ms();
             for (uint32_t b = 0; b < batch_size; b++) {
                 oc_llama_session_reset(&sess);
                 for (uint32_t i = 0; i < prompt_len; i++) {
@@ -80,7 +74,7 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
                     if (e != OC_OK) goto fail;
                 }
             }
-            prefill_ms = (now_ms() - prefill_start) / (double)batch_size;
+            prefill_ms = (oc_clock_mono_ms() - prefill_start) / (double)batch_size;
         }
 
         if (prompt_len > 0 &&
@@ -99,14 +93,14 @@ OcError oc_benchmark_run(OcLlamaModel *model, const OcBenchmarkConfig *cfg,
         }
 
         /* Measured decode. */
-        double decode_start = now_ms();
+        double decode_start = oc_clock_mono_ms();
         for (uint32_t i = 0; i < n_meas; i++) {
-            double t0 = now_ms();
+            double t0 = oc_clock_mono_ms();
             e = oc_llama_forward(&sess, 1, sess.logits);
             if (e != OC_OK) goto fail;
-            tok_latencies[i] = now_ms() - t0;
+            tok_latencies[i] = oc_clock_mono_ms() - t0;
         }
-        double decode_end = now_ms();
+        double decode_end = oc_clock_mono_ms();
         double decode_ms = decode_end - decode_start;
         sum_decode_ms += decode_ms;
 
@@ -298,7 +292,7 @@ double oc_benchmark_matvec(uint32_t n_rows, uint32_t n_cols, uint32_t n_iters)
     for (size_t i = 0; i < n_cols; i++)
         input[i] = (float)(i % 5) * 0.1f;
 
-    double start = now_ms();
+    double start = oc_clock_mono_ms();
     for (uint32_t iter = 0; iter < n_iters; iter++) {
         for (uint32_t r = 0; r < n_rows; r++) {
             float sum = 0.0f;
@@ -307,7 +301,7 @@ double oc_benchmark_matvec(uint32_t n_rows, uint32_t n_cols, uint32_t n_iters)
             output[r] = sum;
         }
     }
-    double elapsed = now_ms() - start;
+    double elapsed = oc_clock_mono_ms() - start;
 
     free(weights); free(input); free(output);
 
@@ -335,10 +329,10 @@ static double bench_oxk_matvec(void (*matvec)(const uint8_t *, size_t, size_t,
     if (!w || !x || !y) { free(w); free(x); free(y); return 0.0; }
     for (size_t i = 0; i < x_len; i++) x[i] = (float)(i % 5) * 0.1f;
 
-    double start = now_ms();
+    double start = oc_clock_mono_ms();
     for (uint32_t it = 0; it < n_iters; it++)
         matvec(w, n_rows, row_bytes, x, y);
-    double elapsed = now_ms() - start;
+    double elapsed = oc_clock_mono_ms() - start;
 
     free(w); free(x); free(y);
     if (elapsed <= 0.0) return 0.0;

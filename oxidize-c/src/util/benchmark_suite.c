@@ -7,21 +7,13 @@
 #include "oxidize/benchmark_suite.h"
 #include "oxidize/quant.h"
 #include "oxidize/activation.h"
+#include "oxidize/util/string.h"
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
 #include <math.h>
-
-static void copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0 || !src) { if (dst && cap > 0) dst[0] = '\0'; return; }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 OcError oc_bench_suite_init(OcBenchSuite *suite)
 {
@@ -407,7 +399,7 @@ OcError oc_bench_suite_run(OcBenchSuite *suite, OcBenchType type,
     OcBenchResult result;
     memset(&result, 0, sizeof(result));
     result.type = type;
-    copy_str(result.name, sizeof(result.name), oc_bench_type_name(type));
+    oc_str_copy(result.name, sizeof(result.name), oc_bench_type_name(type));
     result.n_iterations = n_iterations;
 
     OcError e = OC_OK;

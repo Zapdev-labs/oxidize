@@ -7,6 +7,7 @@
  * Q/K/V projections read the concatenated embedding and hidden state.
  */
 #include "oxidize/eagle4.h"
+#include "oxidize/util/checked.h"
 
 #include "oxidize/flash_attention.h"
 #include "oxidize/parallel.h"
@@ -333,13 +334,6 @@ static int bind_tensor(const OcSafetensorsFile *st, const char *name, E4HfW *w, 
     return 1;
 }
 
-static int hf_mul(size_t a, size_t b, size_t *out)
-{
-    if (a != 0 && b > SIZE_MAX / a) return 0;
-    *out = a * b;
-    return 1;
-}
-
 static int hf_add(size_t *acc, size_t v)
 {
     if (*acc > SIZE_MAX - v) return 0;
@@ -464,7 +458,7 @@ static OcError hf_open(E4HfModel *m, const char *path)
                            m->inter, 3u, m->rank, m->lm_score.rows, m->fc.cols };
         size_t hh = 0, ii = 0;
         int ok = kv_len == 0 || cap <= SIZE_MAX / sizeof(float) / kv_len;
-        ok = ok && hf_mul(parts[0], parts[1], &hh) && hf_mul(parts[6], parts[7], &ii);
+        ok = ok && oc_size_mul(parts[0], parts[1], &hh) && oc_size_mul(parts[6], parts[7], &ii);
         total = hh;
         ok = ok && hf_add(&total, ii);
         for (size_t pi = 2; ok && pi < sizeof(parts) / sizeof(parts[0]); pi++)

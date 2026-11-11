@@ -87,11 +87,7 @@
 #include "oxidize/quant.h"
 #include "oxidize/tensor_ops.h"
 
-/* ─── Helpers ────────────────────────────────────────────────────────────
- *
- * These mirror the static helpers in arch_forward.c / llama.c. We keep
- * local copies to remain self-contained (the llama.c originals are static).
- */
+#include "arch_session_ops.h"
 
 static uint32_t glm_cfg_u32(const OcGgufFile *f, const char *key, uint32_t def)
 {
@@ -111,80 +107,7 @@ static bool glm_cfg_bool(const OcGgufFile *f, const char *key, bool def)
     return oc_gguf_metadata_get_bool(f, key, &v) ? v : def;
 }
 
-/* Dequantize row `token` of tok_embeddings into `dst` (length n_embd). */
-static void glm_embed_token(OcLlamaSession *s, uint32_t token)
-{
-    OcWeightView *w = &s->model->tok_embeddings;
-    if (token >= s->model->cfg.vocab_size) token = s->model->cfg.vocab_size - 1;
-    if (w->qtype == OC_QUANT_F32) {
-        memcpy(s->x, w->data + (size_t)token * w->row_bytes,
-               s->model->cfg.n_embd * sizeof(float));
-    } else {
-        oc_quant_dequant_row(w->qtype,
-            w->data + (size_t)token * w->row_bytes, w->row_bytes,
-            s->x, s->model->cfg.n_embd);
-    }
-}
-
-/* matvec wrapper: pick f32 or quantized path based on qtype. */
-static void glm_matvec(const OcWeightView *w, const float *in, float *out,
-                       float *temp)
-{
-    if (w->qtype == OC_QUANT_F32) {
-        oc_matvec_f32((const float *)w->data, w->rows, w->cols, in, out);
-    } else {
-        oc_matvec_quantized(w->qtype, w->data, w->rows, w->cols,
-                            w->row_bytes, in, out, temp);
-    }
-}
-
-/* Online-softmax attention for a single query head against cached K/V.
- * Mirrors arch_attention_head from arch_forward.c. */
-static void glm_attention_head(const OcLlamaSession *s, uint32_t head,
-                               uint32_t layer, const float *q_vec,
-                               float *out_vec)
-{
-    const OcLlamaConfig *c = &s->model->cfg;
-    size_t hd = c->head_dim;
-    uint32_t group = c->n_head / c->n_head_kv;
-    uint32_t kv_head = head / group;
-    size_t kv_off = ((size_t)layer * c->n_ctx + 0) * s->kv_row_floats
-                  + (size_t)kv_head * hd;
-    const float *k_layer = s->kv_k;
-    const float *v_layer = s->kv_v;
-    float scale = 1.0f / sqrtf((float)hd);
-
-    float run_max = -INFINITY;
-    float run_sum = 0.0f;
-    for (size_t i = 0; i < hd; i++) out_vec[i] = 0.0f;
-
-    int64_t seq_len = s->pos + 1;
-    for (int64_t t = 0; t < seq_len; t++) {
-        const float *k_t = k_layer + kv_off + (size_t)t * s->kv_row_floats;
-        float dot = 0.0f;
-        for (size_t i = 0; i < hd; i++) dot += q_vec[i] * k_t[i];
-        float score = dot * scale;
-        float new_max = (score > run_max) ? score : run_max;
-        float exp_factor = expf(run_max - new_max);
-        float exp_score = expf(score - new_max);
-        for (size_t i = 0; i < hd; i++) out_vec[i] *= exp_factor;
-        const float *v_t = v_layer + kv_off + (size_t)t * s->kv_row_floats;
-        for (size_t i = 0; i < hd; i++) out_vec[i] += exp_score * v_t[i];
-        run_sum = run_sum * exp_factor + exp_score;
-        run_max = new_max;
-    }
-    float inv = 1.0f / run_sum;
-    for (size_t i = 0; i < hd; i++) out_vec[i] *= inv;
-}
-
 /* ─── Validation helpers ──────────────────────────────────────────────── */
-
-static OcError glm_validate_session(OcLlamaSession *sess)
-{
-    if (sess == NULL || sess->model == NULL) return OC_ERR_INVALID_ARG;
-    if ((uint64_t)sess->pos >= sess->model->cfg.n_ctx) return OC_ERR_INVALID_ARG;
-    return OC_OK;
-}
 
 static OcError glm_validate_layers(OcLlamaModel *m)
 {
@@ -679,9 +602,9 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
     oc_rms_norm_f32(s->x, L->attn_norm, s->normed, n_embd, c->rms_norm_eps);
 
     /* 2. Q/K/V projections. */
-    glm_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-    glm_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-    glm_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
     /* 3. qk_norm (GLM-4). The q_norm/k_norm weights are stored in the
      *    mla_q_a_norm / mla_kv_a_norm slots by the loader. */
@@ -710,22 +633,22 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
 
     /* 6. Attention per head → attn_out. */
     for (uint32_t h = 0; h < c->n_head; h++) {
-        glm_attention_head(s, h, layer, s->q + h * hd,
+        oc_arch_attention_head(s, h, layer, s->q + h * hd,
                            s->attn_out + h * hd);
     }
 
     /* Output projection + residual. */
-    glm_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     /* 7. Pre-FFN RMSNorm. */
     oc_rms_norm_f32(s->x, L->ffn_norm, s->normed, n_embd, c->rms_norm_eps);
 
     /* 8. SwiGLU FFN. */
-    glm_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
-    glm_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
+    oc_arch_weight_matvec(&L->ffn_gate, s->normed, s->ffn_gate, s->dequant_temp);
+    oc_arch_weight_matvec(&L->ffn_up,   s->normed, s->ffn_up,   s->dequant_temp);
     oc_swiglu_inplace_f32(s->ffn_gate, s->ffn_up, c->n_ff);
-    glm_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
+    oc_arch_weight_matvec(&L->ffn_down, s->ffn_gate, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 }
 
@@ -734,13 +657,13 @@ static void glm_layer(OcLlamaSession *s, uint32_t layer)
 OcError oc_arch_forward_glm(OcLlamaSession *sess, uint32_t token,
                              float *logits_out)
 {
-    OcError e = glm_validate_session(sess);
+    OcError e = oc_arch_validate_session(sess);
     if (e != OC_OK) return e;
     e = glm_validate_layers(sess->model);
     if (e != OC_OK) return e;
 
     /* 1. Token embedding lookup. */
-    glm_embed_token(sess, token);
+    oc_arch_embed_token(sess, token);
 
     /* 2. Per-layer forward. */
     for (uint32_t l = 0; l < sess->model->cfg.n_layer; l++) {
@@ -866,10 +789,10 @@ static void hunyuan_expert_forward(OcLlamaSession *s, OcLlamaLayer *L,
 
     /* gate = silu(W_gate · normed); up = W_up · normed;
      * intermediate = gate * up; out = W_down · intermediate. */
-    glm_matvec(&gate, normed, s->expert_gate, s->dequant_temp);
-    glm_matvec(&up, normed, s->expert_up, s->dequant_temp);
+    oc_arch_weight_matvec(&gate, normed, s->expert_gate, s->dequant_temp);
+    oc_arch_weight_matvec(&up, normed, s->expert_up, s->dequant_temp);
     oc_swiglu_inplace_f32(s->expert_gate, s->expert_up, expert_i_size);
-    glm_matvec(&down, s->expert_gate, expert_out, s->dequant_temp);
+    oc_arch_weight_matvec(&down, s->expert_gate, expert_out, s->dequant_temp);
 }
 
 /* Shared expert forward (always active, weight 1.0). */
@@ -883,10 +806,10 @@ static void hunyuan_shared_expert_forward(OcLlamaSession *s, OcLlamaLayer *L,
     OcWeightView up = L->ffn_up_shexp;
     OcWeightView down = L->ffn_down_shexp;
 
-    glm_matvec(&gate, normed, s->shexp_gate, s->dequant_temp);
-    glm_matvec(&up, normed, s->shexp_up, s->dequant_temp);
+    oc_arch_weight_matvec(&gate, normed, s->shexp_gate, s->dequant_temp);
+    oc_arch_weight_matvec(&up, normed, s->shexp_up, s->dequant_temp);
     oc_swiglu_inplace_f32(s->shexp_gate, s->shexp_up, shexp_i_size);
-    glm_matvec(&down, s->shexp_gate, shexp_out, s->dequant_temp);
+    oc_arch_weight_matvec(&down, s->shexp_gate, shexp_out, s->dequant_temp);
 }
 
 /* ─── Hunyuan dense layer (pre-MoE layers) ─────────────────────────────── */
@@ -914,9 +837,9 @@ static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
     /* 1. Pre-attention RMSNorm + attention (same as GLM-4 dense). */
     oc_rms_norm_f32(s->x, L->attn_norm, s->normed, n_embd, c->rms_norm_eps);
 
-    glm_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
-    glm_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
-    glm_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_q, s->normed, s->q, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_k, s->normed, s->k, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_v, s->normed, s->v, s->dequant_temp);
 
     for (uint32_t h = 0; h < c->n_head; h++) {
         oc_apply_rope_f32(s->q + h * hd, s->q + h * hd, hd, c->rope_dim,
@@ -933,11 +856,11 @@ static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
     memcpy(s->kv_v + kv_off, s->v, s->kv_row_floats * sizeof(float));
 
     for (uint32_t h = 0; h < c->n_head; h++) {
-        glm_attention_head(s, h, layer, s->q + h * hd,
+        oc_arch_attention_head(s, h, layer, s->q + h * hd,
                            s->attn_out + h * hd);
     }
 
-    glm_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
+    oc_arch_weight_matvec(&L->attn_output, s->attn_out, s->normed, s->dequant_temp);
     for (size_t i = 0; i < n_embd; i++) s->x[i] += s->normed[i];
 
     /* 2. Pre-FFN RMSNorm. */
@@ -949,7 +872,7 @@ static void hunyuan_moe_layer(OcLlamaSession *s, uint32_t layer)
 
     if (n_experts > 0 && top_k > 0) {
         /* Router: gate_inp is [n_experts, n_embd]. */
-        glm_matvec(&L->ffn_gate_inp, s->normed, s->router_logits,
+        oc_arch_weight_matvec(&L->ffn_gate_inp, s->normed, s->router_logits,
                    s->dequant_temp);
 
         /* Select top-k experts. */
@@ -1002,16 +925,16 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
     size_t hd = c->head_dim;
 
     /* 1. q_a_proj → c_q; RMSNorm(c_q, q_a_norm). */
-    glm_matvec(&L->mla_q_a, s->normed, s->mla_c_q, s->dequant_temp);
+    oc_arch_weight_matvec(&L->mla_q_a, s->normed, s->mla_c_q, s->dequant_temp);
     if (L->mla_q_a_norm != NULL) {
         oc_rms_norm_f32(s->mla_c_q, L->mla_q_a_norm, s->mla_c_q,
                         c->mla_q_lora_dim, c->rms_norm_eps);
     }
     /* q_b_proj → q_full [n_head * (q_nope_dim + q_rope_dim)]. */
-    glm_matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
+    oc_arch_weight_matvec(&L->mla_q_b, s->mla_c_q, s->mla_q_full, s->dequant_temp);
 
     /* 2. kv_a_proj → c_kv [kv_lora_dim + kv_pe_dim]. */
-    glm_matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed,
+    oc_arch_weight_matvec(&L->mla_kv_a_mqa, s->normed, s->mla_kv_compressed,
                s->dequant_temp);
     size_t kv_lora = c->mla_kv_lora_dim;
     size_t kv_pe_dim = c->mla_q_rope_dim;   /* kv_pe has same dim as q rope */
@@ -1036,8 +959,8 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
 
     /* 3. k_b_proj → k_nope [n_head * kv_nope_dim];
      *    v_b_proj → v [n_head * v_head_dim]. */
-    glm_matvec(&L->mla_k_b, s->mla_kv_compressed, s->k, s->dequant_temp);
-    glm_matvec(&L->mla_v_b, s->mla_kv_compressed, s->v, s->dequant_temp);
+    oc_arch_weight_matvec(&L->mla_k_b, s->mla_kv_compressed, s->k, s->dequant_temp);
+    oc_arch_weight_matvec(&L->mla_v_b, s->mla_kv_compressed, s->v, s->dequant_temp);
 
     /* 4. Apply RoPE to q's rope portion and to kv_pe.
      *    q layout: [n_head * (q_nope_dim + q_rope_dim)].
@@ -1093,12 +1016,12 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
             } else {
                 /* Past position: decompress by re-running k_b/v_b projections. */
                 /* Project c_kv_nope through k_b for this position. */
-                glm_matvec(&L->mla_k_b, c_kv_nope_t, k_nope_full,
+                oc_arch_weight_matvec(&L->mla_k_b, c_kv_nope_t, k_nope_full,
                            s->dequant_temp);
                 k_h = k_nope_full + h * q_nope;
                 /* Project through v_b. */
                 float *v_full = k_nope_full;  /* reuse buffer (k no longer needed) */
-                glm_matvec(&L->mla_v_b, c_kv_nope_t, v_full,
+                oc_arch_weight_matvec(&L->mla_v_b, c_kv_nope_t, v_full,
                            s->dequant_temp);
                 v_h = v_full + h * c->mla_v_head_dim;
             }
@@ -1138,13 +1061,13 @@ static void hunyuan_mla_attention(OcLlamaSession *s, uint32_t layer)
 OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
                                  float *logits_out)
 {
-    OcError e = glm_validate_session(sess);
+    OcError e = oc_arch_validate_session(sess);
     if (e != OC_OK) return e;
     e = glm_validate_layers(sess->model);
     if (e != OC_OK) return e;
 
     /* 1. Token embedding lookup. */
-    glm_embed_token(sess, token);
+    oc_arch_embed_token(sess, token);
 
     /* 2. Per-layer forward. */
     const OcLlamaConfig *c = &sess->model->cfg;
@@ -1162,7 +1085,7 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
             /* MLA attention. */
             hunyuan_mla_attention(sess, l);
             /* Output projection + residual. */
-            glm_matvec(&L->attn_output, sess->attn_out, sess->normed,
+            oc_arch_weight_matvec(&L->attn_output, sess->attn_out, sess->normed,
                        sess->dequant_temp);
             for (size_t i = 0; i < n_embd; i++) sess->x[i] += sess->normed[i];
 
@@ -1176,12 +1099,12 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
                  * FFN. */
                 oc_rms_norm_f32(sess->x, L->ffn_norm, sess->normed, n_embd,
                                 c->rms_norm_eps);
-                glm_matvec(&L->ffn_gate, sess->normed, sess->ffn_gate,
+                oc_arch_weight_matvec(&L->ffn_gate, sess->normed, sess->ffn_gate,
                            sess->dequant_temp);
-                glm_matvec(&L->ffn_up, sess->normed, sess->ffn_up,
+                oc_arch_weight_matvec(&L->ffn_up, sess->normed, sess->ffn_up,
                            sess->dequant_temp);
                 oc_swiglu_inplace_f32(sess->ffn_gate, sess->ffn_up, c->n_ff);
-                glm_matvec(&L->ffn_down, sess->ffn_gate, sess->normed,
+                oc_arch_weight_matvec(&L->ffn_down, sess->ffn_gate, sess->normed,
                            sess->dequant_temp);
                 for (size_t i = 0; i < n_embd; i++) {
                     sess->x[i] += sess->normed[i];
@@ -1190,12 +1113,12 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
                 /* Dense FFN. */
                 oc_rms_norm_f32(sess->x, L->ffn_norm, sess->normed, n_embd,
                                 c->rms_norm_eps);
-                glm_matvec(&L->ffn_gate, sess->normed, sess->ffn_gate,
+                oc_arch_weight_matvec(&L->ffn_gate, sess->normed, sess->ffn_gate,
                            sess->dequant_temp);
-                glm_matvec(&L->ffn_up, sess->normed, sess->ffn_up,
+                oc_arch_weight_matvec(&L->ffn_up, sess->normed, sess->ffn_up,
                            sess->dequant_temp);
                 oc_swiglu_inplace_f32(sess->ffn_gate, sess->ffn_up, c->n_ff);
-                glm_matvec(&L->ffn_down, sess->ffn_gate, sess->normed,
+                oc_arch_weight_matvec(&L->ffn_down, sess->ffn_gate, sess->normed,
                            sess->dequant_temp);
                 for (size_t i = 0; i < n_embd; i++) {
                     sess->x[i] += sess->normed[i];
@@ -1218,36 +1141,3 @@ OcError oc_arch_forward_hunyuan(OcLlamaSession *sess, uint32_t token,
     return OC_OK;
 }
 
-/* ─── Test stubs (compile-time sanity checks) ─────────────────────────── */
-#ifdef OC_GLM_ARCH_TEST_STUBS
-#include <stdio.h>
-
-static void glm_arch_test_stubs(void)
-{
-    (void)oc_arch_forward_glm;
-    (void)oc_arch_forward_hunyuan;
-    (void)oc_glm_config_parse;
-    (void)oc_hunyuan_config_parse;
-    (void)oc_glm_version_from_str;
-    (void)oc_glm_config_defaults;
-    (void)oc_hunyuan_config_defaults;
-    (void)glm_embed_token;
-    (void)glm_matvec;
-    (void)glm_attention_head;
-    (void)glm_validate_session;
-    (void)glm_validate_layers;
-    (void)glm_final_norm_and_logits;
-    (void)glm_apply_qk_norm;
-    (void)glm_layer;
-    (void)hunyuan_topk_experts;
-    (void)hunyuan_expert_forward;
-    (void)hunyuan_shared_expert_forward;
-    (void)hunyuan_dense_layer;
-    (void)hunyuan_moe_layer;
-    (void)hunyuan_mla_attention;
-    (void)glm_cfg_u32;
-    (void)glm_cfg_f32;
-    (void)glm_cfg_bool;
-    printf("glm_arch test stubs OK\n");
-}
-#endif /* OC_GLM_ARCH_TEST_STUBS */

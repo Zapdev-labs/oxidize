@@ -23,6 +23,8 @@
 #define _DEFAULT_SOURCE
 
 #include "oxidize/dflash2.h"
+#include "oxidize/util/checked.h"
+#include "arch_ops.h"
 #include "oxidize/parallel.h"
 #include "oxidize/safetensors.h"
 #include "oxidize/simd.h"
@@ -108,10 +110,6 @@ static void rms_norm_row(const float *x, const float *w, float *out,
     for (size_t i = 0; i < n; i++) out[i] = x[i] * r * w[i];
 }
 
-static float silu(float x) { return x / (1.0f + expf(-x)); }
-
-static bool df2_size_mul(size_t a, size_t b, size_t *out);
-static bool df2_size_add(size_t a, size_t b, size_t *out);
 static bool df2_float_extent(size_t count);
 
 #ifdef OC_TESTING
@@ -477,8 +475,8 @@ OcError oc_dflash2_kvring_init(OcDFlash2KvRing *ring, size_t capacity,
     if (!ring || capacity == 0 || n_kv_heads == 0 || head_dim == 0)
         return OC_ERR_INVALID_ARG;
     size_t vec, elems;
-    if (!df2_size_mul(n_kv_heads, head_dim, &vec) ||
-        !df2_size_mul(capacity, vec, &elems) ||
+    if (!oc_size_mul(n_kv_heads, head_dim, &vec) ||
+        !oc_size_mul(capacity, vec, &elems) ||
         !df2_float_extent(elems) ||
         capacity > SIZE_MAX / sizeof(int64_t))
         return OC_ERR_INVALID_ARG;
@@ -529,11 +527,11 @@ OcError oc_dflash2_kvring_append(OcDFlash2KvRing *ring,
     if (!ring || !k || !v) return OC_ERR_INVALID_ARG;
     size_t vec, undo_elems, new_total;
     if (ring->capacity == 0 || n > ring->capacity ||
-        !df2_size_mul(ring->n_kv_heads, ring->head_dim, &vec) ||
-        !df2_size_mul(n, vec, &undo_elems) ||
+        !oc_size_mul(ring->n_kv_heads, ring->head_dim, &vec) ||
+        !oc_size_mul(n, vec, &undo_elems) ||
         !df2_float_extent(undo_elems) ||
         n > SIZE_MAX / sizeof(int64_t) ||
-        !df2_size_add(ring->total, n, &new_total) ||
+        !oc_size_add(ring->total, n, &new_total) ||
         (n > 0 && ((n - 1) > (size_t)INT64_MAX ||
                    pos0 > INT64_MAX - (int64_t)(n - 1))))
         return OC_ERR_INVALID_ARG;
@@ -678,7 +676,7 @@ static float *load_tensor_f32(const OcSafetensorsFile *f,
     if (!t) return NULL;
     size_t elems = 1;
     for (uint32_t d = 0; d < t->n_dims; d++)
-        if (!df2_size_mul(elems, (size_t)t->shape[d], &elems)) return NULL;
+        if (!oc_size_mul(elems, (size_t)t->shape[d], &elems)) return NULL;
     if (elems != expect_elems) return NULL;
     if (expect_elems > SIZE_MAX / sizeof(float)) return NULL;
     size_t dtype_sz = 0;
@@ -713,7 +711,7 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
     w->gen_user = NULL;
     w->bf16 = NULL;
     size_t elems;
-    if (!df2_size_mul(rows, cols, &elems)) return OC_ERR_FORMAT;
+    if (!oc_size_mul(rows, cols, &elems)) return OC_ERR_FORMAT;
 
     /* Locate the tensor once; reuse the header walk for both paths. */
     const OcSafetensorsTensor *t = NULL;
@@ -732,7 +730,7 @@ static OcError load_w(const OcSafetensorsFile *f, const char *name,
     }
     size_t got = 1;
     for (uint32_t d = 0; d < t->n_dims; d++)
-        if (!df2_size_mul(got, (size_t)t->shape[d], &got))
+        if (!oc_size_mul(got, (size_t)t->shape[d], &got))
             return OC_ERR_FORMAT;
     if (got != elems) {
         fprintf(stderr, "dflash2: bad tensor %s\n", name);
@@ -845,20 +843,6 @@ static bool cfg_optional_float(const char *json, const char *key, float *out)
     return true;
 }
 
-static bool df2_size_mul(size_t a, size_t b, size_t *out)
-{
-    if (a != 0 && b > SIZE_MAX / a) return false;
-    *out = a * b;
-    return true;
-}
-
-static bool df2_size_add(size_t a, size_t b, size_t *out)
-{
-    if (b > SIZE_MAX - a) return false;
-    *out = a + b;
-    return true;
-}
-
 static bool df2_float_extent(size_t count)
 {
     return count <= SIZE_MAX / sizeof(float);
@@ -871,18 +855,17 @@ static bool df2_config_extents_valid(const OcDFlash2Config *cfg)
     size_t target_width, q_rows, kv_rows, kernel_rows, groups, capacity;
     size_t extent, context_rows, slot_floats;
 
-    if (!df2_size_mul(cfg->n_target_layer_ids, cfg->hidden_size,
-                      &target_width) ||
-        !df2_size_mul(cfg->num_attention_heads, cfg->head_dim, &q_rows) ||
-        !df2_size_mul(cfg->num_key_value_heads, cfg->head_dim, &kv_rows) ||
-        !df2_size_mul(2, cfg->conv_kernel_size, &kernel_rows) ||
-        !df2_size_add(cfg->sliding_window, cfg->block_size, &capacity))
+    if (!oc_size_mul(cfg->n_target_layer_ids, cfg->hidden_size, &target_width) ||
+        !oc_size_mul(cfg->num_attention_heads, cfg->head_dim, &q_rows) ||
+        !oc_size_mul(cfg->num_key_value_heads, cfg->head_dim, &kv_rows) ||
+        !oc_size_mul(2, cfg->conv_kernel_size, &kernel_rows) ||
+        !oc_size_add(cfg->sliding_window, cfg->block_size, &capacity))
         return false;
     groups = cfg->hidden_size / cfg->conv_group_size;
-    if (!df2_size_mul(kernel_rows, groups, &kernel_rows)) return false;
+    if (!oc_size_mul(kernel_rows, groups, &kernel_rows)) return false;
 
 #define DF2_FLOAT_PRODUCT(a, b) \
-    (df2_size_mul((a), (b), &extent) && df2_float_extent(extent))
+    (oc_size_mul((a), (b), &extent) && df2_float_extent(extent))
     if (!DF2_FLOAT_PRODUCT(cfg->hidden_size, target_width) ||
         !DF2_FLOAT_PRODUCT(cfg->vocab_size, cfg->selector_rank) ||
         !DF2_FLOAT_PRODUCT(cfg->selector_rank, cfg->hidden_size) ||
@@ -900,17 +883,17 @@ static bool df2_config_extents_valid(const OcDFlash2Config *cfg)
         return false;
 #undef DF2_FLOAT_PRODUCT
 
-    if (!df2_size_add(capacity, cfg->block_size, &context_rows) ||
-        !df2_size_mul(context_rows, kv_rows, &extent) ||
+    if (!oc_size_add(capacity, cfg->block_size, &context_rows) ||
+        !oc_size_mul(context_rows, kv_rows, &extent) ||
         !df2_float_extent(extent))
         return false;
 
-    if (!df2_size_mul(kv_rows, 2, &slot_floats) ||
+    if (!oc_size_mul(kv_rows, 2, &slot_floats) ||
         !df2_float_extent(slot_floats) ||
-        !df2_size_mul(slot_floats, sizeof(float), &extent) ||
-        !df2_size_add(extent, sizeof(int64_t), &extent) ||
-        !df2_size_mul(extent, cfg->block_size, &extent) ||
-        !df2_size_mul(extent, cfg->num_hidden_layers, &extent))
+        !oc_size_mul(slot_floats, sizeof(float), &extent) ||
+        !oc_size_add(extent, sizeof(int64_t), &extent) ||
+        !oc_size_mul(extent, cfg->block_size, &extent) ||
+        !oc_size_mul(extent, cfg->num_hidden_layers, &extent))
         return false;
 
     return capacity <= SIZE_MAX / sizeof(int64_t) &&
@@ -1810,7 +1793,7 @@ static OcError dflash2_forward_block(OcDFlash2Model *m,
             gemm_multi(&mg);
         }
         for (size_t i = 0; i < block * inter; i++)
-            mlp_gu[i] = silu(mlp_gu[i]) * mlp_up_out[i];
+            mlp_gu[i] = oc_arch_silu(mlp_gu[i]) * mlp_up_out[i];
         gemm(&L->mlp_down, mlp_gu, block, mlp_out);
         df2_pt_mark(PT_MLP);
         oc_dflash2_grouped_conv(mlp_out, conv_dyn_post,
@@ -2168,13 +2151,13 @@ OcError oc_dflash2_forward_debug(OcDFlash2Model *m,
     size_t saved_undo_total[n_layers];
     const size_t n_ctx_dbg = m->target_ctx_len;
     size_t n_overwrite, vec_save, float_bytes, slot_bytes, saved_bytes;
-    if (!df2_size_add(n_ctx_dbg, block, &n_overwrite) ||
-        !df2_size_mul(m->kv[0].n_kv_heads, m->kv[0].head_dim, &vec_save) ||
-        !df2_size_mul(vec_save, 2, &float_bytes) ||
-        !df2_size_mul(float_bytes, sizeof(float), &float_bytes) ||
-        !df2_size_add(float_bytes, sizeof(int64_t), &slot_bytes) ||
-        !df2_size_mul(n_layers, n_overwrite, &saved_bytes) ||
-        !df2_size_mul(saved_bytes, slot_bytes, &saved_bytes))
+    if (!oc_size_add(n_ctx_dbg, block, &n_overwrite) ||
+        !oc_size_mul(m->kv[0].n_kv_heads, m->kv[0].head_dim, &vec_save) ||
+        !oc_size_mul(vec_save, 2, &float_bytes) ||
+        !oc_size_mul(float_bytes, sizeof(float), &float_bytes) ||
+        !oc_size_add(float_bytes, sizeof(int64_t), &slot_bytes) ||
+        !oc_size_mul(n_layers, n_overwrite, &saved_bytes) ||
+        !oc_size_mul(saved_bytes, slot_bytes, &saved_bytes))
         return OC_ERR_INVALID_ARG;
     uint8_t *saved_slots = malloc(saved_bytes);
     if (!saved_slots) return OC_ERR_OOM;
@@ -2280,10 +2263,10 @@ OcError oc_dflash2_selector_debug(OcDFlash2Model *m,
     const size_t top_k = m->cfg.selector_top_k;
     const size_t rank = m->cfg.selector_rank;
     size_t unary_count, proj_count;
-    if (!df2_size_mul(n_rows, top_k, &unary_count) ||
+    if (!oc_size_mul(n_rows, top_k, &unary_count) ||
         !df2_float_extent(unary_count) ||
         unary_count > SIZE_MAX / sizeof(uint32_t) ||
-        !df2_size_mul(n_rows, rank, &proj_count) ||
+        !oc_size_mul(n_rows, rank, &proj_count) ||
         !df2_float_extent(proj_count) ||
         !df2_float_extent(top_k) || !df2_float_extent(rank) ||
         !df2_float_extent(H) || !df2_float_extent(lm_head->rows))

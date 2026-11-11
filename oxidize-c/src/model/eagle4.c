@@ -2,6 +2,8 @@
  * eagle4.c — EAGLE-4 drafter, harness, SafeTensors training, GGUF export.
  */
 #include "oxidize/eagle4.h"
+#include "oxidize/util/checked.h"
+#include "arch_ops.h"
 
 #include "oxidize/flash_attention.h"
 #include "oxidize/gguf.h"
@@ -9,6 +11,7 @@
 #include "oxidize/parallel.h"
 #include "oxidize/safetensors.h"
 #include "oxidize/simd.h"
+#include "oxidize/util/clock.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -22,13 +25,6 @@
 #define E4_CFG_N 28
 #define E4_SEL_MAX 512
 #define E4_MAX_DIM (1u << 24)
-
-static int e4_mul_ok(size_t a, size_t b, size_t *out)
-{
-    if (a != 0 && b > SIZE_MAX / a) return 0;
-    *out = a * b;
-    return 1;
-}
 
 typedef struct E4Scored {
     float score;
@@ -214,11 +210,6 @@ static void rms_forward(const float *x, const float *w, float *out, size_t n, fl
     for (i = 0; i < n; i++) ss += x[i] * x[i];
     inv = 1.0f / sqrtf(ss / (float)n + eps);
     for (i = 0; i < n; i++) out[i] = x[i] * inv * w[i];
-}
-
-static float silu(float x)
-{
-    return x / (1.0f + expf(-x));
 }
 
 static float silu_d(float x)
@@ -640,7 +631,7 @@ static OcError layer_forward(OcEagle4Draft *m, size_t li, const float *x)
             else memset(im->gate, 0, inter * sizeof(float));
             if (u->data) gemv(u->data, inter, h, im->ffn, im->up);
             else memset(im->up, 0, inter * sizeof(float));
-            for (i = 0; i < inter; i++) im->act[i] = silu(im->gate[i]) * im->up[i];
+            for (i = 0; i < inter; i++) im->act[i] = oc_arch_silu(im->gate[i]) * im->up[i];
             if (d->data) gemv(d->data, h, inter, im->act, im->hidden);
             else memset(im->hidden, 0, h * sizeof(float));
             for (i = 0; i < h; i++) im->mlp[i] += wgt * im->hidden[i];
@@ -657,7 +648,7 @@ static OcError layer_forward(OcEagle4Draft *m, size_t li, const float *x)
         else
             memset(im->up, 0, inter * sizeof(float));
         if (layer->mlp_gate.data || layer->mlp_up.data) {
-            for (i = 0; i < inter; i++) im->act[i] = silu(im->gate[i]) * im->up[i];
+            for (i = 0; i < inter; i++) im->act[i] = oc_arch_silu(im->gate[i]) * im->up[i];
             if (layer->mlp_down.data)
                 gemv(layer->mlp_down.data, h, inter, im->act, im->mlp);
             else
@@ -797,7 +788,7 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
         total = 0;
         for (i = 0; i < sizeof(terms) / sizeof(terms[0]); i++) {
             size_t t;
-            if (!e4_mul_ok(terms[i][0], terms[i][1], &t) || total > SIZE_MAX - t) {
+            if (!oc_size_mul(terms[i][0], terms[i][1], &t) || total > SIZE_MAX - t) {
                 oc_eagle4_model_free(m);
                 return OC_ERR_INVALID_ARG;
             }
@@ -859,9 +850,9 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
         /* KV ring (keys+values per layer) plus the per-node snapshot copy;
          * reject anything past a 16 GiB budget before allocating. */
         const uint64_t cap_floats = (UINT64_C(16) << 30) / sizeof(float);
-        if (!e4_mul_ok(cap, kv_len, &cells) || cells > SIZE_MAX / sizeof(float) ||
-            !e4_mul_ok(cells, layers * 2u, &kv_total) ||
-            !e4_mul_ok(snaps * layers * 2u, kv_len, &snap_total) ||
+        if (!oc_size_mul(cap, kv_len, &cells) || cells > SIZE_MAX / sizeof(float) ||
+            !oc_size_mul(cells, layers * 2u, &kv_total) ||
+            !oc_size_mul(snaps * layers * 2u, kv_len, &snap_total) ||
             (uint64_t)kv_total > cap_floats ||
             (uint64_t)snap_total > cap_floats - (uint64_t)kv_total) {
             oc_eagle4_model_free(m);
@@ -882,7 +873,7 @@ OcError oc_eagle4_model_init(OcEagle4Draft *m, const OcEagle4Config *cfg)
     }
     {
         size_t n;
-        if (!e4_mul_ok(snaps * layers * 2u, kvsz, &n) ||
+        if (!oc_size_mul(snaps * layers * 2u, kvsz, &n) ||
             n > SIZE_MAX / sizeof(float)) {
             oc_eagle4_model_free(m);
             return OC_ERR_INVALID_ARG;
@@ -2204,7 +2195,7 @@ static void trunk_update(OcEagle4Draft *m, const float *dh, float lr)
             gemv_add_t(layer->mlp_down.data, H, inter, dh, d_act);
         }
         for (i = 0; i < inter; i++) {
-            d_up[i] = d_act[i] * silu(im->gate[i]);
+            d_up[i] = d_act[i] * oc_arch_silu(im->gate[i]);
             d_gate[i] = d_act[i] * im->up[i] * silu_d(im->gate[i]);
         }
         if (layer->mlp_up.data && layer->mlp_up.rows == inter && layer->mlp_up.cols == H) {
@@ -2473,13 +2464,6 @@ OcError oc_eagle4_train_safetensors(OcEagle4Draft *m, const char *examples_path,
     return OC_OK;
 }
 
-static double now_sec(void)
-{
-    struct timespec ts;
-    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return 0.0;
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-}
-
 static void fill_unit(float *p, size_t n, uint32_t *seed)
 {
     size_t i;
@@ -2535,17 +2519,17 @@ OcError oc_eagle4_bench(int iters, OcEagle4BenchReport *out)
 
     m.full_lm_head = true;
     fill_head(&m, impl_of(&m)->g);
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) fill_head(&m, impl_of(&m)->g);
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->head_full_us = (t1 - t0) * 1e6 / (double)iters;
 
     m.full_lm_head = false;
     oc_eagle4_reset_stats(&m);
     fill_head(&m, impl_of(&m)->g);
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) fill_head(&m, impl_of(&m)->g);
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->head_lowrank_us = (t1 - t0) * 1e6 / (double)iters;
     if (out->head_lowrank_us > 0.0)
         out->head_speedup = out->head_full_us / out->head_lowrank_us;
@@ -2565,20 +2549,20 @@ OcError oc_eagle4_bench(int iters, OcEagle4BenchReport *out)
     fill_unit(q, heads * hd, &seed);
     fill_unit(k, seq * heads * hd, &seed);
     fill_unit(v, seq * heads * hd, &seed);
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) {
         oc_flash_attention_decode_heads_f32(q, k, v, seq, hd, heads * hd, heads, heads, ao);
     }
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->attn_full_us = (t1 - t0) * 1e6 / (double)iters;
-    t0 = now_sec();
+    t0 = oc_clock_wall_sec();
     for (i = 0; i < iters; i++) {
         size_t start = seq - window;
         oc_flash_attention_decode_heads_f32(
             q, k + start * heads * hd, v + start * heads * hd, window, hd,
             heads * hd, heads, heads, ao);
     }
-    t1 = now_sec();
+    t1 = oc_clock_wall_sec();
     out->attn_window_us = (t1 - t0) * 1e6 / (double)iters;
     if (out->attn_window_us > 0.0)
         out->attn_speedup = out->attn_full_us / out->attn_window_us;

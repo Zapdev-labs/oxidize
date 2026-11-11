@@ -601,3 +601,52 @@ Test(gguf_writer, zero_byte_tensor_data)
     oc_gguf_free(&f);
     unlink(path);
 }
+
+/* ─── Init from a source file ───────────────────────────────────────────── */
+
+Test(gguf_writer, init_from_copies_metadata_but_not_source_alignment)
+{
+    const char *path = make_temp_path("init_from.gguf");
+    OcGgufMetadataKV kvs[3] = {
+        { .key = "general.architecture",
+          .value = { .type = OC_GGUF_MT_STRING,
+                     .v.str = { .data = "qwen2", .len = 5 } } },
+        { .key = "general.alignment",
+          .value = { .type = OC_GGUF_MT_UINT32, .v.u32 = 64 } },
+        { .key = "qwen2.block_count",
+          .value = { .type = OC_GGUF_MT_UINT32, .v.u32 = 7 } },
+    };
+    OcGgufFile src = { .metadata_kv_count = 3, .metadata = kvs };
+
+    OcGgufWriter w;
+    cr_assert_eq(oc_gguf_writer_init_from(&src, path, &w), OC_OK, "");
+    float data[5] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f };
+    uint64_t dims[1] = { 5 };
+    cr_assert_eq(oc_gguf_writer_add_tensor(&w, "t", 1, dims, 0, data,
+                                           sizeof(data)), OC_OK, "");
+    cr_assert_eq(oc_gguf_writer_finalize(&w), OC_OK, "");
+    oc_gguf_writer_free(&w);
+
+    OcGgufFile out;
+    cr_assert_eq(oc_gguf_open(path, &out), OC_OK, "");
+    uint32_t blocks = 0, align = 0;
+    const char *arch = NULL;
+    size_t arch_len = 0;
+    cr_assert(oc_gguf_metadata_get_u32(&out, "qwen2.block_count", &blocks), "");
+    cr_assert_eq(blocks, 7, "");
+    cr_assert(oc_gguf_metadata_get_str(&out, "general.architecture", &arch,
+                                       &arch_len), "");
+    cr_assert_eq(arch_len, 5, "");
+    cr_assert_eq(memcmp(arch, "qwen2", 5), 0, "");
+    cr_assert_not(oc_gguf_metadata_get_u32(&out, "general.alignment", &align), "");
+    cr_assert_eq(out.alignment, 32, "");
+    oc_gguf_free(&out);
+    unlink(path);
+}
+
+Test(gguf_writer, init_from_rejects_null_source)
+{
+    OcGgufWriter w;
+    cr_assert_eq(oc_gguf_writer_init_from(NULL, make_temp_path("null.gguf"), &w),
+                 OC_ERR_INVALID_ARG, "");
+}
