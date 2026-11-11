@@ -32,11 +32,14 @@ static inline void oc_arch_rms_norm(const float *x, const float *w,
 }
 
 /* Row-major matvec: out[r] = sum_c W[r*cols + c] * in[c]. A NULL W is a
- * missing optional weight: `out` is left exactly as the caller set it. */
+ * missing optional weight and yields a zero `out`. */
 static inline void oc_arch_matvec(const float *w, const float *in,
                                   float *out, size_t rows, size_t cols)
 {
-    if (!w) return;
+    if (!w) {
+        memset(out, 0, rows * sizeof(*out));
+        return;
+    }
     for (size_t r = 0; r < rows; r++) {
         float dot = 0.0f;
         for (size_t c = 0; c < cols; c++) dot += w[r * cols + c] * in[c];
