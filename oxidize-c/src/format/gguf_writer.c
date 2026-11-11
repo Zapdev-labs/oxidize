@@ -354,6 +354,8 @@ void oc_gguf_writer_free(OcGgufWriter *w)
 OcError oc_gguf_writer_init_from(const OcGgufFile *gf, const char *output_path,
                                  OcGgufWriter *w)
 {
+    if (!gf || !w) return OC_ERR_INVALID_ARG;
+
     char arch[64] = "llama";
     const char *arch_p = NULL;
     size_t arch_len = 0;
@@ -368,6 +370,9 @@ OcError oc_gguf_writer_init_from(const OcGgufFile *gf, const char *output_path,
     for (uint64_t i = 0; i < gf->metadata_kv_count; i++) {
         const OcGgufMetadataKV *kv = &gf->metadata[i];
         if (!kv->key || strcmp(kv->key, "general.architecture") == 0) continue;
+        /* The writer lays tensors out on its own fixed alignment, so the
+         * source's value would point a reader at the wrong offsets. */
+        if (strcmp(kv->key, "general.alignment") == 0) continue;
         switch (kv->value.type) {
         case OC_GGUF_MT_UINT32:
             oc_gguf_writer_add_uint32(w, kv->key, kv->value.v.u32); break;

@@ -96,10 +96,12 @@ static inline void oc_arch_attention_head(const OcLlamaSession *s, uint32_t head
     for (size_t i = 0; i < hd; i++) out_vec[i] *= inv;
 }
 
-/* The session, its model, and its position within the context window. */
+/* The session, its model, its position within the context window, and an
+ * f32 KV cache, which is the only layout these forward passes read. */
 static inline OcError oc_arch_validate_session(OcLlamaSession *sess)
 {
     if (sess == NULL || sess->model == NULL) return OC_ERR_INVALID_ARG;
+    if (sess->kv_k == NULL || sess->kv_v == NULL) return OC_ERR_INVALID_ARG;
     if ((uint64_t)sess->pos >= sess->model->cfg.n_ctx) return OC_ERR_INVALID_ARG;
     return OC_OK;
 }

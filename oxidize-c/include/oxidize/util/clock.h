@@ -1,8 +1,9 @@
 /*
  * clock.h — the process clocks, in one place.
  *
- * Monotonic readings are for measuring elapsed time. The wall reading is
- * UTC seconds since the epoch and can jump when the system clock is set.
+ * Monotonic readings are for measuring elapsed time and read 0 if the
+ * monotonic clock is unavailable. The wall reading is UTC seconds since the
+ * epoch and can jump when the system clock is set.
  */
 #ifndef OXIDIZE_UTIL_CLOCK_H
 #define OXIDIZE_UTIL_CLOCK_H

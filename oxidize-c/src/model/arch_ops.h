@@ -31,8 +31,8 @@ static inline void oc_arch_rms_norm(const float *x, const float *w,
     }
 }
 
-/* Row-major matvec: out[r] = sum_c W[r*n + c] * in[c]. If W is NULL, out is
- * zeroed (calloc'd buffers pass through unchanged in effect). */
+/* Row-major matvec: out[r] = sum_c W[r*cols + c] * in[c]. A NULL W is a
+ * missing optional weight: `out` is left exactly as the caller set it. */
 static inline void oc_arch_matvec(const float *w, const float *in,
                                   float *out, size_t rows, size_t cols)
 {
@@ -45,11 +45,11 @@ static inline void oc_arch_matvec(const float *w, const float *in,
 }
 
 /* Apply interleaved RoPE to one head of size head_dim at sequence
- * position pos. */
+ * position pos. An odd head_dim leaves its last element unrotated. */
 static inline void oc_arch_rope_head(float *head, size_t head_dim,
                                      size_t pos, float theta)
 {
-    for (size_t d = 0; d < head_dim; d += 2) {
+    for (size_t d = 0; d + 1 < head_dim; d += 2) {
         float freq = pos / powf(theta, (float)(d / 2) / (float)(head_dim / 2));
         float c = cosf(freq), s = sinf(freq);
         float h0 = head[d], h1 = head[d + 1];

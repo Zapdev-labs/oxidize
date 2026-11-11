@@ -86,10 +86,14 @@ typedef struct OcGgufWriter {
 OcError oc_gguf_writer_init(const char *path, const char *arch_name,
                             OcGgufWriter *w);
 
-/* Open a writer for `output_path` and copy the architecture plus every
- * scalar and string metadata KV from `gf`, so a tool that rewrites tensors
- * emits a loadable GGUF. Array metadata (e.g. the tokenizer vocab) is not
- * copied. On error the writer is freed. */
+/* Open a writer for `output_path` and copy the architecture plus the
+ * uint32, uint64, float32 and string metadata KVs from `gf`, so a tool that
+ * rewrites tensors emits a loadable GGUF. Every other value type is dropped,
+ * including bool, signed and narrow integers, float64 and arrays (e.g. the
+ * tokenizer vocab). Strings are cut at an embedded NUL. `general.alignment`
+ * is not copied because the writer uses its own alignment.
+ * Returns OC_ERR_INVALID_ARG on a NULL `gf` or `w`. On a later error the
+ * writer is freed. */
 OcError oc_gguf_writer_init_from(const OcGgufFile *gf, const char *output_path,
                                  OcGgufWriter *w);
 

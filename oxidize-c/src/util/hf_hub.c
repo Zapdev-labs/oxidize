@@ -15,6 +15,7 @@
 #define _POSIX_C_SOURCE 200809L  /* getpwuid, stat, ssize_t */
 
 #include "oxidize/hf_hub.h"
+#include "oxidize/util/string.h"
 #include "oxidize/error.h"
 #include "oxidize/log.h"
 
@@ -47,16 +48,6 @@
 static pthread_mutex_t g_hf_dl_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* ─── Small helpers ──────────────────────────────────────────────────── */
-
-static void oc_copy_str(char *dst, size_t cap, const char *src)
-{
-    if (!dst || cap == 0) return;
-    if (!src) { dst[0] = '\0'; return; }
-    size_t n = strlen(src);
-    if (n >= cap) n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
 
 /* Case-insensitive ASCII. */
 static int oc_ci(int c) { return tolower((unsigned char)c); }
@@ -115,18 +106,17 @@ OcError oc_hf_config_init(OcHfConfig *cfg, const char *cache_dir)
     if (!cfg) return OC_ERR_INVALID_ARG;
     memset(cfg, 0, sizeof(*cfg));
     if (cache_dir && cache_dir[0] != '\0') {
-        oc_copy_str(cfg->cache_dir, sizeof(cfg->cache_dir), cache_dir);
+        oc_str_copy(cfg->cache_dir, sizeof(cfg->cache_dir), cache_dir);
     } else {
         char tmp[OC_HF_MAX_CACHE_DIR];
         if (oc_hf_default_cache_dir(tmp, sizeof(tmp)) != OC_OK) {
-            oc_copy_str(cfg->cache_dir, sizeof(cfg->cache_dir),
-                        "/tmp/oxidize-hf");
+            oc_str_copy(cfg->cache_dir, sizeof(cfg->cache_dir), "/tmp/oxidize-hf");
         } else {
-            oc_copy_str(cfg->cache_dir, sizeof(cfg->cache_dir), tmp);
+            oc_str_copy(cfg->cache_dir, sizeof(cfg->cache_dir), tmp);
         }
     }
-    oc_copy_str(cfg->revision, sizeof(cfg->revision), OC_HF_DEFAULT_REVISION);
-    oc_copy_str(cfg->api_base, sizeof(cfg->api_base), OC_HF_DEFAULT_API_BASE);
+    oc_str_copy(cfg->revision, sizeof(cfg->revision), OC_HF_DEFAULT_REVISION);
+    oc_str_copy(cfg->api_base, sizeof(cfg->api_base), OC_HF_DEFAULT_API_BASE);
     cfg->api_token[0] = '\0';
     cfg->repo_id[0] = '\0';
     cfg->quant_type[0] = '\0';
@@ -833,10 +823,9 @@ OcError oc_hf_list_models(const OcHfConfig *cfg,
 
         OcHfModel *m = &out_models[written];
         memset(m, 0, sizeof(*m));
-        oc_copy_str(m->repo_id, sizeof(m->repo_id), cfg->repo_id);
-        oc_copy_str(m->filename, sizeof(m->filename), names[i]);
-        oc_copy_str(m->quant_type, sizeof(m->quant_type),
-                    has_qt ? qt : "");
+        oc_str_copy(m->repo_id, sizeof(m->repo_id), cfg->repo_id);
+        oc_str_copy(m->filename, sizeof(m->filename), names[i]);
+        oc_str_copy(m->quant_type, sizeof(m->quant_type), has_qt ? qt : "");
         m->size_bytes = 0;
         m->sha256[0] = '\0';
         m->download_url[0] = '\0';
@@ -859,8 +848,7 @@ OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model)
 
     if (out_model->filename[0] != '\0') {
         /* Caller specified filename; just build URL. */
-        oc_copy_str(out_model->repo_id, sizeof(out_model->repo_id),
-                    cfg->repo_id);
+        oc_str_copy(out_model->repo_id, sizeof(out_model->repo_id), cfg->repo_id);
         const char *base = cfg->api_base[0] ? cfg->api_base
                                             : OC_HF_DEFAULT_API_BASE;
         const char *rev = cfg->revision[0] ? cfg->revision
@@ -869,11 +857,10 @@ OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model)
         int n = snprintf(url, sizeof(url), "%s/%s/resolve/%s/%s",
                          base, cfg->repo_id, rev, out_model->filename);
         if (n < 0 || (size_t)n >= sizeof(url)) return OC_ERR_INVALID_ARG;
-        oc_copy_str(out_model->download_url, sizeof(out_model->download_url),
-                    url);
+        oc_str_copy(out_model->download_url, sizeof(out_model->download_url), url);
         char qt[OC_HF_MAX_QUANT_TYPE];
         if (oc_hf_parse_quant_type(out_model->filename, qt, sizeof(qt))) {
-            oc_copy_str(out_model->quant_type, sizeof(out_model->quant_type), qt);
+            oc_str_copy(out_model->quant_type, sizeof(out_model->quant_type), qt);
         }
         return OC_OK;
     }
@@ -902,7 +889,7 @@ OcError oc_hf_resolve(const OcHfConfig *cfg, OcHfModel *out_model)
     int n = snprintf(url, sizeof(url), "%s/%s/resolve/%s/%s",
                      base, cfg->repo_id, rev, out_model->filename);
     if (n < 0 || (size_t)n >= sizeof(url)) return OC_ERR_INVALID_ARG;
-    oc_copy_str(out_model->download_url, sizeof(out_model->download_url), url);
+    oc_str_copy(out_model->download_url, sizeof(out_model->download_url), url);
     return OC_OK;
 }
 
@@ -1250,10 +1237,10 @@ OcError oc_hf_cache_list(const OcHfConfig *cfg,
                 m->repo_id[i] = (ent->d_name[i] == '_') ? '/' : ent->d_name[i];
             }
             m->repo_id[rl] = '\0';
-            oc_copy_str(m->filename, sizeof(m->filename), sent->d_name);
+            oc_str_copy(m->filename, sizeof(m->filename), sent->d_name);
             char qt[OC_HF_MAX_QUANT_TYPE];
             if (oc_hf_parse_quant_type(sent->d_name, qt, sizeof(qt))) {
-                oc_copy_str(m->quant_type, sizeof(m->quant_type), qt);
+                oc_str_copy(m->quant_type, sizeof(m->quant_type), qt);
             }
             /* Size. */
             char full[OC_HF_MAX_CACHE_DIR];

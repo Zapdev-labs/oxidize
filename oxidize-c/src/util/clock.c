@@ -9,8 +9,8 @@
 
 static struct timespec mono_now(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    struct timespec ts = {0};
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts;
 }
 
