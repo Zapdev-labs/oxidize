@@ -86,6 +86,13 @@ typedef struct OcGgufWriter {
 OcError oc_gguf_writer_init(const char *path, const char *arch_name,
                             OcGgufWriter *w);
 
+/* Open a writer for `output_path` and copy the architecture plus every
+ * scalar and string metadata KV from `gf`, so a tool that rewrites tensors
+ * emits a loadable GGUF. Array metadata (e.g. the tokenizer vocab) is not
+ * copied. On error the writer is freed. */
+OcError oc_gguf_writer_init_from(const OcGgufFile *gf, const char *output_path,
+                                 OcGgufWriter *w);
+
 /* ─── Metadata KV writers ────────────────────────────────────────────────
  *
  * Each writes a single metadata KV pair to the file and increments the
