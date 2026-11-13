@@ -176,6 +176,94 @@ Test(oxk_asm, tile_and_tail_bit_identical)
     }
 }
 
+/* ─── K-quants: bit-exact, not merely close ────────────────────────────── */
+
+void oc_asm_dot_rows_q4_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_asm_dot_rows_q6_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+
+typedef void (*AsmKRows)(const uint8_t *, size_t, size_t, size_t,
+                         const uint8_t *, float *);
+typedef float (*KScalar)(const uint8_t *, size_t, const uint8_t *);
+
+/* Random bytes everywhere (so every 6-bit scale/min and high-bit pattern
+ * shows up), then real f16 scales at d_off (and d_off + 2 for dmin). */
+static void fill_k(uint8_t *row, size_t blocks, size_t bsize, size_t d_off,
+                   int n_f16, uint32_t *s)
+{
+    for (size_t b = 0; b < blocks; b++) {
+        uint8_t *xb = row + b * bsize;
+        for (size_t i = 0; i < bsize; i++) xb[i] = (uint8_t)rng(s);
+        for (int k = 0; k < n_f16; k++) put_f16(xb + d_off + 2 * k, s);
+    }
+}
+
+/* Q8_K over [-127, 127] (quantize_act_q8_k's range) with matching bsums. */
+static void fill_q8_k(uint8_t *act, size_t blocks, uint32_t *s)
+{
+    for (size_t b = 0; b < blocks; b++) {
+        uint8_t *yb = act + b * OC_OXK_BLOCK_Q8_K_SIZE;
+        const float d = 0.001f + (float)(rng(s) % 1000u) * 2e-5f;
+        memcpy(yb, &d, 4);
+        int8_t *q = (int8_t *)(yb + 4);
+        for (int i = 0; i < 256; i++) q[i] = (int8_t)((int32_t)(rng(s) % 255u) - 127);
+        for (int g = 0; g < 16; g++) {
+            int32_t t = 0;
+            for (int i = 0; i < 16; i++) t += q[g * 16 + i];
+            const int16_t t16 = (int16_t)t;
+            memcpy(yb + 260 + g * 2, &t16, 2);
+        }
+    }
+}
+
+static void check_k_rows(AsmKRows fn, KScalar scalar, size_t bsize,
+                         size_t d_off, int n_f16, const char *name)
+{
+    static const size_t block_counts[] = { 0, 1, 2, 3, 6, 9 };
+    uint32_t s = 0xD1CEu;
+    for (size_t bi = 0; bi < sizeof block_counts / sizeof block_counts[0]; bi++) {
+        const size_t blocks = block_counts[bi];
+        const size_t rb = blocks * bsize;
+        for (size_t n_rows = 1; n_rows <= 9; n_rows++) {
+            /* Exact sizes: ASan builds catch any read past the last row. */
+            uint8_t *w = malloc(rb * n_rows + 1);
+            uint8_t *a = malloc(blocks * OC_OXK_BLOCK_Q8_K_SIZE + 1);
+            float *out = malloc((n_rows + 1) * sizeof *out);
+            cr_assert(w && a && out);
+            for (size_t r = 0; r < n_rows; r++)
+                fill_k(w + r * rb, blocks, bsize, d_off, n_f16, &s);
+            fill_q8_k(a, blocks, &s);
+            out[n_rows] = 12345.0f;
+            fn(w, rb, n_rows, blocks, a, out);
+            for (size_t r = 0; r < n_rows; r++) {
+                const float want = scalar(w + r * rb, blocks, a);
+                cr_assert(memcmp(&out[r], &want, 4) == 0,
+                          "%s blocks %zu n_rows %zu row %zu: asm %a != scalar %a",
+                          name, blocks, n_rows, r, (double)out[r], (double)want);
+            }
+            cr_assert_eq(out[n_rows], 12345.0f, "%s wrote past n_rows", name);
+            free(w); free(a); free(out);
+        }
+    }
+}
+
+Test(oxk_asm, q4_k_bit_exact_vs_scalar)
+{
+    if (!oc_oxk_asm_active()) cr_skip_test("asm kernels not active");
+    check_k_rows(oc_asm_dot_rows_q4_k_q8_k, oc_oxk_dot_q4_k_q8_k_scalar,
+                 OC_OXK_BLOCK_Q4_K_SIZE, 0, 2, "q4_k");
+}
+
+Test(oxk_asm, q6_k_bit_exact_vs_scalar)
+{
+    if (!oc_oxk_asm_active()) cr_skip_test("asm kernels not active");
+    check_k_rows(oc_asm_dot_rows_q6_k_q8_k, oc_oxk_dot_q6_k_q8_k_scalar,
+                 OC_OXK_BLOCK_Q6_K_SIZE, 208, 1, "q6_k");
+}
+
 /* The public facc entry points must route to the asm when it is active and
  * still agree with the C intrinsics kernels. */
 Test(oxk_asm, public_facc_matches_c_kernel)
