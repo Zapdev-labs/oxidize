@@ -7,7 +7,7 @@
 #   make manual-tests  — opt-in DFlash2 parity validators (real checkpoint)
 #   make lint          — clang-tidy on library sources
 #   make clean         — remove build artifacts
-#   make avx512        — AVX-512 build (for .121 Cascade Lake)
+#   make avx512        — AVX-512 build (for .132 Cascade Lake)
 #   make cuda          — CUDA backend build (OC_CUDA, for Modal L40S)
 #
 # C standard: C11 (-std=c11). No GNU extensions unless gated behind #ifdef.
@@ -256,7 +256,7 @@ lint:
 		echo "clang-tidy not found; build with -Wall -Wextra -Werror is the primary gate"; \
 	fi
 
-# AVX-512 build (for .121 Cascade Lake).
+# AVX-512 build (for .132 Cascade Lake).
 avx512: CFLAGS += -DOC_AVX512 -mavx512f -mavx512bw -mavx512dq -mavx512vl -mavx512vnni
 avx512: clean oxidize-c
 

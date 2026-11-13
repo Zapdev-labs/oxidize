@@ -43,6 +43,7 @@ extern "C" {
 #define OC_QK_K       256u
 #define OC_QK_NVFP4   64u
 #define OC_QK_NVFP4_SUB 16u
+#define OC_QK_MXFP4   32u
 /* AL-family block element count (shared by AL5_XS). */
 #define OC_QK_AL      32u
 
@@ -85,6 +86,9 @@ extern "C" {
 #define OC_BLOCK_IQ4_NL_SIZE  18u
 #define OC_BLOCK_IQ4_XS_SIZE 136u
 #define OC_BLOCK_NVFP4_SIZE   36u
+/* MXFP4 (ggml type 39, OCP microscaling): 1 E8M0 scale byte + 16 bytes of
+ * E2M1 nibbles for 32 values. Value = E2M1_DOUBLED[nib] * 2^(e - 128). */
+#define OC_BLOCK_MXFP4_SIZE   17u
 
 /* ─── Quantization type enum (port of GgufQuantizationType) ──────────────
  *
@@ -140,6 +144,8 @@ typedef enum {
      * row-major and yield garbage logits. Unpack offline with
      * `oc_q8_0_r8_unpack_to_q8_0_inplace` first. */
     OC_QUANT_Q8_0_R8  = 37,
+    /* OCP MXFP4 (ggml id 39): gpt-oss / qwen4exp expert weights. */
+    OC_QUANT_MXFP4    = 38,
     OC_QUANT__COUNT,
     OC_QUANT_UNKNOWN  = 0xffffffffu,
 } OcGgufQuantizationType;

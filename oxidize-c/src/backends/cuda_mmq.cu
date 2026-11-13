@@ -35,6 +35,7 @@
 #define MQ_BLOCK_Q5_0_SIZE   22u
 #define MQ_BLOCK_AL5_XS_SIZE 14u
 #define MQ_BLOCK_IQ4_XS_SIZE 136u
+#define MQ_BLOCK_MXFP4_SIZE   17u
 
 /* Device-side block strides. These may exceed the on-disk stride to buy
  * alignment: Q6_K's 210 bytes is only 2-aligned, which forbids 16-byte vector
@@ -52,6 +53,8 @@
 #define MQ_DEV_Q5_0_SIZE    22u
 #define MQ_DEV_AL5_XS_SIZE  14u
 #define MQ_DEV_IQ4_XS_SIZE 136u
+/* MXFP4's 17-byte block is byte-aligned only; kept as-is (scalar loads). */
+#define MQ_DEV_MXFP4_SIZE   17u
 
 #define MQ_BLOCK_THREADS   256u   /* threads per block on the get_row path */
 
@@ -80,6 +83,21 @@ __device__ __constant__ int8_t MQ_KVALUES_IQ4NL[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10,
     1, 13, 25, 38, 53, 69, 89, 113
 };
+
+/* MXFP4 (OCP E2M1) values doubled to int8, mirrors quant_tables.h::
+ * E2M1_DOUBLED_VALUES / ggml kvalues_mxfp4. The block's E8M0 scale is then
+ * 2^(e-128) (GGML_E8M0_TO_FP32_HALF) to undo the doubling. */
+__device__ __constant__ int8_t MQ_KVALUES_MXFP4[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+};
+
+/* E8M0 -> f32 * 0.5, i.e. 2^(e-128). e < 2 is subnormal in f32. */
+__device__ __forceinline__ float mq_e8m0_half(uint8_t e)
+{
+    const uint32_t bits = (e < 2u) ? (0x00200000u << e)
+                                   : ((uint32_t)(e - 1u) << 23);
+    return __uint_as_float(bits);
+}
 
 /* Q4_K 6-bit scale/min unpack. Mirrors quantization.c::get_scale_min_k4. */
 __device__ __forceinline__ void mq_scale_min_k4(uint32_t j,
@@ -405,6 +423,35 @@ __device__ __forceinline__ float mq_iq4_xs_group_dot(const uint8_t *row,
     return dl * acc;
 }
 
+/* MXFP4: one 17-byte block per 32-element group. Element j sits in the low
+ * nibble of qs[j], element j+16 in the high nibble (same pairing as IQ4_NL). */
+__device__ __forceinline__ float mq_mxfp4_group_dot(const uint8_t *row,
+                                                    uint32_t g, const float *x)
+{
+    const uint8_t *blk = row + (size_t)g * MQ_DEV_MXFP4_SIZE;
+    const float d = mq_e8m0_half(blk[0]);
+    const uint8_t *qs = blk + 1;
+    const float4 *x0 = reinterpret_cast<const float4 *>(x);
+    const float4 *x1 = reinterpret_cast<const float4 *>(x + 16);
+    float acc = 0.0f;
+    #pragma unroll
+    for (uint32_t i = 0; i < 4u; i++) {
+        const float4 a = x0[i];
+        const float4 b = x1[i];
+        const uint8_t p0 = qs[i * 4u],      p1 = qs[i * 4u + 1u];
+        const uint8_t p2 = qs[i * 4u + 2u], p3 = qs[i * 4u + 3u];
+        acc += (float)MQ_KVALUES_MXFP4[p0 & 0x0Fu] * a.x
+             + (float)MQ_KVALUES_MXFP4[p1 & 0x0Fu] * a.y
+             + (float)MQ_KVALUES_MXFP4[p2 & 0x0Fu] * a.z
+             + (float)MQ_KVALUES_MXFP4[p3 & 0x0Fu] * a.w
+             + (float)MQ_KVALUES_MXFP4[p0 >> 4] * b.x
+             + (float)MQ_KVALUES_MXFP4[p1 >> 4] * b.y
+             + (float)MQ_KVALUES_MXFP4[p2 >> 4] * b.z
+             + (float)MQ_KVALUES_MXFP4[p3 >> 4] * b.w;
+    }
+    return d * acc;
+}
+
 /* ─── Reduction ──────────────────────────────────────────────────────────── */
 
 /* Sum across a warp with shuffles: no shared memory and no __syncthreads.
@@ -448,6 +495,7 @@ MQ_DEFINE_MATVEC(k_mmq_matvec_q4_0,   mq_q4_0_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_q5_0,   mq_q5_0_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_al5_xs, mq_al5_xs_group_dot)
 MQ_DEFINE_MATVEC(k_mmq_matvec_iq4_xs, mq_iq4_xs_group_dot)
+MQ_DEFINE_MATVEC(k_mmq_matvec_mxfp4,  mq_mxfp4_group_dot)
 
 /* MoE variant: the expert to use is read from device memory, so routing never
  * round-trips to the host and the whole token stays one async submission.
@@ -476,6 +524,7 @@ MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q4_0,   mq_q4_0_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_q5_0,   mq_q5_0_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_al5_xs, mq_al5_xs_group_dot)
 MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_iq4_xs, mq_iq4_xs_group_dot)
+MQ_DEFINE_MATVEC_EXPERT(k_mmq_matvec_exp_mxfp4,  mq_mxfp4_group_dot)
 
 /* ─── Single-row dequantize (embedding lookup) ────────────────────────────── */
 
@@ -647,6 +696,16 @@ __device__ __forceinline__ void mq_iq4_xs_expand(const uint8_t *blk, float *out)
     }
 }
 
+__device__ __forceinline__ void mq_mxfp4_expand(const uint8_t *blk, float *out)
+{
+    const float d = mq_e8m0_half(blk[0]);
+    const uint8_t *qs = blk + 1;
+    for (uint32_t j = 0u; j < 16u; j++) {
+        out[j]       = d * (float)MQ_KVALUES_MXFP4[qs[j] & 0x0Fu];
+        out[j + 16u] = d * (float)MQ_KVALUES_MXFP4[qs[j] >> 4];
+    }
+}
+
 MQ_DEFINE_GETROW(k_mmq_getrow_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_q6k,    MQ_DEV_Q6_K_SIZE,   MQ_QK_K,  mq_q6k_expand)
@@ -655,6 +714,7 @@ MQ_DEFINE_GETROW(k_mmq_getrow_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, mq_q4_0_expa
 MQ_DEFINE_GETROW(k_mmq_getrow_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
 MQ_DEFINE_GETROW(k_mmq_getrow_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
+MQ_DEFINE_GETROW(k_mmq_getrow_mxfp4,  MQ_DEV_MXFP4_SIZE,  MQ_QK8_0, mq_mxfp4_expand)
 
 /* Fast-path variants: the row index comes from device memory (an on-device
  * argmax result or a prompt-ids array), never the host. */
@@ -689,6 +749,7 @@ MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, mq_q
 MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
 MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
 MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
+MQ_DEFINE_GETROW_DEV(k_mmq_getrow_dev_mxfp4,  MQ_DEV_MXFP4_SIZE,  MQ_QK8_0, mq_mxfp4_expand)
 
 MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q4k,    MQ_DEV_Q4_K_SIZE,   MQ_QK_K,  mq_q4k_expand)
 MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q5k,    MQ_DEV_Q5_K_SIZE,   MQ_QK_K,  mq_q5k_expand)
@@ -698,6 +759,7 @@ MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q4_0,   MQ_DEV_Q4_0_SIZE,   MQ_QK8_0, 
 MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_q5_0,   MQ_DEV_Q5_0_SIZE,   MQ_QK8_0, mq_q5_0_expand)
 MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_al5_xs, MQ_DEV_AL5_XS_SIZE, MQ_QK8_0, mq_al5_xs_expand)
 MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_iq4_xs, MQ_DEV_IQ4_XS_SIZE, MQ_QK_K,  mq_iq4_xs_expand)
+MQ_DEFINE_GETROW_BATCH(k_mmq_getrow_batch_mxfp4,  MQ_DEV_MXFP4_SIZE,  MQ_QK8_0, mq_mxfp4_expand)
 
 /* ─── Batched matvec (prompt prefill) ─────────────────────────────────────
  *
@@ -734,6 +796,7 @@ MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q4_0,   mq_q4_0_group_dot)
 MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_q5_0,   mq_q5_0_group_dot)
 MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_al5_xs, mq_al5_xs_group_dot)
 MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_iq4_xs, mq_iq4_xs_group_dot)
+MQ_DEFINE_MATVEC_BATCH(k_mmq_mvb_mxfp4,  mq_mxfp4_group_dot)
 
 /* ─── Host API ───────────────────────────────────────────────────────────── */
 
@@ -772,6 +835,9 @@ static void mq_layout(uint32_t qtype, size_t *src_block, size_t *dev_block,
     case OC_QUANT_IQ4_XS:
         *src_block = MQ_BLOCK_IQ4_XS_SIZE; *dev_block = MQ_DEV_IQ4_XS_SIZE;
         *vals = MQ_QK_K;  return;
+    case OC_QUANT_MXFP4:
+        *src_block = MQ_BLOCK_MXFP4_SIZE; *dev_block = MQ_DEV_MXFP4_SIZE;
+        *vals = MQ_QK8_0; return;
     default:
         *src_block = 0; *dev_block = 0; *vals = 0; return;
     }
@@ -860,6 +926,10 @@ extern "C" bool oc_cuda_mmq_matvec(uint32_t qtype, const void *d_weights,
         k_mmq_matvec_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
                                                    n_groups, row_bytes);
         break;
+    case OC_QUANT_MXFP4:
+        k_mmq_matvec_mxfp4<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+                                                   n_groups, row_bytes);
+        break;
     default:
         return false;
     }
@@ -920,6 +990,10 @@ extern "C" bool oc_cuda_mmq_matvec_expert(uint32_t qtype, const void *d_weights,
         k_mmq_matvec_exp_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
             n_groups, row_bytes, d_expert_sel, slot);
         break;
+    case OC_QUANT_MXFP4:
+        k_mmq_matvec_exp_mxfp4<<<grid, block, 0, s>>>(w, d_x, d_out, rows,
+            n_groups, row_bytes, d_expert_sel, slot);
+        break;
     default:
         return false;
     }
@@ -971,6 +1045,9 @@ extern "C" bool oc_cuda_mmq_get_row(uint32_t qtype, const void *d_weights,
         break;
     case OC_QUANT_IQ4_XS:
         k_mmq_getrow_iq4_xs<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_MXFP4:
+        k_mmq_getrow_mxfp4<<<grid, block, 0, s>>>(w, token, d_out, cols, row_bytes);
         break;
     default:
         return false;
@@ -1025,6 +1102,9 @@ extern "C" bool oc_cuda_mmq_get_row_dev(uint32_t qtype,
         break;
     case OC_QUANT_IQ4_XS:
         k_mmq_getrow_dev_iq4_xs<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
+        break;
+    case OC_QUANT_MXFP4:
+        k_mmq_getrow_dev_mxfp4<<<grid, block, 0, s>>>(w, d_token, d_out, cols, row_bytes);
         break;
     default:
         return false;
@@ -1082,6 +1162,9 @@ extern "C" bool oc_cuda_mmq_get_row_batch(uint32_t qtype,
     case OC_QUANT_IQ4_XS:
         k_mmq_getrow_batch_iq4_xs<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
         break;
+    case OC_QUANT_MXFP4:
+        k_mmq_getrow_batch_mxfp4<<<grid, block, 0, s>>>(w, d_ids, d_out, cols, row_bytes, out_stride);
+        break;
     default:
         return false;
     }
@@ -1135,6 +1218,9 @@ extern "C" bool oc_cuda_mmq_matvec_batch(uint32_t qtype,
         break;
     case OC_QUANT_IQ4_XS:
         k_mmq_mvb_iq4_xs<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
+        break;
+    case OC_QUANT_MXFP4:
+        k_mmq_mvb_mxfp4<<<grid, block, 0, s>>>(w, d_x, d_out, rows, n_groups, row_bytes, n_tok, x_stride, out_stride);
         break;
     default:
         return false;

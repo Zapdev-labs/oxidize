@@ -3,7 +3,7 @@
 # Usage: scripts/bench_iq_remote.sh [ssh-host] [repo-on-remote]
 set -euo pipefail
 
-HOST="${1:-ai@192.168.1.121}"
+HOST="${1:-ai@192.168.1.132}"
 REMOTE_REPO="${2:-~/oxidize}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 THREADS="${BENCH_THREADS:-16}"

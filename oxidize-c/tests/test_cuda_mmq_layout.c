@@ -469,3 +469,72 @@ Test(cuda_mmq_layout, al5_xs_group_dot_matches_reference)
     }
     free(src); free(packed); free(ref); free(x);
 }
+
+/* Mirror of cuda_mmq.cu MQ_KVALUES_MXFP4 / mq_e8m0_half / mq_mxfp4_group_dot. */
+static const int8_t MIRROR_KVALUES_MXFP4[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+};
+
+static float mirror_e8m0_half(uint8_t e)
+{
+    const uint32_t bits = (e < 2u) ? (0x00200000u << e)
+                                   : ((uint32_t)(e - 1u) << 23);
+    float out;
+    memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
+static float mirror_mxfp4_group_dot(const uint8_t *row, uint32_t g,
+                                    const float *x)
+{
+    const uint8_t *blk = row + (size_t)g * 17u;
+    const float d = mirror_e8m0_half(blk[0]);
+    const uint8_t *qs = blk + 1;
+    float acc = 0.0f;
+    for (uint32_t j = 0u; j < 16u; j++) {
+        acc += (float)MIRROR_KVALUES_MXFP4[qs[j] & 0x0Fu] * x[j];
+        acc += (float)MIRROR_KVALUES_MXFP4[qs[j] >> 4]    * x[j + 16u];
+    }
+    return d * acc;
+}
+
+/* The device's E8M0 bit trick must equal 2^(e-128) for every byte,
+ * including the f32-subnormal e = 0, 1. */
+Test(cuda_mmq_layout, mxfp4_e8m0_matches_ldexp)
+{
+    for (uint32_t e = 0; e < 255u; e++) {
+        const float want = ldexpf(1.0f, (int)e - 128);
+        cr_assert_eq(mirror_e8m0_half((uint8_t)e), want, "e=%u", e);
+    }
+}
+
+Test(cuda_mmq_layout, mxfp4_group_dot_matches_dequant)
+{
+    const size_t cols = 2560;   /* qwen4exp n_embd */
+    float *src = malloc(cols * sizeof(float));
+    float *ref = malloc(cols * sizeof(float));
+    float *x = malloc(cols * sizeof(float));
+    size_t packed_len = oc_quantized_size(OC_QUANT_MXFP4, cols);
+    uint8_t *packed = malloc(packed_len);
+    cr_assert(src && ref && x && packed);
+    cr_assert_eq(packed_len, (cols / 32u) * 17u);
+    for (size_t i = 0; i < cols; i++) {
+        src[i] = gen((uint32_t)i, 77u) * (float)(1u + (i / 32u) % 9u);
+        x[i] = gen((uint32_t)i, 5u);
+    }
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_MXFP4, src, cols, packed,
+                                   packed_len), OC_OK);
+    cr_assert_eq(oc_quant_dequant_row_scalar(OC_QUANT_MXFP4, packed,
+                                             packed_len, ref, cols), OC_OK);
+    for (uint32_t g = 0; g < cols / 32u; g++) {
+        float want = 0.0f;
+        for (uint32_t j = 0; j < 32u; j++)
+            want += ref[(size_t)g * 32u + j] * x[(size_t)g * 32u + j];
+        const float got = mirror_mxfp4_group_dot(packed, g,
+                                                 x + (size_t)g * 32u);
+        cr_assert_float_eq(got, want, 1e-4f * (fabsf(want) + 1.0f),
+                           "MXFP4 group %u: got %g want %g",
+                           g, (double)got, (double)want);
+    }
+    free(src); free(ref); free(x); free(packed);
+}

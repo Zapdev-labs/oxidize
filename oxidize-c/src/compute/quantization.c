@@ -225,6 +225,7 @@ static LayoutInfo layout_for(OcGgufQuantizationType qtype)
     case OC_QUANT_IQ4_NL:  return (LayoutInfo){ OC_BLOCK_IQ4_NL_SIZE,  OC_QK4_NL };
     case OC_QUANT_IQ4_XS:  return (LayoutInfo){ OC_BLOCK_IQ4_XS_SIZE,  OC_QK_K };
     case OC_QUANT_NVFP4:   return (LayoutInfo){ OC_BLOCK_NVFP4_SIZE,   OC_QK_NVFP4 };
+    case OC_QUANT_MXFP4:   return (LayoutInfo){ OC_BLOCK_MXFP4_SIZE,   OC_QK_MXFP4 };
     default:              return (LayoutInfo){ 0, 0 };
     }
 }
@@ -1504,6 +1505,32 @@ static OcError dequant_nvfp4(const uint8_t *src, size_t src_len,
     return OC_OK;
 }
 
+/* MXFP4 dequant: 17-byte block, 32 values (ggml block_mxfp4). Layout:
+ *   e[0] (E8M0 shared exponent), qs[1..17] (16 bytes of E2M1 nibbles;
+ *   element j in the low nibble of qs[j], element j + 16 in the high).
+ *   value = E2M1_DOUBLED_VALUES[nib] * 2^(e - 128), which is ggml's
+ *   GGML_E8M0_TO_FP32_HALF(e) (the doubled table absorbs the half). */
+static OcError dequant_mxfp4(const uint8_t *src, size_t src_len,
+                             float *dst, size_t value_count)
+{
+    if (!validate_layout(OC_QUANT_MXFP4, src_len, value_count,
+                         OC_BLOCK_MXFP4_SIZE, OC_QK_MXFP4)) {
+        return OC_ERR_INVALID_ARG;
+    }
+    size_t n_blocks = src_len / OC_BLOCK_MXFP4_SIZE;
+    for (size_t b = 0; b < n_blocks; b++) {
+        const uint8_t *block = src + b * OC_BLOCK_MXFP4_SIZE;
+        float *out = dst + b * OC_QK_MXFP4;
+        const float d = ldexpf(1.0f, (int)block[0] - 128);
+        const uint8_t *qs = &block[1];
+        for (size_t j = 0; j < OC_QK_MXFP4 / 2; j++) {
+            out[j] = d * E2M1_DOUBLED_VALUES[(size_t)(qs[j] & 0x0Fu)];
+            out[j + OC_QK_MXFP4 / 2] = d * E2M1_DOUBLED_VALUES[(size_t)(qs[j] >> 4)];
+        }
+    }
+    return OC_OK;
+}
+
 /* ─── Pack-from-f32 (port of quant_simple.rs + quant_k_blocks.rs) ────── */
 
 static OcError pack_f32(const float *src, size_t value_count,
@@ -2752,6 +2779,41 @@ static OcError pack_nvfp4(const float *src, size_t value_count,
     return OC_OK;
 }
 
+/* MXFP4 pack: mirrors ggml quantize_row_mxfp4_ref. The exponent maps the
+ * block max into [8, 16) in doubled-E2M1 units, so the largest element
+ * lands on +-8 or +-12 and nothing beyond 12 survives clipping. */
+static OcError pack_mxfp4(const float *src, size_t value_count,
+                          uint8_t *dst, size_t dst_len)
+{
+    if (value_count % OC_QK_MXFP4 != 0) return OC_ERR_INVALID_ARG;
+    size_t n_blocks = value_count / OC_QK_MXFP4;
+    if (dst_len != n_blocks * OC_BLOCK_MXFP4_SIZE) return OC_ERR_INVALID_ARG;
+    for (size_t b = 0; b < n_blocks; b++) {
+        const float *x = src + b * OC_QK_MXFP4;
+        uint8_t *out = dst + b * OC_BLOCK_MXFP4_SIZE;
+        float amax = 0.0f;
+        for (size_t j = 0; j < OC_QK_MXFP4; j++) {
+            float a = fabsf(x[j]);
+            if (a > amax) amax = a;
+        }
+        int e = 0;
+        if (amax > 0.0f) {
+            e = (int)floorf(log2f(amax)) - 2 + 127;
+            if (e < 0) e = 0;
+            if (e > 254) e = 254;
+        }
+        out[0] = (uint8_t)e;
+        float d = ldexpf(1.0f, e - 128);
+        for (size_t j = 0; j < OC_QK_MXFP4 / 2; j++) {
+            size_t lo = (amax > 0.0f) ? e2m1_nearest(x[j] / d) : 0;
+            size_t hi = (amax > 0.0f)
+                ? e2m1_nearest(x[j + OC_QK_MXFP4 / 2] / d) : 0;
+            out[1 + j] = (uint8_t)((lo & 0x0Fu) | ((hi & 0x0Fu) << 4));
+        }
+    }
+    return OC_OK;
+}
+
 /* ─── Public dispatch ────────────────────────────────────────────────── */
 
 OcQuantBlockLayout oc_quant_block_size(OcGgufQuantizationType qtype)
@@ -2840,6 +2902,7 @@ OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
     case OC_QUANT_IQ4_NL:  return dequant_iq4_nl(src, src_len, dst, value_count);
     case OC_QUANT_IQ4_XS:  return dequant_iq4_xs(src, src_len, dst, value_count);
     case OC_QUANT_NVFP4:   return dequant_nvfp4(src, src_len, dst, value_count);
+    case OC_QUANT_MXFP4:   return dequant_mxfp4(src, src_len, dst, value_count);
     /* Q8_0_R8 is an offline interleaved repack layout, not a decodable row
      * format: eight rows share a superblock, so there is no "row" to
      * dequantize here. Rejected explicitly (rather than falling into
@@ -2893,6 +2956,7 @@ OcError oc_quant_pack_row(OcGgufQuantizationType qtype,
     case OC_QUANT_IQ4_NL: return pack_iq4_nl(src, value_count, dst, dst_len);
     case OC_QUANT_IQ4_XS: return pack_iq4_xs(src, value_count, dst, dst_len);
     case OC_QUANT_NVFP4:  return pack_nvfp4(src, value_count, dst, dst_len);
+    case OC_QUANT_MXFP4:  return pack_mxfp4(src, value_count, dst, dst_len);
     /* Q8_0_R8 is produced by repacking finished Q8_0 rows, not by a
      * per-row encoder — pack as OC_QUANT_Q8_0, then call
      * `oc_q8_0_r8_repack` on the whole tensor. */
@@ -2959,6 +3023,7 @@ static const struct {
     /* ik_llama.cpp interleaved Q8_0. */
     { OC_QUANT_Q8_0_R8, "Q8_0_R8", 208 },
     { OC_QUANT_NVFP4,   "NVFP4",   40 },
+    { OC_QUANT_MXFP4,   "MXFP4",   39 },
     { OC_QUANT_I8,      "I8",      24 },
     { OC_QUANT_I16,     "I16",     25 },
     { OC_QUANT_I32,     "I32",     26 },
