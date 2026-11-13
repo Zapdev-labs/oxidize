@@ -32,7 +32,16 @@ LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c \
                        src/vision/*.c src/mesh/*.c \
                        src/cluster/*.c src/validation/*.c src/video/*.c) \
                        src/cli/args.c src/cli/commands.c
-LIB_OBJS := $(LIB_SRCS:.c=.o)
+# Hand-written x86-64 assembly kernels (AVX2/FMA/F16C decode GEMV). Linked
+# on x86-64 ELF hosts only; runtime-gated on CPU features, OC_ASM=0 disables.
+ASM_SRCS :=
+ifneq (,$(filter x86_64%,$(shell $(CC) -dumpmachine)))
+ifneq ($(shell uname -s),Darwin)
+ASM_SRCS := $(wildcard src/compute/asm/*.S)
+endif
+endif
+ASM_OBJS := $(ASM_SRCS:.S=.o)
+LIB_OBJS := $(LIB_SRCS:.c=.o) $(ASM_OBJS)
 
 # Binary source for the CLI entrypoint.
 BIN_SRCS := src/cli/main.c
@@ -116,7 +125,7 @@ endif
 TEST_LDFLAGS := $(TEST_SYSTEM_LIBS) $(TEST_SANITIZE_FLAGS)
 
 # Sanitizer-instrumented library objects (stems: src/core/error.c -> src/core/error.asan.o).
-LIB_ASAN_OBJS := $(LIB_SRCS:.c=.$(SAN_SUFFIX).o)
+LIB_ASAN_OBJS := $(LIB_SRCS:.c=.$(SAN_SUFFIX).o) $(ASM_OBJS)
 DEP_FILES := $(LIB_OBJS:.o=.d) $(BIN_OBJS:.o=.d) \
              $(ALL_SAN_OBJS:.o=.d) \
              oc-tokenize.d oc-eval.d
@@ -162,6 +171,9 @@ src/compute/oxk_avx2.asan.o: src/compute/oxk_avx2.c
 
 src/compute/oxk_avx2.nosan.o: src/compute/oxk_avx2.c
 	$(CC) $(CPPFLAGS) $(TEST_CFLAGS) $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
+src/%.o: src/%.S
+	$(CC) $(CPPFLAGS) -c -o $@ $<
 
 # Default object rule (no ASan).
 src/%.o: src/%.c
@@ -262,7 +274,7 @@ avx512: clean oxidize-c
 
 # CUDA build (for Modal L40S). NVCC compiles .cu files; cuda_stub.c excluded.
 CUDA_LIB_SRCS := $(filter-out src/backends/cuda_stub.c,$(LIB_SRCS))
-CUDA_LIB_OBJS := $(CUDA_LIB_SRCS:.c=.o)
+CUDA_LIB_OBJS := $(CUDA_LIB_SRCS:.c=.o) $(ASM_OBJS)
 # bench_mma.cu is a standalone tool with its own main() — built ad hoc, not
 # linked into oxidize-c.
 CUDA_SRCS := $(filter-out src/backends/bench_mma.cu,$(wildcard src/backends/*.cu))
