@@ -3,7 +3,7 @@
 # Usage: scripts/qwen35_9b_self_train_remote.sh [ssh-host]
 set -euo pipefail
 
-HOST="${1:-ai@192.168.1.121}"
+HOST="${1:-ai@192.168.1.132}"
 THREADS="${TRAIN_THREADS:-48}"
 ROUNDS="${SELF_TRAIN_ROUNDS:-5}"
 PROMPTS="${PROMPTS_PER_ROUND:-12}"
@@ -238,5 +238,5 @@ nohup "$FINETUNE" --threads "$THREADS" self-train \
 echo "self-train pid=$!"
 sleep 2
 tail -20 "$LOG" || true
-echo "==> monitor: ssh ai@192.168.1.121 tail -f $LOG"
+echo "==> monitor: ssh ai@192.168.1.132 tail -f $LOG"
 REMOTE

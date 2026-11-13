@@ -607,6 +607,7 @@ Test(quant, encoder_roundtrip_error_scales_with_bit_width,
         { OC_QUANT_IQ4_NL, 32,  OC_BLOCK_IQ4_NL_SIZE, 0.13f },
         { OC_QUANT_IQ4_XS, 256, OC_BLOCK_IQ4_XS_SIZE, 0.13f },
         { OC_QUANT_NVFP4,  64,  OC_BLOCK_NVFP4_SIZE,  0.16f },
+        { OC_QUANT_MXFP4,  32,  OC_BLOCK_MXFP4_SIZE,  0.20f },
         { OC_QUANT_Q3_K_M, 256, OC_BLOCK_Q3_K_SIZE,   0.26f },
         { OC_QUANT_Q2_K,   256, OC_BLOCK_Q2_K_SIZE,   0.45f },
     };
@@ -655,7 +656,7 @@ Test(quant, dequant_reads_every_payload_byte,
         OC_QUANT_AL5, OC_QUANT_AL5_XS, OC_QUANT_AL6, OC_QUANT_AL8,
         OC_QUANT_IQ1_S, OC_QUANT_IQ1_M, OC_QUANT_IQ2_XXS, OC_QUANT_IQ2_XS,
         OC_QUANT_IQ2_S, OC_QUANT_IQ3_XXS, OC_QUANT_IQ3_S,
-        OC_QUANT_IQ4_NL, OC_QUANT_IQ4_XS, OC_QUANT_NVFP4,
+        OC_QUANT_IQ4_NL, OC_QUANT_IQ4_XS, OC_QUANT_NVFP4, OC_QUANT_MXFP4,
     };
 
     for (size_t c = 0; c < sizeof(types) / sizeof(types[0]); c++) {
@@ -905,6 +906,7 @@ Test(quant, al_iq_nvfp4_block_sizes, .description = "VAL-QUANT-001: AL/IQ/NVFP4 
         { OC_QUANT_IQ4_NL,   32,  18  },
         { OC_QUANT_IQ4_XS,   256, 136 },
         { OC_QUANT_NVFP4,    64,  36  },
+        { OC_QUANT_MXFP4,    32,  17  },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         OcQuantBlockLayout bs = oc_quant_block_size(cases[i].t);
@@ -1343,4 +1345,27 @@ Test(quant, al_iq_constant_table_sha256, .description = "VAL-QUANT-016: AL/IQ/NV
         cr_assert_str_eq(hex, tables[i].expected_sha,
             "%s SHA256 mismatch: got %s, want %s", tables[i].name, hex, tables[i].expected_sha);
     }
+}
+
+/* MXFP4 matches ggml block_mxfp4: e=128 -> d=1, nibble 7 -> 12, 0xF -> -12,
+ * element j in the low nibble, j+16 in the high; ggml id 39 round-trips. */
+Test(quant, mxfp4_known_block)
+{
+    uint8_t buf[17] = {0};
+    buf[0] = 129;               /* d = 2 */
+    buf[1] = 0xF7;              /* x[0] = 12*2, x[16] = -12*2 */
+    buf[2] = 0x21;              /* x[1] = 1*2,  x[17] = 2*2  */
+    float dst[32];
+    cr_assert_eq(oc_quant_dequant_row(OC_QUANT_MXFP4, buf, 17, dst, 32), OC_OK);
+    cr_assert_float_eq(dst[0], 24.0f, 0.0f);
+    cr_assert_float_eq(dst[16], -24.0f, 0.0f);
+    cr_assert_float_eq(dst[1], 2.0f, 0.0f);
+    cr_assert_float_eq(dst[17], 4.0f, 0.0f);
+    cr_assert_float_eq(dst[5], 0.0f, 0.0f);
+    cr_assert_eq(oc_quant_type_from_ggml_id(39), OC_QUANT_MXFP4);
+    cr_assert_eq(oc_quant_type_to_ggml_id(OC_QUANT_MXFP4), 39u);
+    cr_assert(oc_quant_is_runtime_supported(OC_QUANT_MXFP4));
+    uint8_t re[17];
+    cr_assert_eq(oc_quant_pack_row(OC_QUANT_MXFP4, dst, 32, re, 17), OC_OK);
+    cr_assert_eq(memcmp(re, buf, 17), 0);
 }

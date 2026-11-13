@@ -495,7 +495,8 @@ __global__ void k_kv_cache_write(__half *kv_k, __half *kv_v,
 __global__ void k_moe_route(const float *logits_in, float *logits,
                             uint32_t *sel, float *weights,
                             uint32_t n_exp, uint32_t k,
-                            bool sigmoid_gating, float routed_scale)
+                            bool sigmoid_gating, float routed_scale,
+                            const float *bias)
 {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -517,12 +518,18 @@ __global__ void k_moe_route(const float *logits_in, float *logits,
             logits[i] = 1.0f / (1.0f + expf(-logits_in[i]));
     }
 
-    /* Partial selection sort over an identity permutation, as on the CPU. */
+    /* Partial selection sort over an identity permutation, as on the CPU.
+     * exp_probs_b (when present) only steers the ranking; the applied
+     * weight below stays the unbiased probability. */
     for (uint32_t i = 0; i < n_exp; i++) sel[i] = i;
     for (uint32_t i = 0; i < k; i++) {
         uint32_t best = i;
-        for (uint32_t j = i + 1; j < n_exp; j++)
-            if (logits[sel[j]] > logits[sel[best]]) best = j;
+        for (uint32_t j = i + 1; j < n_exp; j++) {
+            float sj = logits[sel[j]];
+            float sb = logits[sel[best]];
+            if (bias) { sj += bias[sel[j]]; sb += bias[sel[best]]; }
+            if (sj > sb) best = j;
+        }
         const uint32_t t = sel[i]; sel[i] = sel[best]; sel[best] = t;
     }
 
@@ -790,6 +797,94 @@ static OcError cuda_matvec_expert(const OcCudaWeight *w, const float *d_x,
     return OC_OK;
 }
 
+/* Copy expert `expert`'s rows of a stacked host tensor into device slot
+ * `slot` of `dst` (a packed slot-stacked tensor). */
+static OcError upload_expert_slot(const OcWeightView *view,
+                                  const OcCudaWeight *dst, uint32_t expert,
+                                  uint32_t slot)
+{
+    const size_t rows = view->rows;   /* one expert's rows */
+    const uint8_t *src = view->data + (size_t)expert * rows * view->row_bytes;
+    uint8_t *d = (uint8_t *)dst->data + (size_t)slot * rows * dst->row_bytes;
+    if (dst->row_bytes == view->row_bytes) {
+        OC_CUDA_CHECK(cudaMemcpy(d, src, rows * view->row_bytes,
+                                 cudaMemcpyHostToDevice));
+        return OC_OK;
+    }
+    size_t src_block = 0, dev_block = 0, n_blocks = 0;
+    if (!oc_cuda_mmq_block_layout(dst->qtype, view->cols, &src_block,
+                                  &dev_block, &n_blocks))
+        return OC_ERR_BACKEND;
+    OC_CUDA_CHECK(cudaMemcpy2D(d, dev_block, src, src_block, src_block,
+                               rows * n_blocks, cudaMemcpyHostToDevice));
+    return OC_OK;
+}
+
+/* Expert slot cache: map this token's routed ids to per-layer device slots
+ * (LRU), copying only the misses from the host model, and hand back the
+ * device id array the expert kernels should index with. Costs one k-id
+ * device→host sync per MoE layer; only routed experts ever move. */
+static OcError cuda_expert_map(OcCudaContext *ctx, uint32_t l,
+                               const uint32_t **d_sel_out)
+{
+    *d_sel_out = ctx->d_expert_sel;
+    if (ctx->expert_slots == 0) return OC_OK;
+
+    const uint32_t k = ctx->num_experts_per_tok;
+    const uint32_t nx = ctx->num_experts;
+    const uint32_t S = ctx->expert_slots;
+    const OcLlamaLayer *L = &ctx->host_model->layers[l];
+    OC_CUDA_CHECK(cudaMemcpy(ctx->h_sel, ctx->d_expert_sel,
+                             k * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    int32_t *slot_of = ctx->h_slot_of + (size_t)l * nx;
+    uint32_t *expert_in = ctx->h_expert_in + (size_t)l * S;
+    uint64_t *stamp = ctx->h_slot_stamp + (size_t)l * S;
+    const uint64_t now = ++ctx->slot_clock;
+
+    /* Hits first, so a miss can never evict an expert this token uses. */
+    for (uint32_t i = 0; i < k; i++) {
+        const uint32_t ex = ctx->h_sel[i];
+        if (ex >= nx) return OC_ERR_BACKEND;
+        const int32_t sl = slot_of[ex];
+        if (sl >= 0) {
+            stamp[sl] = now;
+            ctx->h_slot_sel[i] = (uint32_t)sl;
+            ctx->expert_hits++;
+        } else {
+            ctx->h_slot_sel[i] = UINT32_MAX;
+        }
+    }
+    for (uint32_t i = 0; i < k; i++) {
+        if (ctx->h_slot_sel[i] != UINT32_MAX) continue;
+        const uint32_t ex = ctx->h_sel[i];
+        uint32_t v = UINT32_MAX;
+        for (uint32_t s = 0; s < S; s++) {
+            if (stamp[s] == now) continue;
+            if (v == UINT32_MAX || stamp[s] < stamp[v]) v = s;
+        }
+        if (v == UINT32_MAX) return OC_ERR_BACKEND;  /* S < k: init guards */
+        if (expert_in[v] != UINT32_MAX) slot_of[expert_in[v]] = -1;
+        OcError e = upload_expert_slot(&L->ffn_gate_exps,
+                                       &ctx->d_ffn_gate_exps[l], ex, v);
+        if (e == OC_OK)
+            e = upload_expert_slot(&L->ffn_up_exps, &ctx->d_ffn_up_exps[l],
+                                   ex, v);
+        if (e == OC_OK)
+            e = upload_expert_slot(&L->ffn_down_exps,
+                                   &ctx->d_ffn_down_exps[l], ex, v);
+        if (e != OC_OK) { expert_in[v] = UINT32_MAX; stamp[v] = 0; return e; }
+        slot_of[ex] = (int32_t)v;
+        expert_in[v] = ex;
+        stamp[v] = now;
+        ctx->h_slot_sel[i] = v;
+        ctx->expert_misses++;
+    }
+    OC_CUDA_CHECK(cudaMemcpy(ctx->d_expert_slot, ctx->h_slot_sel,
+                             k * sizeof(uint32_t), cudaMemcpyHostToDevice));
+    *d_sel_out = ctx->d_expert_slot;
+    return OC_OK;
+}
+
 /* MoE FFN for one layer. Mirrors llama.c::forward_moe_ffn step for step:
  * router matvec, gating + top-k + renormalize, per-expert SwiGLU accumulated
  * with the routed weight, then the optional shared expert. Everything is
@@ -810,8 +905,14 @@ static OcError cuda_moe_ffn(OcCudaContext *ctx, uint32_t l, uint32_t block)
     k_moe_route<<<1, 1>>>(ctx->d_router_logits, ctx->d_router_logits,
                           ctx->d_expert_sel, ctx->d_expert_w,
                           n_exp, k, ctx->expert_gating_sigmoid,
-                          ctx->expert_weights_scale);
+                          ctx->expert_weights_scale,
+                          ctx->d_exp_probs_b ? ctx->d_exp_probs_b[l] : NULL);
     OC_CUDA_CHECK(cudaGetLastError());
+
+    /* Routed ids → device slots (identity when fully resident). */
+    const uint32_t *d_sel = NULL;
+    e = cuda_expert_map(ctx, l, &d_sel);
+    if (e != OC_OK) return e;
 
     /* 2. Per-expert SwiGLU FFN, weighted into the accumulator. */
     OC_CUDA_CHECK(cudaMemsetAsync(ctx->d_expert_out, 0,
@@ -819,17 +920,17 @@ static OcError cuda_moe_ffn(OcCudaContext *ctx, uint32_t l, uint32_t block)
     for (uint32_t slot = 0; slot < k; slot++) {
         e = cuda_matvec_expert(&ctx->d_ffn_gate_exps[l], ctx->d_normed,
                                ctx->d_expert_gate, i_size,
-                               ctx->d_expert_sel, slot, block);
+                               d_sel, slot, block);
         if (e != OC_OK) return e;
         e = cuda_matvec_expert(&ctx->d_ffn_up_exps[l], ctx->d_normed,
                                ctx->d_expert_up, i_size,
-                               ctx->d_expert_sel, slot, block);
+                               d_sel, slot, block);
         if (e != OC_OK) return e;
         k_swiglu<<<egrid, block>>>(ctx->d_expert_gate, ctx->d_expert_up, i_size);
         OC_CUDA_CHECK(cudaGetLastError());
         e = cuda_matvec_expert(&ctx->d_ffn_down_exps[l], ctx->d_expert_gate,
                                ctx->d_expert_tmp, embd,
-                               ctx->d_expert_sel, slot, block);
+                               d_sel, slot, block);
         if (e != OC_OK) return e;
         k_moe_accum<<<xgrid, block>>>(ctx->d_expert_out, ctx->d_expert_tmp,
                                       ctx->d_expert_w, slot, embd);
@@ -918,7 +1019,7 @@ static OcError cuda_qwen35_recurrent(OcCudaContext *ctx, uint32_t l,
     const uint32_t dk = ctx->ssm_state_size;
     const uint32_t dv = ctx->ssm_value_heads
         ? ctx->ssm_inner_size / ctx->ssm_value_heads : 0;
-    if (!oc_cuda_qwen35_delta_step(
+    if (!oc_cuda_qwen35_delta_step_ex(
             conv_state, recurrent,
             ctx->d_qwen35_qkv, ctx->d_qwen35_gate,
             ctx->d_qwen35_beta, ctx->d_qwen35_alpha,
@@ -926,7 +1027,8 @@ static OcError cuda_qwen35_recurrent(OcCudaContext *ctx, uint32_t l,
             ctx->d_ssm_dt_bias[l], ctx->d_ssm_norm[l],
             ctx->d_qwen35_conv_out, ctx->d_qwen35_delta_out,
             ctx->ssm_group_count, ctx->ssm_value_heads,
-            dk, dv, ctx->ssm_conv_kernel, ctx->rms_norm_eps, NULL))
+            dk, dv, ctx->ssm_conv_kernel, ctx->rms_norm_eps,
+            ctx->is_qwen4exp, NULL))
         return OC_ERR_BACKEND;
 
     e = cuda_matvec(&ctx->d_ssm_out[l], ctx->d_qwen35_delta_out,
@@ -1010,6 +1112,402 @@ static OcError cuda_qwen35_full_attn(OcCudaContext *ctx, uint32_t l,
     return OC_OK;
 }
 
+/* ─── qwen4exp (CYBER-FROST) ─────────────────────────────────────────────── */
+
+static OcError upload_f32(float **dst, const float *src, size_t n,
+                          OcCudaContext *ctx)
+{
+    if (src == NULL) return OC_ERR_MODEL;
+    OC_CUDA_CHECK(cudaMalloc((void **)dst, n * sizeof(float)));
+    OC_CUDA_CHECK(cudaMemcpy(*dst, src, n * sizeof(float),
+                             cudaMemcpyHostToDevice));
+    ctx->vram_weight_bytes += n * sizeof(float);
+    ctx->n_f32_tensors++;
+    return OC_OK;
+}
+
+/* Upload one hc projection and check its shape; an absent optional
+ * tensor (inject) leaves dst zeroed. */
+static OcError upload_hc_weight(const OcWeightView *v, OcCudaWeight *dst,
+                                size_t rows, size_t cols, bool required,
+                                float *host_temp, OcCudaContext *ctx)
+{
+    if (v->data == NULL) return required ? OC_ERR_MODEL : OC_OK;
+    if (v->rows != rows || v->cols != cols) {
+        oc_log(OC_LOG_WARN, "cuda: qwen4exp hc tensor %zux%zu, want %zux%zu",
+               v->rows, v->cols, rows, cols);
+        return OC_ERR_MODEL;
+    }
+    return upload_weight(v, dst, host_temp, ctx);
+}
+
+static OcError cuda_upload_q4e_model(OcCudaContext *ctx,
+                                     const OcLlamaModel *model,
+                                     float *host_temp)
+{
+    const size_t H = ctx->hc_mult, D = ctx->n_embd, R = ctx->hc_low_rank;
+    OcError e = upload_f32(&ctx->d_out_hc_norm, model->output_hc_norm, H * D,
+                           ctx);
+    if (e == OC_OK)
+        e = upload_hc_weight(&model->output_hc_down, &ctx->d_out_hc_down,
+                             R, H * D, true, host_temp, ctx);
+    if (e == OC_OK)
+        e = upload_hc_weight(&model->output_hc_up, &ctx->d_out_hc_up,
+                             H * D, R, true, host_temp, ctx);
+    return e;
+}
+
+static OcError cuda_upload_q4e_layer(OcCudaContext *ctx,
+                                     const OcLlamaModel *model, uint32_t l,
+                                     float *host_temp)
+{
+    const OcLlamaConfig *c = &model->cfg;
+    const OcLlamaLayer *L = &model->layers[l];
+    const size_t H = ctx->hc_mult, D = ctx->n_embd, R = ctx->hc_low_rank;
+    const size_t hc_dim = H * D;
+    OcError e = upload_f32(&ctx->d_hc_attn_norm[l], L->hc_attn_norm, hc_dim,
+                           ctx);
+    if (e == OC_OK)
+        e = upload_f32(&ctx->d_hc_ffn_norm[l], L->hc_ffn_norm, hc_dim, ctx);
+    const struct {
+        const OcWeightView *v; OcCudaWeight *d; size_t r, k; bool req;
+    } ws[] = {
+        { &L->hc_attn_down,   &ctx->d_hc_attn_down[l],   R,      hc_dim, true  },
+        { &L->hc_attn_up,     &ctx->d_hc_attn_up[l],     hc_dim, R,      true  },
+        { &L->hc_attn_inject, &ctx->d_hc_attn_inject[l], H,      hc_dim, false },
+        { &L->hc_ffn_down,    &ctx->d_hc_ffn_down[l],    R,      hc_dim, true  },
+        { &L->hc_ffn_up,      &ctx->d_hc_ffn_up[l],      hc_dim, R,      true  },
+        { &L->hc_ffn_inject,  &ctx->d_hc_ffn_inject[l],  H,      hc_dim, false },
+    };
+    for (size_t i = 0; e == OC_OK && i < sizeof(ws) / sizeof(ws[0]); i++)
+        e = upload_hc_weight(ws[i].v, ws[i].d, ws[i].r, ws[i].k, ws[i].req,
+                             host_temp, ctx);
+    if (e != OC_OK || !c->ple_enabled || l != c->ple_layer) return e;
+
+    /* The PLE layer. The n-gram table itself stays on the host (tens of
+     * GiB); only the gathered rows are uploaded per token. */
+    e = upload_hc_weight(&L->ple_key, &ctx->d_ple_key, hc_dim, D, true,
+                         host_temp, ctx);
+    if (e == OC_OK)
+        e = upload_hc_weight(&L->ple_value, &ctx->d_ple_value, D, D, true,
+                             host_temp, ctx);
+    if (e == OC_OK)
+        e = upload_f32(&ctx->d_ple_norm_key, L->ple_norm_key, hc_dim, ctx);
+    if (e == OC_OK)
+        e = upload_f32(&ctx->d_ple_norm_query, L->ple_norm_query, hc_dim, ctx);
+    if (e == OC_OK)
+        e = upload_f32(&ctx->d_ple_norm_conv, L->ple_norm_conv, hc_dim, ctx);
+    if (e == OC_OK)
+        e = upload_f32(&ctx->d_ple_conv_w, L->ple_conv_w,
+                       hc_dim * c->ple_conv_kernel, ctx);
+    if (e == OC_OK && model->per_layer_tok_embd.data == NULL) e = OC_ERR_MODEL;
+    return e;
+}
+
+/* hc_mix (llama.c q4e_hc_mix_row): fold the hc_mult-wide residual into the
+ * n_embd block input `d_out`. When `inject` holds a tensor, d_hc_inject gets
+ * W_inject·xn and *has_inject is set; otherwise combine uses weight 1. */
+static OcError cuda_q4e_hc_mix(OcCudaContext *ctx, const float *d_norm,
+                               const OcCudaWeight *down,
+                               const OcCudaWeight *up,
+                               const OcCudaWeight *inject, float *d_out,
+                               bool *has_inject, uint32_t block)
+{
+    const uint32_t H = ctx->hc_mult, D = ctx->n_embd;
+    if (!oc_cuda_q4e_norm_streams(ctx->d_hc_resid, d_norm, ctx->d_hc_xn, H, D,
+                                  ctx->rms_norm_eps, NULL))
+        return OC_ERR_BACKEND;
+    OcError e = cuda_matvec(down, ctx->d_hc_xn, ctx->d_hc_lo, block);
+    if (e != OC_OK) return e;
+    if (!oc_cuda_q4e_silu_scale(ctx->d_hc_lo, ctx->hc_low_rank,
+                                1.0f / (float)H, NULL))
+        return OC_ERR_BACKEND;
+    e = cuda_matvec(up, ctx->d_hc_lo, ctx->d_hc_gate, block);
+    if (e != OC_OK) return e;
+    if (!oc_cuda_q4e_hc_fold(ctx->d_hc_xn, ctx->d_hc_gate, d_out, H, D, NULL))
+        return OC_ERR_BACKEND;
+    if (has_inject) {
+        *has_inject = inject && inject->data;
+        if (*has_inject) {
+            e = cuda_matvec(inject, ctx->d_hc_xn, ctx->d_hc_inject, block);
+            if (e != OC_OK) return e;
+        }
+    }
+    return OC_OK;
+}
+
+/* PLE (llama.c q4e_ple + q4e_ple_ctx) applied to d_hc_resid. */
+static OcError cuda_q4e_ple(OcCudaContext *ctx, uint32_t token, uint32_t pos,
+                            uint32_t block)
+{
+    const OcLlamaConfig *c = &ctx->host_model->cfg;
+    const OcWeightView *tbl = &ctx->host_model->per_layer_tok_embd;
+    const uint32_t H = ctx->hc_mult, D = ctx->n_embd;
+    const uint32_t ngram = c->ple_ngram;
+    const size_t pd = c->ple_embd_dim;
+
+    /* ctx[0] = current token; older entries cut to ple_eos once missing or
+     * EOS, and the cut propagates. */
+    uint32_t ids[OC_Q4E_PLE_MAX_NGRAM];
+    ids[0] = token;
+    bool cut = false;
+    for (uint32_t t = 1; t < ngram; t++) {
+        const bool have = pos >= t;
+        const uint32_t tok = have ? ctx->ple_hist[t - 1] : c->ple_eos;
+        if (cut || !have || tok == c->ple_eos) { ids[t] = c->ple_eos; cut = true; }
+        else ids[t] = tok;
+    }
+    const uint32_t per = c->ple_heads_per_ngram ? c->ple_heads_per_ngram : 1u;
+    for (uint32_t h = 0; h < c->ple_n_heads; h++) {
+        const uint32_t n = 2u + h / per;
+        uint64_t mixed = (uint64_t)ids[0] * c->ple_mult[0];
+        for (uint32_t j = 1; j < n; j++) mixed ^= (uint64_t)ids[j] * c->ple_mult[j];
+        const uint64_t row = mixed % c->ple_head_vocab[h] + c->ple_head_off[h];
+        OcError e = oc_quant_dequant_row(tbl->qtype,
+                                         tbl->data + (size_t)row * tbl->row_bytes,
+                                         tbl->row_bytes,
+                                         ctx->h_ple_emb + (size_t)h * pd, pd);
+        if (e != OC_OK) return e;
+    }
+    OC_CUDA_CHECK(cudaMemcpy(ctx->d_ple_emb, ctx->h_ple_emb,
+                             (size_t)D * sizeof(float), cudaMemcpyHostToDevice));
+
+    OcError e = cuda_matvec(&ctx->d_ple_key, ctx->d_ple_emb, ctx->d_ple_key_buf,
+                            block);
+    if (e != OC_OK) return e;
+    e = cuda_matvec(&ctx->d_ple_value, ctx->d_ple_emb, ctx->d_ple_val_buf, block);
+    if (e != OC_OK) return e;
+    const float eps = ctx->rms_norm_eps;
+    /* kn → d_ple_gated, qn → d_hc_xn, gated value → d_ple_key_buf,
+     * conv input (normed gated) → d_ple_gated. */
+    if (!oc_cuda_q4e_norm_streams(ctx->d_ple_key_buf, ctx->d_ple_norm_key,
+                                  ctx->d_ple_gated, H, D, eps, NULL) ||
+        !oc_cuda_q4e_norm_streams(ctx->d_hc_resid, ctx->d_ple_norm_query,
+                                  ctx->d_hc_xn, H, D, eps, NULL) ||
+        !oc_cuda_q4e_ple_gate(ctx->d_ple_gated, ctx->d_hc_xn,
+                              ctx->d_ple_val_buf, ctx->d_ple_key_buf, H, D,
+                              NULL) ||
+        !oc_cuda_q4e_norm_streams(ctx->d_ple_key_buf, ctx->d_ple_norm_conv,
+                                  ctx->d_ple_gated, H, D, eps, NULL) ||
+        !oc_cuda_q4e_ple_conv(ctx->d_ple_conv_w, ctx->d_ple_ring,
+                              ctx->d_ple_gated, ctx->d_ple_key_buf,
+                              ctx->d_hc_resid, H * D, c->ple_conv_kernel,
+                              ngram, NULL))
+        return OC_ERR_BACKEND;
+    return OC_OK;
+}
+
+/* Single-token qwen4exp forward (llama.c forward_qwen4exp). The real
+ * residual is d_hc_resid (hc_mult streams); d_normed carries each mixed
+ * sublayer input and the attention/recurrent output, d_x is the MoE
+ * accumulator. */
+static OcError cuda_qwen4exp_forward(OcCudaContext *ctx, uint32_t token,
+                                     uint32_t pos, float *logits_out)
+{
+    const uint32_t D = ctx->n_embd, H = ctx->hc_mult;
+    const uint32_t block = 256;
+    const OcLlamaConfig *c = &ctx->host_model->cfg;
+
+    /* Past the QSA budget the reference routes full attention through the
+     * sparse indexer, which is not implemented; dense would be wrong. */
+    if (ctx->indexer_top_k > 0 && pos >= ctx->indexer_top_k &&
+        ctx->n_full_attention_layers > 0) {
+        oc_log(OC_LOG_ERROR, "cuda: qwen4exp context %u reached QSA budget "
+               "%u; sparse indexer attention is not implemented",
+               pos, ctx->indexer_top_k);
+        return OC_ERR_MODEL;
+    }
+
+    OcError e = cuda_embed(&ctx->d_tok_embeddings, token, ctx->d_x, D, block);
+    if (e != OC_OK) return e;
+    for (uint32_t s = 0; s < H; s++)
+        OC_CUDA_CHECK(cudaMemcpyAsync(ctx->d_hc_resid + (size_t)s * D, ctx->d_x,
+                                      (size_t)D * sizeof(float),
+                                      cudaMemcpyDeviceToDevice, 0));
+
+    const uint32_t hd = ctx->head_dim;
+    const uint32_t rd = ctx->rope_dim > hd ? hd : ctx->rope_dim;
+    for (uint32_t l = 0; l < ctx->n_layer; l++) {
+        if (c->ple_enabled && l == c->ple_layer) {
+            e = cuda_q4e_ple(ctx, token, pos, block);
+            if (e != OC_OK) return e;
+        }
+
+        bool inj = false;
+        e = cuda_q4e_hc_mix(ctx, ctx->d_hc_attn_norm[l], &ctx->d_hc_attn_down[l],
+                            &ctx->d_hc_attn_up[l], &ctx->d_hc_attn_inject[l],
+                            ctx->d_normed, &inj, block);
+        if (e != OC_OK) return e;
+        if (ctx->l_kind[l] == (uint8_t)OC_LLAMA_LAYER_QWEN35_RECURRENT)
+            e = cuda_qwen35_recurrent(ctx, l, block);
+        else
+            e = cuda_qwen35_full_attn(ctx, l, pos, block, hd, ctx->n_head_kv,
+                                      rd, ctx->rope_theta, 0u);
+        if (e != OC_OK) return e;
+        if (!oc_cuda_q4e_hc_combine(ctx->d_hc_resid, ctx->d_normed,
+                                    inj ? ctx->d_hc_inject : NULL, H, D, NULL))
+            return OC_ERR_BACKEND;
+
+        e = cuda_q4e_hc_mix(ctx, ctx->d_hc_ffn_norm[l], &ctx->d_hc_ffn_down[l],
+                            &ctx->d_hc_ffn_up[l], &ctx->d_hc_ffn_inject[l],
+                            ctx->d_normed, &inj, block);
+        if (e != OC_OK) return e;
+        if (!ctx->d_ffn_gate_inp || !ctx->d_ffn_gate_inp[l].data)
+            return OC_ERR_MODEL;   /* every qwen4exp layer is MoE */
+        OC_CUDA_CHECK(cudaMemsetAsync(ctx->d_x, 0, (size_t)D * sizeof(float)));
+        e = cuda_moe_ffn(ctx, l, block);
+        if (e != OC_OK) return e;
+        if (!oc_cuda_q4e_hc_combine(ctx->d_hc_resid, ctx->d_x,
+                                    inj ? ctx->d_hc_inject : NULL, H, D, NULL))
+            return OC_ERR_BACKEND;
+    }
+
+    /* The output-side hc mix replaces output_norm. */
+    e = cuda_q4e_hc_mix(ctx, ctx->d_out_hc_norm, &ctx->d_out_hc_down,
+                        &ctx->d_out_hc_up, NULL, ctx->d_normed, NULL, block);
+    if (e != OC_OK) return e;
+
+    if (logits_out != NULL) {
+        e = cuda_matvec(&ctx->d_output, ctx->d_normed, ctx->d_logits, block);
+        if (e != OC_OK) return e;
+        const uint32_t vgrid = (ctx->vocab_size + block - 1) / block;
+        if (ctx->logit_scale > 0.0f && ctx->logit_scale != 1.0f) {
+            k_scale<<<vgrid, block>>>(ctx->d_logits, ctx->logit_scale,
+                                      ctx->vocab_size);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
+        if (ctx->logit_softcap > 0.0f) {
+            k_softcap<<<vgrid, block>>>(ctx->d_logits, ctx->logit_softcap,
+                                        ctx->vocab_size);
+            OC_CUDA_CHECK(cudaGetLastError());
+        }
+        OC_CUDA_CHECK(cudaDeviceSynchronize());
+        OC_CUDA_CHECK(cudaMemcpy(logits_out, ctx->d_logits,
+                                 ctx->vocab_size * sizeof(float),
+                                 cudaMemcpyDeviceToHost));
+    } else {
+        OC_CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    /* PLE history: newest first. */
+    memmove(&ctx->ple_hist[1], &ctx->ple_hist[0],
+            (OC_Q4E_PLE_MAX_NGRAM - 1u) * sizeof(uint32_t));
+    ctx->ple_hist[0] = token;
+    return OC_OK;
+}
+
+/* Upload the stacked MoE experts. Fully resident when they fit in the VRAM
+ * left after everything else; otherwise each MoE layer gets `expert_slots`
+ * slots filled on demand by cuda_expert_map. OC_CUDA_EXPERT_SLOTS forces a
+ * slot count (0 = auto); OC_CUDA_RESERVE_MB adds headroom. */
+static OcError cuda_upload_experts(OcCudaContext *ctx,
+                                   const OcLlamaModel *model, float *host_temp)
+{
+    const uint32_t nx = ctx->num_experts, k = ctx->num_experts_per_tok;
+    if (nx == 0 || !ctx->d_ffn_gate_exps) return OC_OK;
+    const uint32_t n_layer = ctx->n_layer;
+
+    size_t per_expert = 0;   /* device bytes of one expert, summed over layers */
+    uint32_t n_moe = 0;
+    for (uint32_t l = 0; l < n_layer; l++) {
+        const OcLlamaLayer *L = &model->layers[l];
+        const OcWeightView *v[3] = { &L->ffn_gate_exps, &L->ffn_up_exps,
+                                     &L->ffn_down_exps };
+        if (v[0]->data == NULL) continue;
+        n_moe++;
+        for (int i = 0; i < 3; i++) {
+            const size_t rb = oc_cuda_mmq_row_bytes((uint32_t)v[i]->qtype,
+                                                    v[i]->cols);
+            per_expert += (rb ? rb : v[i]->cols * sizeof(float)) * v[i]->rows;
+        }
+    }
+    if (n_moe == 0) return OC_OK;
+
+    size_t free_b = 0, total_b = 0;
+    OC_CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    size_t reserve = (size_t)1536 << 20;
+    const char *rs = getenv("OC_CUDA_RESERVE_MB");
+    if (rs && *rs) reserve += (size_t)strtoull(rs, NULL, 10) << 20;
+    const size_t avail = free_b > reserve ? free_b - reserve : 0;
+    uint32_t slots = (uint32_t)(avail / per_expert);
+    const char *es = getenv("OC_CUDA_EXPERT_SLOTS");
+    if (es && *es) {
+        const unsigned long long want = strtoull(es, NULL, 10);
+        if (want > 0) slots = want > nx ? nx : (uint32_t)want;
+    }
+
+    if (slots >= nx) {
+        for (uint32_t l = 0; l < n_layer; l++) {
+            const OcLlamaLayer *L = &model->layers[l];
+            const struct { const OcWeightView *v; OcCudaWeight *d; } ws[] = {
+                { &L->ffn_gate_exps, &ctx->d_ffn_gate_exps[l] },
+                { &L->ffn_up_exps,   &ctx->d_ffn_up_exps[l] },
+                { &L->ffn_down_exps, &ctx->d_ffn_down_exps[l] },
+            };
+            for (int i = 0; i < 3; i++) {
+                if (ws[i].v->data == NULL) continue;
+                OcError e = upload_weight_rows(ws[i].v, ws[i].d, host_temp, ctx,
+                                               (size_t)nx * ws[i].v->rows);
+                if (e != OC_OK) return e;
+            }
+        }
+        oc_log(OC_LOG_INFO, "cuda: all %u experts resident", nx);
+        return OC_OK;
+    }
+    if (slots < k) {
+        oc_log(OC_LOG_WARN, "cuda: room for %u expert slots per layer, need "
+               ">= %u (top-k)", slots, k);
+        return OC_ERR_OOM;
+    }
+
+    for (uint32_t l = 0; l < n_layer; l++) {
+        const OcLlamaLayer *L = &model->layers[l];
+        const struct { const OcWeightView *v; OcCudaWeight *d; } ws[] = {
+            { &L->ffn_gate_exps, &ctx->d_ffn_gate_exps[l] },
+            { &L->ffn_up_exps,   &ctx->d_ffn_up_exps[l] },
+            { &L->ffn_down_exps, &ctx->d_ffn_down_exps[l] },
+        };
+        for (int i = 0; i < 3; i++) {
+            const OcWeightView *v = ws[i].v;
+            if (v->data == NULL) continue;
+            const size_t rb = oc_cuda_mmq_row_bytes((uint32_t)v->qtype, v->cols);
+            if (rb == 0) {
+                oc_log(OC_LOG_WARN, "cuda: expert type %s has no packed device "
+                       "kernel; cannot slot-cache",
+                       oc_quant_type_name(v->qtype));
+                return OC_ERR_BACKEND;
+            }
+            OcCudaWeight *d = ws[i].d;
+            memset(d, 0, sizeof(*d));
+            d->qtype = (uint32_t)v->qtype;
+            d->rows = (uint32_t)((size_t)slots * v->rows);
+            d->cols = (uint32_t)v->cols;
+            d->row_bytes = rb;
+            d->packed = true;
+            const size_t bytes = (size_t)slots * v->rows * rb;
+            OC_CUDA_CHECK(cudaMalloc(&d->data, bytes));
+            ctx->vram_weight_bytes += bytes;
+            ctx->n_packed_tensors++;
+        }
+    }
+    ctx->expert_slots = slots;
+    ctx->h_slot_of = (int32_t *)malloc((size_t)n_layer * nx * sizeof(int32_t));
+    ctx->h_expert_in = (uint32_t *)malloc((size_t)n_layer * slots * sizeof(uint32_t));
+    ctx->h_slot_stamp = (uint64_t *)calloc((size_t)n_layer * slots, sizeof(uint64_t));
+    ctx->h_sel = (uint32_t *)malloc(k * sizeof(uint32_t));
+    ctx->h_slot_sel = (uint32_t *)malloc(k * sizeof(uint32_t));
+    if (!ctx->h_slot_of || !ctx->h_expert_in || !ctx->h_slot_stamp ||
+        !ctx->h_sel || !ctx->h_slot_sel)
+        return OC_ERR_OOM;
+    for (size_t i = 0; i < (size_t)n_layer * nx; i++) ctx->h_slot_of[i] = -1;
+    for (size_t i = 0; i < (size_t)n_layer * slots; i++)
+        ctx->h_expert_in[i] = UINT32_MAX;
+    OC_CUDA_CHECK(cudaMalloc((void **)&ctx->d_expert_slot, k * sizeof(uint32_t)));
+    oc_log(OC_LOG_INFO, "cuda: expert slot cache %u/%u per layer (%.1f GB)",
+           slots, nx, (double)slots * per_expert / 1e9);
+    return OC_OK;
+}
+
 /* ─── Public API ────────────────────────────────────────────────────────── */
 
 bool oc_cuda_available(void)
@@ -1034,20 +1532,30 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         return OC_ERR_BACKEND;
     }
 
-    /* qwen4exp has no device forward: the hybrid path dispatches on
-     * is_qwen35 only, so a qwen4exp model would fall into generic
-     * attention missing its delta-net/PLE/hyper-connection tensors and
-     * emit garbage. Refuse so the CLI falls back to the CPU path. */
+    /* qwen4exp runs its own device forward (cuda_qwen4exp_forward). Its
+     * PLE layer must have the shape that forward assumes. */
     if (model->cfg.is_qwen4exp) {
-        oc_log(OC_LOG_WARN, "cuda: qwen4exp is CPU-only");
-        return OC_ERR_BACKEND;
+        const OcLlamaConfig *qc = &model->cfg;
+        if (qc->hc_mult == 0 || qc->hc_mult > 8 || qc->hc_low_rank == 0 ||
+            (qc->ple_enabled &&
+             (qc->ple_layer >= qc->n_layer || qc->ple_conv_kernel < 2 ||
+              qc->ple_ngram == 0 || qc->ple_ngram > OC_Q4E_PLE_MAX_NGRAM ||
+              (size_t)qc->ple_n_heads * qc->ple_embd_dim != qc->n_embd))) {
+            oc_log(OC_LOG_WARN, "cuda: qwen4exp shape not supported on device");
+            return OC_ERR_BACKEND;
+        }
     }
 
     if (!oc_cuda_available()) return OC_ERR_BACKEND;
 
+    /* Blocking (not cudaStreamNonBlocking) streams: the per-token forward
+     * writes matvec inputs (d_normed, ...) on the legacy default stream and
+     * then fans the projections out across these streams with no explicit
+     * event wait. Only blocking streams implicitly order against stream 0;
+     * non-blocking ones race the producer kernel and read stale inputs. */
     for (int i = 0; i < 3; i++) {
         cudaStream_t s = NULL;
-        if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) == cudaSuccess)
+        if (cudaStreamCreateWithFlags(&s, cudaStreamDefault) == cudaSuccess)
             ctx->compute_streams[i] = (void *)s;
     }
 
@@ -1081,8 +1589,16 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->attn_scale = c->attn_scale;
     ctx->v_rms_norm = c->v_rms_norm;
     ctx->is_qwen35 = c->is_qwen35;
-    ctx->n_full_attention_layers = c->is_qwen35 ? c->n_full_attention_layers
-                                                : c->n_layer;
+    ctx->is_qwen4exp = c->is_qwen4exp;
+    ctx->host_model = model;
+    ctx->hc_mult = c->hc_mult;
+    ctx->hc_low_rank = c->hc_low_rank;
+    ctx->indexer_top_k = c->indexer_top_k;
+    ctx->logit_scale = c->logit_scale;
+    /* Gated-DeltaNet hybrid geometry (Qwen3.5 and qwen4exp alike). */
+    const bool hybrid = c->is_qwen35 || c->is_qwen4exp;
+    ctx->n_full_attention_layers = hybrid ? c->n_full_attention_layers
+                                          : c->n_layer;
     ctx->n_recurrent_layers = c->n_recurrent_layers;
     ctx->ssm_conv_kernel = c->ssm_conv_kernel;
     ctx->ssm_group_count = c->ssm_group_count;
@@ -1117,7 +1633,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         }
     }
 
-    if (c->is_qwen35) {
+    if (hybrid) {
         ctx->l_kind = (uint8_t *)calloc(c->n_layer, sizeof(uint8_t));
         ctx->l_kv_index = (uint32_t *)calloc(c->n_layer, sizeof(uint32_t));
         if (!ctx->l_kind || !ctx->l_kv_index) {
@@ -1181,7 +1697,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
         CUDA_INIT_ALLOC(&ctx->d_expert_out, embd * sizeof(float));
         CUDA_INIT_ALLOC(&ctx->d_shexp_gate_logit, sizeof(float));
     }
-    if (c->is_qwen35) {
+    if (hybrid) {
         const size_t key_dim = (size_t)c->ssm_group_count * c->ssm_state_size;
         const size_t conv_dim = 2u * key_dim + c->ssm_inner_size;
         const size_t packed_q = 2u * (size_t)c->n_head * max_head_dim;
@@ -1221,6 +1737,25 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
                        ctx->recurrent_state_per_layer * sizeof(float));
         }
     }
+    const size_t hc_dim = (size_t)c->hc_mult * embd;
+    if (c->is_qwen4exp) {
+        CUDA_INIT_ALLOC(&ctx->d_hc_resid, hc_dim * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_hc_xn, hc_dim * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_hc_gate, hc_dim * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_hc_lo, c->hc_low_rank * sizeof(float));
+        CUDA_INIT_ALLOC(&ctx->d_hc_inject, c->hc_mult * sizeof(float));
+        if (c->ple_enabled) {
+            const size_t hist = (size_t)(c->ple_conv_kernel - 1u) * c->ple_ngram;
+            CUDA_INIT_ALLOC(&ctx->d_ple_emb, embd * sizeof(float));
+            CUDA_INIT_ALLOC(&ctx->d_ple_key_buf, hc_dim * sizeof(float));
+            CUDA_INIT_ALLOC(&ctx->d_ple_val_buf, embd * sizeof(float));
+            CUDA_INIT_ALLOC(&ctx->d_ple_gated, hc_dim * sizeof(float));
+            CUDA_INIT_ALLOC(&ctx->d_ple_ring, hist * hc_dim * sizeof(float));
+            cudaMemset(ctx->d_ple_ring, 0, hist * hc_dim * sizeof(float));
+            ctx->h_ple_emb = (float *)malloc(embd * sizeof(float));
+            if (!ctx->h_ple_emb) { oc_cuda_free(ctx); return OC_ERR_OOM; }
+        }
+    }
     /* f16 KV cache: half the footprint of f32 for the same context. */
     CUDA_INIT_ALLOC(&ctx->d_kv_k, kv_total * sizeof(__half));
     CUDA_INIT_ALLOC(&ctx->d_kv_v, kv_total * sizeof(__half));
@@ -1238,6 +1773,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     if (ctx->shared_expert_intermediate_size > max_cols)
         max_cols = ctx->shared_expert_intermediate_size;
     if (c->ssm_inner_size > max_cols) max_cols = c->ssm_inner_size;
+    if (hc_dim > max_cols) max_cols = hc_dim;
     float *host_temp = (float *)malloc(max_cols * sizeof(float));
     if (!host_temp) { oc_cuda_free(ctx); return OC_ERR_OOM; }
 
@@ -1251,8 +1787,12 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     if (cudaMalloc((void **)&ctx->d_final_norm, embd * sizeof(float)) != cudaSuccess) {
         free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
     }
-    cudaMemcpy(ctx->d_final_norm, model->final_norm, embd * sizeof(float),
-              cudaMemcpyHostToDevice);
+    /* qwen4exp has no output_norm: the output-side hc mix replaces it. */
+    if (model->final_norm)
+        cudaMemcpy(ctx->d_final_norm, model->final_norm, embd * sizeof(float),
+                   cudaMemcpyHostToDevice);
+    else
+        cudaMemset(ctx->d_final_norm, 0, embd * sizeof(float));
 
     /* Upload output (or alias tok_embeddings if tied). */
     if (model->cfg.tied_embeddings) {
@@ -1279,7 +1819,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
     ctx->d_attn_k_norm = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_post_attn_norm = (float **)calloc(c->n_layer, sizeof(float *));
     ctx->d_post_ffw_norm = (float **)calloc(c->n_layer, sizeof(float *));
-    if (c->is_qwen35) {
+    if (hybrid) {
         ctx->d_attn_qkv = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
         ctx->d_attn_gate = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
         ctx->d_ssm_alpha = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
@@ -1310,6 +1850,26 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
             !ctx->d_ffn_gate_inp_shexp) {
             free(host_temp); oc_cuda_free(ctx); return OC_ERR_OOM;
         }
+        ctx->d_exp_probs_b = (float **)calloc(c->n_layer, sizeof(float *));
+        if (!ctx->d_exp_probs_b) { free(host_temp); oc_cuda_free(ctx); return OC_ERR_OOM; }
+    }
+    if (c->is_qwen4exp) {
+        ctx->d_hc_attn_norm = (float **)calloc(c->n_layer, sizeof(float *));
+        ctx->d_hc_ffn_norm = (float **)calloc(c->n_layer, sizeof(float *));
+        ctx->d_hc_attn_down = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_hc_attn_up = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_hc_attn_inject = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_hc_ffn_down = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_hc_ffn_up = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        ctx->d_hc_ffn_inject = (OcCudaWeight *)calloc(c->n_layer, sizeof(OcCudaWeight));
+        if (!ctx->d_hc_attn_norm || !ctx->d_hc_ffn_norm ||
+            !ctx->d_hc_attn_down || !ctx->d_hc_attn_up ||
+            !ctx->d_hc_attn_inject || !ctx->d_hc_ffn_down ||
+            !ctx->d_hc_ffn_up || !ctx->d_hc_ffn_inject) {
+            free(host_temp); oc_cuda_free(ctx); return OC_ERR_OOM;
+        }
+        e = cuda_upload_q4e_model(ctx, model, host_temp);
+        if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
     }
     if (!ctx->d_attn_q_bias || !ctx->d_attn_k_bias || !ctx->d_attn_v_bias ||
         !ctx->d_attn_q || !ctx->d_attn_k || !ctx->d_attn_v ||
@@ -1359,15 +1919,38 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
             /* A tensor absent from this model (dense FFN on a MoE layer, or
              * the optional shared expert) has a NULL data pointer. */
             if (ws[wi].dst == NULL || ws[wi].view->data == NULL) continue;
-            const size_t ro = ws[wi].stacked ? (size_t)nx * ws[wi].view->rows : 0;
-            e = upload_weight_rows(ws[wi].view, ws[wi].dst, host_temp, ctx, ro);
+            /* Stacked experts go last, once the VRAM left for them is
+             * known (see the expert pass after this loop). */
+            if (ws[wi].stacked) continue;
+            e = upload_weight_rows(ws[wi].view, ws[wi].dst, host_temp, ctx, 0);
             if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
         }
-        if (cudaMalloc((void **)&ctx->d_attn_norm[l], embd * sizeof(float)) != cudaSuccess) {
-            free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
+        (void)nx;
+
+        /* Router ranking bias (LongCat / qwen4exp exp_probs_b). */
+        if (ctx->d_exp_probs_b && L->exp_probs_b) {
+            const size_t nb = ctx->num_experts * sizeof(float);
+            if (cudaMalloc((void **)&ctx->d_exp_probs_b[l], nb) != cudaSuccess) {
+                free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
+            }
+            cudaMemcpy(ctx->d_exp_probs_b[l], L->exp_probs_b, nb,
+                       cudaMemcpyHostToDevice);
         }
-        cudaMemcpy(ctx->d_attn_norm[l], L->attn_norm, embd * sizeof(float),
-                  cudaMemcpyHostToDevice);
+
+        if (ctx->is_qwen4exp) {
+            e = cuda_upload_q4e_layer(ctx, model, l, host_temp);
+            if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
+        }
+        /* qwen4exp has no attn_norm (hc_attn_norm replaces it). */
+        if (L->attn_norm != NULL) {
+            if (cudaMalloc((void **)&ctx->d_attn_norm[l], embd * sizeof(float)) != cudaSuccess) {
+                free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
+            }
+            cudaMemcpy(ctx->d_attn_norm[l], L->attn_norm, embd * sizeof(float),
+                       cudaMemcpyHostToDevice);
+        } else if (!ctx->is_qwen4exp) {
+            free(host_temp); oc_cuda_free(ctx); return OC_ERR_MODEL;
+        }
 
         /* Optional QKV projection biases (Qwen2-family). Uploaded per layer;
          * a NULL host pointer leaves the device pointer NULL and the forward
@@ -1422,7 +2005,7 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
                            cudaMemcpyHostToDevice);
             }
         }
-        if (ctx->is_qwen35 && L->kind == OC_LLAMA_LAYER_QWEN35_RECURRENT) {
+        if (hybrid && L->kind == OC_LLAMA_LAYER_QWEN35_RECURRENT) {
             struct { float **dev; const OcWeightView *view; } fs[] = {
                 { &ctx->d_ssm_conv1d[l],  &L->ssm_conv1d },
                 { &ctx->d_ssm_a[l],       &L->ssm_a },
@@ -1431,6 +2014,13 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
             };
             for (size_t fi = 0; fi < 4; fi++) {
                 if (fs[fi].view->data == NULL) continue;
+                /* Copied raw as floats: the loader redirects quantized
+                 * recurrent tensors to owned f32 (ssm_*_f32). */
+                if (fs[fi].view->qtype != OC_QUANT_F32) {
+                    oc_log(OC_LOG_WARN, "cuda: layer %u recurrent tensor is "
+                           "not f32", l);
+                    free(host_temp); oc_cuda_free(ctx); return OC_ERR_MODEL;
+                }
                 const size_t n = fs[fi].view->rows * fs[fi].view->cols;
                 if (cudaMalloc((void **)fs[fi].dev, n * sizeof(float)) != cudaSuccess) {
                     free(host_temp); oc_cuda_free(ctx); return OC_ERR_BACKEND;
@@ -1442,6 +2032,9 @@ OcError oc_cuda_init(OcCudaContext *ctx, const OcLlamaModel *model)
             }
         }
     }
+    /* Last, so the slot budget sees every other allocation. */
+    e = cuda_upload_experts(ctx, model, host_temp);
+    if (e != OC_OK) { free(host_temp); oc_cuda_free(ctx); return e; }
     oc_log(OC_LOG_INFO,
            "cuda: %u tensors packed on device, %u dequantized to f32; "
            "weights %.1f MB + KV %.1f MB = %.1f MB VRAM",
@@ -1466,6 +2059,8 @@ OcError oc_cuda_forward(OcCudaContext *ctx, uint32_t token, uint32_t pos,
     if (!ctx || !ctx->initialized || pos >= ctx->n_ctx ||
         token >= ctx->vocab_size)
         return OC_ERR_INVALID_ARG;
+    if (ctx->is_qwen4exp)
+        return cuda_qwen4exp_forward(ctx, token, pos, logits_out);
 
     const uint32_t embd = ctx->n_embd;
     const uint32_t head_dim = ctx->head_dim;
@@ -1744,6 +2339,13 @@ void oc_cuda_reset(OcCudaContext *ctx)
         cudaMemset(ctx->d_recurrent_state, 0,
                    (size_t)ctx->n_recurrent_layers *
                    ctx->recurrent_state_per_layer * sizeof(float));
+    if (ctx->d_ple_ring && ctx->host_model) {
+        const OcLlamaConfig *c = &ctx->host_model->cfg;
+        cudaMemset(ctx->d_ple_ring, 0,
+                   (size_t)(c->ple_conv_kernel - 1u) * c->ple_ngram *
+                   ctx->hc_mult * ctx->n_embd * sizeof(float));
+    }
+    memset(ctx->ple_hist, 0, sizeof(ctx->ple_hist));
 }
 
 void oc_cuda_free(OcCudaContext *ctx)
@@ -1804,7 +2406,34 @@ void oc_cuda_free(OcCudaContext *ctx)
         if (ctx->d_ssm_a) cudaFree(ctx->d_ssm_a[l]);
         if (ctx->d_ssm_dt_bias) cudaFree(ctx->d_ssm_dt_bias[l]);
         if (ctx->d_ssm_norm) cudaFree(ctx->d_ssm_norm[l]);
+        if (ctx->d_exp_probs_b) cudaFree(ctx->d_exp_probs_b[l]);
+        if (ctx->d_hc_attn_norm) cudaFree(ctx->d_hc_attn_norm[l]);
+        if (ctx->d_hc_ffn_norm) cudaFree(ctx->d_hc_ffn_norm[l]);
+        if (ctx->d_hc_attn_down) cudaFree(ctx->d_hc_attn_down[l].data);
+        if (ctx->d_hc_attn_up) cudaFree(ctx->d_hc_attn_up[l].data);
+        if (ctx->d_hc_attn_inject) cudaFree(ctx->d_hc_attn_inject[l].data);
+        if (ctx->d_hc_ffn_down) cudaFree(ctx->d_hc_ffn_down[l].data);
+        if (ctx->d_hc_ffn_up) cudaFree(ctx->d_hc_ffn_up[l].data);
+        if (ctx->d_hc_ffn_inject) cudaFree(ctx->d_hc_ffn_inject[l].data);
     }
+    free(ctx->d_exp_probs_b);
+    free(ctx->d_hc_attn_norm); free(ctx->d_hc_ffn_norm);
+    free(ctx->d_hc_attn_down); free(ctx->d_hc_attn_up); free(ctx->d_hc_attn_inject);
+    free(ctx->d_hc_ffn_down); free(ctx->d_hc_ffn_up); free(ctx->d_hc_ffn_inject);
+    cudaFree(ctx->d_out_hc_norm);
+    cudaFree(ctx->d_out_hc_down.data); cudaFree(ctx->d_out_hc_up.data);
+    cudaFree(ctx->d_hc_resid); cudaFree(ctx->d_hc_xn); cudaFree(ctx->d_hc_gate);
+    cudaFree(ctx->d_hc_lo); cudaFree(ctx->d_hc_inject);
+    cudaFree(ctx->d_ple_key.data); cudaFree(ctx->d_ple_value.data);
+    cudaFree(ctx->d_ple_norm_key); cudaFree(ctx->d_ple_norm_query);
+    cudaFree(ctx->d_ple_norm_conv); cudaFree(ctx->d_ple_conv_w);
+    cudaFree(ctx->d_ple_emb); cudaFree(ctx->d_ple_key_buf);
+    cudaFree(ctx->d_ple_val_buf); cudaFree(ctx->d_ple_gated);
+    cudaFree(ctx->d_ple_ring);
+    free(ctx->h_ple_emb);
+    cudaFree(ctx->d_expert_slot);
+    free(ctx->h_slot_of); free(ctx->h_expert_in); free(ctx->h_slot_stamp);
+    free(ctx->h_sel); free(ctx->h_slot_sel);
     free(ctx->d_attn_q_bias); free(ctx->d_attn_k_bias); free(ctx->d_attn_v_bias);
     free(ctx->d_attn_q); free(ctx->d_attn_k); free(ctx->d_attn_v);
     free(ctx->d_attn_output);

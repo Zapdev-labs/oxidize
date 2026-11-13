@@ -8,7 +8,7 @@
 # Requires ~600 GB for BF16 download + convert, ~80-120 GB for AL5 output.
 set -euo pipefail
 
-HOST="${1:-ai@192.168.1.121}"
+HOST="${1:-ai@192.168.1.132}"
 REPO="${REPO:-~/oxidize}"
 OUT_DIR="${OUT_DIR:-~/models/hy3-1m-al}"
 THREADS="${QUANT_THREADS:-96}"

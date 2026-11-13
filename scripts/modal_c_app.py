@@ -409,9 +409,7 @@ def qwen27_smoke(prompt: str = "Say hello in one short sentence.",
     Q4_K_M, then Q4_K_S. This GGUF is qwen35 hybrid (16 full-attn + 48
     Gated DeltaNet + 1 MTP), not dense qwen3.
 
-    On-disk match on ai@192.168.1.121 (CPU only, no NVIDIA):
-      /home/ai/models/qwen36-fable711/Qwen3.6-27B-Fable-Fus-711-UnHeretic-NM-DAU-NEO-MAX-NEO-MTP-Q4_K_S.gguf
-    Modal cannot reach that LAN; this job downloads from Hugging Face.
+    This job downloads the weights from Hugging Face.
 
     Auth (never print tokens):
       python3 -m pip install --user modal
