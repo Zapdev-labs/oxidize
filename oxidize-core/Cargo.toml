@@ -33,7 +33,7 @@ fastrand = "2.4.1"
 futures-core = "0.3"
 futures-util = "0.3"
 gpu-allocator = { version = "0.27", optional = true }
-libp2p = { version = "0.56", features = ["gossipsub", "tcp", "tokio", "noise", "yamux", "ed25519", "identify", "macros"] }
+libp2p = { version = "0.57", features = ["gossipsub", "tcp", "tokio", "noise", "yamux", "ed25519", "identify", "macros"] }
 libc = "0.2"
 libloading = { version = "0.8", optional = true }
 memmap2 = "0.9"

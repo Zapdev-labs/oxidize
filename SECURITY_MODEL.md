@@ -56,7 +56,7 @@ In scope:
 2. Authenticated API user who tries to read other users' data (shared prefix/KV cache, one shared key — no per-user isolation), exhaust resources, or escape limits.
 3. Malicious model publisher: a crafted GGUF/SafeTensors/tokenizer/config from a Hugging Face repo, aiming at memory corruption, path traversal in the cache or downloads, or resource exhaustion.
 4. Rogue LAN peer that joins the mesh namespace.
-5. Supply chain: dependencies, vendored `vendor/libp2p-*`, CI.
+5. Supply chain: dependencies, CI.
 
 ## 6. Existing controls
 
