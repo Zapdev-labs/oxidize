@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#define OC_QWEN35_DELTA_PARALLEL_MIN_STATE 262144u
+
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
@@ -398,7 +400,8 @@ static OcError delta_step(OcQwen35DeltaState *state,
         return OC_ERR_INVALID_ARG;
     }
     /* Prefill calls this once per token. Nested pool dispatches (4 per
-     * token × ~48 recurrent layers) cost more than the DeltaNet work. */
+     * token × ~48 recurrent layers) cost more than the DeltaNet work, so
+     * only the single-token recurrent update of large states dispatches. */
     ConvCtx conv = {&state->geometry, state->conv_state,
                     params->conv_weight, input->qkv, conv_output};
     conv_channels(0, conv_dim, 0, &conv);
@@ -411,7 +414,7 @@ static OcError delta_step(OcQwen35DeltaState *state,
 #if defined(__x86_64__) || defined(__i386__)
     delta.has_avx512 = __builtin_cpu_supports("avx512f") != 0;
 #endif
-    if (parallel && recurrent_state_len >= 262144u)
+    if (parallel && recurrent_state_len >= OC_QWEN35_DELTA_PARALLEL_MIN_STATE)
         oc_parallel_for(state->geometry.n_value_heads, delta_heads, &delta);
     else
         delta_heads(0, state->geometry.n_value_heads, 0, &delta);
