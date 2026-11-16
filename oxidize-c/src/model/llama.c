@@ -14,6 +14,7 @@
  * mirror Rust's `x.iter().map(|v| v*v).sum::<f32>()`.
  */
 #include "oxidize/llama.h"
+#include "qwen35_delta_internal.h"
 #include "oxidize/exl3_overlay.h"
 #include "oxidize/exl3.h"
 #include "oxidize/rope_scaling.h"
@@ -4658,7 +4659,7 @@ static OcError forward_qwen35_recurrent(OcLlamaSession *s, uint32_t layer)
         .alpha = s->qwen35_alpha,
         .alpha_len = c->ssm_value_heads,
     };
-    OcError error = oc_qwen35_delta_step(
+    OcError error = oc_qwen35_delta_single_token_step(
         &s->qwen35_delta[layer], &params, &input,
         s->qwen35_conv_output, conv_dim,
         s->qwen35_delta_output, c->ssm_inner_size);
