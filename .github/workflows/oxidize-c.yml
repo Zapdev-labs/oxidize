@@ -110,7 +110,7 @@ jobs:
   # ─── CUDA build (compile-only, no GPU needed for nvcc PTX) ──────────────
   cuda-build:
     name: CUDA Build (compile-only)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: oxidize-c
