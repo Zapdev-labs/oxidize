@@ -2,9 +2,11 @@
 
 #include "oxidize/parallel.h"
 #include "oxidize/qwen35_delta.h"
+#include "../src/model/qwen35_delta_internal.h"
 
 #include <math.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define NK 2u
@@ -287,4 +289,88 @@ Test(qwen35_delta, one_and_sixteen_threads_match)
     assert_close(threaded.conv_state, serial.conv_state, CONV_STATE_LEN);
     assert_close(threaded.recurrent, serial.recurrent, RECURRENT_LEN);
     assert_close(threaded.output, serial.output, VALUE_DIM);
+}
+
+Test(qwen35_delta, tiny_single_token_bit_exact)
+{
+    Fixture serial, decoded;
+    fixture_init(&serial);
+    fixture_init(&decoded);
+    cr_assert_eq(oc_parallel_set_threads(4), OC_OK);
+    for (size_t step = 0; step < 3; step++) {
+        run_step(&serial);
+        cr_assert_eq(oc_qwen35_delta_single_token_step(&decoded.state,
+                     &decoded.params, &decoded.input, decoded.conv_output,
+                     CONV_DIM, decoded.output, VALUE_DIM), OC_OK);
+        cr_assert_eq(memcmp(serial.conv_state, decoded.conv_state,
+                     sizeof(serial.conv_state)), 0);
+        cr_assert_eq(memcmp(serial.recurrent, decoded.recurrent,
+                     sizeof(serial.recurrent)), 0);
+        cr_assert_eq(memcmp(serial.output, decoded.output,
+                     sizeof(serial.output)), 0);
+    }
+    oc_parallel_shutdown();
+}
+
+Test(qwen35_delta, realistic_single_token_bit_exact_workers_reset_replay)
+{
+    const size_t nk = 16, nv = 32, dk = 128, dv = 128, kw = 4;
+    const size_t cd = 2 * nk * dk + nv * dv, vd = nv * dv;
+    const size_t cs = cd * (kw - 1), rs = nv * dv * dk;
+    float *weights = calloc(cd * kw, sizeof(float));
+    float *qkv = calloc(cd, sizeof(float));
+    float *gate = calloc(vd, sizeof(float));
+    float a[32], bias[32], beta[32], alpha[32], norm[128];
+    float *conv[2], *recurrent[2], *scratch[2], *out[2];
+    float *replay = calloc(vd, sizeof(float));
+    OcQwen35DeltaState state[2];
+    OcQwen35DeltaGeometry geometry = {nk, nv, dk, dv, kw};
+    cr_assert(weights && qkv && gate && replay);
+    for (size_t i = 0; i < cd * kw; i++) weights[i] = sample(i, 1) * 0.3f;
+    for (size_t i = 0; i < vd; i++) gate[i] = sample(i, 2);
+    for (size_t i = 0; i < nv; i++) {
+        a[i] = -0.15f - 0.01f * (float)i;
+        bias[i] = sample(i, 3);
+        beta[i] = sample(i, 4);
+        alpha[i] = sample(i, 5);
+    }
+    for (size_t i = 0; i < dv; i++) norm[i] = 0.8f + sample(i, 6) * 0.1f;
+    for (size_t i = 0; i < 2; i++) {
+        conv[i] = calloc(cs, sizeof(float));
+        recurrent[i] = calloc(rs, sizeof(float));
+        scratch[i] = calloc(cd, sizeof(float));
+        out[i] = calloc(vd, sizeof(float));
+        cr_assert(conv[i] && recurrent[i] && scratch[i] && out[i]);
+        cr_assert_eq(oc_qwen35_delta_state_init(&state[i], &geometry,
+                     conv[i], cs, recurrent[i], rs), OC_OK);
+    }
+    OcQwen35DeltaParams params = {
+        .conv_weight = weights, .conv_weight_len = cd * kw,
+        .ssm_a = a, .ssm_a_len = nv, .dt_bias = bias, .dt_bias_len = nv,
+        .norm_weight = norm, .norm_weight_len = dv, .norm_eps = 1e-6f,
+    };
+    OcQwen35DeltaInput input = {qkv, cd, gate, vd, beta, nv, alpha, nv};
+    const size_t workers[] = {1, 4, 16};
+    for (size_t pass = 0; pass < 6; pass++) {
+        cr_assert_eq(oc_parallel_set_threads(workers[pass / 2]), OC_OK);
+        for (size_t i = 0; i < 2; i++) oc_qwen35_delta_state_reset(&state[i]);
+        for (size_t step = 0; step < 12; step++) {
+            for (size_t i = 0; i < cd; i++) qkv[i] = sample(i, step + 7);
+            cr_assert_eq(oc_qwen35_delta_step(&state[0], &params, &input,
+                         scratch[0], cd, out[0], vd), OC_OK);
+            cr_assert_eq(oc_qwen35_delta_single_token_step(&state[1], &params, &input,
+                         scratch[1], cd, out[1], vd), OC_OK);
+            cr_assert_eq(memcmp(conv[0], conv[1], cs * sizeof(float)), 0);
+            cr_assert_eq(memcmp(recurrent[0], recurrent[1], rs * sizeof(float)), 0);
+            cr_assert_eq(memcmp(scratch[0], scratch[1], cd * sizeof(float)), 0);
+            cr_assert_eq(memcmp(out[0], out[1], vd * sizeof(float)), 0);
+        }
+        if (pass == 0) memcpy(replay, out[1], vd * sizeof(float));
+        else cr_assert_eq(memcmp(replay, out[1], vd * sizeof(float)), 0);
+    }
+    oc_parallel_shutdown();
+    for (size_t i = 0; i < 2; i++) {
+        free(conv[i]); free(recurrent[i]); free(scratch[i]); free(out[i]);
+    }
+    free(weights); free(qkv); free(gate); free(replay);
 }

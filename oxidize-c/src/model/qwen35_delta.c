@@ -1,11 +1,14 @@
-#include "oxidize/qwen35_delta.h"
+#include "qwen35_delta_internal.h"
 
 #include "oxidize/attn_kernels.h"
+#include "oxidize/parallel.h"
 
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+
+#define OC_QWEN35_DELTA_PARALLEL_MIN_STATE 262144u
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
@@ -289,6 +292,7 @@ typedef struct {
     const OcQwen35DeltaParams *params;
     const OcQwen35DeltaInput *input;
     float *output;
+    bool has_avx512;
 } DeltaCtx;
 
 static void delta_heads(size_t begin, size_t end, size_t tid, void *user_data)
@@ -322,10 +326,7 @@ static void delta_heads(size_t begin, size_t end, size_t tid, void *user_data)
                            softplus_stable(ctx->input->alpha[head] +
                                            ctx->params->dt_bias[head]));
 #if defined(__x86_64__) || defined(__i386__)
-        static int has_avx512 = -1;
-        if (has_avx512 < 0)
-            has_avx512 = __builtin_cpu_supports("avx512f") ? 1 : 0;
-        if (dk >= 16 && has_avx512) {
+        if (dk >= 16 && ctx->has_avx512) {
             delta_head_avx512(matrix, q, k, v, out, dv, dk, beta, decay);
             continue;
         }
@@ -369,11 +370,11 @@ static void gate_heads(size_t begin, size_t end, size_t tid, void *user_data)
     }
 }
 
-OcError oc_qwen35_delta_step(OcQwen35DeltaState *state,
-                             const OcQwen35DeltaParams *params,
-                             const OcQwen35DeltaInput *input,
-                             float *conv_output, size_t conv_output_len,
-                             float *output, size_t output_len)
+static OcError delta_step(OcQwen35DeltaState *state,
+                          const OcQwen35DeltaParams *params,
+                          const OcQwen35DeltaInput *input,
+                          float *conv_output, size_t conv_output_len,
+                          float *output, size_t output_len, bool parallel)
 {
     size_t key_dim, value_dim, conv_dim, conv_state_len, recurrent_state_len;
     if (state == NULL || params == NULL || input == NULL ||
@@ -399,7 +400,8 @@ OcError oc_qwen35_delta_step(OcQwen35DeltaState *state,
         return OC_ERR_INVALID_ARG;
     }
     /* Prefill calls this once per token. Nested pool dispatches (4 per
-     * token × ~48 recurrent layers) cost more than the DeltaNet work. */
+     * token × ~48 recurrent layers) cost more than the DeltaNet work, so
+     * only the single-token recurrent update of large states dispatches. */
     ConvCtx conv = {&state->geometry, state->conv_state,
                     params->conv_weight, input->qkv, conv_output};
     conv_channels(0, conv_dim, 0, &conv);
@@ -408,10 +410,37 @@ OcError oc_qwen35_delta_step(OcQwen35DeltaState *state,
     normalize_key_heads(0, state->geometry.n_key_heads, 0, &normalize);
 
     DeltaCtx delta = {&state->geometry, state->recurrent_state, conv_output,
-                      params, input, output};
-    delta_heads(0, state->geometry.n_value_heads, 0, &delta);
+                      params, input, output, false};
+#if defined(__x86_64__) || defined(__i386__)
+    delta.has_avx512 = __builtin_cpu_supports("avx512f") != 0;
+#endif
+    if (parallel && recurrent_state_len >= OC_QWEN35_DELTA_PARALLEL_MIN_STATE)
+        oc_parallel_for(state->geometry.n_value_heads, delta_heads, &delta);
+    else
+        delta_heads(0, state->geometry.n_value_heads, 0, &delta);
 
     GateCtx gate = {&state->geometry, params, input->gate, output};
     gate_heads(0, state->geometry.n_value_heads, 0, &gate);
     return OC_OK;
+}
+
+OcError oc_qwen35_delta_step(OcQwen35DeltaState *state,
+                             const OcQwen35DeltaParams *params,
+                             const OcQwen35DeltaInput *input,
+                             float *conv_output, size_t conv_output_len,
+                             float *output, size_t output_len)
+{
+    return delta_step(state, params, input, conv_output, conv_output_len,
+                      output, output_len, false);
+}
+
+OcError oc_qwen35_delta_single_token_step(OcQwen35DeltaState *state,
+                                          const OcQwen35DeltaParams *params,
+                                          const OcQwen35DeltaInput *input,
+                                          float *conv_output,
+                                          size_t conv_output_len,
+                                          float *output, size_t output_len)
+{
+    return delta_step(state, params, input, conv_output, conv_output_len,
+                      output, output_len, true);
 }
