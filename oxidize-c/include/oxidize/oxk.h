@@ -186,6 +186,10 @@ const OcOxkContext *oc_oxk_init(void);
 /* Returns the cached capability struct (triggers init on first call). */
 const OcOxkCaps *oc_oxk_caps(void);
 
+/** True when the hand-written x86-64 assembly decode kernels
+ *  (src/compute/asm/oxk_x86_64.S) are installed. Set OC_ASM=0 to disable. */
+bool oc_oxk_asm_active(void);
+
 /* ─── Dispatched entry points ────────────────────────────────────────────
  *
  * These route through the global context's function pointers. They are the

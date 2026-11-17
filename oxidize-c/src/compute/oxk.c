@@ -16,6 +16,7 @@
 #include "quant_tables.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 /* pthread_once, not C11 <threads.h>: Apple's libc does not ship <threads.h>,
  * so call_once/once_flag break the macOS build. pthread is already linked. */
@@ -1186,6 +1187,33 @@ void oc_oxk_dot_iq3_s_prepped_multi_scalar(const void *scratch, size_t blocks,
 static OcOxkContext g_ctx;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
+/* Hand-written assembly decode GEMV kernels (src/compute/asm/oxk_x86_64.S).
+ * Installed on x86-64 ELF hosts with AVX2+FMA+F16C; OC_ASM=0 in the
+ * environment falls back to the C intrinsics kernels for A/B runs. */
+#if defined(__x86_64__) && defined(__ELF__) && !defined(OC_NO_ASM)
+#define OC_HAVE_ASM 1
+void oc_asm_dot_rows_q4_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, const int32_t *qsums,
+                                    float *out);
+void oc_asm_dot_rows_q8_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
+                                    size_t n_rows, size_t blocks,
+                                    const uint8_t *q8, float *out);
+void oc_asm_dot_rows_q4_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+void oc_asm_dot_rows_q6_k_q8_k(const uint8_t *rows, size_t row_bytes,
+                               size_t n_rows, size_t blocks,
+                               const uint8_t *q8, float *out);
+#endif
+static bool g_use_asm;
+
+bool oc_oxk_asm_active(void)
+{
+    oc_oxk_init();
+    return g_use_asm;
+}
+
 static void oc_oxk_init_once(void)
 {
     OcOxkLevel level = OC_OXK_SCALAR;
@@ -1266,6 +1294,10 @@ static void oc_oxk_init_once(void)
      * SIGILL on first use. Require the full feature set the bodies were
      * built with. */
     if (level >= OC_OXK_AVX2 && has_fma && has_f16c) {
+#ifdef OC_HAVE_ASM
+        const char *asm_env = getenv("OC_ASM");
+        g_use_asm = !(asm_env != NULL && asm_env[0] == '0');
+#endif
         g_ctx.dot_q4_0_q8_0 = oc_oxk_dot_q4_0_q8_0_avx2;
         g_ctx.dot_q4_k_q8_k = oc_oxk_dot_q4_k_q8_k_avx2;
         g_ctx.dot_q8_0_q8_0 = oc_oxk_dot_q8_0_q8_0_avx2;
@@ -1444,6 +1476,20 @@ float oc_oxk_dot_iq3_s_q8_k(const uint8_t *row, size_t blocks,
 /* Rows forms: take the AVX2 rows kernel exactly when the single-row
  * dispatch would pick the AVX2 kernel, so the per-row results are identical
  * to calling oc_oxk_dot_*_q8_k row by row. */
+/* The asm Q4_K/Q6_K rows kernels are bit-exact against the same scalar
+ * reference the AVX2 bodies match, so routing to them keeps this identity. */
+#ifdef OC_HAVE_ASM
+#define OXK_ROWS_ASM_q4_k(...)                                                 \
+    if (g_use_asm) { oc_asm_dot_rows_q4_k_q8_k(__VA_ARGS__); return; }
+#define OXK_ROWS_ASM_q6_k(...)                                                 \
+    if (g_use_asm) { oc_asm_dot_rows_q6_k_q8_k(__VA_ARGS__); return; }
+#else
+#define OXK_ROWS_ASM_q4_k(...)
+#define OXK_ROWS_ASM_q6_k(...)
+#endif
+#define OXK_ROWS_ASM_q2_k(...)
+#define OXK_ROWS_ASM_q3_k(...)
+#define OXK_ROWS_ASM_iq3_s(...)
 #define OXK_ROWS_DISPATCH(NAME, FIELD)                                         \
 void oc_oxk_dot_rows_##NAME##_q8_k(const uint8_t *rows, size_t row_bytes,      \
                                    size_t n_rows, size_t blocks,               \
@@ -1451,6 +1497,7 @@ void oc_oxk_dot_rows_##NAME##_q8_k(const uint8_t *rows, size_t row_bytes,      \
 {                                                                              \
     oc_oxk_init();                                                             \
     if (g_ctx.FIELD == oc_oxk_dot_##NAME##_q8_k_avx2) {                        \
+        OXK_ROWS_ASM_##NAME(rows, row_bytes, n_rows, blocks, q8, out)          \
         oc_oxk_dot_rows_##NAME##_q8_k_avx2(rows, row_bytes, n_rows, blocks,    \
                                            q8, out);                           \
         return;                                                                \
@@ -1464,6 +1511,11 @@ OXK_ROWS_DISPATCH(q2_k, dot_q2_k_q8_k)
 OXK_ROWS_DISPATCH(q3_k, dot_q3_k_q8_k)
 OXK_ROWS_DISPATCH(iq3_s, dot_iq3_s_q8_k)
 #undef OXK_ROWS_DISPATCH
+#undef OXK_ROWS_ASM_q4_k
+#undef OXK_ROWS_ASM_q6_k
+#undef OXK_ROWS_ASM_q2_k
+#undef OXK_ROWS_ASM_q3_k
+#undef OXK_ROWS_ASM_iq3_s
 
 /* Q5_K's single dot is AVX-512-VNNI on some hosts, so the == avx2 test the
  * macro uses would fall back to per-row calls there. The AVX2 rows body is
@@ -1664,6 +1716,13 @@ void oc_oxk_dot_rows_q4_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
                                     float *out)
 {
     oc_oxk_init();
+#ifdef OC_HAVE_ASM
+    if (g_use_asm && g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2) {
+        oc_asm_dot_rows_q4_0_q8_0_facc(rows, row_bytes, n_rows, blocks, q8,
+                                       qsums, out);
+        return;
+    }
+#endif
     if (g_ctx.dot_q4_0_q8_0 == oc_oxk_dot_q4_0_q8_0_avx2) {
         oc_oxk_dot_rows_q4_0_q8_0_facc_avx2(rows, row_bytes, n_rows, blocks,
                                             q8, qsums, out);
@@ -1678,6 +1737,13 @@ void oc_oxk_dot_rows_q8_0_q8_0_facc(const uint8_t *rows, size_t row_bytes,
                                     const uint8_t *q8, float *out)
 {
     oc_oxk_init();
+#ifdef OC_HAVE_ASM
+    if (g_use_asm && g_ctx.dot_q8_0_q8_0 == oc_oxk_dot_q8_0_q8_0_avx2) {
+        oc_asm_dot_rows_q8_0_q8_0_facc(rows, row_bytes, n_rows, blocks, q8,
+                                       out);
+        return;
+    }
+#endif
     if (g_ctx.dot_q8_0_q8_0 == oc_oxk_dot_q8_0_q8_0_avx2) {
         oc_oxk_dot_rows_q8_0_q8_0_facc_avx2(rows, row_bytes, n_rows, blocks,
                                             q8, out);
