@@ -3,7 +3,7 @@
 # Usage: scripts/publish_gguf_remote_hf.sh [ssh-host] [remote-glob] [hf-repo]
 set -euo pipefail
 
-HOST="${1:-ai@192.168.1.121}"
+HOST="${1:-ai@192.168.1.132}"
 REMOTE_GLOB="${2:-~/models/gemma4-31b-al/gemma-4-31B-it-*.gguf}"
 HF_REPO="${3:-freakyskittle/gemma-4-31B-it-AL-GGUF}"
 STAGING="${STAGING:-$(pwd)/.hf-staging}"

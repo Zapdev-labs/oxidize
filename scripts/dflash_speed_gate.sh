@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Speculative-decoding speed gate for the oxidize-c CLI (on .121 or local).
+# Speculative-decoding speed gate for the oxidize-c CLI (on .132 or local).
 #
 # Runs a greedy baseline (--spec-type none) and a speculative run
 # (--spec-type "$SPEC_TYPE") with identical settings, parses the decode

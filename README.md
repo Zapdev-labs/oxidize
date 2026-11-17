@@ -30,7 +30,7 @@ engine to Go, Python, C, and C++.
 | `oxidize-tui` | OpenTUI/Bun terminal UI — a pure client over the HTTP/SSE API |
 | `oxidize-golang` | Go port of `oxidize-core` (`run`, `chat`, `bench`, `inspect`, `list`, `serve`) |
 | `oxidize-python` | Pure-Python port (uv/pytest), mirrors `oxidize-golang` |
-| `oxidize-c` | Dependency-free C11 port, including native EXL3 inference |
+| `oxidize-c` | Dependency-free C11 port: native EXL3 inference, device-resident CUDA fast path (`make cuda`), EAGLE-4 drafter |
 | `oxidize-cpp` | C++20 Llama-family engine; llama.cpp-parity CPU path + optional CUDA/ROCm |
 | `oxidize-training` | Standalone C training stack (GPT trainer + corpus/eval tools) |
 
@@ -417,6 +417,42 @@ require full-checkpoint benchmarks; fewer stored bits do not guarantee faster
 CPU decoding.
 
 Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllamav3/blob/058b8630fd081f3ff46fce6246955b157c3a2e3b/tests/testlib/trellis.py).
+
+### CUDA fast path in oxidize-c
+
+```bash
+make -C oxidize-c cuda                  # multi-arch: sm_61 75 80 86 89 90
+make -C oxidize-c cuda CUDA_ARCHS=89    # faster single-arch build
+```
+
+`make cuda` builds with `-DOC_CUDA` and links `cudart` from `CUDA_HOME`
+(default `/usr/local/cuda`). Q4_K/Q6_K GGUF models run device-resident:
+weights stay on the GPU, prefill uses an int8 tensor-core GEMM
+(`mma.m8n8k16.s8`, guarded so pre-Turing archs still compile) with split-K for
+underfilled shapes, and decode uses prefetching dp4a matvec kernels. On the
+development GPU this took prefill from about 42 to about 1500 tok/s; rerun the
+benchmarks on your own hardware before relying on those numbers.
+
+### EAGLE-4 speculative drafter in oxidize-c
+
+`oxidize-c` includes an independent implementation of the EAGLE-4 drafter:
+one decoder layer over fused target hidden states, sliding-window attention,
+a rank-128 candidate head, and a cost model that widens the draft tree at
+batch 1 and narrows to a chain as batch size grows. No weights are shipped.
+
+```bash
+# CPU microbench (no checkpoint needed); pass --model to bench a real draft
+./oxidize-c/oxidize-c eagle4 --bench-iters 100 --json
+
+# Train from SafeTensors, then export to GGUF
+./oxidize-c/oxidize-c eagle4-train --model draft.safetensors \
+  --dataset examples.safetensors --output trained.safetensors --epochs 3
+./oxidize-c/oxidize-c eagle4-export --model trained.safetensors --output draft.gguf
+```
+
+Training inputs and checkpoints are SafeTensors only; a `.gguf` passed to
+`eagle4-train` is rejected. Draft loading validates tensor offsets, byte
+lengths, and every projection/head/norm shape against the config.
 
 ## Security
 

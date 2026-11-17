@@ -178,6 +178,40 @@ typedef struct OcCudaContext {
     float *d_qwen35_delta_out;
     size_t conv_state_per_layer;
     size_t recurrent_state_per_layer;
+    /* ── MoE expert slot cache ────────────────────────────────────────────
+     * When the stacked experts do not all fit in VRAM, each MoE layer gets
+     * `expert_slots` device slots instead of num_experts. After routing,
+     * the chosen ids are mapped to slots (LRU per layer), misses are copied
+     * from the host model, and the expert kernels index by slot through
+     * d_expert_slot. expert_slots == 0 means fully resident (no mapping). */
+    uint32_t  expert_slots;
+    int32_t  *h_slot_of;        /* [n_layer][num_experts] slot or -1        */
+    uint32_t *h_expert_in;      /* [n_layer][expert_slots] expert or ~0u    */
+    uint64_t *h_slot_stamp;     /* [n_layer][expert_slots] LRU clock        */
+    uint64_t  slot_clock;
+    uint32_t *h_sel;            /* [k] routed ids copied from the device    */
+    uint32_t *h_slot_sel;       /* [k] slot ids                             */
+    uint32_t *d_expert_slot;    /* [k] slot ids on device                   */
+    uint64_t  expert_hits, expert_misses;
+    float   **d_exp_probs_b;    /* [n_layer] router ranking bias or NULL    */
+    /* ── qwen4exp (CYBER-FROST): hc_mult-wide residual + one PLE layer ──── */
+    bool      is_qwen4exp;
+    const OcLlamaModel *host_model; /* PLE table + expert misses read here  */
+    uint32_t  hc_mult, hc_low_rank, indexer_top_k;
+    float     logit_scale;
+    float   **d_hc_attn_norm, **d_hc_ffn_norm;      /* [n_layer] H*D f32   */
+    OcCudaWeight *d_hc_attn_down, *d_hc_attn_up, *d_hc_attn_inject;
+    OcCudaWeight *d_hc_ffn_down, *d_hc_ffn_up, *d_hc_ffn_inject;
+    float    *d_out_hc_norm;
+    OcCudaWeight d_out_hc_down, d_out_hc_up;
+    float    *d_hc_resid, *d_hc_xn, *d_hc_gate, *d_hc_lo, *d_hc_inject;
+    OcCudaWeight d_ple_key, d_ple_value;
+    float    *d_ple_norm_key, *d_ple_norm_query, *d_ple_norm_conv;
+    float    *d_ple_conv_w;
+    float    *d_ple_emb, *d_ple_key_buf, *d_ple_val_buf, *d_ple_gated;
+    float    *d_ple_ring;       /* (kern-1)*ngram rows of H*D, oldest first */
+    float    *h_ple_emb;        /* host gather scratch, ple_n_heads*embd_dim */
+    uint32_t  ple_hist[OC_Q4E_PLE_MAX_NGRAM]; /* prior tokens, newest first */
     bool initialized;
     /* Autotune-requested CUDA graph / persistent-decode flags, stored and
      * logged only. The fast path's graph is driven by oc_cuda_fast_decode. */

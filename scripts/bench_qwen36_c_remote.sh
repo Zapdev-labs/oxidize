@@ -15,7 +15,7 @@ Options:
   --model PATH          Canonical GGUF on the remote host
   --revision REV        Commit to build in an isolated remote checkout
   --oxidize-binary PATH Use an existing remote oxidize-c executable
-  --host HOST           SSH destination (default: ai@192.168.1.121)
+  --host HOST           SSH destination (default: ai@192.168.1.132)
   --threads N           Must be 16 (the fixed benchmark contract)
   --warmup N            Must be 2 (the fixed benchmark contract)
   --repetitions N       Must be 5 (the fixed benchmark contract)
@@ -76,7 +76,7 @@ self_test() {
     printf '%s\n' "$schema"
 }
 
-host='ai@192.168.1.121'
+host='ai@192.168.1.132'
 model=$DEFAULT_MODEL
 revision=$DEFAULT_REVISION
 oxidize_binary=''

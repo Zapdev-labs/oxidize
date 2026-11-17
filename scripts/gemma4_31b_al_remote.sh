@@ -7,7 +7,7 @@
 #
 set -euo pipefail
 
-HOST="${1:-ai@192.168.1.121}"
+HOST="${1:-ai@192.168.1.132}"
 REPO="${2:-~/oxidize}"
 SRC_REPO="unsloth/gemma-4-31B-it-GGUF"
 OUT_DIR="${OUT_DIR:-~/models/gemma4-31b-al}"

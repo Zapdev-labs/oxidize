@@ -406,6 +406,7 @@ static OcWeightPlan hopper_weight_plan(OcGgufQuantizationType q)
     case OC_QUANT_IQ1_M:
     case OC_QUANT_IQ4_XS:
     case OC_QUANT_NVFP4:
+    case OC_QUANT_MXFP4:
     case OC_QUANT_AL5:
     case OC_QUANT_AL5_XS:
     case OC_QUANT_AL6:

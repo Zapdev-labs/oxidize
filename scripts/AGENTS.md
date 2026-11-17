@@ -33,6 +33,6 @@ bash scripts/bench-ai-box.sh                 # remote NUMA benchmark
 ```
 
 ## NOTES
-- Remote hosts: `ai@192.168.1.132` (primary NUMA bench), `ai@192.168.1.121` (~20 TB storage for large-model quant + HF publish), legacy `ai@192.168.1.68`.
+- Remote hosts: `ai@192.168.1.132` (primary NUMA bench), legacy `ai@192.168.1.68`.
 - Custom HF repos for quant/model publishing should be private unless the user explicitly requests public.
 - Put new scripts in this folder. One-off/local scripts go in `scripts/local/` and are gitignored. Do not add scripts at the repo root.

@@ -277,10 +277,11 @@ __global__ void k_qwen35_delta_heads(float *recurrent, const float *conv,
     }
 }
 
-/* RMSNorm over each value head, then SiLU(gate). One block per head. */
+/* RMSNorm over each value head, then SiLU(gate) — or sigmoid(gate) on
+ * qwen4exp, its only delta-net difference. One block per head. */
 __global__ void k_qwen35_gate_heads(float *out, const float *gate,
                                     const float *norm_w, uint32_t n_heads,
-                                    uint32_t dv, float eps)
+                                    uint32_t dv, float eps, bool sigmoid_gate)
 {
     const uint32_t head = blockIdx.x;
     if (head >= n_heads) return;
@@ -300,7 +301,8 @@ __global__ void k_qwen35_gate_heads(float *out, const float *gate,
     }
     const float inv = rsqrtf(red[0] / (float)dv + eps);
     for (uint32_t i = tid; i < dv; i += nthreads)
-        h[i] = h[i] * inv * norm_w[i] * q35_silu(g[i]);
+        h[i] = h[i] * inv * norm_w[i] *
+               (sigmoid_gate ? q35_sigmoid(g[i]) : q35_silu(g[i]));
 }
 
 static uint32_t q35_block(uint32_t n, uint32_t cap)
@@ -368,6 +370,25 @@ bool oc_cuda_qwen35_delta_step(float *d_conv_state, float *d_recurrent,
                                uint32_t key_head_dim, uint32_t value_head_dim,
                                uint32_t conv_kernel, float eps, void *stream)
 {
+    return oc_cuda_qwen35_delta_step_ex(
+        d_conv_state, d_recurrent, d_qkv, d_gate, d_beta, d_alpha, d_conv_w,
+        d_ssm_a, d_dt_bias, d_norm_w, d_conv_out, d_out, n_key_heads,
+        n_value_heads, key_head_dim, value_head_dim, conv_kernel, eps,
+        false, stream);
+}
+
+bool oc_cuda_qwen35_delta_step_ex(float *d_conv_state, float *d_recurrent,
+                                  const float *d_qkv, const float *d_gate,
+                                  const float *d_beta, const float *d_alpha,
+                                  const float *d_conv_w, const float *d_ssm_a,
+                                  const float *d_dt_bias, const float *d_norm_w,
+                                  float *d_conv_out, float *d_out,
+                                  uint32_t n_key_heads, uint32_t n_value_heads,
+                                  uint32_t key_head_dim,
+                                  uint32_t value_head_dim,
+                                  uint32_t conv_kernel, float eps,
+                                  bool sigmoid_gate, void *stream)
+{
     if (!d_conv_state || !d_recurrent || !d_qkv || !d_gate || !d_beta ||
         !d_alpha || !d_conv_w || !d_ssm_a || !d_dt_bias || !d_norm_w ||
         !d_conv_out || !d_out)
@@ -408,7 +429,8 @@ bool oc_cuda_qwen35_delta_step(float *d_conv_state, float *d_recurrent,
     {
         const uint32_t block = q35_block(value_head_dim, 256u);
         k_qwen35_gate_heads<<<n_value_heads, block, block * sizeof(float), s>>>(
-            d_out, d_gate, d_norm_w, n_value_heads, value_head_dim, eps);
+            d_out, d_gate, d_norm_w, n_value_heads, value_head_dim, eps,
+            sigmoid_gate);
         Q35_CHECK(cudaGetLastError());
     }
     return true;

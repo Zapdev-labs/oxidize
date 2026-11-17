@@ -3,7 +3,7 @@
 # Usage: scripts/qwen30_bf16_al5_remote.sh [ssh-host]
 set -euo pipefail
 
-HOST="${1:-ai@192.168.1.121}"
+HOST="${1:-ai@192.168.1.132}"
 REPO="${2:-~/oxidize}"
 HF_DIR="${3:-~/models/qwen3coder30b-hf}"
 OUT_DIR="${4:-~/models/qwen3coder30b}"

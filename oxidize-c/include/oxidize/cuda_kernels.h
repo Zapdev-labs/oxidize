@@ -194,6 +194,56 @@ bool oc_cuda_qwen35_delta_step(
     uint32_t key_head_dim, uint32_t value_head_dim,
     uint32_t conv_kernel, float eps, void *stream);
 
+/* Same step with the output-gate activation selectable: sigmoid_gate=true
+ * is qwen4exp (sigmoid), false is Qwen3.5 (SiLU). */
+bool oc_cuda_qwen35_delta_step_ex(
+    float *d_conv_state, float *d_recurrent,
+    const float *d_qkv, const float *d_gate,
+    const float *d_beta, const float *d_alpha,
+    const float *d_conv_w, const float *d_ssm_a,
+    const float *d_dt_bias, const float *d_norm_w,
+    float *d_conv_out, float *d_out,
+    uint32_t n_key_heads, uint32_t n_value_heads,
+    uint32_t key_head_dim, uint32_t value_head_dim,
+    uint32_t conv_kernel, float eps, bool sigmoid_gate, void *stream);
+
+/* ── qwen4exp hyper-connections + PLE (cuda_qwen4exp.cu) ──────────────────
+ * Mirrors llama.c q4e_* exactly; `n_streams` = hc_mult, `d` = n_embd. All
+ * launches go on `stream` (NULL = legacy default). */
+
+/* xn[c*d+e] = rmsnorm(res[c])[e] * gamma[c*d+e]. */
+bool oc_cuda_q4e_norm_streams(const float *d_res, const float *d_gamma,
+                              float *d_xn, uint32_t n_streams, uint32_t d,
+                              float eps, void *stream);
+
+/* lo[i] = silu(lo[i] * scale). */
+bool oc_cuda_q4e_silu_scale(float *d_lo, uint32_t n, float scale,
+                            void *stream);
+
+/* out[e] = (1/H) Σ_c xn[c][e] · sigmoid(gate[c][e]). */
+bool oc_cuda_q4e_hc_fold(const float *d_xn, const float *d_gate,
+                         float *d_out, uint32_t n_streams, uint32_t d,
+                         void *stream);
+
+/* res[c][e] += block[e] · 2·sigmoid(inject[c]/H); inject NULL → weight 1. */
+bool oc_cuda_q4e_hc_combine(float *d_res, const float *d_block,
+                            const float *d_inject, uint32_t n_streams,
+                            uint32_t d, void *stream);
+
+/* PLE gate: per stream c, s = <kn[c], qn[c]>/sqrt(d); g = sigmoid(sgn·
+ * sqrt(max(|s|,1e-6))); gated[c][e] = val[e]·g. */
+bool oc_cuda_q4e_ple_gate(const float *d_kn, const float *d_qn,
+                          const float *d_val, float *d_gated,
+                          uint32_t n_streams, uint32_t d, void *stream);
+
+/* PLE dilated depthwise conv over the ring + silu, resid += gated + conv,
+ * then shift the ring and append `conv_in`. ring holds (kern-1)*dil rows
+ * of n_ch, oldest first; conv_w is [n_ch][kern]. Requires kern >= 2. */
+bool oc_cuda_q4e_ple_conv(const float *d_conv_w, float *d_ring,
+                          const float *d_conv_in, const float *d_gated,
+                          float *d_resid, uint32_t n_ch, uint32_t kern,
+                          uint32_t dil, void *stream);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
