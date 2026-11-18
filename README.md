@@ -423,8 +423,10 @@ Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllam
 The C CPU runtime supports grouped latent experts in `qwen4exp` GGUFs.
 Set `qwen4exp.expert_latent_length` and `qwen4exp.expert_latent_group_count`, and
 provide each layer's `ffn_latent_d.weight`, `ffn_latent_u.weight`, and
-`ffn_latent_labels` tensors. D/U are three-dimensional grouped projections;
-labels are a one-dimensional F32 array of integral group IDs, one per expert.
+`ffn_latent_labels.weight` tensors. D/U are three-dimensional grouped projections;
+labels are an F32 array of integral group IDs, one per expert, shaped
+`[n_experts]` or `[1, n_experts]` as in Edge0 GGUFs (the name without
+`.weight` is also accepted).
 Routed gate/up/down weights use the latent width; the shared expert stays
 full-width. Decode and batched prefill project each selected group once,
 combine its weighted expert outputs, then project back to the residual width.

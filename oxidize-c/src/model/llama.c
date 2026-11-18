@@ -1186,12 +1186,18 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
                 info->dims[1] != m->cfg.n_embd ||
                 info->dims[2] != m->cfg.expert_latent_group_count)
                 L->latent_tensor_shape_invalid = true;
-        } else if (strcmp(suf, "ffn_latent_labels") == 0) {
+        } else if (strcmp(suf, "ffn_latent_labels") == 0 ||
+                   strcmp(suf, "ffn_latent_labels.weight") == 0) {
             L->ffn_latent_labels = view_from_info(mm, info);
-            if (info->n_dims != 1 ||
-                info->dims[0] != m->cfg.num_experts ||
+            const bool row_labels = info->n_dims == 2 && info->dims[0] == 1 &&
+                                    info->dims[1] == m->cfg.num_experts;
+            if ((!row_labels && (info->n_dims != 1 ||
+                                 info->dims[0] != m->cfg.num_experts)) ||
                 L->ffn_latent_labels.qtype != OC_QUANT_F32)
                 L->latent_tensor_shape_invalid = true;
+            L->ffn_latent_labels.rows = 1;
+            L->ffn_latent_labels.cols = m->cfg.num_experts;
+            L->ffn_latent_labels.row_bytes = (size_t)m->cfg.num_experts * sizeof(float);
         } else if (strcmp(suf, "ffn_gate_shexp.weight") == 0) {
             L->ffn_gate_shexp = view_from_info(mm, info);
         } else if (strcmp(suf, "ffn_up_shexp.weight") == 0) {
