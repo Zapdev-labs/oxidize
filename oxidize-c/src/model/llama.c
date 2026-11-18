@@ -557,6 +557,8 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
     cfg->ssm_group_count = 0;
     cfg->ssm_value_heads = 0;
     cfg->ssm_inner_size = 0;
+    cfg->expert_latent_dim = 0;
+    cfg->expert_latent_group_count = 0;
     cfg->hc_mult = 0;
     cfg->hc_low_rank = 0;
     cfg->recurrent_layers = NULL;
@@ -613,6 +615,36 @@ static OcError parse_config(const OcGgufFile *f, const char *arch_str,
      * hyper-connections, an explicit per-layer kind map, MRoPE sections,
      * the QSA indexer and PLE. */
     if (cfg->is_qwen4exp) {
+        snprintf(key, sizeof(key), "%sexpert_latent_length", prefix);
+        cfg->expert_latent_dim = cfg_u32(f, key, 0);
+        if (cfg->expert_latent_dim == 0)
+            cfg->expert_latent_dim = cfg_u32(f,
+                "qwen4exp.expert_latent_length", 0);
+        if (cfg->expert_latent_dim == 0)
+            cfg->expert_latent_dim = cfg_u32(f,
+                "qwen4_exp.expert_latent_length", 0);
+        snprintf(key, sizeof(key), "%sexpert_latent_group_count", prefix);
+        cfg->expert_latent_group_count = cfg_u32(f, key, 0);
+        if (cfg->expert_latent_group_count == 0)
+            cfg->expert_latent_group_count = cfg_u32(f,
+                "qwen4exp.expert_latent_group_count", 0);
+        if (cfg->expert_latent_group_count == 0)
+            cfg->expert_latent_group_count = cfg_u32(f,
+                "qwen4_exp.expert_latent_group_count", 0);
+        if (cfg->expert_latent_group_count == 0 && cfg->expert_latent_dim > 0)
+            cfg->expert_latent_group_count = cfg_u32(f,
+                "qwen4exp.expert_group_count", 0);
+        if ((cfg->expert_latent_dim == 0) !=
+                (cfg->expert_latent_group_count == 0) ||
+            (cfg->expert_latent_dim > 0 &&
+             (cfg->num_experts == 0 ||
+              cfg->expert_latent_dim > cfg->n_embd ||
+              cfg->expert_latent_group_count > cfg->num_experts))) {
+            oc_log(OC_LOG_ERROR,
+                   "llama: partial or invalid qwen4exp latent-MoE metadata");
+            return OC_ERR_MODEL;
+        }
+
         /* RoPE here is the standard half-split (rotate_half) convention —
          * verified against the transformers reference: normed-q dims pair
          * (i, i+rope_len/2), not adjacent pairs. Only the [q|gate] weight
@@ -1123,10 +1155,43 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
             L->ffn_gate_inp = view_from_info(mm, info);
         } else if (strcmp(suf, "ffn_gate_exps.weight") == 0) {
             L->ffn_gate_exps = view_from_info(mm, info);
+            if (m->cfg.expert_latent_dim > 0 &&
+                (info->n_dims != 3 || info->dims[0] != m->cfg.expert_latent_dim ||
+                 info->dims[1] != m->cfg.expert_intermediate_size ||
+                 info->dims[2] != m->cfg.num_experts))
+                L->latent_tensor_shape_invalid = true;
         } else if (strcmp(suf, "ffn_up_exps.weight") == 0) {
             L->ffn_up_exps = view_from_info(mm, info);
+            if (m->cfg.expert_latent_dim > 0 &&
+                (info->n_dims != 3 || info->dims[0] != m->cfg.expert_latent_dim ||
+                 info->dims[1] != m->cfg.expert_intermediate_size ||
+                 info->dims[2] != m->cfg.num_experts))
+                L->latent_tensor_shape_invalid = true;
         } else if (strcmp(suf, "ffn_down_exps.weight") == 0) {
             L->ffn_down_exps = view_from_info(mm, info);
+            if (m->cfg.expert_latent_dim > 0 &&
+                (info->n_dims != 3 || info->dims[0] != m->cfg.expert_intermediate_size ||
+                 info->dims[1] != m->cfg.expert_latent_dim ||
+                 info->dims[2] != m->cfg.num_experts))
+                L->latent_tensor_shape_invalid = true;
+        } else if (strcmp(suf, "ffn_latent_d.weight") == 0) {
+            L->ffn_latent_d = view_from_info(mm, info);
+            if (info->n_dims != 3 || info->dims[0] != m->cfg.n_embd ||
+                info->dims[1] != m->cfg.expert_latent_dim ||
+                info->dims[2] != m->cfg.expert_latent_group_count)
+                L->latent_tensor_shape_invalid = true;
+        } else if (strcmp(suf, "ffn_latent_u.weight") == 0) {
+            L->ffn_latent_u = view_from_info(mm, info);
+            if (info->n_dims != 3 || info->dims[0] != m->cfg.expert_latent_dim ||
+                info->dims[1] != m->cfg.n_embd ||
+                info->dims[2] != m->cfg.expert_latent_group_count)
+                L->latent_tensor_shape_invalid = true;
+        } else if (strcmp(suf, "ffn_latent_labels") == 0) {
+            L->ffn_latent_labels = view_from_info(mm, info);
+            if (info->n_dims != 1 ||
+                info->dims[0] != m->cfg.num_experts ||
+                L->ffn_latent_labels.qtype != OC_QUANT_F32)
+                L->latent_tensor_shape_invalid = true;
         } else if (strcmp(suf, "ffn_gate_shexp.weight") == 0) {
             L->ffn_gate_shexp = view_from_info(mm, info);
         } else if (strcmp(suf, "ffn_up_shexp.weight") == 0) {
@@ -1550,6 +1615,7 @@ static OcError resolve_weights(OcLlamaModel *m)
         uint32_t kv_index = 0;
         for (uint32_t l = 0; l < m->cfg.n_layer; l++) {
             OcLlamaLayer *L = &m->layers[l];
+            L->expert_latent_dim = m->cfg.expert_latent_dim;
             const bool has_full = L->attn_q.data || L->attn_k.data ||
                                   L->attn_v.data || L->attn_output.data;
             const bool has_recurrent = L->attn_qkv.data || L->attn_gate.data ||
@@ -1647,6 +1713,42 @@ static OcError resolve_weights(OcLlamaModel *m)
              * router, shared expert and its gate keep their ordinary views. */
             const bool moe_exl3 =
                 L->exl3_gate && L->exl3_up && L->exl3_down;
+            const bool latent = m->cfg.expert_latent_dim > 0;
+            const bool any_latent_tensor = L->ffn_latent_d.data != NULL ||
+                L->ffn_latent_u.data != NULL ||
+                L->ffn_latent_labels.data != NULL;
+            bool bad_latent_labels = false;
+            if (latent && L->ffn_latent_labels.data != NULL &&
+                L->ffn_latent_labels.qtype == OC_QUANT_F32 &&
+                L->ffn_latent_labels.rows == 1 &&
+                L->ffn_latent_labels.cols == m->cfg.num_experts) {
+                const float *labels = (const float *)L->ffn_latent_labels.data;
+                for (uint32_t e = 0; e < m->cfg.num_experts; e++) {
+                    const float label = labels[e];
+                    if (!isfinite(label) || label < 0.0f ||
+                        label >= (float)m->cfg.expert_latent_group_count ||
+                        floorf(label) != label) {
+                        bad_latent_labels = true;
+                        break;
+                    }
+                }
+            } else if (latent) {
+                bad_latent_labels = true;
+            }
+            const size_t routed_input = latent ? m->cfg.expert_latent_dim
+                                               : m->cfg.n_embd;
+            const size_t routed_output = latent ? m->cfg.expert_latent_dim
+                                                : m->cfg.n_embd;
+            const bool invalid_latent = latent
+                ? (moe_exl3 || L->latent_tensor_shape_invalid ||
+                   !L->ffn_latent_d.data ||
+                   L->ffn_latent_d.cols != m->cfg.n_embd ||
+                   L->ffn_latent_d.rows != m->cfg.expert_latent_dim ||
+                   !L->ffn_latent_u.data ||
+                   L->ffn_latent_u.cols != m->cfg.expert_latent_dim ||
+                   L->ffn_latent_u.rows != m->cfg.n_embd ||
+                   bad_latent_labels)
+                : any_latent_tensor;
             const bool invalid_moe = m->cfg.num_experts > 0 && !moe_exl3 &&
                 (!L->ffn_gate_inp.data || !L->ffn_gate_exps.data ||
                  !L->ffn_up_exps.data || !L->ffn_down_exps.data ||
@@ -1654,12 +1756,12 @@ static OcError resolve_weights(OcLlamaModel *m)
                  !L->ffn_down_shexp.data || !L->ffn_gate_inp_shexp.data ||
                  L->ffn_gate_inp.cols != m->cfg.n_embd ||
                  L->ffn_gate_inp.rows != m->cfg.num_experts ||
-                 L->ffn_gate_exps.cols != m->cfg.n_embd ||
+                 L->ffn_gate_exps.cols != routed_input ||
                  L->ffn_gate_exps.rows != m->cfg.expert_intermediate_size ||
-                 L->ffn_up_exps.cols != m->cfg.n_embd ||
+                 L->ffn_up_exps.cols != routed_input ||
                  L->ffn_up_exps.rows != m->cfg.expert_intermediate_size ||
                  L->ffn_down_exps.cols != m->cfg.expert_intermediate_size ||
-                 L->ffn_down_exps.rows != m->cfg.n_embd ||
+                 L->ffn_down_exps.rows != routed_output ||
                  L->ffn_gate_shexp.cols != m->cfg.n_embd ||
                  L->ffn_gate_shexp.rows !=
                      m->cfg.shared_expert_intermediate_size ||
@@ -1670,8 +1772,10 @@ static OcError resolve_weights(OcLlamaModel *m)
                      m->cfg.shared_expert_intermediate_size ||
                  L->ffn_down_shexp.rows != m->cfg.n_embd ||
                  L->ffn_gate_inp_shexp.cols != m->cfg.n_embd);
-            if (invalid_moe) {
-                oc_log(OC_LOG_ERROR, "llama: incomplete qwen4exp MoE block %u", l);
+            if (invalid_moe || invalid_latent) {
+                oc_log(OC_LOG_ERROR,
+                       "llama: incomplete or mis-shaped qwen4exp %s block %u",
+                       latent ? "latent-MoE" : "MoE", l);
                 return OC_ERR_TENSOR;
             }
         }
@@ -2501,6 +2605,14 @@ static OcError session_init_kv_impl2(OcLlamaModel *model, OcLlamaSession *out,
         out->expert_down_all = xcalloc(
             ((size_t)model->cfg.num_experts_per_tok + 1u) * model->cfg.n_embd,
             sizeof(float));
+        if (model->cfg.expert_latent_dim > 0) {
+            out->expert_latent_input = xcalloc(model->cfg.expert_latent_dim,
+                                                sizeof(float));
+            out->expert_latent_sum = xcalloc(model->cfg.expert_latent_dim,
+                                              sizeof(float));
+            out->expert_latent_output = xcalloc(model->cfg.n_embd,
+                                                 sizeof(float));
+        }
         out->selected_experts = xcalloc(
             (size_t)model->cfg.num_experts + model->cfg.zero_expert_count,
             sizeof(uint32_t));
@@ -2556,6 +2668,9 @@ static OcError session_init_kv_impl2(OcLlamaModel *model, OcLlamaSession *out,
         (!out->router_logits || !out->expert_gate || !out->expert_up ||
          !out->expert_out || !out->expert_gate_all || !out->expert_up_all ||
          !out->expert_down_all || !out->selected_experts ||
+         (model->cfg.expert_latent_dim > 0 &&
+          (!out->expert_latent_input || !out->expert_latent_sum ||
+           !out->expert_latent_output)) ||
          !out->shexp_gate || !out->shexp_up || !out->shexp_out)) {
         oc_llama_session_free(out);
         return OC_ERR_OOM;
@@ -3065,6 +3180,8 @@ void oc_llama_session_free(OcLlamaSession *sess)
     free(sess->expert_gate); free(sess->expert_up); free(sess->expert_out);
     free(sess->expert_gate_all); free(sess->expert_up_all);
     free(sess->expert_down_all); free(sess->selected_experts);
+    free(sess->expert_latent_input); free(sess->expert_latent_sum);
+    free(sess->expert_latent_output);
     free(sess->shexp_gate); free(sess->shexp_up); free(sess->shexp_out);
     free(sess->mla_c_q); free(sess->mla_c_kv);
     free(sess->mla_q_full); free(sess->mla_kv_compressed);
@@ -3969,6 +4086,138 @@ static uint32_t moe_layer_index(const OcLlamaSession *s, const OcLlamaLayer *L)
     return (uint32_t)d;
 }
 
+static OcError latent_moe_routed(const OcLlamaConfig *c,
+                                 const OcLlamaLayer *L, const float *input,
+                                 const uint32_t *selected,
+                                 const float *weights, uint32_t n_selected,
+                                 float *output, float *latent_input,
+                                 float *latent_sum, float *latent_output,
+                                 float *gate, float *up, float *temp)
+{
+    const size_t D = c->n_embd;
+    const size_t Z = c->expert_latent_dim;
+    const size_t I = c->expert_intermediate_size;
+    const float *labels = (const float *)L->ffn_latent_labels.data;
+    if (Z == 0 || Z > D || c->expert_latent_group_count == 0 ||
+        L->latent_tensor_shape_invalid ||
+        !L->ffn_latent_d.data || !L->ffn_latent_u.data ||
+        !L->ffn_latent_labels.data ||
+        L->ffn_latent_labels.qtype != OC_QUANT_F32 ||
+        L->ffn_latent_labels.rows != 1 ||
+        L->ffn_latent_labels.cols != c->num_experts ||
+        L->ffn_latent_d.rows != Z || L->ffn_latent_d.cols != D ||
+        L->ffn_latent_u.rows != D || L->ffn_latent_u.cols != Z ||
+        L->ffn_gate_exps.rows != I || L->ffn_up_exps.rows != I ||
+        L->ffn_gate_exps.cols != Z || L->ffn_up_exps.cols != Z ||
+        L->ffn_down_exps.rows != Z || L->ffn_down_exps.cols != I)
+        return OC_ERR_TENSOR;
+    for (uint32_t i = 0; i < n_selected; i++) {
+        if (selected[i] >= c->num_experts) return OC_ERR_MODEL;
+        const float label = labels[selected[i]];
+        if (!isfinite(label) || label < 0.0f ||
+            label >= (float)c->expert_latent_group_count || floorf(label) != label)
+            return OC_ERR_MODEL;
+    }
+
+    memset(output, 0, D * sizeof(float));
+    const size_t d_group_bytes = Z * L->ffn_latent_d.row_bytes;
+    const size_t u_group_bytes = D * L->ffn_latent_u.row_bytes;
+    const size_t gate_expert_bytes = I * L->ffn_gate_exps.row_bytes;
+    const size_t up_expert_bytes = I * L->ffn_up_exps.row_bytes;
+    const size_t down_expert_bytes = Z * L->ffn_down_exps.row_bytes;
+    for (uint32_t i = 0; i < n_selected; i++) {
+        const uint32_t group = (uint32_t)labels[selected[i]];
+        bool first = true;
+        for (uint32_t j = 0; j < i; j++) {
+            if ((uint32_t)labels[selected[j]] == group) {
+                first = false;
+                break;
+            }
+        }
+        if (!first) continue;
+
+        const OcWeightView d = {
+            .data = L->ffn_latent_d.data + (size_t)group * d_group_bytes,
+            .qtype = L->ffn_latent_d.qtype, .rows = Z, .cols = D,
+            .row_bytes = L->ffn_latent_d.row_bytes,
+        };
+        matvec(&d, input, latent_input, temp);
+        memset(latent_sum, 0, Z * sizeof(float));
+        for (uint32_t j = i; j < n_selected; j++) {
+            const uint32_t expert = selected[j];
+            if ((uint32_t)labels[expert] != group) continue;
+            OcWeightView gate_v = L->ffn_gate_exps;
+            gate_v.data += (size_t)expert * gate_expert_bytes;
+            gate_v.cols = Z;
+            OcWeightView up_v = L->ffn_up_exps;
+            up_v.data += (size_t)expert * up_expert_bytes;
+            up_v.cols = Z;
+            OcWeightView down_v = L->ffn_down_exps;
+            down_v.data += (size_t)expert * down_expert_bytes;
+            down_v.rows = Z;
+            if (gate_v.qtype != OC_QUANT_F32 && up_v.qtype != OC_QUANT_F32) {
+                const OcGgufQuantizationType types[2] = {
+                    gate_v.qtype, up_v.qtype,
+                };
+                const uint8_t *data[2] = {gate_v.data, up_v.data};
+                const size_t rows[2] = {I, I};
+                const size_t strides[2] = {gate_v.row_bytes, up_v.row_bytes};
+                float *outputs[2] = {gate, up};
+                oc_matvec_quantized_fused(types, data, rows, Z, strides, 2,
+                                          latent_input, outputs, temp);
+            } else {
+                matvec(&gate_v, latent_input, gate, temp);
+                matvec(&up_v, latent_input, up, temp);
+            }
+            oc_swiglu_inplace_f32(gate, up, I);
+            matvec(&down_v, gate, latent_output, temp);
+            for (size_t z = 0; z < Z; z++)
+                latent_sum[z] += weights[j] * latent_output[z];
+        }
+        const OcWeightView u = {
+            .data = L->ffn_latent_u.data + (size_t)group * u_group_bytes,
+            .qtype = L->ffn_latent_u.qtype, .rows = D, .cols = Z,
+            .row_bytes = L->ffn_latent_u.row_bytes,
+        };
+        matvec(&u, latent_sum, latent_output, temp);
+        for (size_t d = 0; d < D; d++) output[d] += latent_output[d];
+    }
+    return OC_OK;
+}
+
+#ifdef OC_TESTING
+OcError oc_llama_test_latent_moe_decode(const OcLlamaConfig *cfg,
+                                        const OcLlamaLayer *layer,
+                                        const float *input,
+                                        const uint32_t *selected,
+                                        const float *weights, uint32_t k,
+                                        float *output)
+{
+    if (!cfg || !layer || !input || (!selected && k) || (!weights && k) ||
+        !output) return OC_ERR_INVALID_ARG;
+    size_t n_temp = cfg->n_embd;
+    if (cfg->expert_intermediate_size > n_temp)
+        n_temp = cfg->expert_intermediate_size;
+    float *latent_input = xcalloc(cfg->expert_latent_dim, sizeof(float));
+    float *latent_sum = xcalloc(cfg->expert_latent_dim, sizeof(float));
+    float *latent_output = xcalloc(cfg->n_embd, sizeof(float));
+    float *gate = xcalloc(cfg->expert_intermediate_size, sizeof(float));
+    float *up = xcalloc(cfg->expert_intermediate_size, sizeof(float));
+    float *temp = xcalloc(n_temp, sizeof(float));
+    if (!latent_input || !latent_sum || !latent_output || !gate || !up ||
+        !temp) {
+        free(latent_input); free(latent_sum); free(latent_output);
+        free(gate); free(up); free(temp);
+        return OC_ERR_OOM;
+    }
+    OcError e = latent_moe_routed(cfg, layer, input, selected, weights, k,
+        output, latent_input, latent_sum, latent_output, gate, up, temp);
+    free(latent_input); free(latent_sum); free(latent_output);
+    free(gate); free(up); free(temp);
+    return e;
+}
+#endif
+
 static void apply_lora_at(OcLlamaSession *s, const OcLoraAdapter *arr,
                           uint32_t layer, const float *x, float *out)
 {
@@ -4161,7 +4410,8 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
      * regions. Same kernels and the same single activation quantization, so
      * its output is bit-identical to the separate path below. LoRA adapters
      * hook the separate path, so they keep it. */
-    const bool shexp_fused = grouped && n_routed > 0 && s->lora == NULL &&
+    const bool shexp_fused = L->expert_latent_dim == 0 &&
+        grouped && n_routed > 0 && s->lora == NULL &&
         L->ffn_gate_shexp.data != NULL && L->ffn_up_shexp.data != NULL &&
         L->ffn_down_shexp.data != NULL &&
         c->shared_expert_intermediate_size == i_size &&
@@ -4176,7 +4426,18 @@ static void forward_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L)
         L->ffn_down_shexp.row_bytes == down_row_bytes;
     const uint32_t n_mm = n_routed + (shexp_fused ? 1u : 0u);
 
-    if (L->exl3_gate) {
+    const bool latent_active = c->expert_latent_dim > 0 && layer < c->n_layer;
+    if (latent_active) {
+        float *weights = s->expert_down_all;
+        for (uint32_t ei = 0; ei < k; ei++)
+            weights[ei] = routed_scale *
+                (float)(s->router_logits[sel[ei]] / weight_norm);
+        OcError le = latent_moe_routed(c, L, s->normed, sel, weights, k,
+            s->expert_out, s->expert_latent_input, s->expert_latent_sum,
+            s->expert_latent_output, s->expert_gate, s->expert_up,
+            s->dequant_temp);
+        if (le != OC_OK) { exl3_compute_error = le; return; }
+    } else if (L->exl3_gate) {
         /* Native per-expert EXL3: each projection is its own trellis matrix,
          * so instead of slicing stacked views the routed experts run through
          * the fused per-expert runner (one parallel region per phase). */
@@ -5762,6 +6023,8 @@ typedef struct {
      * scratch, pair-indexed — [cap*k] rows of i_size (gate/up/act) and
      * n_embd (down). */
     float    *exl3_ga, *exl3_ub, *exl3_dn;
+    float    *latent_in, *latent_sum, *latent_dn;
+    uint32_t *latent_row;
 } PrefillBuf;
 
 static void prefill_buf_free(PrefillBuf *b)
@@ -5780,6 +6043,8 @@ static void prefill_buf_free(PrefillBuf *b)
     free(b->hcx); free(b->hc_xn); free(b->hc_gate);
     free(b->hc_lo); free(b->hc_inj);
     free(b->exl3_ga); free(b->exl3_ub); free(b->exl3_dn);
+    free(b->latent_in); free(b->latent_sum); free(b->latent_dn);
+    free(b->latent_row);
     memset(b, 0, sizeof(*b));
 }
 
@@ -5871,6 +6136,23 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
             prefill_buf_free(b);
             return OC_ERR_OOM;
         }
+        if (c->expert_latent_dim > 0) {
+            size_t latent_rows;
+            if (!size_mul(cap, c->expert_latent_group_count, &latent_rows) ||
+                latent_rows > SIZE_MAX / sizeof(uint32_t)) {
+                prefill_buf_free(b);
+                return OC_ERR_OOM;
+            }
+            b->latent_in = xcalloc(cap * c->expert_latent_dim, sizeof(float));
+            b->latent_sum = xcalloc(cap * c->expert_latent_dim, sizeof(float));
+            b->latent_dn = xcalloc(cap * c->expert_latent_dim, sizeof(float));
+            b->latent_row = xcalloc(latent_rows, sizeof(uint32_t));
+            if (!b->latent_in || !b->latent_sum || !b->latent_dn ||
+                !b->latent_row) {
+                prefill_buf_free(b);
+                return OC_ERR_OOM;
+            }
+        }
         /* Native per-expert EXL3 needs pair-indexed routed scratch. */
         if (m->layers && m->layers[0].exl3_gate && b->n_slots > 0) {
             const size_t pairs = cap * b->k;
@@ -5935,6 +6217,191 @@ static void mm_batch(const OcWeightView *w, const float *in, size_t in_stride,
                                   n, b->dequant_temp, b->act, b->act_bytes);
     }
 }
+
+static OcError prefill_latent_moe_ffn(OcLlamaSession *s,
+                                      const OcLlamaLayer *L, PrefillBuf *b,
+                                      size_t n, uint32_t k, uint32_t i_size)
+{
+    const OcLlamaConfig *c = &s->model->cfg;
+    const size_t D = c->n_embd;
+    const size_t Z = c->expert_latent_dim;
+    const size_t G = c->expert_latent_group_count;
+    const size_t I = i_size;
+    const size_t group_map_n = b->cap * G;
+    const size_t gate_expert_bytes = (size_t)i_size * L->ffn_gate_exps.row_bytes;
+    const size_t up_expert_bytes = (size_t)i_size * L->ffn_up_exps.row_bytes;
+    const size_t down_expert_bytes = Z * L->ffn_down_exps.row_bytes;
+    const size_t d_group_bytes = Z * L->ffn_latent_d.row_bytes;
+    const size_t u_group_bytes = D * L->ffn_latent_u.row_bytes;
+    const float *labels = (const float *)L->ffn_latent_labels.data;
+
+    if (Z == 0 || Z > D || G == 0 || L->latent_tensor_shape_invalid ||
+        !L->ffn_latent_d.data || L->ffn_latent_d.rows != Z ||
+        L->ffn_latent_d.cols != D || !L->ffn_latent_u.data ||
+        L->ffn_latent_u.rows != D || L->ffn_latent_u.cols != Z ||
+        !L->ffn_latent_labels.data ||
+        L->ffn_latent_labels.qtype != OC_QUANT_F32 ||
+        L->ffn_latent_labels.rows != 1 ||
+        L->ffn_latent_labels.cols != c->num_experts ||
+        L->ffn_gate_exps.rows != I || L->ffn_up_exps.rows != I ||
+        L->ffn_gate_exps.cols != Z || L->ffn_up_exps.cols != Z ||
+        L->ffn_down_exps.rows != Z || L->ffn_down_exps.cols != I)
+        return OC_ERR_TENSOR;
+    memset(b->expert_out, 0, n * D * sizeof(float));
+    for (size_t i = 0; i < group_map_n; i++) b->latent_row[i] = UINT32_MAX;
+    for (size_t j = 0; j < n; j++) {
+        for (uint32_t i = 0; i < k; i++) {
+            const uint32_t expert = b->sel[j * k + i];
+            if (expert >= c->num_experts) return OC_ERR_MODEL;
+            const float label = labels[expert];
+            if (!isfinite(label) || label < 0.0f ||
+                label >= (float)G || floorf(label) != label)
+                return OC_ERR_MODEL;
+        }
+    }
+
+    for (uint32_t group = 0; group < G; group++) {
+        size_t n_group_tokens = 0;
+        for (size_t j = 0; j < n; j++) {
+            bool selected_group = false;
+            for (uint32_t i = 0; i < k; i++) {
+                if ((uint32_t)labels[b->sel[j * k + i]] == group) {
+                    selected_group = true;
+                    break;
+                }
+            }
+            if (!selected_group) continue;
+            b->ex_tok[n_group_tokens] = (uint32_t)j;
+            b->latent_row[j * G + group] = (uint32_t)n_group_tokens++;
+            memcpy(b->proj + (n_group_tokens - 1u) * D,
+                   b->normed + j * D, D * sizeof(float));
+        }
+        if (n_group_tokens == 0) continue;
+
+        OcWeightView d = L->ffn_latent_d;
+        d.data += (size_t)group * d_group_bytes;
+        mm_batch(&d, b->proj, D, b->latent_in, Z, n_group_tokens, b);
+        memset(b->latent_sum, 0, n_group_tokens * Z * sizeof(float));
+
+        for (uint32_t expert = 0; expert < c->num_experts; expert++) {
+            size_t n_expert_tokens = 0;
+            for (size_t j = 0; j < n; j++) {
+                for (uint32_t i = 0; i < k; i++) {
+                    const size_t pair = j * k + i;
+                    if (b->sel[pair] != expert ||
+                        (uint32_t)labels[expert] != group)
+                        continue;
+                    const uint32_t row = b->latent_row[j * G + group];
+                    if (row == UINT32_MAX) return OC_ERR_MODEL;
+                    b->ex_tok[n_expert_tokens] = (uint32_t)j;
+                    b->ex_w[n_expert_tokens] = b->sel_w[pair];
+                    memcpy(b->proj + n_expert_tokens * D,
+                           b->latent_in + (size_t)row * Z,
+                           Z * sizeof(float));
+                    n_expert_tokens++;
+                }
+            }
+            if (n_expert_tokens == 0) continue;
+
+            OcWeightView gate_v = L->ffn_gate_exps;
+            gate_v.data += (size_t)expert * gate_expert_bytes;
+            gate_v.cols = Z;
+            OcWeightView up_v = L->ffn_up_exps;
+            up_v.data += (size_t)expert * up_expert_bytes;
+            up_v.cols = Z;
+            OcWeightView down_v = L->ffn_down_exps;
+            down_v.data += (size_t)expert * down_expert_bytes;
+            down_v.rows = Z;
+
+            mm_batch(&gate_v, b->proj, D, b->ffn_a, b->ffw,
+                     n_expert_tokens, b);
+            mm_batch(&up_v, b->proj, D, b->ffn_b, b->ffw,
+                     n_expert_tokens, b);
+            for (size_t t = 0; t < n_expert_tokens; t++)
+                oc_swiglu_inplace_f32(b->ffn_a + t * b->ffw,
+                                      b->ffn_b + t * b->ffw, i_size);
+            mm_batch(&down_v, b->ffn_a, b->ffw, b->latent_dn, Z,
+                     n_expert_tokens, b);
+            for (size_t t = 0; t < n_expert_tokens; t++) {
+                const size_t token = b->ex_tok[t];
+                const size_t row = b->latent_row[token * G + group];
+                float *sum = b->latent_sum + row * Z;
+                const float *dn = b->latent_dn + t * Z;
+                for (size_t z = 0; z < Z; z++)
+                    sum[z] += b->ex_w[t] * dn[z];
+            }
+        }
+
+        OcWeightView u = L->ffn_latent_u;
+        u.data += (size_t)group * u_group_bytes;
+        mm_batch(&u, b->latent_sum, Z, b->gath, D, n_group_tokens, b);
+        for (size_t j = 0; j < n; j++) {
+            const uint32_t row = b->latent_row[j * G + group];
+            if (row == UINT32_MAX) continue;
+            float *dst = b->expert_out + j * D;
+            const float *src = b->gath + (size_t)row * D;
+            for (size_t d = 0; d < D; d++) dst[d] += src[d];
+        }
+    }
+    return OC_OK;
+}
+
+#ifdef OC_TESTING
+OcError oc_llama_test_latent_moe_prefill(const OcLlamaConfig *cfg,
+                                         const OcLlamaLayer *layer,
+                                         const float *inputs, size_t n,
+                                         const uint32_t *selected,
+                                         const float *weights, uint32_t k,
+                                         float *outputs)
+{
+    if (!cfg || !layer || (!inputs && n) || (!selected && n && k) ||
+        (!weights && n && k) || (!outputs && n) || k == 0)
+        return OC_ERR_INVALID_ARG;
+    OcLlamaModel model = { .cfg = *cfg };
+    OcLlamaSession session = { .model = &model };
+    PrefillBuf b = { .cap = n, .n_embd = cfg->n_embd,
+                     .ffw = cfg->expert_intermediate_size, .k = k };
+    const size_t D = cfg->n_embd, Z = cfg->expert_latent_dim;
+    const size_t I = cfg->expert_intermediate_size;
+    const size_t G = cfg->expert_latent_group_count;
+    size_t map_n;
+    if (!size_mul(n, G, &map_n)) return OC_ERR_OOM;
+    b.normed = xcalloc(n * D, sizeof(float));
+    b.proj = xcalloc(n * D, sizeof(float));
+    b.gath = xcalloc(n * D, sizeof(float));
+    b.expert_out = xcalloc(n * D, sizeof(float));
+    b.ffn_a = xcalloc(n * I, sizeof(float));
+    b.ffn_b = xcalloc(n * I, sizeof(float));
+    b.latent_in = xcalloc(n * Z, sizeof(float));
+    b.latent_sum = xcalloc(n * Z, sizeof(float));
+    b.latent_dn = xcalloc(n * Z, sizeof(float));
+    b.latent_row = xcalloc(map_n, sizeof(uint32_t));
+    b.ex_tok = xcalloc(n * k, sizeof(uint32_t));
+    b.ex_w = xcalloc(n * k, sizeof(float));
+    b.sel = xcalloc(n * k, sizeof(uint32_t));
+    b.sel_w = xcalloc(n * k, sizeof(float));
+    size_t temp_n = D > I ? D : I;
+    if (Z > temp_n) temp_n = Z;
+    b.dequant_temp = xcalloc(temp_n, sizeof(float));
+    b.act_bytes = oc_matvec_batch_scratch_bytes(temp_n);
+    b.act = b.act_bytes ? malloc(b.act_bytes) : NULL;
+    if (!b.normed || !b.proj || !b.gath || !b.expert_out || !b.ffn_a ||
+        !b.ffn_b || !b.latent_in || !b.latent_sum || !b.latent_dn ||
+        !b.latent_row || !b.ex_tok || !b.ex_w || !b.sel || !b.sel_w ||
+        !b.dequant_temp || (b.act_bytes && !b.act)) {
+        prefill_buf_free(&b);
+        return OC_ERR_OOM;
+    }
+    memcpy(b.normed, inputs, n * D * sizeof(float));
+    memcpy(b.sel, selected, n * k * sizeof(uint32_t));
+    memcpy(b.sel_w, weights, n * k * sizeof(float));
+    OcError e = prefill_latent_moe_ffn(&session, layer, &b, n, k,
+                                       cfg->expert_intermediate_size);
+    if (e == OC_OK) memcpy(outputs, b.expert_out, n * D * sizeof(float));
+    prefill_buf_free(&b);
+    return e;
+}
+#endif
 
 /* Batched MoE FFN. Same routing decision per token as forward_moe_ffn(); the
  * difference is that the expert matmuls run once per expert over all of its
@@ -6073,7 +6540,11 @@ static void prefill_moe_ffn(OcLlamaSession *s, const OcLlamaLayer *L,
     const size_t up_rb   = L->ffn_up_exps.row_bytes;
     const size_t down_rb = L->ffn_down_exps.row_bytes;
 
-    if (L->exl3_gate) {
+    const bool latent_active = c->expert_latent_dim > 0 && layer < c->n_layer;
+    if (latent_active) {
+        OcError le = prefill_latent_moe_ffn(s, L, b, n, k, i_size);
+        if (le != OC_OK) { exl3_compute_error = le; return; }
+    } else if (L->exl3_gate) {
         /* Native per-expert EXL3: compact the routed experts (zero-width
          * ranges drop out; the pair offsets stay the global pair indices)
          * and run the whole routed MoE in two parallel regions. */

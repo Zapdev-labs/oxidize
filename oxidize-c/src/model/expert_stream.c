@@ -287,7 +287,8 @@ OcError oc_expert_stream_new(OcLlamaModel *model, const OcExpertStreamConfig *cf
             (is_mtp && model->mtp_gguf_open) ? &model->mtp_gguf
                                              : &model->gguf;
         pool->layers[i].n_experts = n_exp;
-        size_t n_embd = model->cfg.n_embd;
+        size_t n_embd = L->expert_latent_dim
+            ? L->expert_latent_dim : model->cfg.n_embd;
         size_t inter = model->cfg.expert_intermediate_size;
         (void)span_from_view(g, &L->ffn_gate_exps, n_exp, n_embd,
                              inter, &pool->layers[i].gate);
@@ -360,6 +361,16 @@ OcError oc_expert_stream_prepare_mapping(OcExpertStreamPool *pool)
     for (uint32_t i = 0; i < pool->n_layers; i++) {
         const OcLlamaLayer *L = (i < pool->model->cfg.n_layer)
             ? &pool->model->layers[i] : &pool->model->mtp.layer;
+        if (L->expert_latent_dim > 0) {
+            const OcWeightView *latent[] = {&L->ffn_latent_d, &L->ffn_latent_u};
+            for (size_t j = 0; j < 2; j++) {
+                OcWeightView grouped = *latent[j];
+                if (mul_size(grouped.rows,
+                              pool->model->cfg.expert_latent_group_count,
+                              &grouped.rows))
+                    advise_view(gguf, &grouped, OC_MMAP_ADVICE_NORMAL);
+            }
+        }
         advise_view(gguf, &L->attn_q, OC_MMAP_ADVICE_WILLNEED);
         advise_view(gguf, &L->attn_k, OC_MMAP_ADVICE_WILLNEED);
         advise_view(gguf, &L->attn_v, OC_MMAP_ADVICE_WILLNEED);

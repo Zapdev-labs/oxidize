@@ -418,6 +418,30 @@ CPU decoding.
 
 Format reference: [ExLlamaV3 CPU oracle](https://github.com/turboderp-org/exllamav3/blob/058b8630fd081f3ff46fce6246955b157c3a2e3b/tests/testlib/trellis.py).
 
+### Grouped latent MoE and IQ2_VQ in oxidize-c
+
+The C CPU runtime supports grouped latent experts in `qwen4exp` GGUFs.
+Set `qwen4exp.expert_latent_length` and `qwen4exp.expert_latent_group_count`, and
+provide each layer's `ffn_latent_d.weight`, `ffn_latent_u.weight`, and
+`ffn_latent_labels` tensors. D/U are three-dimensional grouped projections;
+labels are a one-dimensional F32 array of integral group IDs, one per expert.
+Routed gate/up/down weights use the latent width; the shared expert stays
+full-width. Decode and batched prefill project each selected group once,
+combine its weighted expert outputs, then project back to the residual width.
+
+```bash
+make -C oxidize-c
+./oxidize-c/oxidize-c --model /path/to/latent.gguf \
+  --threads 16 --stream-experts --kv f32 --spec-type none --prompt "Hello"
+```
+
+IQ2_VQ is a custom GGML type **70**, with 128 weights in 38 bytes
+(2.375 bits/weight). The C runtime supports CPU dequantization and fused
+Q8_0-activation multiplication, but does not encode it. It is distinct from
+standard IQ2 formats and requires a compatible converter. Reduced file size
+does not establish a speed or quality improvement; compare the same checkpoint
+and workload before replacing a higher-precision model.
+
 ## Security
 
 See [SECURITY_MODEL.md](SECURITY_MODEL.md) for the threat model, trust boundaries, and existing controls.

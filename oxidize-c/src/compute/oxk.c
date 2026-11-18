@@ -9,6 +9,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "oxidize/oxk.h"
+#include "oxidize/iq2_vq.h"
 #include "oxidize/log.h"
 #include "oxidize/oxk_avx512.h"
 #include "oxidize/oxk_neon.h"
@@ -1115,6 +1116,36 @@ float oc_oxk_dot_iq3_s_q8_k_scalar(const uint8_t *row, size_t blocks,
     return iq3_s_lanes_reduce(acc);
 }
 
+float oc_oxk_dot_iq2_vq_q8_0_scalar(const uint8_t *row,
+                                    size_t activation_blocks,
+                                    const uint8_t *q8)
+{
+    float sum = 0.0f;
+    const size_t weight_blocks = activation_blocks / 4u;
+    for (size_t b = 0; b < weight_blocks; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_IQ2_VQ_SIZE;
+        const float d = oc_oxk_f16_le_to_f32(wb);
+        for (size_t sub = 0; sub < 4; sub++) {
+            const uint8_t scale = wb[2 + sub];
+            const size_t book = (size_t)(scale >> 6) *
+                                OC_IQ2_VQ_CODES_PER_BOOK *
+                                OC_IQ2_VQ_VALUES_PER_CODE;
+            const uint8_t *codes = wb + 6 + sub * 8;
+            const uint8_t *yb = q8 + (b * 4u + sub) * OC_OXK_BLOCK_Q8_0_SIZE;
+            const float act_d = oc_oxk_f16_le_to_f32(yb);
+            const int8_t *act = (const int8_t *)(yb + 2);
+            int32_t sumi = 0;
+            for (size_t g = 0; g < 8; g++) {
+                const int8_t *values = oc_iq2_vq_codebook + book + (size_t)codes[g] * 4u;
+                for (size_t j = 0; j < 4; j++)
+                    sumi += (int32_t)values[j] * (int32_t)act[g * 4u + j];
+            }
+            sum += d * (float)((int)(scale & 0x3fu) - 32) * act_d * (float)sumi;
+        }
+    }
+    return sum;
+}
+
 size_t oc_oxk_iq3_s_prep_bytes(size_t blocks)
 {
     if (blocks > SIZE_MAX / OC_OXK_IQ3_S_PREP_BLOCK) return SIZE_MAX;
@@ -1246,6 +1277,7 @@ static void oc_oxk_init_once(void)
     g_ctx.dot_q2_k_prepped_1 = oc_oxk_dot_q2_k_prepped;
     g_ctx.dot_q3_k_prepped_1 = oc_oxk_dot_q3_k_prepped;
     g_ctx.dot_iq3_s_q8_k = oc_oxk_dot_iq3_s_q8_k_scalar;
+    g_ctx.dot_iq2_vq_q8_0 = oc_oxk_dot_iq2_vq_q8_0_scalar;
     g_ctx.iq3_s_prep_row = oc_oxk_iq3_s_prep_row_scalar;
     g_ctx.dot_iq3_s_prepped_multi = oc_oxk_dot_iq3_s_prepped_multi_scalar;
 
@@ -1307,6 +1339,7 @@ static void oc_oxk_init_once(void)
         /* IQ3_S: real AVX2 bodies, bit-exact against the scalar reference
          * (test_oxk_iq3_s.c). Also used on AVX-512 hosts. */
         g_ctx.dot_iq3_s_q8_k = oc_oxk_dot_iq3_s_q8_k_avx2;
+        g_ctx.dot_iq2_vq_q8_0 = oc_oxk_dot_iq2_vq_q8_0_avx2;
         g_ctx.iq3_s_prep_row = oc_oxk_iq3_s_prep_row_avx2;
         g_ctx.dot_iq3_s_prepped_multi = oc_oxk_dot_iq3_s_prepped_multi_avx2;
     }
@@ -1440,6 +1473,14 @@ void oc_oxk_matvec_q8_0_f32(const uint8_t *w, size_t n_rows, size_t row_bytes, c
 float oc_oxk_dot_iq3_s_q8_k(const uint8_t *row, size_t blocks,
                             const uint8_t *q8)
 { oc_oxk_init(); return g_ctx.dot_iq3_s_q8_k(row, blocks, q8); }
+
+float oc_oxk_dot_iq2_vq_q8_0(const uint8_t *row,
+                             size_t activation_blocks,
+                             const uint8_t *q8)
+{
+    oc_oxk_init();
+    return g_ctx.dot_iq2_vq_q8_0(row, activation_blocks, q8);
+}
 
 /* Rows forms: take the AVX2 rows kernel exactly when the single-row
  * dispatch would pick the AVX2 kernel, so the per-row results are identical

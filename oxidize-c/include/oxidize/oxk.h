@@ -61,6 +61,7 @@ extern "C" {
 #define OC_OXK_BLOCK_Q6_K_SIZE  210u  /* f16 d + 16 ql_scales + 192 packed (4+4-bit) */
 #define OC_OXK_BLOCK_Q8_K_SIZE  292u  /* f32 d + 256 int8 + 16 i16 bsums     */
 #define OC_OXK_BLOCK_IQ3_S_SIZE 110u  /* f16 d + 64 qs + 8 qh + 32 signs + 4 scales */
+#define OC_OXK_BLOCK_IQ2_VQ_SIZE 38u
 /* Prepared IQ3_S block: f32 d, 12 pad bytes, 8 x i16 (2*ls+1), 256 signed
  * int8 weights (grid value with its sign applied). */
 #define OC_OXK_IQ3_S_PREP_BLOCK 288u
@@ -136,6 +137,9 @@ typedef void (*OcOxkDotQ4_KPreppedMulti_fn)(const void *prep, size_t blocks,
 
 typedef float (*OcOxkDotIq3SQ8K_fn)(const uint8_t *row, size_t blocks,
                                     const uint8_t *q8);
+typedef float (*OcOxkDotIq2VQQ8_0_fn)(const uint8_t *row,
+                                      size_t activation_blocks,
+                                      const uint8_t *q8);
 typedef void (*OcOxkIq3SPrepRow_fn)(const uint8_t *row, size_t blocks,
                                     void *scratch);
 
@@ -170,6 +174,7 @@ typedef struct OcOxkContext {
     /* IQ3_S x Q8_K: packed single-activation dot, row prep, and the
      * prepared multi-activation dot used by batched prefill. */
     OcOxkDotIq3SQ8K_fn          dot_iq3_s_q8_k;
+    OcOxkDotIq2VQQ8_0_fn        dot_iq2_vq_q8_0;
     OcOxkIq3SPrepRow_fn         iq3_s_prep_row;
     OcOxkDotQ4_KPreppedMulti_fn dot_iq3_s_prepped_multi;
     /* Matvec dispatch table — one slot per quant type. */
@@ -539,6 +544,15 @@ void oc_oxk_dot_rows_iq3_s_q8_k_multi_avx2(const uint8_t *rows,
  * a -128 would flip sign differently in the SIMD sign trick. */
 float oc_oxk_dot_iq3_s_q8_k(const uint8_t *row, size_t blocks,
                             const uint8_t *q8);
+float oc_oxk_dot_iq2_vq_q8_0(const uint8_t *row,
+                             size_t activation_blocks,
+                             const uint8_t *q8);
+float oc_oxk_dot_iq2_vq_q8_0_scalar(const uint8_t *row,
+                                    size_t activation_blocks,
+                                    const uint8_t *q8);
+float oc_oxk_dot_iq2_vq_q8_0_avx2(const uint8_t *row,
+                                  size_t activation_blocks,
+                                  const uint8_t *q8);
 float oc_oxk_dot_iq3_s_q8_k_scalar(const uint8_t *row, size_t blocks,
                                    const uint8_t *q8);
 float oc_oxk_dot_iq3_s_q8_k_avx2(const uint8_t *row, size_t blocks,
