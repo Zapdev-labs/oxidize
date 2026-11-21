@@ -427,8 +427,10 @@ provide each layer's `ffn_latent_d.weight`, `ffn_latent_u.weight`, and
 labels are an F32 array of integral group IDs, one per expert, shaped
 `[n_experts]` or `[1, n_experts]` as in Edge0 GGUFs (the name without
 `.weight` is also accepted).
-Routed gate/up/down weights use the latent width; the shared expert stays
-full-width. Decode and batched prefill project each selected group once,
+Routed gate/up/down weights use the latent width; the shared expert and the
+MTP (nextn) head stay full-width, and a file whose MTP head carries latent
+experts loads without speculative decoding. Decode and batched prefill project
+each selected group once,
 combine its weighted expert outputs, then project back to the residual width.
 
 ```bash

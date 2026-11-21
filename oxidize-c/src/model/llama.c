@@ -1189,15 +1189,19 @@ static bool assign_tensor(OcLlamaModel *m, const char *cname,
         } else if (strcmp(suf, "ffn_latent_labels") == 0 ||
                    strcmp(suf, "ffn_latent_labels.weight") == 0) {
             L->ffn_latent_labels = view_from_info(mm, info);
+            const bool flat_labels = info->n_dims == 1 &&
+                                     info->dims[0] == m->cfg.num_experts;
             const bool row_labels = info->n_dims == 2 && info->dims[0] == 1 &&
                                     info->dims[1] == m->cfg.num_experts;
-            if ((!row_labels && (info->n_dims != 1 ||
-                                 info->dims[0] != m->cfg.num_experts)) ||
-                L->ffn_latent_labels.qtype != OC_QUANT_F32)
+            if ((!flat_labels && !row_labels) ||
+                L->ffn_latent_labels.qtype != OC_QUANT_F32) {
                 L->latent_tensor_shape_invalid = true;
-            L->ffn_latent_labels.rows = 1;
-            L->ffn_latent_labels.cols = m->cfg.num_experts;
-            L->ffn_latent_labels.row_bytes = (size_t)m->cfg.num_experts * sizeof(float);
+            } else {
+                L->ffn_latent_labels.rows = 1;
+                L->ffn_latent_labels.cols = m->cfg.num_experts;
+                L->ffn_latent_labels.row_bytes =
+                    (size_t)m->cfg.num_experts * sizeof(float);
+            }
         } else if (strcmp(suf, "ffn_gate_shexp.weight") == 0) {
             L->ffn_gate_shexp = view_from_info(mm, info);
         } else if (strcmp(suf, "ffn_up_shexp.weight") == 0) {
@@ -1724,7 +1728,8 @@ static OcError resolve_weights(OcLlamaModel *m)
                 L->ffn_latent_u.data != NULL ||
                 L->ffn_latent_labels.data != NULL;
             bool bad_latent_labels = false;
-            if (latent && L->ffn_latent_labels.data != NULL &&
+            if (latent && !L->latent_tensor_shape_invalid &&
+                L->ffn_latent_labels.data != NULL &&
                 L->ffn_latent_labels.qtype == OC_QUANT_F32 &&
                 L->ffn_latent_labels.rows == 1 &&
                 L->ffn_latent_labels.cols == m->cfg.num_experts) {
@@ -1797,6 +1802,15 @@ static OcError resolve_weights(OcLlamaModel *m)
             const size_t kv_rows = (size_t)m->cfg.n_head_kv * m->cfg.head_dim;
             const bool m_moe_exl3 =
                 M->exl3_gate && M->exl3_up && M->exl3_down;
+            const bool m_full_width_experts = !M->ffn_latent_d.data &&
+                !M->ffn_latent_u.data && !M->ffn_latent_labels.data &&
+                (m_moe_exl3 ||
+                 (M->ffn_gate_exps.cols == m->cfg.n_embd &&
+                  M->ffn_gate_exps.rows == m->cfg.expert_intermediate_size &&
+                  M->ffn_up_exps.cols == m->cfg.n_embd &&
+                  M->ffn_up_exps.rows == m->cfg.expert_intermediate_size &&
+                  M->ffn_down_exps.cols == m->cfg.expert_intermediate_size &&
+                  M->ffn_down_exps.rows == m->cfg.n_embd));
             const bool mtp_full =
                 M->attn_q.data && M->attn_q.rows == q_rows &&
                 M->attn_q.cols == m->cfg.n_embd &&
@@ -1825,7 +1839,12 @@ static OcError resolve_weights(OcLlamaModel *m)
                 m->mtp.hc_head_up.data &&
                 m->mtp.hc_head_up.rows == hc_dim &&
                 m->mtp.hc_head_up.cols == m->cfg.hc_low_rank;
-            if (mtp_full) {
+            if (mtp_full && !m_full_width_experts) {
+                oc_log(OC_LOG_WARN,
+                       "llama: qwen4exp MTP block routed experts are not "
+                       "n_embd wide (latent MTP heads are unsupported) — "
+                       "running without speculative decoding");
+            } else if (mtp_full) {
                 M->kind = OC_LLAMA_LAYER_FULL_ATTENTION;
                 M->head_dim = m->cfg.head_dim;
                 M->n_head_kv = m->cfg.n_head_kv;
@@ -6066,6 +6085,8 @@ static OcError prefill_buf_init(const OcLlamaModel *m, size_t cap,
     size_t i_size = c->expert_intermediate_size ? c->expert_intermediate_size
                                                 : c->n_ff;
     b->ffw     = c->n_ff > i_size ? c->n_ff : i_size;
+    if (c->shared_expert_intermediate_size > b->ffw)
+        b->ffw = c->shared_expert_intermediate_size;
     b->n_slots = (size_t)c->num_experts + c->zero_expert_count;
     b->k       = c->num_experts_per_tok;
     if (b->k > b->n_slots) b->k = b->n_slots;
@@ -6255,16 +6276,14 @@ static OcError prefill_latent_moe_ffn(OcLlamaSession *s,
         return OC_ERR_TENSOR;
     memset(b->expert_out, 0, n * D * sizeof(float));
     for (size_t i = 0; i < group_map_n; i++) b->latent_row[i] = UINT32_MAX;
-    for (size_t j = 0; j < n; j++) {
-        for (uint32_t i = 0; i < k; i++) {
-            const uint32_t expert = b->sel[j * k + i];
-            if (expert >= c->num_experts) return OC_ERR_MODEL;
-            const float label = labels[expert];
-            if (!isfinite(label) || label < 0.0f ||
-                label >= (float)G || floorf(label) != label)
-                return OC_ERR_MODEL;
-        }
+    for (uint32_t e = 0; e < c->num_experts; e++) {
+        const float label = labels[e];
+        if (!isfinite(label) || label < 0.0f ||
+            label >= (float)G || floorf(label) != label)
+            return OC_ERR_MODEL;
     }
+    for (size_t pair = 0; pair < n * k; pair++)
+        if (b->sel[pair] >= c->num_experts) return OC_ERR_MODEL;
 
     for (uint32_t group = 0; group < G; group++) {
         size_t n_group_tokens = 0;
@@ -6290,13 +6309,12 @@ static OcError prefill_latent_moe_ffn(OcLlamaSession *s,
         memset(b->latent_sum, 0, n_group_tokens * Z * sizeof(float));
 
         for (uint32_t expert = 0; expert < c->num_experts; expert++) {
+            if ((uint32_t)labels[expert] != group) continue;
             size_t n_expert_tokens = 0;
             for (size_t j = 0; j < n; j++) {
                 for (uint32_t i = 0; i < k; i++) {
                     const size_t pair = j * k + i;
-                    if (b->sel[pair] != expert ||
-                        (uint32_t)labels[expert] != group)
-                        continue;
+                    if (b->sel[pair] != expert) continue;
                     const uint32_t row = b->latent_row[j * G + group];
                     if (row == UINT32_MAX) return OC_ERR_MODEL;
                     b->ex_tok[n_expert_tokens] = (uint32_t)j;

@@ -288,3 +288,323 @@ Test(latent_moe, rejects_bad_labels_and_geometry)
     cr_assert_eq(oc_llama_test_latent_moe_decode(&f.cfg, &f.layer, x,
         chosen, weight, 1, out), OC_ERR_TENSOR);
 }
+
+#define QD 8u
+#define QNL 2u
+#define QE 16u
+#define QK 2u
+#define QI 4u
+#define QSI 12u
+#define QZ 4u
+#define QG 2u
+#define QHC 2u
+#define QR 2u
+#define QNH 2u
+#define QNKV 1u
+#define QHD 4u
+#define QV 16u
+
+typedef struct {
+    const char *labels_name;
+    uint32_t labels_n_dims;
+    uint64_t labels_dims[2];
+    uint32_t labels_type;
+    bool mtp;
+    bool mtp_latent;
+} Q4eFile;
+
+static Q4eFile q4e_file(void)
+{
+    return (Q4eFile){ .labels_name = "ffn_latent_labels", .labels_n_dims = 1,
+                      .labels_dims = {QE, 0}, .labels_type = 0 };
+}
+
+static void q4e_tensor(OcGgufWriter *w, const char *name, uint32_t n_dims,
+                       const uint64_t *dims, float base)
+{
+    size_t n = 1;
+    for (uint32_t i = 0; i < n_dims; i++) n *= (size_t)dims[i];
+    float *data = malloc(n * sizeof(float));
+    cr_assert_not_null(data);
+    const size_t seed = strlen(name);
+    for (size_t i = 0; i < n; i++)
+        data[i] = base + 0.04f * (float)((int)((i * 7u + seed) % 11u) - 5);
+    cr_assert_eq(oc_gguf_writer_add_tensor(w, name, n_dims, dims, 0, data,
+                                           n * sizeof(float)), OC_OK,
+                 "%s", name);
+    free(data);
+}
+
+static void q4e_block_tensor(OcGgufWriter *w, unsigned layer,
+                             const char *suffix, uint32_t n_dims,
+                             const uint64_t *dims, float base)
+{
+    char name[96];
+    snprintf(name, sizeof(name), "blk.%u.%s", layer, suffix);
+    q4e_tensor(w, name, n_dims, dims, base);
+}
+
+static void q4e_block(OcGgufWriter *w, unsigned l, bool latent)
+{
+    const uint64_t hc = QHC * QD;
+    const uint64_t width = latent ? QZ : QD;
+    q4e_block_tensor(w, l, "attn_q.weight", 2,
+                     (const uint64_t[]){QD, 2 * QNH * QHD}, 0.0f);
+    q4e_block_tensor(w, l, "attn_k.weight", 2,
+                     (const uint64_t[]){QD, QNKV * QHD}, 0.0f);
+    q4e_block_tensor(w, l, "attn_v.weight", 2,
+                     (const uint64_t[]){QD, QNKV * QHD}, 0.0f);
+    q4e_block_tensor(w, l, "attn_output.weight", 2,
+                     (const uint64_t[]){QNH * QHD, QD}, 0.0f);
+    q4e_block_tensor(w, l, "attn_q_norm.weight", 1, (const uint64_t[]){QHD},
+                     1.0f);
+    q4e_block_tensor(w, l, "attn_k_norm.weight", 1, (const uint64_t[]){QHD},
+                     1.0f);
+    q4e_block_tensor(w, l, "hc_attn_norm.weight", 1, (const uint64_t[]){hc},
+                     1.0f);
+    q4e_block_tensor(w, l, "hc_attn_down.weight", 2,
+                     (const uint64_t[]){hc, QR}, 0.0f);
+    q4e_block_tensor(w, l, "hc_attn_up.weight", 2,
+                     (const uint64_t[]){QR, hc}, 0.0f);
+    q4e_block_tensor(w, l, "hc_ffn_norm.weight", 1, (const uint64_t[]){hc},
+                     1.0f);
+    q4e_block_tensor(w, l, "hc_ffn_down.weight", 2,
+                     (const uint64_t[]){hc, QR}, 0.0f);
+    q4e_block_tensor(w, l, "hc_ffn_up.weight", 2,
+                     (const uint64_t[]){QR, hc}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_gate_inp.weight", 2,
+                     (const uint64_t[]){QD, QE}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_gate_exps.weight", 3,
+                     (const uint64_t[]){width, QI, QE}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_up_exps.weight", 3,
+                     (const uint64_t[]){width, QI, QE}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_down_exps.weight", 3,
+                     (const uint64_t[]){QI, width, QE}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_gate_shexp.weight", 2,
+                     (const uint64_t[]){QD, QSI}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_up_shexp.weight", 2,
+                     (const uint64_t[]){QD, QSI}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_down_shexp.weight", 2,
+                     (const uint64_t[]){QSI, QD}, 0.0f);
+    q4e_block_tensor(w, l, "ffn_gate_inp_shexp.weight", 1,
+                     (const uint64_t[]){QD}, 0.0f);
+    if (latent) {
+        q4e_block_tensor(w, l, "ffn_latent_d.weight", 3,
+                         (const uint64_t[]){QD, QZ, QG}, 0.0f);
+        q4e_block_tensor(w, l, "ffn_latent_u.weight", 3,
+                         (const uint64_t[]){QZ, QD, QG}, 0.0f);
+    }
+}
+
+static void q4e_labels(OcGgufWriter *w, unsigned layer, const Q4eFile *f)
+{
+    char name[96];
+    snprintf(name, sizeof(name), "blk.%u.%s", layer, f->labels_name);
+    size_t n = 1;
+    for (uint32_t i = 0; i < f->labels_n_dims; i++)
+        n *= (size_t)f->labels_dims[i];
+    cr_assert_leq(n, QE);
+    float values[QE];
+    uint16_t halves[QE];
+    for (size_t e = 0; e < n; e++) {
+        values[e] = (float)(e % QG);
+        halves[e] = (uint16_t)(e % QG ? 0x3c00u : 0u);
+    }
+    const bool f16 = f->labels_type == 1;
+    cr_assert_eq(oc_gguf_writer_add_tensor(w, name, f->labels_n_dims,
+        f->labels_dims, f->labels_type,
+        f16 ? (const void *)halves : (const void *)values,
+        n * (f16 ? sizeof(uint16_t) : sizeof(float))), OC_OK, "%s", name);
+}
+
+static void q4e_write(char *path, const Q4eFile *f)
+{
+    const int fd = mkstemp(path);
+    cr_assert_geq(fd, 0);
+    close(fd);
+    OcGgufWriter w;
+    cr_assert_eq(oc_gguf_writer_init(path, "qwen4exp", &w), OC_OK);
+    const struct { const char *key; uint32_t value; } meta[] = {
+        {"qwen4exp.block_count", QNL + (f->mtp ? 1u : 0u)},
+        {"qwen4exp.context_length", 64},
+        {"qwen4exp.embedding_length", QD},
+        {"qwen4exp.feed_forward_length", QI},
+        {"qwen4exp.attention.head_count", QNH},
+        {"qwen4exp.attention.head_count_kv", QNKV},
+        {"qwen4exp.attention.key_length", QHD},
+        {"qwen4exp.expert_count", QE},
+        {"qwen4exp.expert_used_count", QK},
+        {"qwen4exp.expert_feed_forward_length", QI},
+        {"qwen4exp.expert_shared_feed_forward_length", QSI},
+        {"qwen4exp.expert_latent_length", QZ},
+        {"qwen4exp.expert_latent_group_count", QG},
+        {"qwen4exp.nextn_predict_layers", f->mtp ? 1u : 0u},
+        {"qwen4exp.full_attention_interval", 1},
+        {"qwen4exp.ssm.conv_kernel", 2},
+        {"qwen4exp.ssm.state_size", 2},
+        {"qwen4exp.ssm.group_count", 1},
+        {"qwen4exp.ssm.time_step_rank", 1},
+        {"qwen4exp.ssm.inner_size", 2},
+        {"qwen4exp.hyper_connection.count", QHC},
+        {"qwen4exp.hyper_connection.low_rank", QR},
+    };
+    for (size_t i = 0; i < sizeof(meta) / sizeof(meta[0]); i++)
+        cr_assert_eq(oc_gguf_writer_add_uint32(&w, meta[i].key,
+                                               meta[i].value), OC_OK,
+                     "%s", meta[i].key);
+    const uint64_t hc = QHC * QD;
+    q4e_tensor(&w, "token_embd.weight", 2, (const uint64_t[]){QD, QV}, 0.0f);
+    q4e_tensor(&w, "output.weight", 2, (const uint64_t[]){QD, QV}, 0.0f);
+    q4e_tensor(&w, "output_hc_norm.weight", 1, (const uint64_t[]){hc}, 1.0f);
+    q4e_tensor(&w, "output_hc_down.weight", 2, (const uint64_t[]){hc, QR},
+               0.0f);
+    q4e_tensor(&w, "output_hc_up.weight", 2, (const uint64_t[]){QR, hc},
+               0.0f);
+    for (unsigned l = 0; l < QNL; l++) q4e_block(&w, l, true);
+    if (f->mtp) {
+        q4e_block(&w, QNL, f->mtp_latent);
+        if (f->mtp_latent) q4e_labels(&w, QNL, f);
+        q4e_block_tensor(&w, QNL, "nextn.eh_proj.weight", 2,
+                         (const uint64_t[]){2 * QD, QD}, 0.0f);
+        q4e_block_tensor(&w, QNL, "nextn.enorm.weight", 1,
+                         (const uint64_t[]){QD}, 1.0f);
+        q4e_block_tensor(&w, QNL, "nextn.hnorm.weight", 1,
+                         (const uint64_t[]){hc}, 1.0f);
+        q4e_block_tensor(&w, QNL, "nextn.hc_head_norm.weight", 1,
+                         (const uint64_t[]){hc}, 1.0f);
+        q4e_block_tensor(&w, QNL, "nextn.hc_head_down.weight", 2,
+                         (const uint64_t[]){hc, QR}, 0.0f);
+        q4e_block_tensor(&w, QNL, "nextn.hc_head_up.weight", 2,
+                         (const uint64_t[]){QR, hc}, 0.0f);
+    }
+    for (unsigned l = QNL; l-- > 0;) q4e_labels(&w, l, f);
+    cr_assert_eq(oc_gguf_writer_finalize(&w), OC_OK);
+    oc_gguf_writer_free(&w);
+}
+
+Test(latent_moe, loader_accepts_flat_and_row_labels_under_both_names)
+{
+    const char *names[] = {"ffn_latent_labels", "ffn_latent_labels.weight"};
+    for (size_t name = 0; name < 2; name++) {
+        for (uint32_t n_dims = 1; n_dims <= 2; n_dims++) {
+            Q4eFile f = q4e_file();
+            f.labels_name = names[name];
+            f.labels_n_dims = n_dims;
+            if (n_dims == 2) {
+                f.labels_dims[0] = 1;
+                f.labels_dims[1] = QE;
+            }
+            char path[] = "/tmp/oxidize-latent-labels-XXXXXX";
+            q4e_write(path, &f);
+            OcLlamaModel model;
+            cr_assert_eq(oc_llama_load(path, &model), OC_OK, "%s %u-D",
+                         names[name], n_dims);
+            for (uint32_t l = 0; l < QNL; l++) {
+                const OcWeightView *v = &model.layers[l].ffn_latent_labels;
+                cr_assert_eq(v->rows, 1);
+                cr_assert_eq(v->cols, QE);
+                cr_assert_eq(v->row_bytes, QE * sizeof(float));
+                const float *labels = (const float *)v->data;
+                for (size_t e = 0; e < QE; e++)
+                    cr_assert_eq(labels[e], (float)(e % QG));
+            }
+            oc_llama_free(&model);
+            cr_assert_eq(unlink(path), 0);
+        }
+    }
+}
+
+Test(latent_moe, loader_rejects_mis_shaped_and_non_f32_labels)
+{
+    const struct {
+        uint32_t n_dims;
+        uint64_t dims[2];
+        uint32_t type;
+    } bad[] = {
+        {2, {QE, 1}, 0},
+        {1, {1, 0}, 0},
+        {2, {1, 1}, 0},
+        {1, {QE, 0}, 1},
+        {2, {1, QE}, 1},
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        Q4eFile f = q4e_file();
+        f.labels_n_dims = bad[i].n_dims;
+        f.labels_dims[0] = bad[i].dims[0];
+        f.labels_dims[1] = bad[i].dims[1];
+        f.labels_type = bad[i].type;
+        char path[] = "/tmp/oxidize-latent-labels-XXXXXX";
+        q4e_write(path, &f);
+        OcLlamaModel model;
+        cr_assert_eq(oc_llama_load(path, &model), OC_ERR_TENSOR, "case %zu",
+                     i);
+        cr_assert_eq(unlink(path), 0);
+    }
+}
+
+Test(latent_moe, full_width_mtp_head_runs_and_latent_head_is_refused)
+{
+    for (int latent_head = 0; latent_head < 2; latent_head++) {
+        Q4eFile f = q4e_file();
+        f.mtp = true;
+        f.mtp_latent = latent_head != 0;
+        char path[] = "/tmp/oxidize-latent-mtp-XXXXXX";
+        q4e_write(path, &f);
+        OcLlamaModel model;
+        cr_assert_eq(oc_llama_load(path, &model), OC_OK);
+        cr_assert_eq(model.cfg.n_layer, QNL);
+        cr_assert_eq(oc_llama_mtp_present(&model), !latent_head);
+        OcLlamaSession s;
+        cr_assert_eq(oc_llama_session_init_kv(&model, &s, OC_KV_F32), OC_OK);
+        cr_assert_eq(oc_llama_mtp_enable(&s, true),
+                     latent_head ? OC_ERR_MODEL : OC_OK);
+        if (!latent_head) {
+            const uint32_t prompt[] = {1, 3, 5, 7};
+            float logits[QV];
+            cr_assert_eq(oc_llama_prefill(&s, prompt, 4, 4, logits), OC_OK);
+            uint32_t out[OC_K2_MTP_MAX_K + 1];
+            size_t n_out = 0;
+            OcMtpStats st = {0};
+            cr_assert_eq(oc_llama_mtp_step(&s, 2, logits, out,
+                                           OC_K2_MTP_MAX_K + 1, &n_out, &st),
+                         OC_OK);
+            cr_assert_eq(st.drafted, 2);
+            cr_assert_geq(n_out, 1);
+            for (size_t i = 0; i < QV; i++) cr_assert(isfinite(logits[i]));
+        }
+        oc_llama_session_free(&s);
+        oc_llama_free(&model);
+        cr_assert_eq(unlink(path), 0);
+    }
+}
+
+Test(latent_moe, decode_and_prefill_agree_when_shared_expert_is_widest)
+{
+    Q4eFile f = q4e_file();
+    char path[] = "/tmp/oxidize-latent-forward-XXXXXX";
+    q4e_write(path, &f);
+    OcLlamaModel model;
+    cr_assert_eq(oc_llama_load(path, &model), OC_OK);
+    cr_assert_gt(model.cfg.shared_expert_intermediate_size, model.cfg.n_ff);
+    cr_assert_gt(model.cfg.shared_expert_intermediate_size,
+                 model.cfg.expert_intermediate_size);
+    OcLlamaSession a, b;
+    cr_assert_eq(oc_llama_session_init_kv(&model, &a, OC_KV_F32), OC_OK);
+    cr_assert_eq(oc_llama_session_init_kv(&model, &b, OC_KV_F32), OC_OK);
+    const uint32_t tokens[] = {1, 3, 5};
+    float decoded[QV], prefilled[QV];
+    for (size_t i = 0; i < 3; i++)
+        cr_assert_eq(oc_llama_forward(&a, tokens[i], decoded), OC_OK);
+    cr_assert_eq(oc_llama_prefill(&b, tokens, 3, 3, prefilled), OC_OK);
+    for (size_t i = 0; i < QV; i++) {
+        cr_assert(isfinite(decoded[i]) && isfinite(prefilled[i]));
+        cr_assert_float_eq(decoded[i], prefilled[i],
+                           1e-5f + fabsf(prefilled[i]) * 1e-4f,
+                           "logit %zu: decode %.9g prefill %.9g", i,
+                           decoded[i], prefilled[i]);
+    }
+    oc_llama_session_free(&a);
+    oc_llama_session_free(&b);
+    oc_llama_free(&model);
+    cr_assert_eq(unlink(path), 0);
+}
