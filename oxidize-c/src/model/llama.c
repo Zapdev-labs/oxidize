@@ -1841,9 +1841,9 @@ static OcError resolve_weights(OcLlamaModel *m)
                 m->mtp.hc_head_up.cols == m->cfg.hc_low_rank;
             if (mtp_full && !m_full_width_experts) {
                 oc_log(OC_LOG_WARN,
-                       "llama: qwen4exp MTP block routed experts are not "
-                       "n_embd wide (latent MTP heads are unsupported) — "
-                       "running without speculative decoding");
+                       "llama: qwen4exp MTP block has latent tensors or "
+                       "routed experts that are not full width — running "
+                       "without speculative decoding");
             } else if (mtp_full) {
                 M->kind = OC_LLAMA_LAYER_FULL_ATTENTION;
                 M->head_dim = m->cfg.head_dim;
