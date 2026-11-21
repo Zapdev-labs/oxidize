@@ -109,6 +109,8 @@ static ActKind fused_act_kind(OcGgufQuantizationType qtype, size_t cols)
     case OC_QUANT_AL8:
     case OC_QUANT_AL5_XS:
         return (cols % OC_OXK_QK8_0 == 0) ? ACT_Q8_0 : ACT_NONE;
+    case OC_QUANT_IQ2_VQ:
+        return (cols % 128u == 0) ? ACT_Q8_0 : ACT_NONE;
     case OC_QUANT_Q2_K:
     case OC_QUANT_Q3_K_S:
     case OC_QUANT_Q3_K_M:
@@ -339,6 +341,7 @@ static float fused_row_dot(OcGgufQuantizationType qtype, const uint8_t *row,
     case OC_QUANT_Q3_K_L: return oc_oxk_dot_q3_k_q8_k(row, blocks, act);
     case OC_QUANT_IQ1_XXXS: return oc_quant_dot_iq1_xxxs_q8_k(row, blocks, act);
     case OC_QUANT_IQ3_S:  return oc_oxk_dot_iq3_s_q8_k(row, blocks, act);
+    case OC_QUANT_IQ2_VQ: return oc_oxk_dot_iq2_vq_q8_0(row, blocks, act);
     default:              return 0.0f;
     }
 }
@@ -367,6 +370,7 @@ static float (*fused_dot_fn(OcGgufQuantizationType qtype))(const uint8_t *,
     case OC_QUANT_Q3_K_M:
     case OC_QUANT_Q3_K_L: return oc_oxk_dot_q3_k_q8_k;
     case OC_QUANT_IQ3_S:  return oc_oxk_dot_iq3_s_q8_k;
+    case OC_QUANT_IQ2_VQ: return oc_oxk_dot_iq2_vq_q8_0;
     default:              return NULL;
     }
 }
@@ -961,6 +965,12 @@ static size_t act_blocks_for(ActKind kind, size_t cols)
 static bool fused_stride_ok(OcGgufQuantizationType qtype, size_t blocks,
                             size_t row_bytes)
 {
+    if (qtype == OC_QUANT_IQ2_VQ) {
+        size_t expect;
+        return blocks % 4u == 0 &&
+               size_mul(blocks / 4u, OC_OXK_BLOCK_IQ2_VQ_SIZE, &expect) &&
+               row_bytes == expect;
+    }
     size_t expect;
     const size_t block_bytes = ((qtype == OC_QUANT_Q4_0 ||
                                  qtype == OC_QUANT_AL5) ? OC_OXK_BLOCK_Q4_0_SIZE

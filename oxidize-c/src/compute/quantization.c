@@ -20,6 +20,7 @@
  * arms return OC_ERR_QUANT here.
  */
 #include "oxidize/quant.h"
+#include "oxidize/iq2_vq.h"
 #include "oxidize/log.h"
 #include "oxidize/simd.h"
 
@@ -225,6 +226,7 @@ static LayoutInfo layout_for(OcGgufQuantizationType qtype)
     case OC_QUANT_IQ4_NL:  return (LayoutInfo){ OC_BLOCK_IQ4_NL_SIZE,  OC_QK4_NL };
     case OC_QUANT_IQ4_XS:  return (LayoutInfo){ OC_BLOCK_IQ4_XS_SIZE,  OC_QK_K };
     case OC_QUANT_NVFP4:   return (LayoutInfo){ OC_BLOCK_NVFP4_SIZE,   OC_QK_NVFP4 };
+    case OC_QUANT_IQ2_VQ:  return (LayoutInfo){ OC_IQ2_VQ_BLOCK_BYTES, OC_IQ2_VQ_BLOCK_ELEMENTS };
     default:              return (LayoutInfo){ 0, 0 };
     }
 }
@@ -1389,6 +1391,39 @@ static OcError dequant_iq3_s(const uint8_t *src, size_t src_len,
             qs_o += 8;
             sg_o += 4;
             ib32 += 2;
+        }
+    }
+    return OC_OK;
+}
+
+static OcError dequant_iq2_vq(const uint8_t *src, size_t src_len,
+                              float *dst, size_t value_count)
+{
+    if (!validate_layout(OC_QUANT_IQ2_VQ, src_len, value_count,
+                         OC_IQ2_VQ_BLOCK_BYTES,
+                         OC_IQ2_VQ_BLOCK_ELEMENTS)) {
+        return OC_ERR_INVALID_ARG;
+    }
+    const size_t n_blocks = src_len / OC_IQ2_VQ_BLOCK_BYTES;
+    for (size_t b = 0; b < n_blocks; b++) {
+        const uint8_t *block = src + b * OC_IQ2_VQ_BLOCK_BYTES;
+        const float d = f16_le_to_f32(block[0], block[1]);
+        const uint8_t *sc = block + 2;
+        const uint8_t *qs = block + 6;
+        float *out = dst + b * OC_IQ2_VQ_BLOCK_ELEMENTS;
+        for (size_t sub = 0; sub < 4; sub++) {
+            const uint8_t scale = sc[sub];
+            const float ds = d * (float)((int)(scale & 0x3fu) - 32);
+            const size_t book = (size_t)(scale >> 6) *
+                                OC_IQ2_VQ_CODES_PER_BOOK *
+                                OC_IQ2_VQ_VALUES_PER_CODE;
+            for (size_t g = 0; g < 8; g++) {
+                const size_t code = qs[sub * 8 + g];
+                const int8_t *values = oc_iq2_vq_codebook + book + code * 4;
+                for (size_t j = 0; j < 4; j++)
+                    out[sub * OC_IQ2_VQ_SUBBLOCK_ELEMENTS + g * 4 + j] =
+                        ds * (float)values[j];
+            }
         }
     }
     return OC_OK;
@@ -2840,6 +2875,7 @@ OcError oc_quant_dequant_row_scalar(OcGgufQuantizationType qtype,
     case OC_QUANT_IQ4_NL:  return dequant_iq4_nl(src, src_len, dst, value_count);
     case OC_QUANT_IQ4_XS:  return dequant_iq4_xs(src, src_len, dst, value_count);
     case OC_QUANT_NVFP4:   return dequant_nvfp4(src, src_len, dst, value_count);
+    case OC_QUANT_IQ2_VQ:  return dequant_iq2_vq(src, src_len, dst, value_count);
     /* Q8_0_R8 is an offline interleaved repack layout, not a decodable row
      * format: eight rows share a superblock, so there is no "row" to
      * dequantize here. Rejected explicitly (rather than falling into
@@ -2958,6 +2994,7 @@ static const struct {
     { OC_QUANT_IQ1_XXXS, "IQ1_XXXS", 66 },
     /* ik_llama.cpp interleaved Q8_0. */
     { OC_QUANT_Q8_0_R8, "Q8_0_R8", 208 },
+    { OC_QUANT_IQ2_VQ, "IQ2_VQ", 70 },
     { OC_QUANT_NVFP4,   "NVFP4",   40 },
     { OC_QUANT_I8,      "I8",      24 },
     { OC_QUANT_I16,     "I16",     25 },

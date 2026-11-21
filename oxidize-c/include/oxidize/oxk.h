@@ -64,6 +64,7 @@ extern "C" {
 /* Prepared IQ3_S block: f32 d, 12 pad bytes, 8 x i16 (2*ls+1), 256 signed
  * int8 weights (grid value with its sign applied). */
 #define OC_OXK_IQ3_S_PREP_BLOCK 288u
+#define OC_OXK_BLOCK_IQ2_VQ_SIZE 38u  /* f16 d + 4 codebook/scale bytes + 32 codes */
 
 /* ─── Capability detection + kernel table ────────────────────────────────
  *
@@ -138,6 +139,9 @@ typedef float (*OcOxkDotIq3SQ8K_fn)(const uint8_t *row, size_t blocks,
                                     const uint8_t *q8);
 typedef void (*OcOxkIq3SPrepRow_fn)(const uint8_t *row, size_t blocks,
                                     void *scratch);
+typedef float (*OcOxkDotIq2VQQ8_0_fn)(const uint8_t *row,
+                                      size_t activation_blocks,
+                                      const uint8_t *q8);
 
 typedef struct OcOxkContext {
     OcOxkCaps caps;
@@ -172,6 +176,8 @@ typedef struct OcOxkContext {
     OcOxkDotIq3SQ8K_fn          dot_iq3_s_q8_k;
     OcOxkIq3SPrepRow_fn         iq3_s_prep_row;
     OcOxkDotQ4_KPreppedMulti_fn dot_iq3_s_prepped_multi;
+    /* IQ2_VQ x Q8_0 single-activation dot (oc_oxk_dot_iq2_vq_q8_0). */
+    OcOxkDotIq2VQQ8_0_fn        dot_iq2_vq_q8_0;
     /* Matvec dispatch table — one slot per quant type. */
     OcOxkMatvecQ4_0F32_fn matvec_q4_0_f32;
     OcOxkMatvecQ4_KF32_fn matvec_q4_k_f32;
@@ -560,6 +566,28 @@ void oc_oxk_dot_iq3_s_prepped_multi_avx2(const void *scratch, size_t blocks,
                                          const uint8_t *acts,
                                          size_t act_stride, size_t n_act,
                                          float *out);
+
+/* ─── IQ2_VQ × Q8_0 ───────────────────────────────────────────────────────
+ *
+ * An IQ2_VQ block holds 128 weights in OC_OXK_BLOCK_IQ2_VQ_SIZE bytes: an
+ * f16 scale, four sub-block bytes (bits 6-7 pick one of four 256-entry
+ * codebooks, bits 0-5 are the sub-block scale biased by 32) and 32 codebook
+ * indices of four weights each.
+ *
+ * `activation_blocks` counts Q8_0 activation blocks (32 values each), not
+ * IQ2_VQ blocks. It must be a multiple of 4, and `row` holds
+ * activation_blocks / 4 IQ2_VQ blocks. A remainder that is not a multiple
+ * of 4 is silently ignored, so callers only dispatch widths divisible by 128
+ * (matvec.c checks cols % 128). The AVX2 form is bit-identical to the
+ * scalar reference. */
+float oc_oxk_dot_iq2_vq_q8_0(const uint8_t *row, size_t activation_blocks,
+                             const uint8_t *q8);
+float oc_oxk_dot_iq2_vq_q8_0_scalar(const uint8_t *row,
+                                    size_t activation_blocks,
+                                    const uint8_t *q8);
+float oc_oxk_dot_iq2_vq_q8_0_avx2(const uint8_t *row,
+                                  size_t activation_blocks,
+                                  const uint8_t *q8);
 
 /* Quantized weight × f32-input matvec. `w` is `n_rows` rows of `row_bytes`
  * each, laid out back-to-back; `x` is the f32 activation vector of length

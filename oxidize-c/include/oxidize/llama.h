@@ -236,6 +236,8 @@ typedef struct OcLlamaConfig {
      * indexer (QSA). One early layer (ple_layer) carries PLE n-gram hash
      * embeddings that add a token-context signal into the wide residual. */
     bool     is_qwen4exp;
+    uint32_t expert_latent_dim;
+    uint32_t expert_latent_group_count;
     uint32_t hc_mult;            /* hyper_connection.count (4)           */
     uint32_t hc_low_rank;        /* hyper_connection.low_rank            */
     /* attention.recurrent_layers — explicit per-layer kind map (n_layer
@@ -304,6 +306,11 @@ typedef struct OcLlamaLayer {
     OcWeightView ffn_gate_exps;           /* [num_experts*exp_i_size, n_embd]    */
     OcWeightView ffn_up_exps;             /* [num_experts*exp_i_size, n_embd]    */
     OcWeightView ffn_down_exps;           /* [num_experts*n_embd, exp_i_size]    */
+    OcWeightView ffn_latent_d;
+    OcWeightView ffn_latent_u;
+    OcWeightView ffn_latent_labels;
+    uint32_t expert_latent_dim;
+    bool latent_tensor_shape_invalid;
     /* Native per-expert EXL3 (qwen4exp SafeTensors): one trellis matrix per
      * expert projection instead of a stacked view. Arrays of num_experts
      * entries; the matrices' packed backing data is owned by the model's
@@ -526,6 +533,9 @@ typedef struct OcLlamaSession {
     float *expert_gate_all;
     float *expert_up_all;
     float *expert_down_all;
+    float *expert_latent_input;
+    float *expert_latent_sum;
+    float *expert_latent_output;
     uint32_t *selected_experts;
     float *shexp_gate;       /* expert_intermediate_size (shared)   */
     float *shexp_up;         /* expert_intermediate_size (shared)   */
@@ -865,6 +875,18 @@ OcError oc_llama_mtp_forward_rows(OcLlamaSession *sess, const uint32_t *tokens,
                                   float *s_out);
 
 #ifdef OC_TESTING
+OcError oc_llama_test_latent_moe_decode(const OcLlamaConfig *cfg,
+                                        const OcLlamaLayer *layer,
+                                        const float *input,
+                                        const uint32_t *selected,
+                                        const float *weights, uint32_t k,
+                                        float *output);
+OcError oc_llama_test_latent_moe_prefill(const OcLlamaConfig *cfg,
+                                         const OcLlamaLayer *layer,
+                                         const float *inputs, size_t n,
+                                         const uint32_t *selected,
+                                         const float *weights, uint32_t k,
+                                         float *outputs);
 /* Test-only: replace each draft before verification. Called with the
  * position the draft would occupy and the head's proposal. */
 typedef uint32_t (*OcMtpDraftHook)(void *ud, int64_t pos, uint32_t proposed);

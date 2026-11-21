@@ -9,6 +9,10 @@ ignore = [
   # Keep the advisory visible here until the dependency graph can move to a
   # fixed release without dropping mmap support.
   "RUSTSEC-2026-0186",
+  # chrono is marked unmaintained (no known vulnerability). oxidize-server uses
+  # it directly for timestamps; keep it visible here until that moves to jiff
+  # or time.
+  "RUSTSEC-2026-0543",
 ]
 
 [licenses]
