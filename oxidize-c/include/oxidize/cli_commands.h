@@ -180,8 +180,8 @@ typedef struct OcCliContext {
     const char        *mtp_model;       /* --mtp-model PATH                  */
     bool               mtp;             /* --mtp                             */
     bool               chat;            /* --chat: wrap the prompt as a turn */
-    bool               gpu;             /* --gpu: Vulkan forward (inkling)   */
     const char        *exl3_path;
+    bool               gpu;             /* --gpu: Vulkan forward (inkling)   */
     /* Inkling-2: --draft, --draft-out, --draft-max, --p-min, --lm-type,
      * --draft-type, --effort. */
     const char        *draft_path;
