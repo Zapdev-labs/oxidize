@@ -58,18 +58,16 @@ OcError oc_kv_cache_init(OcKvCache *cache, const OcKvCacheConfig *cfg)
     cache->n_tokens = 0;
 
     size_t count = kv_total_count(cfg);
-    cache->k_data = malloc(count * sizeof(float));
+    cache->k_data = calloc(count, sizeof(float));
     if (!cache->k_data) {
         return OC_ERR_OOM;
     }
-    cache->v_data = malloc(count * sizeof(float));
+    cache->v_data = calloc(count, sizeof(float));
     if (!cache->v_data) {
         free(cache->k_data);
         cache->k_data = NULL;
         return OC_ERR_OOM;
     }
-    memset(cache->k_data, 0, count * sizeof(float));
-    memset(cache->v_data, 0, count * sizeof(float));
     return OC_OK;
 }
 
