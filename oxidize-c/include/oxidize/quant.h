@@ -85,6 +85,7 @@ extern "C" {
 #define OC_BLOCK_IQ4_NL_SIZE  18u
 #define OC_BLOCK_IQ4_XS_SIZE 136u
 #define OC_BLOCK_NVFP4_SIZE   36u
+#define OC_BLOCK_IQ2_VQ_SIZE  38u
 
 /* ─── Quantization type enum (port of GgufQuantizationType) ──────────────
  *
@@ -140,6 +141,7 @@ typedef enum {
      * row-major and yield garbage logits. Unpack offline with
      * `oc_q8_0_r8_unpack_to_q8_0_inplace` first. */
     OC_QUANT_Q8_0_R8  = 37,
+    OC_QUANT_IQ2_VQ   = 38,
     OC_QUANT__COUNT,
     OC_QUANT_UNKNOWN  = 0xffffffffu,
 } OcGgufQuantizationType;

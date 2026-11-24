@@ -15,6 +15,7 @@
  * OC_OXK_AVX2 before calling.
  */
 #include "oxidize/oxk.h"
+#include "oxidize/iq2_vq.h"
 
 #include <string.h>
 
@@ -2234,6 +2235,41 @@ OXK_ROWS_WRAPPERS_Q80(al5_xs, al5_xs_dot_body)
 #undef OXK_ROWS_WRAPPERS_Q80
 
 __attribute__((target("avx2,fma,f16c")))
+float oc_oxk_dot_iq2_vq_q8_0_avx2(const uint8_t *row,
+                                  size_t activation_blocks,
+                                  const uint8_t *q8)
+{
+    float sum = 0.0f;
+    for (size_t b = 0; b < activation_blocks / 4u; b++) {
+        const uint8_t *wb = row + b * OC_OXK_BLOCK_IQ2_VQ_SIZE;
+        const float d = oxk_f16(wb);
+        for (size_t sub = 0; sub < 4; sub++) {
+            const uint8_t scale = wb[2 + sub];
+            const size_t book = (size_t)(scale >> 6) * 1024u;
+            const uint8_t *codes = wb + 6 + sub * 8u;
+            const uint8_t *ab = q8 + (b * 4u + sub) * OC_OXK_BLOCK_Q8_0_SIZE;
+            const float act_d = oxk_f16(ab);
+            int32_t e[8];
+            for (size_t g = 0; g < 8; g++)
+                memcpy(e + g, oc_iq2_vq_codebook + book + (size_t)codes[g] * 4u, 4);
+            const __m128i lo = _mm_setr_epi32(e[0], e[1], e[2], e[3]);
+            const __m128i hi = _mm_setr_epi32(e[4], e[5], e[6], e[7]);
+            const __m256i c = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
+            const __m256i q = _mm256_loadu_si256((const __m256i *)(ab + 2));
+            const __m256i p0 = _mm256_madd_epi16(
+                _mm256_cvtepi8_epi16(_mm256_castsi256_si128(c)),
+                _mm256_cvtepi8_epi16(_mm256_castsi256_si128(q)));
+            const __m256i p1 = _mm256_madd_epi16(
+                _mm256_cvtepi8_epi16(_mm256_extracti128_si256(c, 1)),
+                _mm256_cvtepi8_epi16(_mm256_extracti128_si256(q, 1)));
+            const int32_t sumi = hsum_i32_8(_mm256_add_epi32(p0, p1));
+            sum += d * (float)((int)(scale & 0x3fu) - 32) * act_d * (float)sumi;
+        }
+    }
+    return sum;
+}
+
+__attribute__((target("avx2,fma,f16c")))
 void oc_oxk_iq3_s_prep_row_avx2(const uint8_t *row, size_t blocks,
                                 void *scratch)
 {
@@ -2408,6 +2444,8 @@ void oc_oxk_matvec_q8_0_f32_avx512(const uint8_t *w, size_t n_rows, size_t row_b
 
 float oc_oxk_dot_iq3_s_q8_k_avx2(const uint8_t *row, size_t blocks, const uint8_t *q8)
 { return oc_oxk_dot_iq3_s_q8_k_scalar(row, blocks, q8); }
+float oc_oxk_dot_iq2_vq_q8_0_avx2(const uint8_t *row, size_t activation_blocks, const uint8_t *q8)
+{ return oc_oxk_dot_iq2_vq_q8_0_scalar(row, activation_blocks, q8); }
 void oc_oxk_iq3_s_prep_row_avx2(const uint8_t *row, size_t blocks, void *scratch)
 { oc_oxk_iq3_s_prep_row_scalar(row, blocks, scratch); }
 void oc_oxk_dot_iq3_s_prepped_multi_avx2(const void *scratch, size_t blocks,
