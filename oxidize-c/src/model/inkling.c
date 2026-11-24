@@ -1053,7 +1053,7 @@ static void moe(OcInklingSession *s, const OcInkLayer *ly, const float *x, size_
     }
 
     /* pairs grouped by expert: pair p = (token, slot), contiguous per expert */
-    int32_t cnt[256] = { 0 }, first[256], pt[OC_INK_MAX_BATCH * 16], pk[OC_INK_MAX_BATCH * 16];
+    int32_t cnt[256] = { 0 }, first[256] = { 0 }, pt[OC_INK_MAX_BATCH * 16], pk[OC_INK_MAX_BATCH * 16];
     for (size_t t = 0; t < n; t++) for (size_t k = 0; k < K; k++) cnt[sel[t][k]]++;
     int32_t acc = 0;
     for (size_t i = 0; i < NE; i++) { first[i] = acc; acc += cnt[i]; }
