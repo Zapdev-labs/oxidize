@@ -13,6 +13,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <math.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,20 +98,30 @@ static void fx_dense(FxSt *st, const char *name, const char *dtype, int nd, size
     }
 }
 
+static void fx_cat(char *h, size_t cap, size_t *len, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(h + *len, cap - *len, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n + 8 >= cap - *len) abort();
+    *len += (size_t)n;
+}
+
 static void fx_write_st(const char *path, const FxSt *st)
 {
     size_t cap = 1 << 20, len = 0;
     char *h = malloc(cap);
-    len += (size_t)snprintf(h + len, cap - len, "{");
+    fx_cat(h, cap, &len, "{");
     size_t off = 0;
     for (size_t i = 0; i < st->n; i++) {
         const FxT *t = &st->t[i];
-        len += (size_t)snprintf(h + len, cap - len, "%s\"%s\":{\"dtype\":\"%s\",\"shape\":[", i ? "," : "", t->name, t->dtype);
-        for (int k = 0; k < t->nd; k++) len += (size_t)snprintf(h + len, cap - len, "%s%zu", k ? "," : "", t->shape[k]);
-        len += (size_t)snprintf(h + len, cap - len, "],\"data_offsets\":[%zu,%zu]}", off, off + t->bytes);
+        fx_cat(h, cap, &len, "%s\"%s\":{\"dtype\":\"%s\",\"shape\":[", i ? "," : "", t->name, t->dtype);
+        for (int k = 0; k < t->nd; k++) fx_cat(h, cap, &len, "%s%zu", k ? "," : "", t->shape[k]);
+        fx_cat(h, cap, &len, "],\"data_offsets\":[%zu,%zu]}", off, off + t->bytes);
         off += t->bytes;
     }
-    len += (size_t)snprintf(h + len, cap - len, "}");
+    fx_cat(h, cap, &len, "}");
     while (len % 8) h[len++] = ' ';
     FILE *f = fopen(path, "wb");
     uint64_t hl = len;

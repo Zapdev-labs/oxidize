@@ -567,7 +567,7 @@ static void draft_block_cpu(OcInklingSpec *sp, const OcInklingModel *m, uint32_t
         for (uint32_t t = 0; t < nb; t++) rms_norm(sp->h + t * E, L->ffn_norm, E, d->eps, sp->xn + t * E);
         dlinear(&sp->act, &L->ffn_gate, sp->xn, E, nb, sp->g, d->n_ff);
         dlinear(&sp->act, &L->ffn_up, sp->xn, E, nb, sp->u, d->n_ff);
-        for (size_t i = 0; i < nb * d->n_ff; i++) sp->g[i] = sp->g[i] * sigmoidf(sp->g[i]) * sp->u[i];
+        for (size_t i = 0; i < (size_t)nb * d->n_ff; i++) sp->g[i] = sp->g[i] * sigmoidf(sp->g[i]) * sp->u[i];
         dlinear(&sp->act, &L->ffn_down, sp->g, d->n_ff, nb, sp->a, E);
         for (size_t i = 0; i < nb * E; i++) sp->h[i] += sp->a[i];
     }
