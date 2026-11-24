@@ -82,7 +82,9 @@ impl AuditEvent {
     pub fn new(request_id: RequestId, event_type: &str) -> Self {
         Self {
             request_id,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
             event_type: event_type.to_string(),
             severity: AuditSeverity::Info,
             client_ip: None,
