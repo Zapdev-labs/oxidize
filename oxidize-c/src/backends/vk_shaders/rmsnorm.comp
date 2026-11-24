@@ -1,0 +1,27 @@
+#version 460
+/* Row RMS norm: y[row] = x[row] * rstd * w (w optional); rstd = 1/sqrt(mean(x^2) + eps)
+ * is also written to rs[row] when rs != 0; y == 0 computes rstd only. One
+ * workgroup per row. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t x, y, w, rs; uint len, xs, ys, pad; float eps, pad2; } p;
+shared float red_s[64];
+
+void main()
+{
+    const uint row = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+    F32 X = F32(p.x + uint64_t(row) * p.xs * 4u);
+    float s = 0.0;
+    for (uint i = tid; i < p.len; i += 256u) { const float v = X.v[i]; s += v * v; }
+    s = subgroupAdd(s);
+    if (subgroupElect()) red_s[gl_SubgroupID] = s;
+    barrier();
+    float t = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) t += red_s[i];
+    const float r = 1.0 / sqrt(t / float(p.len) + p.eps);
+    if (p.rs != 0 && tid == 0u) F32(p.rs).v[row] = r;
+    if (p.y == 0) return;
+    F32 Y = F32(p.y + uint64_t(row) * p.ys * 4u);
+    for (uint i = tid; i < p.len; i += 256u) Y.v[i] = X.v[i] * r * (p.w != 0 ? F32(p.w).v[i] : 1.0);
+}

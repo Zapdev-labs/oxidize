@@ -9,6 +9,7 @@
 #   make clean         — remove build artifacts
 #   make avx512        — AVX-512 build (for .121 Cascade Lake)
 #   make cuda          — CUDA backend build (OC_CUDA, for Modal L40S)
+#   make vulkan        — Vulkan compute build (OC_VULKAN, needs glslc + libvulkan)
 #
 # C standard: C11 (-std=c11). No GNU extensions unless gated behind #ifdef.
 # Baseline links only libc + libm + libpthread.
@@ -27,6 +28,7 @@ DEPFLAGS := -MMD -MP
 LIB_SRCS := $(wildcard src/core/*.c src/util/*.c src/format/*.c src/model/*.c \
                        src/compute/*.c src/autotune/*.c src/server/*.c \
                        src/paged/*.c src/backends/cuda_stub.c \
+                       src/backends/vk.c \
                        src/backends/gpu_dispatch.c \
                        src/backends/backend.c \
                        src/vision/*.c src/mesh/*.c \
@@ -308,11 +310,41 @@ cuda: $(CUDA_LIB_OBJS) $(CUDA_OBJS) $(BIN_OBJS)
 %.cuo: %.cu
 	nvcc $(NVCC_FLAGS) -c -o $@ $<
 
+# Vulkan build (OC_VULKAN). Compute shaders are compiled by glslc into SPIR-V
+# word arrays (*.spv.h) that the C sources include. VULKAN_INCLUDE names a
+# header prefix when the Vulkan headers are not installed system-wide, e.g.
+#   make vulkan VULKAN_INCLUDE=$$HOME/vulkan-prefix/include
+GLSLC          ?= glslc
+VULKAN_INCLUDE ?=
+VK_CPPFLAGS    := $(if $(VULKAN_INCLUDE),-isystem $(VULKAN_INCLUDE)) -DOC_VULKAN
+VK_SHADERS     := $(wildcard src/backends/vk_shaders/*.comp)
+VK_SPV         := $(VK_SHADERS:.comp=.spv.h)
+VK_LIB_OBJS    := $(LIB_SRCS:.c=.vk.o)
+
+src/backends/vk_shaders/%.spv.h: src/backends/vk_shaders/%.comp $(wildcard src/backends/vk_shaders/*.glsl)
+	$(GLSLC) --target-env=vulkan1.3 -O -mfmt=c -o $@ $<
+
+src/%.vk.o: src/%.c | $(VK_SPV)
+	$(CC) $(CPPFLAGS) $(VK_CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+src/compute/oxk_avx2.vk.o: src/compute/oxk_avx2.c
+	$(CC) $(CPPFLAGS) $(VK_CPPFLAGS) $(CFLAGS) -O3 $(OXK_AVX2_FLAGS) $(DEPFLAGS) -c -o $@ $<
+
+vulkan: $(VK_LIB_OBJS) $(BIN_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o oxidize-c $(VK_LIB_OBJS) $(BIN_OBJS) $(LDFLAGS) -lvulkan
+
+# Kernel benchmark + CPU parity check for the Vulkan shaders.
+oc-vkbench: scripts/oc_vkbench.c $(VK_LIB_OBJS) | $(VK_SPV)
+	$(CC) $(CPPFLAGS) $(VK_CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -o $@ scripts/oc_vkbench.c $(VK_LIB_OBJS) $(LDFLAGS) -lvulkan
+
+-include $(VK_LIB_OBJS:.o=.d) oc-vkbench.d
+
 clean:
 	rm -f $(LIB_OBJS) $(BIN_OBJS) $(ALL_SAN_OBJS) \
 	      $(TEST_SRCS:.c=.o) $(TEST_SRCS:.c=.d) \
 	      $(CUDA_OBJS) \
+	      $(VK_LIB_OBJS) $(VK_LIB_OBJS:.o=.d) $(VK_SPV) oc-vkbench \
 	      $(DEP_FILES) \
 	      oxidize-c oc-tokenize oc-eval test_runner test_runner.* liboxidize-c.a
 
-.PHONY: build lib test lint clean avx512 cuda manual-tests
+.PHONY: build lib test lint clean avx512 cuda vulkan manual-tests

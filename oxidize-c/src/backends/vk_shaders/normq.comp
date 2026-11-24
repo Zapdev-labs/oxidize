@@ -1,0 +1,57 @@
+#version 460
+/* Row RMS norm fused with activation quantization, one workgroup per row:
+ * y = x * rstd * w (w optional; written when y != 0, may alias x), and y
+ * quantized to int8 per 64-value block (amax / 127) into q / d like
+ * quant_act. With nmix > 0 the row input is sum_k mixw[k] * x[k * len..],
+ * a mix of nmix <= 4 consecutive vectors. len <= 4608. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t x, y, w, q, d; uint len, xs, ys, qs; float eps; uint nmix; vec4 mixw; } p;
+shared float xs_[4608];
+shared float red_s[64];
+
+void main()
+{
+    const uint row = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+    F32 X = F32(p.x + uint64_t(row) * p.xs * 4u);
+    float s = 0.0;
+    for (uint i = tid; i < p.len; i += 256u) {
+        float v = X.v[i];
+        if (p.nmix > 0u) {
+            v *= p.mixw.x;
+            [[unroll]] for (uint k = 1; k < 4u; k++) if (k < p.nmix) v += p.mixw[k] * X.v[k * p.len + i];
+        }
+        xs_[i] = v;
+        s += v * v;
+    }
+    s = subgroupAdd(s);
+    if (subgroupElect()) red_s[gl_SubgroupID] = s;
+    barrier();
+    float t = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) t += red_s[i];
+    const float r = 1.0 / sqrt(t / float(p.len) + p.eps);
+    const bool wr = p.y != 0;
+    F32 Y = F32(p.y + uint64_t(row) * p.ys * 4u);
+    for (uint i = tid; i < p.len; i += 256u) {
+        const float v = xs_[i] * r * (p.w != 0 ? F32(p.w).v[i] : 1.0);
+        xs_[i] = v;
+        if (wr) Y.v[i] = v;
+    }
+    barrier();
+    const uint nb = p.len / 64u;
+    if (tid >= nb) return;
+    float amax = 0.0;
+    [[unroll]] for (uint i = 0; i < 64u; i++) amax = max(amax, abs(xs_[tid * 64u + i]));
+    const float d = amax / 127.0, id = d > 0.0 ? 1.0 / d : 0.0;
+    UV4 Q = UV4(p.q + uint64_t(row) * p.qs + uint64_t(tid) * 64u);
+    [[unroll]] for (uint i = 0; i < 4u; i++) {
+        uvec4 o;
+        [[unroll]] for (uint k = 0; k < 4u; k++) {
+            const uint b = tid * 64u + i * 16u + k * 4u;
+            o[k] = uint(pack32(i8vec4(ivec4(roundEven(vec4(xs_[b], xs_[b + 1u], xs_[b + 2u], xs_[b + 3u]) * id)))));
+        }
+        Q.v[i] = o;
+    }
+    F32(p.d).v[row * nb + tid] = d;
+}

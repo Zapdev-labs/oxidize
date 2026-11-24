@@ -1,0 +1,8 @@
+#version 460
+/* Attention for prefill calls: 64 / grp query tokens per tile (all 64 rows
+ * in use), 16-key chunks (attn_body.glsl). */
+#define TQ 64u
+#define QHM 64u
+#define TQ_FILL
+#define KC 16u
+#include "attn_body.glsl"

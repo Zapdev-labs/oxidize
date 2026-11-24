@@ -1,0 +1,130 @@
+#version 460
+/* Tiled NVFP4 x int8 matmul for 9+ columns. A workgroup computes a 64-row x
+ * 128-column tile; each 64-value K block is decoded once into shared memory
+ * and reused by every column. Thread (tr, tc) owns rows lrow(tr, 0..3) and
+ * columns tc + 16 * 0..7; lrow keeps a thread's gate and up rows together
+ * for POST_SITU. Column groups past the item's count are skipped. */
+#include "common.glsl"
+#define BM 64u
+#define BN 128u
+layout(local_size_x = 256) in;
+MM_PUSH
+
+shared uvec4 Ws[4u * BM];
+shared vec4  Wsc[BM];
+shared uvec4 As[4u * BN];
+shared float Ad[BN];
+
+uint lrow(uint tr, uint m) { return m < 2u ? tr * 2u + m : BM / 2u + tr * 2u + m - 2u; }
+
+void main()
+{
+    const uint tid = gl_LocalInvocationID.x, tc = tid & 15u, tr = tid >> 4;
+    uint mat = 0u, first, count;
+    if (p.items != 0) {
+        const ivec4 it = IV4(p.items).v[gl_WorkGroupID.y];
+        mat = uint(it.x); first = uint(it.y); count = uint(it.z);
+    } else {
+        first = gl_WorkGroupID.y * BN;
+        count = min(BN, p.n - first);
+    }
+    const uint ncg = (count + 15u) / 16u;
+    const bool situ_post = p.post == POST_SITU;
+    const uint rbase = gl_WorkGroupID.x * (situ_post ? BM / 2u : BM);
+    const uint nb = p.cols / 64u;
+    const uint64_t wbase = p.w + uint64_t(mat) * p.mat_bytes;
+    UV4 WQ = UV4(wbase);
+    U32 WS = U32(wbase + uint64_t(p.rows) * nb * 32u);
+
+    /* loader: threads 0..127 one nibble uvec4, 128..191 one scale word,
+     * 0..255 two activation uvec4, 0..127 one activation scale */
+    const uint lr = tid < 128u ? tid >> 1 : tid - 128u;
+    uint gr = rbase + lr;
+    bool wok = tid < 192u && (situ_post ? rbase + (lr & 31u) < p.ff : gr < p.rows);
+    if (situ_post) gr = lr < BM / 2u ? rbase + lr : p.ff + rbase + lr - BM / 2u;
+    const uint woff = tid < 128u ? (gr * nb) * 2u + (tid & 1u) : gr * nb;
+    uint aoff[2]; bool aok[2];
+    [[unroll]] for (uint j = 0; j < 2u; j++) {
+        const uint idx = tid + 256u * j, col = idx >> 2;
+        aok[j] = col < count;
+        const uint arow = !aok[j] ? 0u : p.cidx != 0 ? uint(I32(p.cidx).v[first + col]) : first + col;
+        aoff[j] = arow * (p.aq_stride / 16u) + (idx & 3u);
+    }
+    const bool dok = tid < count;
+    const uint drow = !dok ? 0u : p.cidx != 0 ? uint(I32(p.cidx).v[first + tid]) : first + tid;
+
+    uvec4 wreg = uvec4(0u); uvec4 areg[2]; float dreg = 0.0;
+    if (wok) { if (tid < 128u) wreg = WQ.v[woff]; else wreg.x = WS.v[woff]; }
+    [[unroll]] for (uint j = 0; j < 2u; j++) areg[j] = aok[j] ? UV4(p.aq).v[aoff[j]] : uvec4(0u);
+    if (dok) dreg = F32(p.ad).v[drow * p.ad_stride];
+
+    float acc[4][8];
+    [[unroll]] for (uint m = 0; m < 4u; m++) [[unroll]] for (uint c = 0; c < 8u; c++) acc[m][c] = 0.0;
+
+    for (uint kb = 0; kb < nb; kb++) {
+        barrier();
+        if (tid < 128u) {
+            const uint s0 = (tid & 1u) * 2u;
+            Ws[s0 * BM + lr] = e2m1_sub(wreg.x, wreg.y);
+            Ws[(s0 + 1u) * BM + lr] = e2m1_sub(wreg.z, wreg.w);
+        } else if (tid < 192u) {
+            Wsc[lr] = ue4m3h4(wreg.x);
+        }
+        [[unroll]] for (uint j = 0; j < 2u; j++) {
+            const uint idx = tid + 256u * j;
+            As[(idx & 3u) * BN + (idx >> 2)] = areg[j];
+        }
+        if (tid < BN) Ad[tid] = dreg;
+        barrier();
+        if (kb + 1u < nb) {
+            if (wok) { if (tid < 128u) wreg = WQ.v[woff + (kb + 1u) * 2u]; else wreg.x = WS.v[woff + kb + 1u]; }
+            [[unroll]] for (uint j = 0; j < 2u; j++) areg[j] = aok[j] ? UV4(p.aq).v[aoff[j] + (kb + 1u) * 4u] : uvec4(0u);
+            if (dok) dreg = F32(p.ad).v[drow * p.ad_stride + kb + 1u];
+        }
+
+        float blk[4][8];
+        [[unroll]] for (uint m = 0; m < 4u; m++) [[unroll]] for (uint c = 0; c < 8u; c++) blk[m][c] = 0.0;
+        [[unroll]] for (uint s = 0; s < 4u; s++) {
+            uvec4 wv[4]; float ws[4];
+            [[unroll]] for (uint m = 0; m < 4u; m++) {
+                const uint r = lrow(tr, m);
+                wv[m] = Ws[s * BM + r];
+                ws[m] = Wsc[r][s];
+            }
+            [[unroll]] for (uint c = 0; c < 8u; c++) {
+                if (c < ncg) {
+                    const uvec4 av = As[s * BN + tc + 16u * c];
+                    [[unroll]] for (uint m = 0; m < 4u; m++) blk[m][c] += float(dot16(wv[m], av)) * ws[m];
+                }
+            }
+        }
+        [[unroll]] for (uint c = 0; c < 8u; c++) {
+            if (c < ncg) {
+                const float a = Ad[tc + 16u * c];
+                [[unroll]] for (uint m = 0; m < 4u; m++) acc[m][c] += blk[m][c] * a;
+            }
+        }
+    }
+
+    const float gs = p.gscale != 0 ? F32(p.gscale).v[mat] : 1.0;
+    F32 Y = F32(p.y);
+    [[unroll]] for (uint c = 0; c < 8u; c++) {
+        const uint col = tc + 16u * c;
+        if (col >= count) continue;
+        const uint orow = (first + col) * p.y_stride;
+        if (situ_post) {
+            [[unroll]] for (uint m = 0; m < 2u; m++) {
+                const uint r = rbase + tr * 2u + m;
+                if (r < p.ff) Y.v[orow + r] = situ(acc[m][c] * gs, acc[m + 2u][c] * gs, p.beta, p.lbeta);
+            }
+        } else {
+            [[unroll]] for (uint m = 0; m < 4u; m++) {
+                const uint r = rbase + lrow(tr, m);
+                if (r >= p.rows) continue;
+                float v = acc[m][c] * gs;
+                if (p.post == POST_SOFTCAP) v = p.cap * tanh_s(v / p.cap);
+                Y.v[orow + r] = v;
+            }
+        }
+    }
+}

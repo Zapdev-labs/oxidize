@@ -1,0 +1,81 @@
+#version 460
+/* Depth attention, one workgroup per token: S = n_blk + 1 rms-normed sources
+ * (pool blocks with precomputed 1/rms, then cur) mixed by nq <= 4 learned
+ * queries. args holds uint64 src[16] then uint64 rstd[16]; src rows are
+ * [n][E]. out is [nq][n][E]. Every source row is read once for all the
+ * query dots and once for all the mixes. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#define SMAX 17u
+#define QMAX 4u
+#define WG 256u
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t args, cur, query, out_; uint n_blk, nq, n, E; } p;
+shared float red_s[16][QMAX * SMAX + 1u];
+shared float w_s[QMAX][SMAX];
+
+void main()
+{
+    const uint t = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x, S = p.n_blk + 1u;
+    U64 A = U64(p.args);
+    uint64_t src[SMAX];
+    [[unroll]] for (uint k = 0; k < SMAX; k++)
+        src[k] = k < p.n_blk ? A.v[k] + uint64_t(t) * p.E * 4u : (k == p.n_blk ? p.cur + uint64_t(t) * p.E * 4u : 0ul);
+
+    float part[QMAX][SMAX], ss = 0.0;
+    [[unroll]] for (uint qi = 0; qi < QMAX; qi++) [[unroll]] for (uint k = 0; k < SMAX; k++) part[qi][k] = 0.0;
+    for (uint i = tid; i < p.E; i += WG) {
+        float q[QMAX];
+        [[unroll]] for (uint qi = 0; qi < QMAX; qi++) q[qi] = qi < p.nq ? F32(p.query + uint64_t(qi) * p.E * 4u).v[i] : 0.0;
+        [[unroll]] for (uint k = 0; k < SMAX; k++) {
+            if (k < S) {
+                const float v = F32(src[k]).v[i];
+                if (k == p.n_blk) ss += v * v;
+                [[unroll]] for (uint qi = 0; qi < QMAX; qi++) part[qi][k] += q[qi] * v;
+            }
+        }
+    }
+    [[unroll]] for (uint qi = 0; qi < QMAX; qi++) {
+        [[unroll]] for (uint k = 0; k < SMAX; k++) {
+            if (qi < p.nq && k < S) {
+                const float v = subgroupAdd(part[qi][k]);
+                if (subgroupElect()) red_s[gl_SubgroupID][qi * SMAX + k] = v;
+            }
+        }
+    }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red_s[gl_SubgroupID][QMAX * SMAX] = ss;
+    barrier();
+    if (tid < p.nq) {
+        const uint qi = tid;
+        float tot = 0.0;
+        for (uint i = 0; i < gl_NumSubgroups; i++) tot += red_s[i][QMAX * SMAX];
+        const float rs_cur = 1.0 / sqrt(tot / float(p.E) + 1e-6), inv = 1.0 / sqrt(float(p.E));
+        float sc[SMAX], mx = NEG_INF, sum = 0.0;
+        [[unroll]] for (uint k = 0; k < SMAX; k++) {
+            if (k < S) {
+                float d = 0.0;
+                for (uint i = 0; i < gl_NumSubgroups; i++) d += red_s[i][qi * SMAX + k];
+                const float rk = k < p.n_blk ? F32(A.v[16u + k]).v[t] : rs_cur;
+                sc[k] = d * rk * inv;
+                mx = max(mx, sc[k]);
+            }
+        }
+        [[unroll]] for (uint k = 0; k < SMAX; k++) if (k < S) { sc[k] = exp(sc[k] - mx); sum += sc[k]; }
+        [[unroll]] for (uint k = 0; k < SMAX; k++)
+            if (k < S) w_s[qi][k] = sc[k] / sum * (k < p.n_blk ? F32(A.v[16u + k]).v[t] : rs_cur);
+    }
+    barrier();
+    for (uint i = tid; i < p.E; i += WG) {
+        float o[QMAX];
+        [[unroll]] for (uint qi = 0; qi < QMAX; qi++) o[qi] = 0.0;
+        [[unroll]] for (uint k = 0; k < SMAX; k++) {
+            if (k < S) {
+                const float v = F32(src[k]).v[i];
+                [[unroll]] for (uint qi = 0; qi < QMAX; qi++) o[qi] += w_s[qi][k] * v;
+            }
+        }
+        [[unroll]] for (uint qi = 0; qi < QMAX; qi++)
+            if (qi < p.nq) F32(p.out_ + (uint64_t(qi) * p.n + t) * p.E * 4u).v[i] = o[qi];
+    }
+}

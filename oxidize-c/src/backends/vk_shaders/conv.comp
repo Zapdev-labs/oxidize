@@ -1,0 +1,39 @@
+#version 460
+/* Causal 4-tap short convolution with residual, one thread per (token, ch).
+ * Input j of this call is x[j] for j >= 0 and history row 3 + j for
+ * j in [-3, -1]; the result goes to y (x is left intact), plus res when
+ * res != 0 (res may alias y):
+ *   y[t][c] = (h3 + sum_k wT[k][c] h_k + sum_l dyn[t][c/hs][l] h_{3-l}) * scale + res[t][c]
+ * with h_k the input t + k - 3. */
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t hist, x, y, wT, dyn, res; uint n, C, NC, off, n_heads, hs; float scale, pad; } p;
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= p.n * p.C) return;
+    const uint t = id / p.C, c = id % p.C;
+    F32 H = F32(p.hist), X = F32(p.x);
+    float h[4];
+    [[unroll]] for (uint k = 0; k < 4u; k++) {
+        const int j = int(t + k) - 3;
+        h[k] = j >= 0 ? X.v[uint(j) * p.C + c] : H.v[uint(3 + j) * p.NC + p.off + c];
+    }
+    F32 W = F32(p.wT);
+    float acc = W.v[c] * h[0];
+    acc += W.v[p.C + c] * h[1];
+    acc += W.v[2u * p.C + c] * h[2];
+    acc += W.v[3u * p.C + c] * h[3];
+    if (p.dyn != 0) {
+        F32 D = F32(p.dyn);
+        const uint tb = (t * p.n_heads + c / p.hs) * 4u;
+        acc += D.v[tb] * h[3];
+        acc += D.v[tb + 1u] * h[2];
+        acc += D.v[tb + 2u] * h[1];
+        acc += D.v[tb + 3u] * h[0];
+    }
+    float v = (h[3] + acc) * p.scale;
+    if (p.res != 0) v += F32(p.res).v[id];
+    F32(p.y).v[id] = v;
+}

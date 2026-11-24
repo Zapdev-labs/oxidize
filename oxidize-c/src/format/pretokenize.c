@@ -25,6 +25,7 @@ OcPretokType oc_pretok_type_from_name(const char *pre)
         return OC_PRETOK_LLAMA3;
     if (pre && strcmp(pre, "qwen2") == 0) return OC_PRETOK_QWEN2;
     if (pre && strcmp(pre, "qwen_m") == 0) return OC_PRETOK_QWEN2_M;
+    if (pre && (strcmp(pre, "gpt-4o") == 0 || strcmp(pre, "o200k") == 0)) return OC_PRETOK_O200K;
     return OC_PRETOK_NONE;
 }
 
@@ -158,6 +159,106 @@ static size_t split_k2_horizon(Splitter *s)
     return s->n_words;
 }
 
+/* o200k_base, as written in tiktoken:
+ *   [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+ *  |[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+ *  |\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+
+ * The letter alternatives follow the regex engine's backtracking order: the
+ * upper-class run is greedy and gives characters back until the lower-class
+ * run can start. */
+static inline bool o200k_up(const Splitter *s, size_t pos)
+{
+    uint16_t f = get_flags(s, pos);
+    if (f & OC_UCPT_ACCENT_MARK) return true;
+    return (f & OC_UCPT_LETTER) && !oc_unicode_is_lower(get_cpt(s, pos));
+}
+
+static inline bool o200k_lo(const Splitter *s, size_t pos)
+{
+    uint16_t f = get_flags(s, pos);
+    if (f & OC_UCPT_ACCENT_MARK) return true;
+    return (f & OC_UCPT_LETTER) && !oc_unicode_is_upper(get_cpt(s, pos));
+}
+
+/* End of the letter alternatives starting at pos, or pos when neither matches. */
+static size_t o200k_letters(const Splitter *s, size_t pos)
+{
+    size_t j = pos;
+    while (o200k_up(s, j)) j++;
+    for (size_t b = j + 1; b-- > pos;) {
+        if (o200k_lo(s, b)) {
+            size_t k = b;
+            while (o200k_lo(s, k)) k++;
+            return k;
+        }
+    }
+    return j;
+}
+
+static size_t o200k_contraction(const Splitter *s, size_t pos)
+{
+    if (get_cpt(s, pos) != '\'') return 0;
+    uint32_t a = oc_unicode_tolower(get_cpt(s, pos + 1));
+    uint32_t b = oc_unicode_tolower(get_cpt(s, pos + 2));
+    if (a == 0x017Fu) a = 's';
+    if (a == 's' || a == 't' || a == 'm' || a == 'd') return 2;
+    if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') || (a == 'l' && b == 'l')) return 3;
+    return 0;
+}
+
+static size_t split_o200k(Splitter *s)
+{
+    const uint16_t WLN = OC_UCPT_WHITESPACE | OC_UCPT_LETTER | OC_UCPT_NUMBER;
+    for (size_t pos = 0; pos < s->n;) {
+        const uint32_t c = get_cpt(s, pos);
+        const uint16_t flags = get_flags(s, pos);
+
+        const bool prefix = c != '\r' && c != '\n' && !(flags & (OC_UCPT_LETTER | OC_UCPT_NUMBER));
+        size_t end = pos;
+        if (prefix) {
+            size_t e2 = o200k_letters(s, pos + 1);
+            if (e2 > pos + 1) end = e2;
+        }
+        if (end == pos) end = o200k_letters(s, pos);
+        if (end > pos) {
+            end += o200k_contraction(s, end);
+            add_token(s, end);
+            pos = end;
+            continue;
+        }
+
+        if (flags & OC_UCPT_NUMBER) {
+            size_t e = pos;
+            while (e - pos < 3 && (get_flags(s, e) & OC_UCPT_NUMBER)) e++;
+            add_token(s, e);
+            pos = e;
+            continue;
+        }
+
+        size_t start = pos + (c == ' ');
+        if (start < s->n && !(get_flags(s, start) & WLN)) {
+            size_t e = start + 1;
+            while (e < s->n && !(get_flags(s, e) & WLN)) e++;
+            while (get_cpt(s, e) == '\r' || get_cpt(s, e) == '\n' || get_cpt(s, e) == '/') e++;
+            add_token(s, e);
+            pos = e;
+            continue;
+        }
+
+        size_t ws = pos, nl_end = pos;
+        while (get_flags(s, ws) & OC_UCPT_WHITESPACE) {
+            if (get_cpt(s, ws) == '\r' || get_cpt(s, ws) == '\n') nl_end = ws + 1;
+            ws++;
+        }
+        if (nl_end > pos) pos = nl_end;
+        else if (ws - pos > 1 && ws < s->n) pos = ws - 1;
+        else if (ws > pos) pos = ws;
+        else pos++;
+        add_token(s, pos);
+    }
+    return s->n_words;
+}
+
 /* Standard patterns from openai/gpt-2 src/encoder.py, Meta llama3
  * llama/tokenizer.py, and transformers models/qwen2/tokenization_qwen2.py.
  * Unlike K2, marks and joiners are not letters in these patterns. */
@@ -245,6 +346,8 @@ size_t oc_pretok_split(OcPretokType type, const uint32_t *cpts, size_t n,
     switch (type) {
     case OC_PRETOK_K2_HORIZON:
         return split_k2_horizon(&s);
+    case OC_PRETOK_O200K:
+        return split_o200k(&s);
     case OC_PRETOK_GPT2:
     case OC_PRETOK_LLAMA3:
     case OC_PRETOK_QWEN2:

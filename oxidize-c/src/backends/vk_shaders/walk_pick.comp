@@ -1,0 +1,75 @@
+#version 460
+/* DSpark Markov walk, the pick of step i over the vocabulary: logits
+ * x = base_i + bias + b2, greedy argmax (first index among equals) and the
+ * top probability of the softcapped softmax, 1 / sum exp(c - c_top).
+ * phase 0: one workgroup per 1024 entries writes {best x, its index, its
+ *          capped c, sum exp(c - c_wg)} to part.
+ * phase 1: one workgroup merges the partials into tok[i - 1], ptop[i - 1]. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t base, bias, b2, part, tok, ptop; uint V, i, nwg, phase; float cap, pad; } p;
+shared float bx_s[256], z_s[256];
+shared uint bi_s[256];
+
+float capf(float x) { return p.cap > 0.0 ? p.cap * tanh_s(x / p.cap) : x; }
+
+void merge(uint t, uint o)
+{
+    if (bx_s[o] > bx_s[t] || (bx_s[o] == bx_s[t] && bi_s[o] < bi_s[t])) {
+        z_s[t] = z_s[o] + z_s[t] * exp(capf(bx_s[t]) - capf(bx_s[o]));
+        bx_s[t] = bx_s[o];
+        bi_s[t] = bi_s[o];
+    } else {
+        z_s[t] += z_s[o] * exp(capf(bx_s[o]) - capf(bx_s[t]));
+    }
+}
+
+void main()
+{
+    const uint t = gl_LocalInvocationID.x;
+    F32 PT = F32(p.part);
+    float bx = NEG_INF, z = 0.0;
+    uint bi = 0xFFFFFFFFu;
+    if (p.phase == 0u) {
+        F32 BA = F32(p.base + uint64_t(p.i - 1u) * p.V * 4u), BI = F32(p.bias), B2 = F32(p.b2);
+        float x[4];
+        [[unroll]] for (uint k = 0; k < 4u; k++) {
+            const uint v = gl_WorkGroupID.x * 1024u + k * 256u + t;
+            x[k] = v < p.V ? BA.v[v] + BI.v[v] + B2.v[v] : NEG_INF;
+            if (x[k] > bx) { bx = x[k]; bi = v; }
+        }
+        const float cb = capf(bx);
+        [[unroll]] for (uint k = 0; k < 4u; k++) if (x[k] != NEG_INF) z += exp(capf(x[k]) - cb);
+    } else {
+        for (uint w = t; w < p.nwg; w += 256u) {
+            const float x = PT.v[w * 4u], zw = PT.v[w * 4u + 3u];
+            const uint xi = floatBitsToUint(PT.v[w * 4u + 1u]);
+            if (x > bx || (x == bx && xi < bi)) {
+                z = zw + (bx == NEG_INF ? 0.0 : z * exp(capf(bx) - capf(x)));
+                bx = x; bi = xi;
+            } else {
+                z += zw * exp(capf(x) - capf(bx));
+            }
+        }
+    }
+    bx_s[t] = bx; bi_s[t] = bi; z_s[t] = z;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (t < s && bx_s[t + s] != NEG_INF) {
+            if (bx_s[t] == NEG_INF) { bx_s[t] = bx_s[t + s]; bi_s[t] = bi_s[t + s]; z_s[t] = z_s[t + s]; }
+            else merge(t, t + s);
+        }
+        barrier();
+    }
+    if (t != 0u) return;
+    if (p.phase == 0u) {
+        const uint w = gl_WorkGroupID.x;
+        PT.v[w * 4u] = bx_s[0];
+        PT.v[w * 4u + 1u] = uintBitsToFloat(bi_s[0]);
+        PT.v[w * 4u + 3u] = z_s[0];
+    } else {
+        U32(p.tok).v[p.i - 1u] = bi_s[0];
+        F32(p.ptop).v[p.i - 1u] = 1.0 / z_s[0];
+    }
+}

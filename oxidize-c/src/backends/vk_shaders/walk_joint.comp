@@ -1,0 +1,26 @@
+#version 460
+/* DSpark Markov walk, step i: the RNN input [state, w1[prev], xn_i, frnn]
+ * (R, R, E, E floats). prev is the anchor for i = 1, else the token picked at
+ * step i - 1 (tok[i - 2]); w1 is BF16 [V][R]. */
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t state, w1, xn, frnn, tok, joint; uint R, E, i, anchor; } p;
+
+void main()
+{
+    const uint j = gl_GlobalInvocationID.x, R = p.R, E = p.E;
+    if (j >= 2u * R + 2u * E) return;
+    float v;
+    if (j < R) {
+        v = F32(p.state).v[j];
+    } else if (j < 2u * R) {
+        const uint prev = p.i == 1u ? p.anchor : U32(p.tok).v[p.i - 2u], k = j - R;
+        const uint w = U32(p.w1).v[(prev * R + k) / 2u];
+        v = (k & 1u) != 0u ? bf16hi(w) : bf16lo(w);
+    } else if (j < 2u * R + E) {
+        v = F32(p.xn).v[p.i * E + j - 2u * R];
+    } else {
+        v = F32(p.frnn).v[j - 2u * R - E];
+    }
+    F32(p.joint).v[j] = v;
+}

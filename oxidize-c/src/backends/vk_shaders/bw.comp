@@ -1,0 +1,12 @@
+#version 460
+/* Read-bandwidth probe: XOR-reduce n uvec4 words. */
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t src, dst; uint n, pad; } p;
+void main()
+{
+    const uint stride = gl_NumWorkGroups.x * 256u;
+    uvec4 s = uvec4(0u);
+    for (uint i = gl_GlobalInvocationID.x; i < p.n; i += stride) s ^= UV4(p.src).v[i];
+    if (s.x == 0x9E3779B9u && s.y == 0x7F4A7C15u) U32(p.dst).v[0] = s.z;
+}

@@ -49,6 +49,10 @@ uint16_t oc_unicode_cpt_flags(uint32_t cp);
 /* Simple (1:1) lowercase mapping; returns `cp` when it has none. */
 uint32_t oc_unicode_tolower(uint32_t cp);
 
+/* Letter case from src/util/unicode_case.c: \p{Lu}|\p{Lt}, and \p{Ll}. */
+bool oc_unicode_is_upper(uint32_t cp);
+bool oc_unicode_is_lower(uint32_t cp);
+
 /* Decode UTF-8 into code points with llama.cpp's rules: structurally valid
  * 1-4 byte sequences decode as-is (no overlong/surrogate checks); every
  * byte that does not start a complete sequence becomes one

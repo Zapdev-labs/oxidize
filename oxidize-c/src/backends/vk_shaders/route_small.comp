@@ -1,0 +1,63 @@
+#version 460
+/* MoE routing for a few tokens in one workgroup: each subgroup takes the
+ * top-K of one token (subgroup reductions only), then the pairs are grouped
+ * by expert as in group.comp. n <= 16, NE <= 256, K <= 16. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#define NMAX 16u
+#define KMAX 16u
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P {
+    uint64_t logits, bias, wsel, pair_of, pair_tok, items, items_s, ind;
+    uint n, NE, K, gx_gu, gx_dn_b, gx_dn_s;
+    float rscale, pad;
+} p;
+shared uint sel_s[NMAX * KMAX];
+shared float pr_s[NMAX * KMAX];
+shared uint cnt[256], first_[256], fill[256];
+#include "moe_group.glsl"
+
+void main()
+{
+    const uint tid = gl_LocalInvocationID.x, lane = gl_SubgroupInvocationID, SG = gl_SubgroupSize;
+    for (uint e = tid; e < p.NE; e += 256u) { cnt[e] = 0u; fill[e] = 0u; }
+    for (uint t = gl_SubgroupID; t < p.n; t += gl_NumSubgroups) {
+        float sc[8], pr[8];
+        [[unroll]] for (uint j = 0; j < 8u; j++) {
+            const uint e = lane + j * SG;
+            sc[j] = NEG_INF; pr[j] = 0.0;
+            if (e < p.NE) {
+                pr[j] = sigmoid_s(F32(p.logits).v[t * p.NE + e]);
+                sc[j] = pr[j] + (p.bias != 0 ? F32(p.bias).v[e] : 0.0);
+            }
+        }
+        float sum = 0.0;
+        for (uint k = 0; k < p.K; k++) {
+            float lm = NEG_INF;
+            [[unroll]] for (uint j = 0; j < 8u; j++) lm = max(lm, sc[j]);
+            const float m = subgroupMax(lm);
+            uint li = 0xFFFFFFFFu;
+            [[unroll]] for (uint j = 0; j < 8u; j++) if (sc[j] == m) li = min(li, lane + j * SG);
+            const uint wi = subgroupMin(li);
+            float wp = 0.0;
+            [[unroll]] for (uint j = 0; j < 8u; j++) if (lane + j * SG == wi) { wp = pr[j]; sc[j] = NEG_INF; }
+            wp = subgroupMax(wp);
+            sum += wp;
+            if (subgroupElect()) { sel_s[t * KMAX + k] = wi; pr_s[t * KMAX + k] = wp; }
+        }
+        sum = max(sum, 1e-20);
+        if (subgroupElect())
+            for (uint k = 0; k < p.K; k++) F32(p.wsel).v[t * p.K + k] = pr_s[t * KMAX + k] / sum * p.rscale;
+    }
+    barrier();
+    for (uint i = tid; i < p.n * p.K; i += 256u) atomicAdd(cnt[sel_s[(i / p.K) * KMAX + i % p.K]], 1u);
+    barrier();
+    if (tid == 0u) build_items(p.NE, p.items, p.items_s, p.ind, p.gx_gu, p.gx_dn_b, p.gx_dn_s);
+    barrier();
+    for (uint i = tid; i < p.n * p.K; i += 256u) {
+        const uint e = sel_s[(i / p.K) * KMAX + i % p.K], pi = first_[e] + atomicAdd(fill[e], 1u);
+        I32(p.pair_tok).v[pi] = int(i / p.K);
+        I32(p.pair_of).v[i] = int(pi);
+    }
+}

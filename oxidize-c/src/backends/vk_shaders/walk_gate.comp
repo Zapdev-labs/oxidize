@@ -1,0 +1,31 @@
+#version 460
+/* DSpark Markov walk: from the RNN projection jo (+ bias b), [3R]: the
+ * gated state update and the Markov vector tanh(jo[2R..] + b), quantized to
+ * int8 blocks of 64 like quant_act. One workgroup, R = 256. */
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t jo, b, state, q, d; uint R, pad; } p;
+shared float mk[256];
+shared float dsh[4];
+
+void main()
+{
+    const uint r = gl_LocalInvocationID.x, R = p.R;
+    F32 J = F32(p.jo), B = F32(p.b), S = F32(p.state);
+    const float gate = sigmoid_s(J.v[r] + B.v[r]), cand = tanh_s(J.v[R + r] + B.v[R + r]);
+    S.v[r] = cand + gate * (S.v[r] - cand);
+    mk[r] = tanh_s(J.v[2u * R + r] + B.v[2u * R + r]);
+    barrier();
+    if (r < R / 64u) {
+        float amax = 0.0;
+        for (uint k = 0; k < 64u; k++) amax = max(amax, abs(mk[r * 64u + k]));
+        const float d = amax / 127.0;
+        dsh[r] = d;
+        F32(p.d).v[r] = d;
+    }
+    barrier();
+    if (r >= R / 4u) return;
+    const float d = dsh[r / 16u], id = d > 0.0 ? 1.0 / d : 0.0;
+    const vec4 x = vec4(mk[4u * r], mk[4u * r + 1u], mk[4u * r + 2u], mk[4u * r + 3u]);
+    U32(p.q).v[r] = uint(pack32(i8vec4(ivec4(roundEven(x * id)))));
+}

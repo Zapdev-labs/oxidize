@@ -61,6 +61,8 @@ typedef enum {
     OC_CLI_CMD_EAGLE4          = 18, /* EAGLE-4 drafter microbench         */
     OC_CLI_CMD_EAGLE4_TRAIN    = 19, /* Train an EAGLE-4 draft from SafeTensors */
     OC_CLI_CMD_EAGLE4_EXPORT   = 20, /* Export a trained draft to GGUF     */
+    OC_CLI_CMD_INKLING_CONVERT = 21, /* Inkling-2 safetensors -> GGUF      */
+    OC_CLI_CMD_INKLING         = 22, /* Inkling-2 generate / bench (DSpark)*/
 } OcCliCommand;
 
 /* ─── Output format ────────────────────────────────────────────────────── */
@@ -178,7 +180,17 @@ typedef struct OcCliContext {
     const char        *mtp_model;       /* --mtp-model PATH                  */
     bool               mtp;             /* --mtp                             */
     bool               chat;            /* --chat: wrap the prompt as a turn */
+    bool               gpu;             /* --gpu: Vulkan forward (inkling)   */
     const char        *exl3_path;
+    /* Inkling-2: --draft, --draft-out, --draft-max, --p-min, --lm-type,
+     * --draft-type, --effort. */
+    const char        *draft_path;
+    const char        *draft_out;
+    uint32_t           draft_max;
+    float              draft_p_min;
+    const char        *lm_type;
+    const char        *draft_type;
+    float              effort;
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.
@@ -292,6 +304,8 @@ OcError oc_cli_run_eagle4_train(OcCliContext *ctx);
 
 /* Write a GGUF package from a SafeTensors draft. Does not train. */
 OcError oc_cli_run_eagle4_export(OcCliContext *ctx);
+OcError oc_cli_run_inkling_convert(OcCliContext *ctx);
+OcError oc_cli_run_inkling(OcCliContext *ctx);
 
 #ifdef __cplusplus
 }

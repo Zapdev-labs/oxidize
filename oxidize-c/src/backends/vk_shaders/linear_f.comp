@@ -1,0 +1,34 @@
+#version 460
+/* Small F32 / BF16 linear: y[t][r] = W[r] . x[t] (soft-capped when cap > 0),
+ * one 64-thread workgroup per output (x = row, y = token). */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint64_t w, x, y; uint rows, cols, xs, ys, bf16; float cap; } p;
+shared float red_s[64];
+
+void main()
+{
+    const uint r = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    F32 X = F32(p.x + uint64_t(t) * p.xs * 4u);
+    float s = 0.0;
+    if (p.bf16 != 0u) {
+        U32 W = U32(p.w + uint64_t(r) * p.cols * 2u);
+        for (uint k = tid; k < p.cols / 2u; k += 64u) {
+            const uint w = W.v[k];
+            s += bf16lo(w) * X.v[2u * k] + bf16hi(w) * X.v[2u * k + 1u];
+        }
+    } else {
+        F32 W = F32(p.w + uint64_t(r) * p.cols * 4u);
+        for (uint k = tid; k < p.cols; k += 64u) s += W.v[k] * X.v[k];
+    }
+    s = subgroupAdd(s);
+    if (subgroupElect()) red_s[gl_SubgroupID] = s;
+    barrier();
+    if (tid == 0u) {
+        float tot = 0.0;
+        for (uint i = 0; i < gl_NumSubgroups; i++) tot += red_s[i];
+        if (p.cap > 0.0) tot = p.cap * tanh_s(tot / p.cap);
+        F32(p.y).v[t * p.ys + r] = tot;
+    }
+}

@@ -1,0 +1,61 @@
+#version 460
+/* Per-token, per-head attention input post-processing; workgroup (t, h):
+ * h < NH: Q and R clip with log length scaling; h >= NH: K clip, V norm
+ * and the KV cache write of KV head h - NH. head_dim must be 128. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 128) in;
+layout(push_constant) uniform P {
+    uint64_t q, r, kx, vx, qclip, rclip, Kc, Vc;
+    uint n, pos0, NH, NKV, NR, swa, cap, log_floor;
+    float qk_clip, rel_clip, log_alpha, eps;
+} p;
+shared float red_s[8];
+
+float wg_sum(float v)
+{
+    v = subgroupAdd(v);
+    if (subgroupElect()) red_s[gl_SubgroupID] = v;
+    barrier();
+    float t = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) t += red_s[i];
+    barrier();
+    return t;
+}
+
+/* x *= min(thr / (|x| + 1e-6), 1) * mul */
+float clip(float x, bool on, float thr, float mul)
+{
+    const float nrm = sqrt(wg_sum(on ? x * x : 0.0)) + 1e-6;
+    float f = min(thr / nrm, 1.0) * mul;
+    return f != 1.0 ? x * f : x;
+}
+
+void main()
+{
+    const uint t = gl_WorkGroupID.x, h = gl_WorkGroupID.y, d = gl_LocalInvocationID.x;
+    const uint pos = p.pos0 + t, HD = 128u, QD = p.NH * HD, KV = p.NKV * HD;
+    if (h < p.NH) {
+        float tau = 1.0;
+        if (p.swa == 0u) {
+            const float x = (float(pos) + 1.0) / float(p.log_floor);
+            tau = 1.0 + p.log_alpha * log(max(x, 1.0));
+        }
+        F32 Q = F32(p.q), R = F32(p.r);
+        const uint qi = t * QD + h * HD + d;
+        Q.v[qi] = clip(Q.v[qi] * (p.qclip != 0 ? F32(p.qclip).v[h * HD + d] : 1.0), true, p.qk_clip, tau);
+        const bool ra = d < p.NR;
+        const uint ri = (t * p.NH + h) * p.NR + d;
+        const float rv = ra ? R.v[ri] * (p.rclip != 0 ? F32(p.rclip).v[h * p.NR + d] : 1.0) : 0.0;
+        const float rc = clip(rv, ra, p.rel_clip, tau);
+        if (ra) R.v[ri] = rc;
+        return;
+    }
+    const uint g = h - p.NH, slot = p.swa != 0u ? pos % p.cap : pos;
+    const uint ki = t * KV + g * HD + d;
+    const float k = clip(F32(p.kx).v[ki], true, p.qk_clip, 1.0);
+    const float v = F32(p.vx).v[ki];
+    const float vr = 1.0 / sqrt(wg_sum(v * v) / float(HD) + p.eps);
+    F32(p.Kc).v[slot * KV + g * HD + d] = k;
+    F32(p.Vc).v[slot * KV + g * HD + d] = v * vr;
+}

@@ -1,0 +1,31 @@
+#version 460
+/* Merge of split attention (attn_body.glsl, nsplit > 0): for query row
+ * (t, head) of KV head g, the shares' P.V rows weighted by exp(m_s - M) in
+ * share order, the sink as one more share (m = sink, l = 1, no P.V), the
+ * sigmoid output gate. One workgroup per (t * grp + head in group, g); the
+ * kernel's tiles hold TQ = QHM / 4 tokens. */
+#include "common.glsl"
+layout(local_size_x = 32) in;
+layout(push_constant) uniform P { uint64_t part, sink, g, o; uint NH, NKV, nsplit, QHM; } p;
+
+void main()
+{
+    const uint qg = gl_WorkGroupID.x, g = gl_WorkGroupID.y, d4 = gl_LocalInvocationID.x;
+    const uint grp = p.NH / p.NKV, t = qg / grp, hi = qg % grp, h = g * grp + hi, TQ = p.QHM / 4u;
+    const uint qh = (t % TQ) * grp + hi, rec = p.QHM * 130u, tb = (t / TQ) * p.NKV + g;
+    F32 PT = F32(p.part);
+    const float sink = F32(p.sink).v[t * p.NH + h];
+    float M = sink;
+    for (uint s = 0; s < p.nsplit; s++) M = max(M, PT.v[(tb * p.nsplit + s) * rec + p.QHM * 128u + qh]);
+    float den = exp(sink - M);
+    vec4 acc = vec4(0.0);
+    for (uint s = 0; s < p.nsplit; s++) {
+        const uint base = (tb * p.nsplit + s) * rec;
+        const float f = exp(PT.v[base + p.QHM * 128u + qh] - M);
+        den += PT.v[base + p.QHM * 129u + qh] * f;
+        acc += FV4(p.part + uint64_t(base + qh * 128u) * 4u).v[d4] * f;
+    }
+    const uint idx = (t * p.NH * 128u + h * 128u) / 4u + d4;
+    const vec4 gv = FV4(p.g).v[idx];
+    FV4(p.o).v[idx] = acc / den / (vec4(1.0) + exp(-gv));
+}
