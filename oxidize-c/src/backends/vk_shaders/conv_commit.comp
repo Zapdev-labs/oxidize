@@ -1,0 +1,18 @@
+#version 460
+/* Conv history commit after a (possibly rolled back) call: rows keep..keep+2
+ * of every visit's history move to rows 0..2. One thread per (visit, ch). */
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t hist; uint n_visits, NC, vstride, keep; } p;
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= p.n_visits * p.NC) return;
+    const uint vi = id / p.NC, c = id % p.NC;
+    F32 H = F32(p.hist + uint64_t(vi) * p.vstride * 4u);
+    const float a = H.v[p.keep * p.NC + c], b = H.v[(p.keep + 1u) * p.NC + c], d = H.v[(p.keep + 2u) * p.NC + c];
+    H.v[c] = a;
+    H.v[p.NC + c] = b;
+    H.v[2u * p.NC + c] = d;
+}

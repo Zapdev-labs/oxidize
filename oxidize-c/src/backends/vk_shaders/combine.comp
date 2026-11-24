@@ -1,0 +1,16 @@
+#version 460
+/* MoE combine: out[t][i] = sum_k wsel[t][k] * dn[pair_of[t][k]][i]. */
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t dn, out_, wsel, pair_of; uint n, E, K, pad; } p;
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= p.n * p.E) return;
+    const uint t = id / p.E, i = id % p.E;
+    float o = 0.0;
+    for (uint k = 0; k < p.K; k++)
+        o += F32(p.wsel).v[t * p.K + k] * F32(p.dn).v[uint(I32(p.pair_of).v[t * p.K + k]) * p.E + i];
+    F32(p.out_).v[id] = o;
+}

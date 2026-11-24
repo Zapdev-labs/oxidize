@@ -1,0 +1,34 @@
+#version 460
+/* Activation quantization: f32 rows to int8 per 64-value block (natural
+ * order, 16 words per block) with one f32 scale, amax / 127. One thread per
+ * block. rows != 0 gathers input row rows[v] for output vector v. */
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P {
+    uint64_t x, q, d, rows;
+    uint n, cols, x_stride, q_stride, d_stride, pad;
+} p;
+
+void main()
+{
+    const uint nb = p.cols / 64u, gid = gl_GlobalInvocationID.x;
+    if (gid >= p.n * nb) return;
+    const uint v = gid / nb, b = gid % nb;
+    const uint row = p.rows != 0 ? uint(I32(p.rows).v[v]) : v;
+    FV4 X = FV4(p.x + (uint64_t(row) * p.x_stride + uint64_t(b) * 64u) * 4u);
+    vec4 xv[16];
+    float amax = 0.0;
+    [[unroll]] for (uint i = 0; i < 16u; i++) {
+        xv[i] = X.v[i];
+        vec4 a = abs(xv[i]);
+        amax = max(amax, max(max(a.x, a.y), max(a.z, a.w)));
+    }
+    const float d = amax / 127.0, id = d > 0.0 ? 1.0 / d : 0.0;
+    UV4 Q = UV4(p.q + uint64_t(v) * p.q_stride + uint64_t(b) * 64u);
+    [[unroll]] for (uint i = 0; i < 4u; i++) {
+        uvec4 o;
+        [[unroll]] for (uint k = 0; k < 4u; k++) o[k] = uint(pack32(i8vec4(ivec4(roundEven(xv[i * 4u + k] * id)))));
+        Q.v[i] = o;
+    }
+    F32(p.d).v[v * p.d_stride + b] = d;
+}

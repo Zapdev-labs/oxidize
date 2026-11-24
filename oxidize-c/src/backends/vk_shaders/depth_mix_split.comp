@@ -1,0 +1,85 @@
+#version 460
+/* Depth attention for a few tokens, split over E in two phases so that
+ * every workgroup touches only its slice of each source row (see
+ * depth_mix.comp for the math). Workgroup (t, sp) owns channels
+ * [sp * CH, sp * CH + CH), CH = E / nsplit <= 256.
+ * phase 0: partial query . source dots and the sum of squares of cur over
+ *          the slice into part[t][sp][QMAX * SMAX + 1].
+ * phase 1: sum the partials, softmax over the sources, mix the slice. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#define SMAX 17u
+#define QMAX 4u
+#define NP (QMAX * SMAX + 1u)
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t args, cur, query, out_, part; uint n_blk, nq, n, E, nsplit, phase; } p;
+shared float red_s[8][NP];
+shared float w_s[QMAX][SMAX];
+
+void main()
+{
+    const uint t = gl_WorkGroupID.x, sp = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x, S = p.n_blk + 1u;
+    const uint CH = p.E / p.nsplit, i = sp * CH + tid;
+    const bool on = tid < CH;
+    U64 A = U64(p.args);
+    F32 PART = F32(p.part + uint64_t(t * p.nsplit) * NP * 4u);
+    float v[SMAX];
+    [[unroll]] for (uint k = 0; k < SMAX; k++) {
+        v[k] = 0.0;
+        if (on && k < S) v[k] = F32((k < p.n_blk ? A.v[k] : p.cur) + uint64_t(t) * p.E * 4u).v[i];
+    }
+    if (p.phase == 0u) {
+        float q[QMAX];
+        [[unroll]] for (uint qi = 0; qi < QMAX; qi++) q[qi] = on && qi < p.nq ? F32(p.query + uint64_t(qi) * p.E * 4u).v[i] : 0.0;
+        [[unroll]] for (uint qi = 0; qi < QMAX; qi++) {
+            [[unroll]] for (uint k = 0; k < SMAX; k++) {
+                if (qi < p.nq && k < S) {
+                    const float d = subgroupAdd(q[qi] * v[k]);
+                    if (subgroupElect()) red_s[gl_SubgroupID][qi * SMAX + k] = d;
+                }
+            }
+        }
+        float ss = 0.0;
+        [[unroll]] for (uint k = 0; k < SMAX; k++) if (k == p.n_blk) ss = v[k] * v[k];
+        ss = subgroupAdd(ss);
+        if (subgroupElect()) red_s[gl_SubgroupID][NP - 1u] = ss;
+        barrier();
+        if (tid < NP) {
+            const uint qi = tid / SMAX, k = tid % SMAX;
+            if (tid == NP - 1u || (qi < p.nq && k < S)) {
+                float tot = 0.0;
+                for (uint g = 0; g < gl_NumSubgroups; g++) tot += red_s[g][tid];
+                PART.v[sp * NP + tid] = tot;
+            }
+        }
+        return;
+    }
+    if (tid < p.nq) {
+        const uint qi = tid;
+        float tot = 0.0;
+        for (uint g = 0; g < p.nsplit; g++) tot += PART.v[g * NP + NP - 1u];
+        const float rs_cur = 1.0 / sqrt(tot / float(p.E) + 1e-6), inv = 1.0 / sqrt(float(p.E));
+        float sc[SMAX], mx = NEG_INF, sum = 0.0;
+        [[unroll]] for (uint k = 0; k < SMAX; k++) {
+            if (k < S) {
+                float d = 0.0;
+                for (uint g = 0; g < p.nsplit; g++) d += PART.v[g * NP + qi * SMAX + k];
+                const float rk = k < p.n_blk ? F32(A.v[16u + k]).v[t] : rs_cur;
+                sc[k] = d * rk * inv;
+                mx = max(mx, sc[k]);
+            }
+        }
+        [[unroll]] for (uint k = 0; k < SMAX; k++) if (k < S) { sc[k] = exp(sc[k] - mx); sum += sc[k]; }
+        [[unroll]] for (uint k = 0; k < SMAX; k++)
+            if (k < S) w_s[qi][k] = sc[k] / sum * (k < p.n_blk ? F32(A.v[16u + k]).v[t] : rs_cur);
+    }
+    barrier();
+    if (!on) return;
+    [[unroll]] for (uint qi = 0; qi < QMAX; qi++) {
+        if (qi < p.nq) {
+            float o = 0.0;
+            [[unroll]] for (uint k = 0; k < SMAX; k++) if (k < S) o += w_s[qi][k] * v[k];
+            F32(p.out_ + (uint64_t(qi) * p.n + t) * p.E * 4u).v[i] = o;
+        }
+    }
+}

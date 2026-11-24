@@ -321,6 +321,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         if (match(arg, "--prerouter-prefetch")) { ctx->prerouter_prefetch = true; continue; }
         if (match(arg, "--mtp"))        { ctx->mtp = true; continue; }
         if (match(arg, "--chat"))       { ctx->chat = true; continue; }
+        if (match(arg, "--gpu"))        { ctx->gpu = true; continue; }
 
         const char *val = (i + 1 < argc) ? argv[i + 1] : NULL;
         if (match(arg, "--exl3") && (!val || val[0] == '-')) {
@@ -435,6 +436,13 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--prerouter"))      { ctx->prerouter_path = val; i++; }
         else if (match(arg, "--lora"))           { ctx->lora_path = val; i++; }
         else if (match(arg, "--exl3"))           { ctx->exl3_path = val; i++; }
+        else if (match(arg, "--draft"))          { ctx->draft_path = val; i++; }
+        else if (match(arg, "--draft-out"))      { ctx->draft_out = val; i++; }
+        else if (match(arg, "--lm-type"))        { ctx->lm_type = val; i++; }
+        else if (match(arg, "--draft-type"))     { ctx->draft_type = val; i++; }
+        else if (match(arg, "--draft-max"))      { ctx->draft_max = (uint32_t)strtoul(val, NULL, 10); i++; }
+        else if (match(arg, "--p-min"))          { ctx->draft_p_min = strtof(val, NULL); i++; }
+        else if (match(arg, "--effort"))         { ctx->effort = strtof(val, NULL); i++; }
         else if (match(arg, "--experts-per-tok")) {
             uint32_t n;
             if (!oc_parse_u32(val, &n) || n == 0) {

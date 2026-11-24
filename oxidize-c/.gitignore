@@ -8,6 +8,8 @@ test_runner
 test_runner.*
 oc-tokenize
 oc-eval
+oc-vkbench
+src/backends/vk_shaders/*.spv.h
 llama-tokenize-ref
 
 # Vendored deps are tracked despite the *.a / *.o rules above.

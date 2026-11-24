@@ -1,0 +1,41 @@
+#version 460
+/* Loop-controller down projection with its two input norms fused:
+ *   y[t][r] = W[r][0:E] . (x[t] * rx) + W[r][E:2E] . (m[t] * rm)
+ * rx, rm the RMS-norm factors (no weight) of x[t] and m[t]. W is F32 or
+ * BF16 [R][2E]; one 64-thread workgroup per (r, t). */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint64_t w, x, m, y; uint E, R, bf16, pad; float eps, pad2; } p;
+shared vec4 red_s[8];
+
+void main()
+{
+    const uint r = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    F32 X = F32(p.x + uint64_t(t) * p.E * 4u), M = F32(p.m + uint64_t(t) * p.E * 4u);
+    vec4 acc = vec4(0.0);
+    if (p.bf16 != 0u) {
+        U32 W = U32(p.w + uint64_t(r) * p.E * 4u);
+        const uint h = p.E / 2u;
+        for (uint k = tid; k < h; k += 64u) {
+            const uint wa = W.v[k], wb = W.v[h + k];
+            const float x0 = X.v[2u * k], x1 = X.v[2u * k + 1u], m0 = M.v[2u * k], m1 = M.v[2u * k + 1u];
+            acc += vec4(bf16lo(wa) * x0 + bf16hi(wa) * x1, bf16lo(wb) * m0 + bf16hi(wb) * m1, x0 * x0 + x1 * x1,
+                        m0 * m0 + m1 * m1);
+        }
+    } else {
+        F32 W = F32(p.w + uint64_t(r) * p.E * 8u);
+        for (uint k = tid; k < p.E; k += 64u) {
+            const float x0 = X.v[k], m0 = M.v[k];
+            acc += vec4(W.v[k] * x0, W.v[p.E + k] * m0, x0 * x0, m0 * m0);
+        }
+    }
+    acc = subgroupAdd(acc);
+    if (subgroupElect()) red_s[gl_SubgroupID] = acc;
+    barrier();
+    if (tid != 0u) return;
+    vec4 tot = vec4(0.0);
+    for (uint i = 0; i < gl_NumSubgroups; i++) tot += red_s[i];
+    const float rx = 1.0 / sqrt(tot.z / float(p.E) + p.eps), rm = 1.0 / sqrt(tot.w / float(p.E) + p.eps);
+    F32(p.y).v[t * p.R + r] = tot.x * rx + tot.y * rm;
+}

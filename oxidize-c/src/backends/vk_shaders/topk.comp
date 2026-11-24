@@ -1,0 +1,48 @@
+#version 460
+/* MoE top-K per token (one workgroup each, one thread per expert): sigmoid
+ * router probs, selection by prob + bias (ties to the lowest index), weights
+ * normalized * route_scale. sel and wsel are [n][K]. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t logits, bias, sel, wsel; uint NE, K; float rscale, pad; } p;
+shared float bv_s[8];
+shared uint bi_s[8];
+shared uint win_s;
+shared float pr_s[16];
+shared uint sel_s[16];
+
+void main()
+{
+    const uint t = gl_WorkGroupID.x, e = gl_LocalInvocationID.x;
+    float prob = 0.0, sc = NEG_INF;
+    if (e < p.NE) {
+        prob = sigmoid_s(F32(p.logits).v[t * p.NE + e]);
+        sc = prob + (p.bias != 0 ? F32(p.bias).v[e] : 0.0);
+    }
+    for (uint k = 0; k < p.K; k++) {
+        const float m = subgroupMax(sc);
+        const uint i = subgroupMin(sc == m ? e : 0xFFFFFFFFu);
+        if (subgroupElect()) { bv_s[gl_SubgroupID] = m; bi_s[gl_SubgroupID] = i; }
+        barrier();
+        if (e == 0u) {
+            float bv = bv_s[0];
+            uint bi = bi_s[0];
+            for (uint s = 1; s < gl_NumSubgroups; s++)
+                if (bv_s[s] > bv || (bv_s[s] == bv && bi_s[s] < bi)) { bv = bv_s[s]; bi = bi_s[s]; }
+            win_s = bi;
+        }
+        barrier();
+        if (e == win_s) { pr_s[k] = prob; sel_s[k] = e; sc = NEG_INF; }
+        barrier();
+    }
+    if (e == 0u) {
+        float sum = 0.0;
+        for (uint k = 0; k < p.K; k++) sum += pr_s[k];
+        sum = max(sum, 1e-20);
+        for (uint k = 0; k < p.K; k++) {
+            F32(p.wsel).v[t * p.K + k] = pr_s[k] / sum * p.rscale;
+            I32(p.sel).v[t * p.K + k] = int(sel_s[k]);
+        }
+    }
+}

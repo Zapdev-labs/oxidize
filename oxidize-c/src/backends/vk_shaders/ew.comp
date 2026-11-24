@@ -1,0 +1,17 @@
+#version 460
+/* Strided row copy / add: y[r][c] = a[r][c] (+ b[r][c] when mode == 1,
+ * silu(a[r][c]) * b[r][c] when mode == 2). */
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t y, a, b; uint rows, cols, ys, as_, bs, mode; } p;
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= p.rows * p.cols) return;
+    const uint r = i / p.cols, c = i % p.cols;
+    float v = F32(p.a).v[r * p.as_ + c];
+    if (p.mode == 1u) v += F32(p.b).v[r * p.bs + c];
+    else if (p.mode == 2u) v = v * sigmoid_s(v) * F32(p.b).v[r * p.bs + c];
+    F32(p.y).v[r * p.ys + c] = v;
+}

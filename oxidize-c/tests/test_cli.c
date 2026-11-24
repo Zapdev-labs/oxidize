@@ -408,6 +408,14 @@ Test(cli, context_prefill_chunk_size_is_append_only)
         offsetof(OcCliContext, mtp),
         offsetof(OcCliContext, chat),
         offsetof(OcCliContext, exl3_path),
+        offsetof(OcCliContext, gpu),
+        offsetof(OcCliContext, draft_path),
+        offsetof(OcCliContext, draft_out),
+        offsetof(OcCliContext, draft_max),
+        offsetof(OcCliContext, draft_p_min),
+        offsetof(OcCliContext, lm_type),
+        offsetof(OcCliContext, draft_type),
+        offsetof(OcCliContext, effort),
     };
     for (size_t i = 1; i < sizeof(order) / sizeof(order[0]); i++) {
         cr_assert(order[i] > order[i - 1],
@@ -415,10 +423,10 @@ Test(cli, context_prefill_chunk_size_is_append_only)
                   i);
     }
     cr_assert_eq(order[sizeof(order) / sizeof(order[0]) - 1],
-                 offsetof(OcCliContext, exl3_path));
+                 offsetof(OcCliContext, effort));
     /* Only alignment padding may follow the last field. */
     cr_assert_eq(sizeof(OcCliContext),
-                 ((offsetof(OcCliContext, exl3_path) + sizeof(const char *)
+                 ((offsetof(OcCliContext, effort) + sizeof(float)
                    + _Alignof(OcCliContext) - 1)
                   / _Alignof(OcCliContext)) * _Alignof(OcCliContext));
 }

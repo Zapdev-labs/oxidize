@@ -1,0 +1,56 @@
+#version 460
+/* Tiled F32 / BF16 linear for 9+ tokens: y[t][r] = W[r] . x[t] (soft-capped
+ * when cap > 0). A workgroup computes 64 rows x 64 tokens through 16-wide K
+ * slices in shared memory; each thread owns a 4 x 4 block. */
+#include "common.glsl"
+#define BM 64u
+#define BN 64u
+#define BK 16u
+layout(local_size_x = 256) in;
+layout(push_constant) uniform P { uint64_t w, x, y; uint rows, cols, n, xs, ys, bf16; float cap, pad; } p;
+shared float Ws[BK][BM + 1u];
+shared float Xs[BK][BN + 1u];
+
+void main()
+{
+    const uint tid = gl_LocalInvocationID.x, tr = tid >> 4, tc = tid & 15u;
+    const uint r0 = gl_WorkGroupID.x * BM, t0 = gl_WorkGroupID.y * BN;
+    float acc[4][4];
+    [[unroll]] for (uint i = 0; i < 4u; i++) [[unroll]] for (uint j = 0; j < 4u; j++) acc[i][j] = 0.0;
+    F32 Wf = F32(p.w), X = F32(p.x);
+    U32 Wb = U32(p.w);
+    for (uint k0 = 0; k0 < p.cols; k0 += BK) {
+        [[unroll]] for (uint j = 0; j < 4u; j++) {
+            const uint idx = tid + 256u * j, r = idx / BK, k = idx % BK;
+            const uint gr = r0 + r, gk = k0 + k;
+            float wv = 0.0;
+            if (gr < p.rows && gk < p.cols) {
+                const uint e = gr * p.cols + gk;
+                if (p.bf16 != 0u) { const uint wd = Wb.v[e >> 1]; wv = (e & 1u) != 0u ? bf16hi(wd) : bf16lo(wd); }
+                else wv = Wf.v[e];
+            }
+            Ws[k][r] = wv;
+            const uint gt = t0 + r;
+            Xs[k][r] = gt < p.n && gk < p.cols ? X.v[gt * p.xs + gk] : 0.0;
+        }
+        barrier();
+        [[unroll]] for (uint k = 0; k < BK; k++) {
+            float a[4], b[4];
+            [[unroll]] for (uint i = 0; i < 4u; i++) { a[i] = Ws[k][tr * 4u + i]; b[i] = Xs[k][tc * 4u + i]; }
+            [[unroll]] for (uint i = 0; i < 4u; i++) [[unroll]] for (uint j = 0; j < 4u; j++) acc[i][j] += a[i] * b[j];
+        }
+        barrier();
+    }
+    F32 Y = F32(p.y);
+    [[unroll]] for (uint i = 0; i < 4u; i++) {
+        const uint r = r0 + tr * 4u + i;
+        if (r >= p.rows) continue;
+        [[unroll]] for (uint j = 0; j < 4u; j++) {
+            const uint t = t0 + tc * 4u + j;
+            if (t >= p.n) continue;
+            float v = acc[i][j];
+            if (p.cap > 0.0) v = p.cap * tanh_s(v / p.cap);
+            Y.v[t * p.ys + r] = v;
+        }
+    }
+}

@@ -1,0 +1,6 @@
+#version 460
+/* Attention for decode and verify calls (up to 8 tokens): 4 query tokens per
+ * tile, 32-key chunks, keys split in 256-position shares (attn_body.glsl). */
+#define TQ 4u
+#define KC 32u
+#include "attn_body.glsl"

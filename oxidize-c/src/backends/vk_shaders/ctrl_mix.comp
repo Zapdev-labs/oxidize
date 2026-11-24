@@ -1,0 +1,41 @@
+#version 460
+/* Loop controller mix for channel pairs (i, i+1) over a tile of TT tokens:
+ *   x = x - tanh(F[i] . gl[t]) * x + tanh(G[i] . gl[t]) * m
+ * Gt, Ft are BF16 transposed to [R][E], so a warp reads consecutive
+ * channels; gl is [n][R] and uniform across the warp. */
+#include "common.glsl"
+#define TT 8u
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint64_t x, m, gl, G, F; uint n, E, R, pad; } p;
+
+void main()
+{
+    const uint ip = gl_GlobalInvocationID.x, t0 = gl_WorkGroupID.y * TT;
+    if (2u * ip >= p.E) return;
+    const uint nt = min(TT, p.n - t0);
+    U32 G = U32(p.G), F = U32(p.F);
+    F32 L = F32(p.gl);
+    float gn[TT][2], fg[TT][2];
+    [[unroll]] for (uint t = 0; t < TT; t++) { gn[t][0] = 0.0; gn[t][1] = 0.0; fg[t][0] = 0.0; fg[t][1] = 0.0; }
+    for (uint r = 0; r < p.R; r++) {
+        const uint gw = G.v[(r * p.E) / 2u + ip], fw = F.v[(r * p.E) / 2u + ip];
+        const float g0 = bf16lo(gw), g1 = bf16hi(gw), f0 = bf16lo(fw), f1 = bf16hi(fw);
+        [[unroll]] for (uint t = 0; t < TT; t++) {
+            if (t < nt) {
+                const float l = L.v[(t0 + t) * p.R + r];
+                gn[t][0] += g0 * l; gn[t][1] += g1 * l;
+                fg[t][0] += f0 * l; fg[t][1] += f1 * l;
+            }
+        }
+    }
+    F32 X = F32(p.x), M = F32(p.m);
+    [[unroll]] for (uint t = 0; t < TT; t++) {
+        if (t < nt) {
+            [[unroll]] for (uint h = 0; h < 2u; h++) {
+                const uint id = (t0 + t) * p.E + 2u * ip + h;
+                const float x = X.v[id];
+                X.v[id] = x - tanh_s(fg[t][h]) * x + tanh_s(gn[t][h]) * M.v[id];
+            }
+        }
+    }
+}

@@ -306,6 +306,8 @@ const char *oc_cli_command_name(OcCliCommand cmd)
     case OC_CLI_CMD_EAGLE4:         return "eagle4";
     case OC_CLI_CMD_EAGLE4_TRAIN:   return "eagle4-train";
     case OC_CLI_CMD_EAGLE4_EXPORT:  return "eagle4-export";
+    case OC_CLI_CMD_INKLING_CONVERT: return "inkling-convert";
+    case OC_CLI_CMD_INKLING:        return "inkling";
     case OC_CLI_CMD_NONE:           break;
     }
     return "none";
@@ -340,6 +342,8 @@ OcCliCommand oc_cli_command_parse(const char *name)
     if (ieq(name, "eagle4"))          return OC_CLI_CMD_EAGLE4;
     if (ieq(name, "eagle4-train"))    return OC_CLI_CMD_EAGLE4_TRAIN;
     if (ieq(name, "eagle4-export"))   return OC_CLI_CMD_EAGLE4_EXPORT;
+    if (ieq(name, "inkling-convert")) return OC_CLI_CMD_INKLING_CONVERT;
+    if (ieq(name, "inkling"))         return OC_CLI_CMD_INKLING;
     return OC_CLI_CMD_NONE;
 }
 
@@ -366,6 +370,9 @@ void oc_cli_context_defaults(OcCliContext *ctx)
     ctx->host             = "127.0.0.1";
     ctx->port             = 8080;
     ctx->bench_iterations = 3;
+    ctx->draft_max = 5;
+    ctx->draft_p_min = 0.5f;
+    ctx->effort = 0.9f;
     ctx->bench_warmup     = 5;
     ctx->bench_tokens     = 50;
     ctx->merge_slerp_t    = 0.5f;
@@ -421,6 +428,8 @@ OcError oc_cli_command_run(OcCliContext *ctx)
     case OC_CLI_CMD_EAGLE4:         return oc_cli_run_eagle4(ctx);
     case OC_CLI_CMD_EAGLE4_TRAIN:   return oc_cli_run_eagle4_train(ctx);
     case OC_CLI_CMD_EAGLE4_EXPORT:  return oc_cli_run_eagle4_export(ctx);
+    case OC_CLI_CMD_INKLING_CONVERT: return oc_cli_run_inkling_convert(ctx);
+    case OC_CLI_CMD_INKLING:        return oc_cli_run_inkling(ctx);
     /* PROMPT and CHAT are handled by the generation path in main.c. */
     case OC_CLI_CMD_PROMPT:
     case OC_CLI_CMD_CHAT:
@@ -570,6 +579,29 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "       [--lr 1e-2] [--epochs N]\n\n"
                "The draft and the example shard are SafeTensors. A .gguf path\n"
                "is rejected. GGUF is produced afterwards with eagle4-export.\n");
+        break;
+    case OC_CLI_CMD_INKLING_CONVERT:
+        printf("Convert an Inkling-2 checkpoint to oxidize GGUF\n\n"
+               "USAGE: oxidize-c inkling-convert --input <hf_dir> --output <model.gguf> \\\n"
+               "       [--draft-out <dspark.gguf>] [--quant-type nvfp4|bf16]\n"
+               "       [--lm-type nvfp4|bf16] [--draft-type nvfp4|bf16]\n\n"
+               "Experts are copied bit for bit from the NVFP4 checkpoint; --quant-type\n"
+               "sets the attention projections, --lm-type the lm head, --draft-type\n"
+               "the DSpark drafter (from mtp.safetensors).\n");
+        break;
+    case OC_CLI_CMD_INKLING:
+        printf("Inkling-2 generation with optional DSpark speculative decoding\n\n"
+               "USAGE: oxidize-c inkling --model <model.gguf> [--draft <dspark.gguf>] \\\n"
+               "       --prompt TEXT [--chat] [--effort F] [--n-predict N] [--ctx N] \\\n"
+               "       [--threads N] [--draft-max N] [--p-min P] [--bench-iters N] [--gpu] [--json]\n\n"
+               "  --draft PATH         DSpark drafter GGUF (from inkling-convert)\n"
+               "  --gpu                Run the model on the GPU (Vulkan build: make vulkan)\n"
+               "  --draft-max N        Tokens drafted per round, 0 = no drafting (default 5)\n"
+               "  --p-min P            Truncate a draft where its own top probability\n"
+               "                       falls below P, 0 = never (default 0.5)\n"
+               "  --chat               Wrap the prompt in the Inkling chat template\n"
+               "  --effort F           Thinking effort for --chat in [0, 0.99] (default 0.9)\n"
+               "  --bench-iters N      Repeat generation N times and report the best\n");
         break;
     case OC_CLI_CMD_EAGLE4_EXPORT:
         printf("Export a trained EAGLE-4 draft to GGUF\n\n"
@@ -2378,3 +2410,207 @@ OcError oc_cli_run_eagle4_export(OcCliContext *ctx)
     }
     return OC_OK;
 }
+
+
+/* ─── inkling: Inkling-2 convert / generate ─────────────────────────────── */
+
+#include "oxidize/inkling.h"
+
+static OcInklingWeightType ink_wtype(const char *s, OcInklingWeightType def)
+{
+    if (!s) return def;
+    if (ieq(s, "bf16")) return OC_INK_W_BF16;
+    return OC_INK_W_NVFP4;
+}
+
+static void ink_threads(const OcCliContext *ctx)
+{
+    if (ctx->threads_set) oc_parallel_set_threads((size_t)ctx->threads);
+}
+
+OcError oc_cli_run_inkling_convert(OcCliContext *ctx)
+{
+    if (!ctx->input_path || (!ctx->output_path && !ctx->draft_out)) {
+        cli_error("inkling-convert needs --input <hf_dir> and --output and/or --draft-out");
+        return OC_ERR_INVALID_ARG;
+    }
+    ink_threads(ctx);
+    OcInklingConvertOptions o = {
+        .hf_dir = ctx->input_path,
+        .out_path = ctx->output_path,
+        .draft_out_path = ctx->draft_out,
+        .dense_type = ink_wtype(ctx->target_type, OC_INK_W_NVFP4),
+        .output_type = ink_wtype(ctx->lm_type, OC_INK_W_NVFP4),
+        .draft_type = ink_wtype(ctx->draft_type, OC_INK_W_NVFP4),
+    };
+    double t0 = dflash2_now_sec();
+    OcError e = oc_inkling_convert(&o);
+    if (e != OC_OK) {
+        cli_error("inkling-convert failed (%s)", oc_error_msg(e));
+        return e;
+    }
+    printf("inkling-convert: done in %.1f s\n", dflash2_now_sec() - t0);
+    return OC_OK;
+}
+
+typedef struct {
+    const OcInklingModel  *m;
+    OcStreamingDetokenizer sd;
+    bool                   print;
+} InkOut;
+
+static bool ink_emit(uint32_t tok, void *u)
+{
+    InkOut *o = u;
+    if (o->print && o->m->have_tok) {
+        const char *d = NULL;
+        size_t n = 0;
+        if (oc_streaming_detok_push(&o->sd, tok, &d, &n) == OC_OK && n) {
+            fwrite(d, 1, n, stdout);
+            fflush(stdout);
+        }
+    }
+    return true;
+}
+
+OcError oc_cli_run_inkling(OcCliContext *ctx)
+{
+    if (!ctx->model_path) {
+        cli_error("inkling needs --model <model.gguf>");
+        return OC_ERR_INVALID_ARG;
+    }
+    ink_threads(ctx);
+    OcInklingModel m;
+    double t0 = dflash2_now_sec();
+    OcError e = oc_inkling_load(ctx->model_path, &m);
+    if (e != OC_OK) {
+        cli_error("failed to load %s (%s)", ctx->model_path, oc_error_msg(e));
+        return e;
+    }
+    OcInklingDraft d;
+    bool have_draft = false;
+    if (ctx->draft_path) {
+        e = oc_inkling_draft_load(ctx->draft_path, &m, &d);
+        if (e != OC_OK) {
+            cli_error("failed to load drafter %s (%s)", ctx->draft_path, oc_error_msg(e));
+            oc_inkling_free(&m);
+            return e;
+        }
+        have_draft = true;
+    }
+    cli_info("loaded in %.1f s (%u layers, %u visits, %u threads)", dflash2_now_sec() - t0, m.n_layer,
+             m.n_visits, (unsigned)oc_parallel_n_threads());
+
+    const char *prompt = ctx->prompt ? ctx->prompt : "Hello";
+    char *text = NULL, *file_text = NULL;
+    if (ctx->gpu) {
+        if (!oc_inkling_gpu_compiled()) {
+            cli_error("--gpu needs the Vulkan build (make vulkan)");
+            e = OC_ERR_BACKEND;
+            goto done;
+        }
+        t0 = dflash2_now_sec();
+        e = oc_inkling_gpu_load(&m);
+        if (e != OC_OK) {
+            cli_error("GPU upload failed (%s)", oc_error_msg(e));
+            goto done;
+        }
+        cli_info("weights on the GPU in %.1f s", dflash2_now_sec() - t0);
+    }
+    if (ctx->prompt_file) {
+        FILE *pf = fopen(ctx->prompt_file, "rb");
+        if (!pf) { cli_error("cannot read %s", ctx->prompt_file); e = OC_ERR_IO; goto done; }
+        fseek(pf, 0, SEEK_END);
+        long sz = ftell(pf);
+        fseek(pf, 0, SEEK_SET);
+        file_text = malloc((size_t)sz + 1);
+        if (!file_text || fread(file_text, 1, (size_t)sz, pf) != (size_t)sz) { fclose(pf); e = OC_ERR_IO; goto done; }
+        fclose(pf);
+        file_text[sz] = 0;
+        prompt = file_text;
+    }
+    if (ctx->chat) {
+        size_t need = strlen(prompt) + 256;
+        text = malloc(need);
+        if (!text) { e = OC_ERR_OOM; goto done; }
+        snprintf(text, need,
+                 "<|message_system|><|content_text|>Thinking effort level: %g<|end_message|>"
+                 "<|message_user|><|content_text|>%s<|end_message|>",
+                 ctx->effort == 0.0f ? 0.0 : (double)ctx->effort, prompt);
+        prompt = text;
+    }
+    uint32_t *ids = NULL;
+    size_t n_ids = 0;
+    if (!m.have_tok) { e = OC_ERR_TOKENIZER; goto done; }
+    e = oc_tokenizer_encode(&m.tok, prompt, OC_TOK_ALLOW_SPECIAL, &ids, &n_ids);
+    if (e != OC_OK || n_ids == 0) {
+        cli_error("tokenize failed");
+        free(ids);
+        goto done;
+    }
+    if (ctx->verbose) {
+        fprintf(stderr, "prompt ids:");
+        for (size_t i = 0; i < n_ids; i++) fprintf(stderr, " %u", ids[i]);
+        fprintf(stderr, "\n");
+    }
+
+    uint32_t n_ctx = ctx->n_ctx ? ctx->n_ctx : (uint32_t)(n_ids + ctx->n_predict + 64);
+    const int iters = ctx->bench_iters_set && ctx->bench_iterations > 0 ? ctx->bench_iterations : 1;
+    for (int it = 0; it < iters && e == OC_OK; it++) {
+        OcInklingSession *s = NULL;
+        OcInklingSpec *sp = NULL;
+        e = oc_inkling_session_new(&m, n_ctx, have_draft ? d.target_layers : NULL,
+                                   have_draft ? d.n_targets : 0, &s);
+        if (e == OC_OK && ctx->gpu) e = oc_inkling_session_use_gpu(s);
+        if (e == OC_OK && have_draft) e = oc_inkling_spec_new(&d, s, n_ctx, &sp);
+        if (e != OC_OK) {
+            cli_error("session setup failed (%s)", oc_error_msg(e));
+            oc_inkling_session_free(s);
+            break;
+        }
+        InkOut out = { &m, { 0 }, it == iters - 1 && ctx->output_format != OC_CLI_OUTPUT_JSON };
+        oc_streaming_detok_init(&out.sd, &m.tok);
+        OcInklingSpecStats st;
+        e = oc_inkling_generate(s, sp, ids, n_ids, ctx->n_predict, have_draft ? ctx->draft_max : 0,
+                                ctx->draft_p_min, ink_emit, &out, &st);
+        if (out.print) {
+            const char *dd = NULL;
+            size_t dn = 0;
+            if (oc_streaming_detok_flush(&out.sd, &dd, &dn) == OC_OK && dn) fwrite(dd, 1, dn, stdout);
+            printf("\n");
+        }
+        const double pp = st.t_prefill > 0 ? (double)st.n_prompt / st.t_prefill : 0.0;
+        const double tg = st.t_decode > 0 ? (double)(st.emitted > 0 ? st.emitted - 1 : 0) / st.t_decode : 0.0;
+        if (ctx->output_format == OC_CLI_OUTPUT_JSON) {
+            printf("{\"iter\":%d,\"prompt_tokens\":%llu,\"prefill_tps\":%.2f,\"emitted\":%llu,\"decode_tps\":%.2f,"
+                   "\"rounds\":%llu,\"drafted\":%llu,\"accepted\":%llu,\"t_draft\":%.3f,\"t_verify\":%.3f}\n",
+                   it, (unsigned long long)st.n_prompt, pp, (unsigned long long)st.emitted, tg,
+                   (unsigned long long)st.rounds, (unsigned long long)st.drafted,
+                   (unsigned long long)st.accepted, st.t_draft, st.t_verify);
+        } else {
+            fprintf(stderr, "[inkling] prefill %llu tok %.2f tok/s | decode %llu tok %.2f tok/s",
+                    (unsigned long long)st.n_prompt, pp, (unsigned long long)st.emitted, tg);
+            if (have_draft && st.rounds)
+                fprintf(stderr, " | dspark %.2f tok/round, accept %.1f%% (draft %.2f s, verify %.2f s)",
+                        (double)(st.accepted + st.rounds) / (double)st.rounds,
+                        st.drafted ? 100.0 * (double)st.accepted / (double)st.drafted : 0.0, st.t_draft, st.t_verify);
+            fprintf(stderr, "\n");
+            if (have_draft && st.rounds && ctx->verbose) {
+                fprintf(stderr, "[inkling] accepted-per-round histogram:");
+                for (int k = 0; k < 16; k++) if (st.accept_hist[k]) fprintf(stderr, " %d:%llu", k, (unsigned long long)st.accept_hist[k]);
+                fprintf(stderr, "\n");
+            }
+        }
+        oc_streaming_detok_free(&out.sd);
+        oc_inkling_spec_free(sp);
+        oc_inkling_session_free(s);
+    }
+    free(ids);
+done:
+    free(text);
+    free(file_text);
+    if (have_draft) oc_inkling_draft_free(&d);
+    oc_inkling_free(&m);
+    return e;
+}
+

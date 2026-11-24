@@ -1,0 +1,74 @@
+#version 460
+/* DSpark drafter attention, workgroup (t, head): non-causal over n_ctx cached
+ * context keys (positions lo.., ring slot p % cap when swa) followed by the
+ * nb block keys kb / vb, scaled by ks, online softmax over chunks of 128 keys.
+ * head_dim 128; q, o [nb][NH * 128]; caches and kb / vb rows of NKV * 128. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 128) in;
+layout(push_constant) uniform P { uint64_t q, K, V, kb, vb, o; uint n_ctx, lo, cap, swa, nb, NH, NKV, pad; float ks, pad2; } p;
+shared vec4 q_s[32];
+shared float p_s[128];
+shared float red_s[4];
+
+float wg_max(float v)
+{
+    v = subgroupMax(v);
+    if (subgroupElect()) red_s[gl_SubgroupID] = v;
+    barrier();
+    float m = red_s[0];
+    for (uint k = 1; k < gl_NumSubgroups; k++) m = max(m, red_s[k]);
+    barrier();
+    return m;
+}
+
+float wg_sum(float v)
+{
+    v = subgroupAdd(v);
+    if (subgroupElect()) red_s[gl_SubgroupID] = v;
+    barrier();
+    float s = 0.0;
+    for (uint k = 0; k < gl_NumSubgroups; k++) s += red_s[k];
+    barrier();
+    return s;
+}
+
+uint64_t key_row(uint j, bool v)
+{
+    const uint KV = p.NKV * 128u;
+    if (j < p.n_ctx) {
+        const uint pos = p.lo + j, slot = p.swa != 0u ? pos % p.cap : pos;
+        return (v ? p.V : p.K) + uint64_t(slot) * KV * 4u;
+    }
+    return (v ? p.vb : p.kb) + uint64_t(j - p.n_ctx) * KV * 4u;
+}
+
+void main()
+{
+    const uint t = gl_WorkGroupID.x, h = gl_WorkGroupID.y, d = gl_LocalInvocationID.x;
+    const uint g = h / (p.NH / p.NKV), QD = p.NH * 128u, nk = p.n_ctx + p.nb;
+    if (d < 32u) q_s[d] = FV4(p.q + (uint64_t(t) * QD + h * 128u) * 4u).v[d];
+    barrier();
+    float m = NEG_INF, den = 0.0, acc = 0.0;
+    for (uint c0 = 0; c0 < nk; c0 += 128u) {
+        const uint j = c0 + d;
+        float sc = NEG_INF;
+        if (j < nk) {
+            FV4 Kr = FV4(key_row(j, false) + uint64_t(g) * 512u);
+            vec4 s4 = vec4(0.0);
+            [[unroll]] for (uint k = 0; k < 32u; k++) s4 += Kr.v[k] * q_s[k];
+            sc = (s4.x + s4.y + s4.z + s4.w) * p.ks;
+        }
+        const float mn = max(m, wg_max(sc));
+        const float pj = j < nk ? exp(sc - mn) : 0.0;
+        p_s[d] = pj;
+        const float f = exp(m - mn);
+        den = den * f + wg_sum(pj);
+        acc *= f;
+        m = mn;
+        const uint cn = min(128u, nk - c0);
+        for (uint k = 0; k < cn; k++) acc += p_s[k] * F32(key_row(c0 + k, true) + uint64_t(g) * 512u).v[d];
+        barrier();
+    }
+    F32(p.o + (uint64_t(t) * QD + h * 128u) * 4u).v[d] = acc / den;
+}

@@ -36,6 +36,10 @@ typedef enum {
     /* Qwen2 multimodal variant (`pre == "qwen_m"`): combining marks
      * (\p{M}) stay inside letter runs. */
     OC_PRETOK_QWEN2_M = 5,
+    /* o200k_base (GPT-4o, Inkling-2): case-split letter runs with
+     * contractions, digits in threes, punctuation runs that absorb
+     * trailing newlines and slashes. */
+    OC_PRETOK_O200K = 6,
 } OcPretokType;
 
 /* Map a `tokenizer.ggml.pre` string to a splitter. NULL / unknown strings map

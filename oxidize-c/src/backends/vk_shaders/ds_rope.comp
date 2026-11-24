@@ -1,0 +1,40 @@
+#version 460
+/* Per-head RMS norm (weight w, when norm != 0) and NeoX rotary embedding
+ * (when inv != 0) of 128-wide heads, written to row (orow0 + t) % ocap of y;
+ * workgroup (t, head). Rows t < tmin are skipped (overwritten slots of a
+ * ring cache). inv[i] = base^(-2i/128), the CPU table. */
+#include "common.glsl"
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint64_t x, w, y, inv; uint xs, ys, pos0, ocap, orow0, tmin; float eps, pad; } p;
+shared float red_s[4];
+
+void main()
+{
+    const uint t = gl_WorkGroupID.x, h = gl_WorkGroupID.y, i = gl_LocalInvocationID.x;
+    if (t < p.tmin) return;
+    F32 X = F32(p.x + (uint64_t(t) * p.xs + uint64_t(h) * 128u) * 4u);
+    float a = X.v[i], b = X.v[i + 64u];
+    if (p.w != 0) {
+        const float s = subgroupAdd(a * a + b * b);
+        if (subgroupElect()) red_s[gl_SubgroupID] = s;
+        barrier();
+        float tot = 0.0;
+        for (uint k = 0; k < gl_NumSubgroups; k++) tot += red_s[k];
+        const float r = 1.0 / sqrt(tot / 128.0 + p.eps);
+        a *= r * F32(p.w).v[i];
+        b *= r * F32(p.w).v[i + 64u];
+    }
+    if (p.inv != 0) {
+        const float th = float(p.pos0 + t) * F32(p.inv).v[i];
+        const float rv = fract(th * 0.15915494309189535) * 6.283185307179586;
+        const float c = cos(rv), s = sin(rv);
+        const float a2 = a * c - b * s;
+        b = a * s + b * c;
+        a = a2;
+    }
+    const uint row = (p.orow0 + t) % p.ocap;
+    F32 Y = F32(p.y + (uint64_t(row) * p.ys + uint64_t(h) * 128u) * 4u);
+    Y.v[i] = a;
+    Y.v[i + 64u] = b;
+}

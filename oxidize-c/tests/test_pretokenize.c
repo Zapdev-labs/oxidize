@@ -244,3 +244,44 @@ Test(pretokenize, standard_4_5)
     check_standard((OcPretokType)4, text, sizeof(text) / sizeof(text[0]),
                    want, sizeof(want) / sizeof(want[0]));
 }
+
+
+/* o200k_base (gpt-4o / Inkling-2). */
+static void check_split_o200k(const char *text, const uint32_t *want, size_t n_want)
+{
+    uint32_t cpts[256];
+    size_t lens[256];
+    size_t n = oc_unicode_cpts_from_utf8(text, strlen(text), cpts);
+    size_t nw = oc_pretok_split(OC_PRETOK_O200K, cpts, n, lens);
+    cr_assert_eq(nw, n_want, "'%s': %zu words, want %zu", text, nw, n_want);
+    for (size_t i = 0; i < nw; ++i)
+        cr_assert_eq(lens[i], (size_t)want[i], "'%s': word %zu len %zu want %u", text, i, lens[i], want[i]);
+}
+
+#define CHECK_O200K(text, ...) do {                                \
+        const uint32_t w_[] = { __VA_ARGS__ };                     \
+        check_split_o200k((text), w_, sizeof(w_) / sizeof(w_[0])); \
+    } while (0)
+
+Test(pretokenize, o200k_name)
+{
+    cr_assert_eq(oc_pretok_type_from_name("gpt-4o"), OC_PRETOK_O200K);
+    cr_assert_eq(oc_pretok_type_from_name("o200k"), OC_PRETOK_O200K);
+}
+
+Test(pretokenize, o200k_case_splits)
+{
+    CHECK_O200K("HelloWorld", 5, 5);
+    CHECK_O200K("camelCase ALLCAPS", 5, 4, 8);
+    CHECK_O200K("HTTPServer", 10);
+    CHECK_O200K("it's I'LL", 4, 5);
+}
+
+Test(pretokenize, o200k_digits_punct_space)
+{
+    CHECK_O200K("x=12345", 1, 1, 3, 2);
+    CHECK_O200K("a/b\n\n", 1, 2, 2);
+    CHECK_O200K("  end", 1, 4);
+    CHECK_O200K("ok!!\n/x", 2, 4, 1);
+}
+
