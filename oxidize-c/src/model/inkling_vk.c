@@ -361,7 +361,7 @@ static OcError gmodel_alloc(GModel *g, const char *what)
 static bool supported(const OcInklingModel *m)
 {
     if (m->head_dim != 128 || m->n_head / m->n_head_kv > 4 || m->n_rel > 16 || m->n_expert > 256 ||
-        m->n_expert_used > 16 || m->n_conv != 4) return false;
+        m->n_expert_used > 16 || m->n_conv != 4 || m->n_embd % 64 || m->n_ff_exp % 64) return false;
     for (uint32_t il = 0; il < m->n_layer; il++) {
         const OcInkLayer *ly = &m->layers[il];
         const OcInkMat *mats[] = { &ly->wq, &ly->wk, &ly->wv, &ly->wo, &ly->wgate, &ly->wr };
@@ -492,6 +492,7 @@ struct InkGpu {
     uint32_t n_ctx, B, NC, vstride, n_taps, n_pool;
     OcVkBuf  dev, hist, host, ind, kv[OC_INK_MAX_VISITS];
     OcVkBuf  saved[OC_INK_SAVE_SLOTS];       /* ink_gpu_save: rows 0..2 per visit */
+    OcVkBuf  saved_swa[OC_INK_SAVE_SLOTS];   /* [swa visits][K, V][n_swa][KV]     */
     uint64_t kc[OC_INK_MAX_VISITS], vc[OC_INK_MAX_VISITS];
     uint32_t cap[OC_INK_MAX_VISITS];
     uint64_t cur, inp_sa, in3, q, kx, vx, kxc, vxc, ac, r, gt, sink, kdyn, vdyn, o, a, xm, msg, gl;
@@ -537,7 +538,7 @@ void ink_gpu_free(InkGpu *s)
     OcVk *vk = s->vk;
     oc_vk_buf_free(vk, &s->dev);
     oc_vk_buf_free(vk, &s->hist);
-    for (int i = 0; i < OC_INK_SAVE_SLOTS; i++) oc_vk_buf_free(vk, &s->saved[i]);
+    for (int i = 0; i < OC_INK_SAVE_SLOTS; i++) { oc_vk_buf_free(vk, &s->saved[i]); oc_vk_buf_free(vk, &s->saved_swa[i]); }
     oc_vk_buf_free(vk, &s->host);
     oc_vk_buf_free(vk, &s->ind);
     for (int i = 0; i < OC_INK_MAX_VISITS; i++) oc_vk_buf_free(vk, &s->kv[i]);
@@ -1038,16 +1039,42 @@ static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0
     mark(s, GP_RES);
 }
 
-OcError ink_gpu_save(InkGpu *s, uint32_t keep, uint32_t slot)
+/* The sliding-window K/V rows before position pos, which later positions
+ * overwrite in the ring: copied into buf ([swa visits][K, V][n_swa][KV]) on
+ * save, back into the cache on restore. */
+static void d_swa_window(InkGpu *s, uint64_t buf, uint32_t pos, bool save)
 {
-    const uint32_t nv = s->m->n_visits, row3 = 3 * s->NC;
+    const OcInklingModel *m = s->m;
+    const uint32_t KV = m->n_head_kv * m->head_dim, W = m->n_swa, n = pos < W ? pos : W;
+    for (uint32_t vi = 0; vi < m->n_visits; vi++) {
+        if (!m->layers[m->visit_layer[vi]].swa) continue;
+        const uint32_t cap = s->cap[vi], r0 = (pos - n) % cap, n1 = n < cap - r0 ? n : cap - r0;
+        for (int h = 0; h < 2; h++, buf += F4((uint64_t)W * KV))
+            for (int k = 0; k < 2; k++) {
+                const uint32_t rows = k ? n - n1 : n1;
+                const uint64_t c = (h ? s->vc[vi] : s->kc[vi]) + (k ? 0 : F4((uint64_t)r0 * KV));
+                const uint64_t b = buf + (k ? F4((uint64_t)n1 * KV) : 0);
+                if (rows) d_copy(s, save ? b : c, save ? c : b, rows, KV);
+            }
+    }
+}
+
+OcError ink_gpu_save(InkGpu *s, uint32_t keep, uint32_t slot, uint32_t pos)
+{
+    const OcInklingModel *m = s->m;
+    const uint32_t nv = m->n_visits, row3 = 3 * s->NC;
     if (keep && s->last_big) {
         if (keep != s->last_n) return OC_ERR_INVALID_ARG;
         keep = 3;
     }
+    uint64_t n_swa_visits = 0;
+    for (uint32_t vi = 0; vi < nv; vi++) n_swa_visits += m->layers[m->visit_layer[vi]].swa;
+    const size_t swa_bytes = F4(n_swa_visits * 2 * m->n_swa * m->n_head_kv * m->head_dim);
     OcError e = OC_OK;
-    OcVkBuf *sv = &s->saved[slot];
+    OcVkBuf *sv = &s->saved[slot], *sw = &s->saved_swa[slot];
     if (!sv->impl) e = oc_vk_buf_new(s->vk, F4((uint64_t)nv * row3), OC_VK_MEM_DEVICE, sv);
+    if (e == OC_OK && swa_bytes && !sw->impl)
+        e = ram_ok(s->vk, swa_bytes, "a prompt-cache slot") ? oc_vk_buf_new(s->vk, swa_bytes, OC_VK_MEM_DEVICE, sw) : OC_ERR_OOM;
     if (e == OC_OK) e = oc_vk_begin(s->vk);
     if (e != OC_OK) return e;
     if (keep) {
@@ -1056,17 +1083,19 @@ OcError ink_gpu_save(InkGpu *s, uint32_t keep, uint32_t slot)
         BAR();
     }
     d_ew(s, sv->addr, s->hist.addr, 0, nv, row3, row3, s->vstride, 0, 0);
+    if (swa_bytes) d_swa_window(s, sw->addr, pos, true);
     return oc_vk_submit(s->vk);
 }
 
-OcError ink_gpu_restore(InkGpu *s, uint32_t slot)
+OcError ink_gpu_restore(InkGpu *s, uint32_t slot, uint32_t pos)
 {
-    const OcVkBuf *sv = &s->saved[slot];
+    const OcVkBuf *sv = &s->saved[slot], *sw = &s->saved_swa[slot];
     if (!sv->impl) return OC_ERR_INVALID_ARG;
     const uint32_t nv = s->m->n_visits, row3 = 3 * s->NC;
     const OcError e = oc_vk_begin(s->vk);
     if (e != OC_OK) return e;
     d_ew(s, s->hist.addr, sv->addr, 0, nv, row3, s->vstride, row3, 0, 0);
+    if (sw->impl) d_swa_window(s, sw->addr, pos, false);
     return oc_vk_submit(s->vk);
 }
 
@@ -1460,14 +1489,14 @@ OcError ink_gpu_forward(InkGpu *g, const uint32_t *tokens, size_t n, uint32_t po
     return OC_ERR_BACKEND;
 }
 
-OcError ink_gpu_save(InkGpu *g, uint32_t keep, uint32_t slot)
+OcError ink_gpu_save(InkGpu *g, uint32_t keep, uint32_t slot, uint32_t pos)
 {
-    (void)g; (void)keep; (void)slot;
+    (void)g; (void)keep; (void)slot; (void)pos;
     return OC_ERR_BACKEND;
 }
-OcError ink_gpu_restore(InkGpu *g, uint32_t slot)
+OcError ink_gpu_restore(InkGpu *g, uint32_t slot, uint32_t pos)
 {
-    (void)g; (void)slot;
+    (void)g; (void)slot; (void)pos;
     return OC_ERR_BACKEND;
 }
 

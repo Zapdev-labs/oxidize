@@ -1637,6 +1637,14 @@ static void ink_threads(const OcCliContext *ctx);
  * GPU with --gpu and with the DSpark drafter given by --draft. */
 static OcError cli_serve_inkling(OcCliContext *ctx)
 {
+    if (!(ctx->effort >= 0.0f && ctx->effort <= 0.99f)) {
+        cli_error("--effort must be in [0, 0.99]");
+        return OC_ERR_INVALID_ARG;
+    }
+    if (ctx->api_key == NULL && strcmp(ctx->host, "127.0.0.1") != 0 && strcmp(ctx->host, "localhost") != 0 &&
+        strcmp(ctx->host, "::1") != 0)
+        fprintf(stderr, "warning: serving on %s without --api-key; anyone who can reach this port can use the model\n",
+                ctx->host);
     ink_threads(ctx);
     OcInklingModel m;
     progress(ctx, "loading model: %s", ctx->model_path);
@@ -1658,7 +1666,9 @@ static OcError cli_serve_inkling(OcCliContext *ctx)
     }
     if (ctx->gpu) {
         e = oc_inkling_gpu_compiled() ? oc_inkling_gpu_load(&m) : OC_ERR_BACKEND;
-        if (e != OC_OK) cli_error("GPU upload failed (%s); --gpu needs the Vulkan build (make vulkan)", oc_error_msg(e));
+        if (e != OC_OK)
+            cli_error("GPU upload failed (%s)%s", oc_error_msg(e),
+                      oc_inkling_gpu_compiled() ? "" : "; --gpu needs the Vulkan build (make vulkan)");
     }
     OcMiddleware mw;
     uint32_t mw_enabled = OC_MW_METRICS | OC_MW_AUDIT;

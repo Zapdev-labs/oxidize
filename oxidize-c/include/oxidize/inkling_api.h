@@ -43,6 +43,8 @@ typedef enum {
     OC_INK_PART_TOOL_CALL, /* a whole tool call: text = name, args = arguments (JSON) */
 } OcInklingPartKind;
 
+/* args: a tool call's arguments as a NUL-terminated JSON object, NULL for
+ * other parts; valid only during the callback, so copy it to keep it. */
 typedef void (*OcInklingPartCb)(OcInklingPartKind kind, const char *text, size_t len, const char *args, void *user);
 
 /* Splits the generated text into parts as it arrives. push takes the text

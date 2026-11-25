@@ -245,6 +245,7 @@ static bool render_tool_call(Buf *out, OcArena *a, const OcJson *msg, const OcJs
 {
     const OcJson *fn = jget(tc, "function"), *name = jget(fn, "name");
     if (!is_str(name)) { *err = "tool call function name must be a string"; return false; }
+    if (strstr(name->string, "<|")) { *err = "names must not contain control tokens"; return false; }
     const OcJson *mname = jget(msg, "name");
     if (truthy(mname) && !str_is(mname, name->string)) { *err = "assistant name does not match its tool call"; return false; }
     const OcJson *args = jget(fn, "arguments");
@@ -309,6 +310,11 @@ static bool render_message(Buf *out, OcArena *a, const OcJson *msgs, const OcJso
         b_str(&header, name->string);
     }
     if (header.oom) { *err = "out of memory"; return false; }
+    if (strstr(header.p + strlen(rtok), "<|")) {
+        free(header.p);
+        *err = "names must not contain control tokens";
+        return false;
+    }
 
     const OcJson *rc = jget(m, "reasoning_content"), *content = jget(m, "content"), *calls = jget(m, "tool_calls");
     bool ok = true;
@@ -758,7 +764,7 @@ static void handle_chat(Server *srv, const OcHttpRequest *req, int *status, cons
     b_fmt(&usage, "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%u,\"total_tokens\":%zu,"
                   "\"prompt_tokens_details\":{\"cached_tokens\":%zu}}", n_ids, g.n_out, n_ids + g.n_out, cached);
     Buf out = { 0 };
-    if (ge != OC_OK && !g.n_out) {
+    if (ge != OC_OK) {
         char *ej = error_json(oc_error_msg(ge), "server_error");
         if (stream) {
             b_str(&out, "data: ");
@@ -817,7 +823,7 @@ static void handler(const OcHttpRequest *req, int *status, const char **ctype, c
 {
     Server *srv = user;
     OcRequestContext rctx = { req->method, req->path, req->auth_header, req->client_ip };
-    if (srv->o.mw) {
+    if (srv->o.mw && req->stream_write == NULL) {
         const int reject = oc_middleware_process_request(srv->o.mw, &rctx);
         if (reject) {
             respond(status, ctype, body, body_len, reject,
