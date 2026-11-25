@@ -486,6 +486,10 @@ struct OcInklingSession {
 
     uint32_t max_batch;
     InkGpu  *gpu;                            /* forward on the GPU when set  */
+
+    bool     saved[OC_INK_SAVE_SLOTS];       /* oc_inkling_session_save      */
+    uint32_t saved_pos[OC_INK_SAVE_SLOTS];
+    float   *saved_hist[OC_INK_SAVE_SLOTS];  /* CPU: [n_visits][3][n_ch]     */
 };
 
 static size_t kv_row(const OcInklingModel *m) { return (size_t)m->n_head_kv * m->head_dim; }
@@ -549,6 +553,7 @@ void oc_inkling_session_free(OcInklingSession *s)
     prof_report();
     ink_gpu_free(s->gpu);
     for (int i = 0; i < OC_INK_MAX_VISITS; i++) { free(s->k[i]); free(s->v[i]); free(s->hist[i]); }
+    for (int i = 0; i < OC_INK_SAVE_SLOTS; i++) free(s->saved_hist[i]);
     float *bufs[] = { s->cur, s->inp_sa, s->in3, s->q, s->kx, s->vx, s->r, s->g, s->sink, s->kdyn,
                       s->vdyn, s->o, s->a, s->xm, s->router, s->gu, s->act, s->dn, s->mixed, s->msg,
                       s->tmp, s->prelude, s->bank_out, s->taps, s->gain, s->forget };
@@ -615,6 +620,44 @@ static void commit_conv(OcInklingSession *s)
     for (uint32_t vi = 0; vi < s->m->n_visits; vi++)
         memmove(s->hist[vi], s->hist[vi] + (size_t)s->keep * s->n_ch, 3 * s->n_ch * sizeof(float));
     s->keep = 0;
+}
+
+OcError oc_inkling_session_save(OcInklingSession *s, uint32_t slot)
+{
+    if (slot >= OC_INK_SAVE_SLOTS) return OC_ERR_INVALID_ARG;
+    if (s->gpu) {
+        const OcError e = ink_gpu_save(s->gpu, s->keep, slot);
+        if (e != OC_OK) return e;
+    } else {
+        commit_conv(s);
+        const size_t row3 = 3 * s->n_ch;
+        if (!s->saved_hist[slot]) s->saved_hist[slot] = malloc((size_t)s->m->n_visits * row3 * sizeof(float));
+        if (!s->saved_hist[slot]) return OC_ERR_OOM;
+        for (uint32_t vi = 0; vi < s->m->n_visits; vi++)
+            memcpy(s->saved_hist[slot] + vi * row3, s->hist[vi], row3 * sizeof(float));
+    }
+    s->keep = 0;
+    s->last_n = 0;
+    s->saved[slot] = true;
+    s->saved_pos[slot] = s->n_past;
+    return OC_OK;
+}
+
+OcError oc_inkling_session_restore(OcInklingSession *s, uint32_t slot)
+{
+    if (slot >= OC_INK_SAVE_SLOTS || !s->saved[slot]) return OC_ERR_INVALID_ARG;
+    if (s->gpu) {
+        const OcError e = ink_gpu_restore(s->gpu, slot);
+        if (e != OC_OK) return e;
+    } else {
+        const size_t row3 = 3 * s->n_ch;
+        for (uint32_t vi = 0; vi < s->m->n_visits; vi++)
+            memcpy(s->hist[vi], s->saved_hist[slot] + vi * row3, row3 * sizeof(float));
+    }
+    s->keep = 0;
+    s->last_n = 0;
+    s->n_past = s->saved_pos[slot];
+    return OC_OK;
 }
 
 OcError oc_inkling_rollback(OcInklingSession *s, size_t n_keep)

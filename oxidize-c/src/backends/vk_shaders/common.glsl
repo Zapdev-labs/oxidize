@@ -73,6 +73,7 @@ float situ(float g, float u, float beta, float lbeta)
 #define POST_NONE    0u
 #define POST_SITU    1u
 #define POST_SOFTCAP 2u
+#define POST_SITU_Q  3u
 
 /* Push block of the NVFP4 matmul kernels (nvfp4_mm, nvfp4_mv).
  *   y[c][r] = gscale[mat] * sum_k W[mat][r][k] * A[cidx[c]][k]
@@ -88,4 +89,5 @@ float situ(float g, float u, float beta, float lbeta)
         uint rows, cols, n, y_stride; \
         uint aq_stride, ad_stride, post, ff; \
         float beta, lbeta, cap, pad; \
+        uint64_t yd; \
     } p;

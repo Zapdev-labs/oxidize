@@ -12,7 +12,7 @@
 #define QMAX 4u
 #define NP (QMAX * SMAX + 1u)
 layout(local_size_x = 256) in;
-layout(push_constant) uniform P { uint64_t args, cur, query, out_, part; uint n_blk, nq, n, E, nsplit, phase; } p;
+layout(push_constant) uniform P { uint64_t args, cur, query, out_, part; uint n_blk, nq, n, E, nsplit, phase, ostride, orep; } p;
 shared float red_s[8][NP];
 shared float w_s[QMAX][SMAX];
 
@@ -79,7 +79,7 @@ void main()
         if (qi < p.nq) {
             float o = 0.0;
             [[unroll]] for (uint k = 0; k < SMAX; k++) if (k < S) o += w_s[qi][k] * v[k];
-            F32(p.out_ + (uint64_t(qi) * p.n + t) * p.E * 4u).v[i] = o;
+            for (uint r = 0; r < p.orep; r++) F32(p.out_ + (uint64_t(qi + r) * p.ostride + uint64_t(t) * p.E) * 4u).v[i] = o;
         }
     }
 }

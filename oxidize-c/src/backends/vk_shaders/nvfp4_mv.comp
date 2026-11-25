@@ -1,15 +1,25 @@
 #version 460
-/* NVFP4 x int8 matvec for up to NV columns (decode / small verify). Eight
- * lanes share a row and split its K blocks; a workgroup covers 32 rows and
- * stages the columns' activations in shared memory, KMAX values of K at a
- * time; KMAX shrinks with NV so that several workgroups share a CU. KMAX is
- * a multiple of 512, so lane l always takes the blocks b = l (mod 8) in
- * increasing order and a column's result does not depend on NV. Same push block and post-ops as nvfp4_mm; with SITU a workgroup
- * covers 32 gate rows and the matching up rows. */
+/* NVFP4 x int8 matvec for up to NV columns (decode / small verify). LPR
+ * lanes share a row and split its K blocks (eight, four with SITU); each
+ * cluster of LPR lanes owns RPT rows (r, r + 256 / LPR, ...): two for one
+ * column without SITU, where it keeps twice the loads in flight, else one.
+ * The workgroup stages the columns' activations in shared memory, KMAX
+ * values of K at a time; KMAX shrinks with NV so that several workgroups
+ * share a CU. KMAX is a multiple of 512, so lane l always takes the blocks
+ * b = l (mod LPR) in increasing order, and the block sums are accumulated
+ * without contraction, so a column's result does not depend on NV or RPT.
+ * Same push block and post-ops as nvfp4_mm; with SITU a workgroup covers 64
+ * gate rows and the matching up rows, and POST_SITU_Q quantizes each
+ * column's 64 outputs as one quant_act block into the int8 rows at y
+ * (stride y_stride bytes) and the scales at yd. */
 #include "common.glsl"
 #extension GL_KHR_shader_subgroup_clustered : require
 layout(constant_id = 0) const uint NV = 1u;
 layout(constant_id = 1) const uint SITU = 0u;
+const uint LPR = SITU != 0u ? 4u : 8u;
+const uint CL = 256u / LPR;                         /* lane clusters per workgroup */
+const uint RPT = NV == 1u && SITU == 0u ? 2u : 1u;
+const uint RPW = CL * RPT;
 const uint KMAX = NV > 2u ? 2048u : 4096u;
 const uint KB = KMAX / 64u;
 layout(local_size_x = 256) in;
@@ -17,6 +27,8 @@ MM_PUSH
 
 shared uvec4 Aq[NV * KMAX / 16u];
 shared float Ad[NV * KB];
+shared float qv[NV][64];
+shared float qd[NV];
 
 /* lb: the block's index within the staged chunk */
 void block_dot(uvec4 q0, uvec4 q1, uint sw, uint lb, uint count, inout float acc[NV])
@@ -27,34 +39,54 @@ void block_dot(uvec4 q0, uvec4 q1, uint sw, uint lb, uint count, inout float acc
     [[unroll]] for (uint c = 0; c < NV; c++) {
         if (c < count) {
             const uint a = (c * KB + lb) * 4u;
-            const float bs = float(dot16(w0, Aq[a])) * ws.x + float(dot16(w1, Aq[a + 1u])) * ws.y +
-                             float(dot16(w2, Aq[a + 2u])) * ws.z + float(dot16(w3, Aq[a + 3u])) * ws.w;
-            acc[c] += bs * Ad[c * KB + lb];
+            precise float bs = float(dot16(w0, Aq[a])) * ws.x + float(dot16(w1, Aq[a + 1u])) * ws.y +
+                               float(dot16(w2, Aq[a + 2u])) * ws.z + float(dot16(w3, Aq[a + 3u])) * ws.w;
+            precise float t = acc[c] + bs * Ad[c * KB + lb];
+            acc[c] = t;
         }
     }
 }
 
-/* Blocks [b0, b1) of a row, two per step, both loads issued before either
- * is used. */
-void row_dot(UV4 WQ, U32 WS, uint row, uint nb, uint b0, uint b1, uint lane, uint count, inout float acc[NV])
+/* Blocks [b0, b1) of the cluster's first nrow rows (row0 + CL r), two blocks
+ * per row and step, every load of a step issued before any is used. */
+void row_dot(UV4 WQ, U32 WS, uint row0, uint nrow, uint nb, uint b0, uint b1, uint lane, uint count,
+             inout float acc[RPT][NV])
 {
     uint b = b0 + lane;
-    for (; b + 8u < b1; b += 16u) {
-        const uint bi = row * nb + b, bj = bi + 8u;
-        const uvec4 q0 = WQ.v[bi * 2u], q1 = WQ.v[bi * 2u + 1u], r0 = WQ.v[bj * 2u], r1 = WQ.v[bj * 2u + 1u];
-        const uint si = WS.v[bi], sj = WS.v[bj];
-        block_dot(q0, q1, si, b - b0, count, acc);
-        block_dot(r0, r1, sj, b + 8u - b0, count, acc);
+    for (; b + LPR < b1; b += 2u * LPR) {
+        uvec4 q0[RPT], q1[RPT], r0[RPT], r1[RPT];
+        uint si[RPT], sj[RPT];
+        [[unroll]] for (uint r = 0; r < RPT; r++) {
+            if (r < nrow) {
+                const uint bi = (row0 + CL * r) * nb + b, bj = bi + LPR;
+                q0[r] = WQ.v[bi * 2u]; q1[r] = WQ.v[bi * 2u + 1u]; r0[r] = WQ.v[bj * 2u]; r1[r] = WQ.v[bj * 2u + 1u];
+                si[r] = WS.v[bi]; sj[r] = WS.v[bj];
+            }
+        }
+        [[unroll]] for (uint r = 0; r < RPT; r++) {
+            if (r < nrow) {
+                block_dot(q0[r], q1[r], si[r], b - b0, count, acc[r]);
+                block_dot(r0[r], r1[r], sj[r], b + LPR - b0, count, acc[r]);
+            }
+        }
     }
     if (b < b1) {
-        const uint bi = row * nb + b;
-        block_dot(WQ.v[bi * 2u], WQ.v[bi * 2u + 1u], WS.v[bi], b - b0, count, acc);
+        uvec4 q0[RPT], q1[RPT];
+        uint si[RPT];
+        [[unroll]] for (uint r = 0; r < RPT; r++) {
+            if (r < nrow) {
+                const uint bi = (row0 + CL * r) * nb + b;
+                q0[r] = WQ.v[bi * 2u]; q1[r] = WQ.v[bi * 2u + 1u]; si[r] = WS.v[bi];
+            }
+        }
+        [[unroll]] for (uint r = 0; r < RPT; r++)
+            if (r < nrow) block_dot(q0[r], q1[r], si[r], b - b0, count, acc[r]);
     }
 }
 
 void main()
 {
-    const uint tid = gl_LocalInvocationID.x, lane = tid & 7u;
+    const uint tid = gl_LocalInvocationID.x, lane = tid % LPR;
     uint mat = 0u, first = 0u, count = p.n;
     if (p.items != 0) {
         const ivec4 it = IV4(p.items).v[gl_WorkGroupID.y];
@@ -66,10 +98,13 @@ void main()
     UV4 WQ = UV4(wbase);
     U32 WS = U32(wbase + uint64_t(p.rows) * nb * 32u);
     const float gs = p.gscale != 0 ? F32(p.gscale).v[mat] : 1.0;
-    const uint row = gl_WorkGroupID.x * 32u + (tid >> 3);
-    const bool ok = row < (SITU != 0u ? p.ff : p.rows);
-    float acc[NV], acc2[NV];
-    [[unroll]] for (uint c = 0; c < NV; c++) { acc[c] = 0.0; acc2[c] = 0.0; }
+    const uint row = gl_WorkGroupID.x * RPW + tid / LPR;
+    const uint R = SITU != 0u ? p.ff : p.rows;
+    uint nrow = 0u;
+    [[unroll]] for (uint r = 0; r < RPT; r++) if (row + CL * r < R) nrow = r + 1u;
+    float acc[RPT][NV], acc2[RPT][NV];
+    [[unroll]] for (uint r = 0; r < RPT; r++)
+        [[unroll]] for (uint c = 0; c < NV; c++) { acc[r][c] = 0.0; acc2[r][c] = 0.0; }
     for (uint c0 = 0; c0 < nb; c0 += KB) {
         const uint cn = min(KB, nb - c0);
         if (c0 > 0u) barrier();
@@ -84,22 +119,53 @@ void main()
             Ad[c * KB + b] = F32(p.ad).v[arow * p.ad_stride + c0 + b];
         }
         barrier();
-        if (ok) {
-            row_dot(WQ, WS, row, nb, c0, c0 + cn, lane, count, acc);
-            if (SITU != 0u) row_dot(WQ, WS, p.ff + row, nb, c0, c0 + cn, lane, count, acc2);
+        if (nrow > 0u) {
+            row_dot(WQ, WS, row, nrow, nb, c0, c0 + cn, lane, count, acc);
+            if (SITU != 0u) row_dot(WQ, WS, p.ff + row, nrow, nb, c0, c0 + cn, lane, count, acc2);
         }
     }
-    [[unroll]] for (uint c = 0; c < NV; c++) {
-        acc[c] = subgroupClusteredAdd(acc[c], 8u);
-        if (SITU != 0u) acc2[c] = subgroupClusteredAdd(acc2[c], 8u);
+    [[unroll]] for (uint r = 0; r < RPT; r++) {
+        [[unroll]] for (uint c = 0; c < NV; c++) {
+            if (SITU != 0u) {
+                acc[r][c] = subgroupClusteredAdd(acc[r][c], 4u);
+                acc2[r][c] = subgroupClusteredAdd(acc2[r][c], 4u);
+            } else {
+                acc[r][c] = subgroupClusteredAdd(acc[r][c], 8u);
+            }
+        }
     }
-    if (!ok || lane != 0u) return;
+    if (SITU != 0u && p.post == POST_SITU_Q) {
+        /* rows [x * 64, x * 64 + 64) are one quant block of each pair row */
+        if (lane == 0u)
+            [[unroll]] for (uint r = 0; r < RPT; r++)
+                [[unroll]] for (uint c = 0; c < NV; c++)
+                    qv[c][tid / LPR + CL * r] = r < nrow && c < count ? situ(acc[r][c] * gs, acc2[r][c] * gs, p.beta, p.lbeta) : 0.0;
+        barrier();
+        if (tid < count) {
+            float amax = 0.0;
+            for (uint i = 0; i < 64u; i++) amax = max(amax, abs(qv[tid][i]));
+            qd[tid] = amax / 127.0;
+        }
+        barrier();
+        const uint c = tid >> 4, i = tid & 15u;
+        if (c >= count) return;
+        const float d = qd[c], id = d > 0.0 ? 1.0 / d : 0.0;
+        const uint blk = gl_WorkGroupID.x;
+        const vec4 x = vec4(qv[c][i * 4u], qv[c][i * 4u + 1u], qv[c][i * 4u + 2u], qv[c][i * 4u + 3u]);
+        U32(p.y).v[((first + c) * p.y_stride + blk * 64u) / 4u + i] = uint(pack32(i8vec4(ivec4(roundEven(x * id)))));
+        if (i == 0u) F32(p.yd).v[(first + c) * (p.y_stride / 64u) + blk] = d;
+        return;
+    }
+    if (nrow == 0u || lane != 0u) return;
     F32 Y = F32(p.y);
-    [[unroll]] for (uint c = 0; c < NV; c++) {
-        if (c >= count) break;
-        float v = acc[c] * gs;
-        if (SITU != 0u) v = situ(v, acc2[c] * gs, p.beta, p.lbeta);
-        else if (p.post == POST_SOFTCAP) v = p.cap * tanh_s(v / p.cap);
-        Y.v[(first + c) * p.y_stride + row] = v;
+    [[unroll]] for (uint r = 0; r < RPT; r++) {
+        if (r >= nrow) break;
+        [[unroll]] for (uint c = 0; c < NV; c++) {
+            if (c >= count) break;
+            float v = acc[r][c] * gs;
+            if (SITU != 0u) v = situ(v, acc2[r][c] * gs, p.beta, p.lbeta);
+            else if (p.post == POST_SOFTCAP) v = p.cap * tanh_s(v / p.cap);
+            Y.v[(first + c) * p.y_stride + row + CL * r] = v;
+        }
     }
 }

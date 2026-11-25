@@ -28,6 +28,11 @@ OcError ink_gpu_forward(InkGpu *g, const uint32_t *tokens, size_t n, uint32_t po
                         float *logits, bool all_logits, const int32_t *tap_visits, uint32_t n_taps,
                         float *taps);
 
+/* Commit the previous call's first keep inputs (as the next forward would)
+ * and save rows 0..2 of every visit's conv history in a slot
+ * (< OC_INK_SAVE_SLOTS); restore copies them back. */
+OcError ink_gpu_save(InkGpu *g, uint32_t keep, uint32_t slot);
+OcError ink_gpu_restore(InkGpu *g, uint32_t slot);
 
 /* ─── DSpark drafter on the GPU ─────────────────────────────────────────── */
 

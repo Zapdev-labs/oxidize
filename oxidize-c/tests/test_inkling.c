@@ -137,3 +137,33 @@ Test(inkling, rejects_bad_arguments, .init = setup, .fini = teardown)
     cr_assert(oc_inkling_gguf_is_inkling(g_gguf));
     oc_inkling_free(&m);
 }
+
+/* Prompt caching: save after a prompt, run more tokens, restore and feed a
+ * different continuation; the logits must match a fresh session fed the
+ * prompt and that continuation. */
+Test(inkling, save_restore_matches_fresh_prefill, .init = setup, .fini = teardown)
+{
+    OcInklingModel m;
+    cr_assert_eq(oc_inkling_load(g_gguf, &m), OC_OK);
+    const size_t V = m.n_vocab;
+    OcInklingSession *a = NULL, *b = NULL;
+    cr_assert_eq(oc_inkling_session_new(&m, 64, NULL, 0, &a), OC_OK);
+    cr_assert_eq(oc_inkling_session_new(&m, 64, NULL, 0, &b), OC_OK);
+    float *la = malloc(V * sizeof(float)), *lb = malloc(V * sizeof(float));
+    cr_assert(la && lb);
+    cr_assert_eq(oc_inkling_session_restore(a, 1), OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_inkling_forward(a, TOKS, 12, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_session_save(a, 1), OC_OK);
+    cr_assert_eq(oc_inkling_forward(a, TOKS + 20, 5, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_forward(a, TOKS + 30, 1, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_session_restore(a, 1), OC_OK);
+    cr_assert_eq(oc_inkling_session_pos(a), 12u);
+    cr_assert_eq(oc_inkling_forward(a, TOKS + 12, 6, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_forward(b, TOKS, 18, lb, false), OC_OK);
+    cr_assert_lt(max_diff(la, lb, V), 1e-4f);
+    free(la);
+    free(lb);
+    oc_inkling_session_free(a);
+    oc_inkling_session_free(b);
+    oc_inkling_free(&m);
+}

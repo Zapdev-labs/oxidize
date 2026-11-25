@@ -2,7 +2,8 @@
 /* Depth attention, one workgroup per token: S = n_blk + 1 rms-normed sources
  * (pool blocks with precomputed 1/rms, then cur) mixed by nq <= 4 learned
  * queries. args holds uint64 src[16] then uint64 rstd[16]; src rows are
- * [n][E]. out is [nq][n][E]. Every source row is read once for all the
+ * [n][E]. Output qi of token t goes to out + (qi + r) * ostride + t * E for
+ * r < orep. Every source row is read once for all the
  * query dots and once for all the mixes. */
 #include "common.glsl"
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -10,7 +11,7 @@
 #define QMAX 4u
 #define WG 256u
 layout(local_size_x = 256) in;
-layout(push_constant) uniform P { uint64_t args, cur, query, out_; uint n_blk, nq, n, E; } p;
+layout(push_constant) uniform P { uint64_t args, cur, query, out_; uint n_blk, nq, n, E, ostride, orep; } p;
 shared float red_s[16][QMAX * SMAX + 1u];
 shared float w_s[QMAX][SMAX];
 
@@ -76,6 +77,6 @@ void main()
             }
         }
         [[unroll]] for (uint qi = 0; qi < QMAX; qi++)
-            if (qi < p.nq) F32(p.out_ + (uint64_t(qi) * p.n + t) * p.E * 4u).v[i] = o[qi];
+            if (qi < p.nq) for (uint r = 0; r < p.orep; r++) F32(p.out_ + (uint64_t(qi + r) * p.ostride + uint64_t(t) * p.E) * 4u).v[i] = o[qi];
     }
 }

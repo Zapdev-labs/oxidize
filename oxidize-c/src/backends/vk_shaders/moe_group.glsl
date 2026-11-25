@@ -4,10 +4,11 @@
  * Each expert's pairs are cut into pieces of up to 128: a piece of more than
  * MOE_SMALL (8) pairs becomes one item {expert, first pair, count, 0} of the
  * big list (nvfp4_mm), a smaller one an item of the small list (nvfp4_mv). ind receives four indirect dispatch commands: big gate_up,
- * big down, small gate_up, small down. Run by a single thread. */
+ * big down, small gate_up, small down, with gx_* the row groups of each.
+ * Run by a single thread. */
 #define MOE_SMALL 8u
 
-void build_items(uint NE, uint64_t items, uint64_t items_s, uint64_t ind, uint gx_gu, uint gx_dn_b, uint gx_dn_s)
+void build_items(uint NE, uint64_t items, uint64_t items_s, uint64_t ind, uint gx_gu, uint gx_dn, uint gx_gu_s, uint gx_dn_s)
 {
     uint acc = 0u, nb = 0u, ns = 0u;
     IV4 IT = IV4(items), IS = IV4(items_s);
@@ -25,7 +26,7 @@ void build_items(uint NE, uint64_t items, uint64_t items_s, uint64_t ind, uint g
     }
     U32 I = U32(ind);
     I.v[0] = gx_gu;   I.v[1] = nb;  I.v[2] = 1u;
-    I.v[3] = gx_dn_b; I.v[4] = nb;  I.v[5] = 1u;
-    I.v[6] = gx_gu;   I.v[7] = ns;  I.v[8] = 1u;
+    I.v[3] = gx_dn;   I.v[4] = nb;  I.v[5] = 1u;
+    I.v[6] = gx_gu_s; I.v[7] = ns;  I.v[8] = 1u;
     I.v[9] = gx_dn_s; I.v[10] = ns; I.v[11] = 1u;
 }
