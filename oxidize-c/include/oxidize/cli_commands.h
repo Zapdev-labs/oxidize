@@ -191,6 +191,7 @@ typedef struct OcCliContext {
     const char        *lm_type;
     const char        *draft_type;
     float              effort;
+    const char        *expert_type;     /* --expert-type nvfp4|nv3 (inkling-convert) */
 } OcCliContext;
 
 /* Default cap on the KV context when --ctx is not given.

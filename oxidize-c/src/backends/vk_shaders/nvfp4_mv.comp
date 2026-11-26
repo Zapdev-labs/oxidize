@@ -16,9 +16,10 @@
 #extension GL_KHR_shader_subgroup_clustered : require
 layout(constant_id = 0) const uint NV = 1u;
 layout(constant_id = 1) const uint SITU = 0u;
-const uint LPR = SITU != 0u ? 4u : 8u;
+layout(constant_id = 2) const uint FMT = 0u;        /* 0 NVFP4, 1 NV3 (nv3.h) */
+const uint LPR = 8u >> (SITU * (1u - FMT));          /* SITU, FMT are 0 or 1 */
 const uint CL = 256u / LPR;                         /* lane clusters per workgroup */
-const uint RPT = NV == 1u && SITU == 0u ? 2u : 1u;
+const uint RPT = 1u + (((NV == 1u ? 1u : 0u) * (1u - SITU)) | (SITU * FMT));
 const uint RPW = CL * RPT;
 const uint KMAX = NV > 2u ? 2048u : 4096u;
 const uint KB = KMAX / 64u;
@@ -34,8 +35,12 @@ shared float qd[NV];
 void block_dot(uvec4 q0, uvec4 q1, uint sw, uint lb, uint count, inout float acc[NV])
 {
     const vec4 ws = ue4m3h4(sw);
-    const uvec4 w0 = e2m1_sub(q0.x, q0.y), w1 = e2m1_sub(q0.z, q0.w);
-    const uvec4 w2 = e2m1_sub(q1.x, q1.y), w3 = e2m1_sub(q1.z, q1.w);
+    /* NVFP4: q0, q1 the block's nibble words; NV3: q0 its magnitude words,
+     * q1.xy its sign words */
+    const uvec4 w0 = FMT == 1u ? nv3_sub(q0.x, q1.x) : e2m1_sub(q0.x, q0.y);
+    const uvec4 w1 = FMT == 1u ? nv3_sub(q0.y, q1.x >> 4) : e2m1_sub(q0.z, q0.w);
+    const uvec4 w2 = FMT == 1u ? nv3_sub(q0.z, q1.y) : e2m1_sub(q1.x, q1.y);
+    const uvec4 w3 = FMT == 1u ? nv3_sub(q0.w, q1.y >> 4) : e2m1_sub(q1.z, q1.w);
     [[unroll]] for (uint c = 0; c < NV; c++) {
         if (c < count) {
             const uint a = (c * KB + lb) * 4u;
@@ -47,9 +52,21 @@ void block_dot(uvec4 q0, uvec4 q1, uint sw, uint lb, uint count, inout float acc
     }
 }
 
+/* The weight words of block bi, in the layout block_dot takes. */
+void load_block(UV4 WQ, UV2 WH, uint bi, out uvec4 q0, out uvec4 q1)
+{
+    if (FMT == 1u) {
+        q0 = WQ.v[bi];
+        q1 = uvec4(WH.v[bi], 0u, 0u);
+    } else {
+        q0 = WQ.v[bi * 2u];
+        q1 = WQ.v[bi * 2u + 1u];
+    }
+}
+
 /* Blocks [b0, b1) of the cluster's first nrow rows (row0 + CL r), two blocks
  * per row and step, every load of a step issued before any is used. */
-void row_dot(UV4 WQ, U32 WS, uint row0, uint nrow, uint nb, uint b0, uint b1, uint lane, uint count,
+void row_dot(UV4 WQ, UV2 WH, U32 WS, uint row0, uint nrow, uint nb, uint b0, uint b1, uint lane, uint count,
              inout float acc[RPT][NV])
 {
     uint b = b0 + lane;
@@ -59,7 +76,8 @@ void row_dot(UV4 WQ, U32 WS, uint row0, uint nrow, uint nb, uint b0, uint b1, ui
         [[unroll]] for (uint r = 0; r < RPT; r++) {
             if (r < nrow) {
                 const uint bi = (row0 + CL * r) * nb + b, bj = bi + LPR;
-                q0[r] = WQ.v[bi * 2u]; q1[r] = WQ.v[bi * 2u + 1u]; r0[r] = WQ.v[bj * 2u]; r1[r] = WQ.v[bj * 2u + 1u];
+                load_block(WQ, WH, bi, q0[r], q1[r]);
+                load_block(WQ, WH, bj, r0[r], r1[r]);
                 si[r] = WS.v[bi]; sj[r] = WS.v[bj];
             }
         }
@@ -76,7 +94,8 @@ void row_dot(UV4 WQ, U32 WS, uint row0, uint nrow, uint nb, uint b0, uint b1, ui
         [[unroll]] for (uint r = 0; r < RPT; r++) {
             if (r < nrow) {
                 const uint bi = (row0 + CL * r) * nb + b;
-                q0[r] = WQ.v[bi * 2u]; q1[r] = WQ.v[bi * 2u + 1u]; si[r] = WS.v[bi];
+                load_block(WQ, WH, bi, q0[r], q1[r]);
+                si[r] = WS.v[bi];
             }
         }
         [[unroll]] for (uint r = 0; r < RPT; r++)
@@ -96,7 +115,8 @@ void main()
     const uint nb = p.cols / 64u;
     const uint64_t wbase = p.w + uint64_t(mat) * p.mat_bytes;
     UV4 WQ = UV4(wbase);
-    U32 WS = U32(wbase + uint64_t(p.rows) * nb * 32u);
+    UV2 WH = UV2(wbase + uint64_t(p.rows) * nb * 16u);
+    U32 WS = U32(wbase + uint64_t(p.rows) * nb * (FMT == 1u ? 24u : 32u));
     const float gs = p.gscale != 0 ? F32(p.gscale).v[mat] : 1.0;
     const uint row = gl_WorkGroupID.x * RPW + tid / LPR;
     const uint R = SITU != 0u ? p.ff : p.rows;
@@ -120,15 +140,18 @@ void main()
         }
         barrier();
         if (nrow > 0u) {
-            row_dot(WQ, WS, row, nrow, nb, c0, c0 + cn, lane, count, acc);
-            if (SITU != 0u) row_dot(WQ, WS, p.ff + row, nrow, nb, c0, c0 + cn, lane, count, acc2);
+            row_dot(WQ, WH, WS, row, nrow, nb, c0, c0 + cn, lane, count, acc);
+            if (SITU != 0u) row_dot(WQ, WH, WS, p.ff + row, nrow, nb, c0, c0 + cn, lane, count, acc2);
         }
     }
     [[unroll]] for (uint r = 0; r < RPT; r++) {
         [[unroll]] for (uint c = 0; c < NV; c++) {
-            if (SITU != 0u) {
+            if (SITU != 0u && LPR == 4u) {
                 acc[r][c] = subgroupClusteredAdd(acc[r][c], 4u);
                 acc2[r][c] = subgroupClusteredAdd(acc2[r][c], 4u);
+            } else if (SITU != 0u) {
+                acc[r][c] = subgroupClusteredAdd(acc[r][c], 8u);
+                acc2[r][c] = subgroupClusteredAdd(acc2[r][c], 8u);
             } else {
                 acc[r][c] = subgroupClusteredAdd(acc[r][c], 8u);
             }

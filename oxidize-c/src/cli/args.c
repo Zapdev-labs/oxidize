@@ -439,6 +439,7 @@ bool oc_cli_context_parse(int argc, char **argv, OcCliContext *ctx)
         else if (match(arg, "--draft"))          { ctx->draft_path = val; i++; }
         else if (match(arg, "--draft-out"))      { ctx->draft_out = val; i++; }
         else if (match(arg, "--lm-type"))        { ctx->lm_type = val; i++; }
+        else if (match(arg, "--expert-type"))    { ctx->expert_type = val; i++; }
         else if (match(arg, "--draft-type"))     { ctx->draft_type = val; i++; }
         else if (match(arg, "--draft-max"))      { ctx->draft_max = (uint32_t)strtoul(val, NULL, 10); i++; }
         else if (match(arg, "--p-min"))          { ctx->draft_p_min = strtof(val, NULL); i++; }

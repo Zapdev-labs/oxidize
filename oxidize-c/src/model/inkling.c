@@ -12,6 +12,7 @@
 
 #include "inkling_gpu.h"
 #include "oxidize/log.h"
+#include "oxidize/nv3.h"
 #include "oxidize/nvfp4.h"
 #include "oxidize/parallel.h"
 
@@ -23,6 +24,7 @@
 #define GT_F32   0u
 #define GT_BF16  30u
 #define GT_NVFP4 40u
+#define GT_NV3   OC_NV3_GGML_TYPE
 
 /* ─── profiler (OC_INK_PROF=1) ─────────────────────────────────────────── */
 
@@ -92,6 +94,14 @@ typedef struct {
     float             post_arg;
 } Seg;
 
+/* NVFP4 or NV3 rows [r0, r1) of one matrix at w against n quantized vectors. */
+static void gemm_rows(uint32_t gtype, const uint8_t *w, size_t cols, size_t r0, size_t r1, float gs,
+                      const OcNvfp4Act *acts, size_t n, float *y, size_t y_stride)
+{
+    if (gtype == GT_NV3) oc_nv3_gemm_rows(w, cols, r0, r1, gs, acts, n, y, y_stride);
+    else oc_nvfp4_gemm_rows(w, cols, r0, r1, gs, acts, n, y, y_stride);
+}
+
 typedef struct {
     Seg    seg[MAX_SEGS];
     size_t first[MAX_SEGS + 1];   /* first work item of each segment */
@@ -110,9 +120,9 @@ static void lin_rows(size_t b, size_t e, size_t tid, void *u)
         const uint8_t *base = W->data + g->mat * W->mat_bytes;
         size_t r0 = (it - j->first[si]) * LIN_CHUNK, r1 = r0 + LIN_CHUNK;
         if (r1 > W->rows) r1 = W->rows;
-        if (W->gtype == GT_NVFP4) {
+        if (W->gtype == GT_NVFP4 || W->gtype == GT_NV3) {
             float gs = W->scale ? W->scale[g->mat] : 1.0f;
-            oc_nvfp4_gemm_rows(base, W->cols, r0, r1, gs, g->acts, j->n, g->y, g->y_stride);
+            gemm_rows(W->gtype, base, W->cols, r0, r1, gs, g->acts, j->n, g->y, g->y_stride);
         } else {
             for (size_t r = r0; r < r1; r++) {
                 const uint8_t *row = base + r * W->row_bytes;
@@ -181,7 +191,7 @@ static void quant_acts(ActBuf *a, const float *x, size_t x_stride, size_t n, siz
 static void linear(const OcInkMat *W, size_t mat, const float *x, size_t x_stride, size_t n,
                    float *y, size_t y_stride, ActBuf *ab)
 {
-    if (W->gtype == GT_NVFP4) quant_acts(ab, x, x_stride, n, W->cols);
+    if (W->gtype == GT_NVFP4 || W->gtype == GT_NV3) quant_acts(ab, x, x_stride, n, W->cols);
     LinJob j = { .n = n };
     lin_add(&j, W, mat, x, x_stride, ab->acts, y, y_stride);
     lin_run(&j);
@@ -230,17 +240,33 @@ static bool load_mat(const OcGgufMmappedFile *map, const char *name, OcInkMat *o
     out->cols = (size_t)ti->dims[0];
     out->rows = ti->n_dims > 1 ? (size_t)ti->dims[1] : 1;
     out->n_mat = ti->n_dims > 2 ? (size_t)ti->dims[2] : 1;
-    out->row_bytes = out->gtype == GT_NVFP4 ? oc_nvfp4_row_bytes(out->cols)
-                   : out->gtype == GT_BF16 ? out->cols * 2 : out->cols * 4;
-    out->mat_bytes = out->row_bytes * out->rows;
-    if (out->gtype == GT_NVFP4) {
+    const bool blocked = out->gtype == GT_NVFP4 || out->gtype == GT_NV3;
+    if (blocked && out->cols % 64) return false;
+    if (out->gtype == GT_NVFP4) out->row_bytes = oc_nvfp4_row_bytes(out->cols);
+    else if (out->gtype == GT_NV3) out->row_bytes = oc_nv3_row_bytes(out->cols);
+    else if (__builtin_mul_overflow(out->cols, out->gtype == GT_BF16 ? 2 : 4, &out->row_bytes)) return false;
+    if (__builtin_mul_overflow(out->row_bytes, out->rows, &out->mat_bytes)) return false;
+    /* the GGUF reader cannot size every type (NV3), so check the extent here */
+    if (ti->shard_index >= map->n_shards || !out->data) return false;
+    const OcGgufShard *sh = &map->shards[ti->shard_index];
+    size_t total = 0;
+    if (__builtin_mul_overflow(out->mat_bytes, out->n_mat, &total) || (const uint8_t *)out->data < sh->bytes ||
+        total > sh->len - (size_t)((const uint8_t *)out->data - sh->bytes))
+        return false;
+    if (blocked) {
         char sn[160];
         size_t len = strlen(name);
         snprintf(sn, sizeof sn, "%.*s.scale", (int)(len > 7 ? len - 7 : len), name);
         const OcGgufTensorInfo *si = oc_gguf_map_tensor_get(map, sn);
-        out->scale = si ? (const float *)oc_gguf_map_tensor_data(map, si) : NULL;
+        if (si) {
+            /* one F32 global scale per matrix (the reader checked its extent) */
+            uint64_t n = 1;
+            for (uint32_t d = 0; d < si->n_dims; d++) n *= si->dims[d];
+            if (si->ggml_type != GT_F32 || n < out->n_mat) return false;
+            out->scale = (const float *)oc_gguf_map_tensor_data(map, si);
+        }
     }
-    return out->gtype == GT_NVFP4 || out->gtype == GT_BF16 || out->gtype == GT_F32;
+    return out->gtype == GT_NVFP4 || out->gtype == GT_NV3 || out->gtype == GT_BF16 || out->gtype == GT_F32;
 }
 
 OcError oc_ink_load_mat(const OcGgufMmappedFile *map, const char *name, OcInkMat *out, bool required);
@@ -420,7 +446,8 @@ OcError oc_inkling_load(const char *path, OcInklingModel *m)
         }
         if (L.err == OC_OK && (ly->gate_up.rows != 2 * m->n_ff_exp || ly->gate_up.cols != m->n_embd ||
                                ly->down.cols != m->n_ff_exp || ly->gate_up.n_mat != m->n_expert ||
-                               ly->gate_up.gtype != GT_NVFP4 || ly->down.gtype != GT_NVFP4)) {
+                               (ly->gate_up.gtype != GT_NVFP4 && ly->gate_up.gtype != GT_NV3) ||
+                               (ly->down.gtype != GT_NVFP4 && ly->down.gtype != GT_NV3))) {
             oc_log(OC_LOG_ERROR, "inkling: layer %u expert tensors have unexpected shape or type", i);
             L.err = OC_ERR_FORMAT;
         }
@@ -1070,12 +1097,13 @@ static void moe_items(size_t b, size_t e, size_t tid, void *u)
         const float gs = j->W->scale ? j->W->scale[ex] : 1.0f;
         float *out = j->out + (size_t)first * j->out_stride;
         if (!j->act) {
-            oc_nvfp4_gemm_rows(w, j->W->cols, r0, r1, gs, j->acts + first, (size_t)cnt, out, j->out_stride);
+            gemm_rows(j->W->gtype, w, j->W->cols, r0, r1, gs, j->acts + first, (size_t)cnt, out, j->out_stride);
             continue;
         }
         if (r1 > j->ff) r1 = j->ff;
-        oc_nvfp4_gemm_rows(w, j->W->cols, r0, r1, gs, j->acts + first, (size_t)cnt, out, j->out_stride);
-        oc_nvfp4_gemm_rows(w, j->W->cols, j->ff + r0, j->ff + r1, gs, j->acts + first, (size_t)cnt, out, j->out_stride);
+        gemm_rows(j->W->gtype, w, j->W->cols, r0, r1, gs, j->acts + first, (size_t)cnt, out, j->out_stride);
+        gemm_rows(j->W->gtype, w, j->W->cols, j->ff + r0, j->ff + r1, gs, j->acts + first, (size_t)cnt, out,
+                  j->out_stride);
         for (int32_t p = 0; p < cnt; p++) {
             const float *gu = out + (size_t)p * j->out_stride;
             ink_situ(gu + r0, gu + j->ff + r0, j->act + (size_t)(first + p) * j->ff + r0, r1 - r0, j->beta, j->lbeta);
@@ -1370,7 +1398,7 @@ OcError oc_inkling_forward(OcInklingSession *s, const uint32_t *tokens, size_t n
 
     if (logits) {
         const size_t t0 = all_logits ? 0 : n - 1, nl = all_logits ? n : 1;
-        if (m->output.gtype == GT_NVFP4) quant_acts(&s->ab, s->xm + t0 * E, E, nl, E);
+        if (m->output.gtype == GT_NVFP4 || m->output.gtype == GT_NV3) quant_acts(&s->ab, s->xm + t0 * E, E, nl, E);
         LinJob oj = { .n = nl };
         lin_add(&oj, &m->output, 0, s->xm + t0 * E, E, s->ab.acts, logits, m->n_vocab);
         if (m->softcap > 0.0f) {

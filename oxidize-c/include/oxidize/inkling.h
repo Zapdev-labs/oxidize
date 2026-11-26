@@ -44,6 +44,7 @@ extern "C" {
 typedef enum {
     OC_INK_W_NVFP4 = 0,
     OC_INK_W_BF16  = 1,
+    OC_INK_W_NV3   = 2,   /* 3-bit NV3 (nv3.h): experts and target attention; not the lm head or drafter */
 } OcInklingWeightType;
 
 typedef struct OcInklingConvertOptions {
@@ -53,6 +54,7 @@ typedef struct OcInklingConvertOptions {
     OcInklingWeightType dense_type;   /* attention projections                     */
     OcInklingWeightType output_type;  /* lm head                                    */
     OcInklingWeightType draft_type;   /* drafter projections                        */
+    OcInklingWeightType expert_type;  /* experts: NVFP4 (copied) or NV3             */
 } OcInklingConvertOptions;
 
 OcError oc_inkling_convert(const OcInklingConvertOptions *opt);

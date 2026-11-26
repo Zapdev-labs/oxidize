@@ -5,6 +5,7 @@
  * columns tc + 16 * 0..7; lrow keeps a thread's gate and up rows together
  * for POST_SITU. Column groups past the item's count are skipped. */
 #include "common.glsl"
+layout(constant_id = 0) const uint FMT = 0u;        /* 0 NVFP4, 1 NV3 (nv3.h) */
 #define BM 64u
 #define BN 128u
 layout(local_size_x = 256) in;
@@ -34,9 +35,12 @@ void main()
     const uint nb = p.cols / 64u;
     const uint64_t wbase = p.w + uint64_t(mat) * p.mat_bytes;
     UV4 WQ = UV4(wbase);
-    U32 WS = U32(wbase + uint64_t(p.rows) * nb * 32u);
+    UV2 WM = UV2(wbase);                                 /* NV3 magnitude words, two subs per uvec2 */
+    U32 WG = U32(wbase + uint64_t(p.rows) * nb * 16u);   /* NV3 sign words */
+    U32 WS = U32(wbase + uint64_t(p.rows) * nb * (FMT == 1u ? 24u : 32u));
 
-    /* loader: threads 0..127 one nibble uvec4, 128..191 one scale word,
+    /* loader: threads 0..127 half a block of weights (NVFP4: one nibble
+     * uvec4; NV3: two magnitude words and a sign word), 128..191 one scale word,
      * 0..255 two activation uvec4, 0..127 one activation scale */
     const uint lr = tid < 128u ? tid >> 1 : tid - 128u;
     uint gr = rbase + lr;
@@ -54,7 +58,11 @@ void main()
     const uint drow = !dok ? 0u : p.cidx != 0 ? uint(I32(p.cidx).v[first + tid]) : first + tid;
 
     uvec4 wreg = uvec4(0u); uvec4 areg[2]; float dreg = 0.0;
-    if (wok) { if (tid < 128u) wreg = WQ.v[woff]; else wreg.x = WS.v[woff]; }
+    if (wok) {
+        if (tid >= 128u) wreg.x = WS.v[woff];
+        else if (FMT == 1u) wreg = uvec4(WM.v[woff], WG.v[woff], 0u);
+        else wreg = WQ.v[woff];
+    }
     [[unroll]] for (uint j = 0; j < 2u; j++) areg[j] = aok[j] ? UV4(p.aq).v[aoff[j]] : uvec4(0u);
     if (dok) dreg = F32(p.ad).v[drow * p.ad_stride];
 
@@ -65,8 +73,8 @@ void main()
         barrier();
         if (tid < 128u) {
             const uint s0 = (tid & 1u) * 2u;
-            Ws[s0 * BM + lr] = e2m1_sub(wreg.x, wreg.y);
-            Ws[(s0 + 1u) * BM + lr] = e2m1_sub(wreg.z, wreg.w);
+            Ws[s0 * BM + lr] = FMT == 1u ? nv3_sub(wreg.x, wreg.z) : e2m1_sub(wreg.x, wreg.y);
+            Ws[(s0 + 1u) * BM + lr] = FMT == 1u ? nv3_sub(wreg.y, wreg.z >> 4) : e2m1_sub(wreg.z, wreg.w);
         } else if (tid < 192u) {
             Wsc[lr] = ue4m3h4(wreg.x);
         }
@@ -77,7 +85,11 @@ void main()
         if (tid < BN) Ad[tid] = dreg;
         barrier();
         if (kb + 1u < nb) {
-            if (wok) { if (tid < 128u) wreg = WQ.v[woff + (kb + 1u) * 2u]; else wreg.x = WS.v[woff + kb + 1u]; }
+            if (wok) {
+                if (tid >= 128u) wreg.x = WS.v[woff + kb + 1u];
+                else if (FMT == 1u) wreg = uvec4(WM.v[woff + (kb + 1u) * 2u], WG.v[woff + (kb + 1u) * 2u], 0u);
+                else wreg = WQ.v[woff + (kb + 1u) * 2u];
+            }
             [[unroll]] for (uint j = 0; j < 2u; j++) areg[j] = aok[j] ? UV4(p.aq).v[aoff[j] + (kb + 1u) * 4u] : uvec4(0u);
             if (dok) dreg = F32(p.ad).v[drow * p.ad_stride + kb + 1u];
         }
