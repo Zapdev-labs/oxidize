@@ -319,7 +319,7 @@ static void upload(GModel *g, const OcInklingModel *m)
  * kernel kill other processes to make room. */
 static bool ram_ok(const OcVk *vk, size_t bytes, const char *what)
 {
-    if (!oc_vk_info(vk)->integrated) return true;
+    if (!oc_vk_info(vk)->integrated || getenv("OC_INK_NO_RAM_CHECK")) return true;
     FILE *f = fopen("/proc/meminfo", "r");
     if (!f) return true;
     char line[128];
@@ -329,8 +329,8 @@ static bool ram_ok(const OcVk *vk, size_t bytes, const char *what)
     fclose(f);
     const double avail = (double)kb * 1024.0, need = (double)bytes + (double)(1u << 30);
     if (kb == 0 || need <= avail) return true;
-    oc_log(OC_LOG_ERROR, "inkling-gpu: %s needs %.2f GB but only %.2f GB of RAM is available (1 GB is kept free)", what,
-           (double)bytes / 1e9, avail / 1e9);
+    oc_log(OC_LOG_ERROR, "inkling-gpu: %s needs %.2f GB but only %.2f GB of RAM is available (1 GB is kept free; "
+           "OC_INK_NO_RAM_CHECK=1 skips this check)", what, (double)bytes / 1e9, avail / 1e9);
     return false;
 }
 
