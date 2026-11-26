@@ -59,6 +59,7 @@ typedef struct OcInklingReply {
     size_t          name_len, name_cap, json_len, json_cap;
     uint32_t        n_tool_calls;
     bool            done;
+    bool            tools_as_text;  /* tool_choice "none": tool bodies are content */
 } OcInklingReply;
 
 void oc_inkling_reply_init(OcInklingReply *r, OcInklingPartCb cb, void *user);

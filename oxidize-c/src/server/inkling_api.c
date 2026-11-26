@@ -308,7 +308,7 @@ static bool render_tool_call(Buf *out, OcArena *a, const OcJson *msg, const OcJs
 /* Assistant tool calls by id (then message order), for naming tool results. */
 typedef struct {
     const char *id, *name;
-    size_t      ord;
+    size_t      ord, msg;   /* order of the call, index of its message */
 } CallIdx;
 
 static int call_cmp(const void *a, const void *b)
@@ -318,7 +318,8 @@ static int call_cmp(const void *a, const void *b)
     return c ? c : (x->ord > y->ord) - (x->ord < y->ord);
 }
 
-static bool render_message(Buf *out, OcArena *a, const CallIdx *idx, size_t nidx, const OcJson *m, const char **err)
+static bool render_message(Buf *out, OcArena *a, const CallIdx *idx, size_t nidx, size_t mi, const OcJson *m,
+                           const char **err)
 {
     const OcJson *role = jget(m, "role");
     const char *rtok = is_str(role) ? role_token(role->string) : NULL;
@@ -333,8 +334,8 @@ static bool render_message(Buf *out, OcArena *a, const CallIdx *idx, size_t nidx
         if (truthy(name) && is_str(name)) {
             b_text(&header, name->string, strlen(name->string));
         } else if (truthy(id) && is_str(id) && nidx) {
-            /* every earlier call with this id, in order (as the template does) */
-            const CallIdx key = { id->string, NULL, 0 };
+            /* every call with this id in an earlier message, in order */
+            const CallIdx key = { id->string, NULL, 0, 0 };
             size_t lo = 0, hi = nidx;
             while (lo < hi) {
                 const size_t mid = (lo + hi) / 2;
@@ -342,7 +343,7 @@ static bool render_message(Buf *out, OcArena *a, const CallIdx *idx, size_t nidx
                 else hi = mid;
             }
             for (; lo < nidx && !strcmp(idx[lo].id, id->string); lo++)
-                b_text(&header, idx[lo].name, strlen(idx[lo].name));
+                if (idx[lo].msg < mi) b_text(&header, idx[lo].name, strlen(idx[lo].name));
         }
     } else if (assistant && truthy(name) && is_str(name)) {
         b_text(&header, name->string, strlen(name->string));
@@ -415,16 +416,19 @@ static char *chat_render(const char *request_json, size_t len, float default_eff
     CallIdx *idx = nidx ? malloc(nidx * sizeof *idx) : NULL;
     if (nidx && !idx) { oc_arena_free(a); *err = oom; return NULL; }
     nidx = 0;
-    for (const OcJson *p = msgs->child; p; p = p->next) {
+    size_t mi = 0;
+    for (const OcJson *p = msgs->child; p; p = p->next, mi++) {
         if (!str_is(jget(p, "role"), "assistant") || !truthy(jget(p, "tool_calls"))) continue;
         for (const OcJson *tc = jget(p, "tool_calls")->child; tc; tc = tc->next) {
             const OcJson *tid = jget(tc, "id"), *tname = jget(jget(tc, "function"), "name");
-            if (is_str(tid) && is_str(tname)) idx[nidx] = (CallIdx){ tid->string, tname->string, nidx }, nidx++;
+            if (is_str(tid) && is_str(tname)) idx[nidx] = (CallIdx){ tid->string, tname->string, nidx, mi }, nidx++;
         }
     }
+    mi = 0;
     if (nidx) qsort(idx, nidx, sizeof *idx, call_cmp);
     bool ok = render_effort(&effort, jget(root, "reasoning_effort"), default_effort, err);
-    if (ok && truthy(tools)) {
+    /* tool_choice "none": the model is not told about the tools */
+    if (ok && truthy(tools) && !str_is(jget(root, "tool_choice"), "none")) {
         if (tools->type != OC_JSON_ARRAY) { *err = "'tools' must be a list"; ok = false; }
         else ok = render_tools(&out, tools, err);
     }
@@ -435,7 +439,7 @@ static char *chat_render(const char *request_json, size_t len, float default_eff
             effort_done = true;
             if (prefix) break;
         }
-        ok = render_message(&out, a, idx, nidx, m, err);
+        ok = render_message(&out, a, idx, nidx, mi++, m, err);
     }
     if (ok && !effort_done) b_put(&out, effort.p, effort.n);
     free(effort.p);
@@ -492,7 +496,8 @@ static void emit_tool(OcInklingReply *r)
     const char *body = r->json ? r->json : "";
     OcArena *a = oc_arena_new(r->json_len * 2 + 1024);
     OcJson *root = NULL;
-    const bool parsed = a && oc_json_parse(body, r->json_len, a, &root) == OC_OK && root->type == OC_JSON_OBJECT;
+    const bool parsed = !r->tools_as_text && a && oc_json_parse(body, r->json_len, a, &root) == OC_OK &&
+                        root->type == OC_JSON_OBJECT;
     const char *name = r->name ? r->name : "";
     size_t nlen = r->name_len;
     while (nlen && (name[0] == ' ' || name[0] == '\n')) { name++; nlen--; }
@@ -802,7 +807,7 @@ typedef struct {
     uint32_t *ids;
     size_t    n_ids, n_sys;
     uint32_t  max_tokens;
-    bool      usage_chunk;
+    bool      usage_chunk, no_tools;
 } Prep;
 
 /* false with *code / *msg set for a request to refuse */
@@ -823,8 +828,24 @@ static bool prepare(const Server *srv, const OcHttpRequest *req, Prep *pr, int *
     }
     pr->max_tokens = srv->o.n_predict;
     const OcJson *mt = jget(root, "max_completion_tokens");
-    if (!mt || mt->type != OC_JSON_NUMBER) mt = jget(root, "max_tokens");
-    if (mt && mt->type == OC_JSON_NUMBER && mt->number >= 1) pr->max_tokens = (uint32_t)fmin(mt->number, 1e9);
+    if (!mt || mt->type == OC_JSON_NULL) mt = jget(root, "max_tokens");
+    if (mt && mt->type != OC_JSON_NULL) {
+        if (mt->type != OC_JSON_NUMBER || mt->number < 1 || mt->number != floor(mt->number)) {
+            oc_arena_free(a);
+            free(prompt);
+            *msg = "max_tokens / max_completion_tokens must be a positive integer";
+            return false;
+        }
+        pr->max_tokens = (uint32_t)fmin(mt->number, 1e9);
+    }
+    const OcJson *tc = jget(root, "tool_choice");
+    if (truthy(tc) && !str_is(tc, "auto") && !str_is(tc, "none")) {
+        oc_arena_free(a);
+        free(prompt);
+        *msg = "tool_choice must be \"auto\" or \"none\" on this server";
+        return false;
+    }
+    pr->no_tools = str_is(tc, "none");
     pr->usage_chunk = request_bool(jget(root, "stream_options"), "include_usage");
     oc_arena_free(a);
 
@@ -868,10 +889,13 @@ static void handle_chat(Server *srv, const OcHttpRequest *req, int *status, cons
 
     Gen g = { .srv = srv, .req = req, .stream = stream, .connected = true, .ids = ids, .n_ids = n_ids, .first = true,
               .usage_null = stream && usage_chunk };
-    snprintf(g.id, sizeof g.id, "chatcmpl-%lx%04x", (unsigned long)time(NULL), (unsigned)(rand() & 0xffff));
+    /* unique within the process (the counter) and across restarts (the time) */
+    static _Atomic unsigned long seq;
+    snprintf(g.id, sizeof g.id, "chatcmpl-%lx%lx", (unsigned long)time(NULL), (unsigned long)++seq);
     g.created = (long)time(NULL);
     oc_streaming_detok_init(&g.sd, &srv->m->tok);
     oc_inkling_reply_init(&g.reply, on_part, &g);
+    g.reply.tools_as_text = pr.no_tools;
 
     pthread_mutex_lock(&srv->lock);
     size_t reuse = 0;
@@ -910,14 +934,15 @@ static void handle_chat(Server *srv, const OcHttpRequest *req, int *status, cons
     /* the token budget ran out before the model ended its reply */
     const bool cut = !g.reply.done && g.n_out >= max_tokens;
     if (g.reply.state == RS_TOOL && !g.reply.done) {
+        /* a call that never reached its closing marker is not a call */
         g.reply.done = true;
-        emit_tool(&g.reply);
+        on_part(OC_INK_PART_CONTENT, g.reply.json ? g.reply.json : "", g.reply.json_len, NULL, &g);
     }
     oc_log(OC_LOG_INFO, "inkling-api: %zu prompt tokens (%zu cached), %u generated, prefill %.1f tok/s, decode %.1f tok/s",
            n_ids, cached, g.n_out, st.t_prefill > 0 ? (double)st.n_prompt / st.t_prefill : 0.0,
            st.t_decode > 0 && st.emitted > 1 ? (double)(st.emitted - 1) / st.t_decode : 0.0);
 
-    const char *finish = cut ? "length" : g.reply.n_tool_calls ? "tool_calls" : "stop";
+    const char *finish = g.reply.n_tool_calls ? "tool_calls" : cut ? "length" : "stop";
     Buf usage = { 0 };
     b_fmt(&usage, "\"usage\":{\"prompt_tokens\":%zu,\"completion_tokens\":%u,\"total_tokens\":%zu,"
                   "\"prompt_tokens_details\":{\"cached_tokens\":%zu}}", n_ids, g.n_out, n_ids + g.n_out, cached);
