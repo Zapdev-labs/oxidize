@@ -77,6 +77,7 @@ typedef struct OcInklingServeOptions {
     float         p_min;
     float         effort;     /* default reasoning effort                 */
     OcMiddleware *mw;         /* optional; not owned                      */
+    bool          json;       /* one JSON startup record instead of the banner */
 } OcInklingServeOptions;
 
 /* Serve m (with drafter d, may be NULL) until the process is stopped. With

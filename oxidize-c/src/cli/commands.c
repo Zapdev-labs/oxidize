@@ -558,7 +558,7 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --host HOST           Bind host (default 127.0.0.1)\n"
                "  --port PORT           Bind port (default 8080)\n"
                "  --auto                Apply autotune plan to scheduler/KV\n"
-               "  --prefill-chunk-size N Prefill chunk (overrides plan)\n\n"
+               "  --prefill-chunk-size N Prefill chunk (overrides plan; not used for Inkling)\n\n"
                "With an Inkling-2 GGUF (from inkling-convert) it serves the Inkling chat API\n"
                "(reasoning_content, tool_calls, prompt caching across turns):\n"
                "  --gpu                 Run on the Vulkan forward (make vulkan)\n"
@@ -1689,6 +1689,7 @@ static OcError cli_serve_inkling(OcCliContext *ctx)
             .host = ctx->host, .port = (uint16_t)ctx->port, .model_id = model_id,
             .n_ctx = ctx->n_ctx ? ctx->n_ctx : 32768, .n_predict = 8192, .draft_max = ctx->draft_max,
             .p_min = ctx->draft_p_min, .effort = ctx->effort, .mw = &mw,
+            .json = ctx->output_format == OC_CLI_OUTPUT_JSON,
         };
         e = oc_inkling_serve(&m, have_draft ? &d : NULL, ctx->gpu, &o);
         if (e != OC_OK) cli_error("server failed (%s)", oc_error_msg(e));

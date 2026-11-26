@@ -1071,7 +1071,13 @@ static void d_swa_window(InkGpu *s, uint64_t buf, uint32_t pos, bool save)
                 const uint32_t rows = k ? n - n1 : n1;
                 const uint64_t c = (h ? s->vc[vi] : s->kc[vi]) + (k ? 0 : F4((uint64_t)r0 * KV));
                 const uint64_t b = buf + (k ? F4((uint64_t)n1 * KV) : 0);
-                if (rows) d_copy(s, save ? b : c, save ? c : b, rows, KV);
+                /* at most 65535 x 256 values per copy, the minimum X group limit */
+                const uint32_t step = (uint32_t)(65535u * 256u / KV);
+                for (uint32_t r = 0; r < rows; r += step) {
+                    const uint32_t nr = rows - r < step ? rows - r : step;
+                    const uint64_t cr = c + F4((uint64_t)r * KV), br = b + F4((uint64_t)r * KV);
+                    d_copy(s, save ? br : cr, save ? cr : br, nr, KV);
+                }
             }
     }
 }

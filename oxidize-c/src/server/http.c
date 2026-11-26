@@ -481,6 +481,10 @@ static void *worker_main(void *arg)
                 "\r\n"
                 ": oxidize\n\n",
                 server_extra(srv));
+            /* a client that stops reading fails the stream's writes after
+             * 30 s instead of blocking its producer for good */
+            const struct timeval send_timeout = { .tv_sec = 30 };
+            (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
             atomic_init(&heartbeat.stop, false);
             atomic_init(&heartbeat.disconnected, false);
             pthread_mutex_init(&heartbeat.write_mutex, NULL);
