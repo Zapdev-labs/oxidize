@@ -32,6 +32,7 @@
 #define POST_NONE    0u
 #define POST_SITU    1u
 #define POST_SOFTCAP 2u
+#define POST_SITU_Q  3u
 
 static const uint32_t SPV_QUANT[] =
 #include "../backends/vk_shaders/quant_act.spv.h"
@@ -78,9 +79,6 @@ static const uint32_t SPV_TOPK[] =
 static const uint32_t SPV_GROUP[] =
 #include "../backends/vk_shaders/group.spv.h"
     ;
-static const uint32_t SPV_COMB[] =
-#include "../backends/vk_shaders/combine.spv.h"
-    ;
 static const uint32_t SPV_NORMQ[] =
 #include "../backends/vk_shaders/normq.spv.h"
     ;
@@ -121,14 +119,19 @@ typedef struct {
     uint64_t w, gscale, aq, ad, items, cidx, y, mat_bytes;
     uint32_t rows, cols, n, y_stride, aq_stride, ad_stride, post, ff;
     float    beta, lbeta, cap, pad;
+    uint64_t yd;
 } MmPush;
 typedef struct { uint64_t x, y, w, rs; uint32_t len, xs, ys, pad; float eps, pad2; } NormPush;
 typedef struct { uint64_t y, a, b; uint32_t rows, cols, ys, as, bs, mode; } EwPush;
-typedef struct { uint64_t args, cur, query, out; uint32_t n_blk, nq, n, E; } MixPush;
+typedef struct { uint64_t args, cur, query, out; uint32_t n_blk, nq, n, E, ostride, orep; } MixPush;
 typedef struct { uint64_t x, m, gl, G, F; uint32_t n, E, R, pad; } CtrlPush;
 typedef struct { uint64_t w, x, y; uint32_t rows, cols, xs, ys, bf16; float cap; } LinPush;
 typedef struct { uint64_t w, x, y; uint32_t rows, cols, n, xs, ys, bf16; float cap, pad; } LintPush;
-typedef struct { uint64_t hist, x, y, wT, dyn, res; uint32_t n, C, NC, off, n_heads, hs; float scale, pad; } ConvPush;
+typedef struct {
+    uint64_t hist, x, y, wT, dyn, res, dn, wsel, pair_of;
+    uint32_t n, C, NC, off, n_heads, hs, K, hmax;
+    float    scale, pad;
+} ConvPush;
 typedef struct { uint64_t hist; uint32_t n_visits, NC, vstride, keep; } CommitPush;
 typedef struct {
     uint64_t q, r, kx, vx, qclip, rclip, Kc, Vc;
@@ -140,7 +143,7 @@ typedef struct {
     uint32_t n, pos0, NH, NKV, NR, EXT, cap, swa, n_swa, nsplit, s0;
     float    kscale;
 } AttnPush;
-typedef struct { uint64_t part, sink, g, o; uint32_t NH, NKV, nsplit, QHM; } AcombPush;
+typedef struct { uint64_t part, sink, g, o, q, d; uint32_t NH, NKV, nsplit, QHM; } AcombPush;
 typedef struct { uint64_t state, w1, xn, frnn, tok, joint; uint32_t R, E, i, anchor; } WalkJointPush;
 typedef struct { uint64_t jo, b, state, q, d; uint32_t R, pad; } WalkGatePush;
 typedef struct {
@@ -151,17 +154,16 @@ typedef struct {
 typedef struct { uint64_t logits, bias, sel, wsel; uint32_t NE, K; float rscale, pad; } TopkPush;
 typedef struct {
     uint64_t sel, pair_of, pair_tok, items, items_s, ind;
-    uint32_t n, NE, K, gx_gu, gx_dn_b, gx_dn_s;
+    uint32_t n, NE, K, gx_gu, gx_dn, gx_gu_s, gx_dn_s, pad;
 } GroupPush;
-typedef struct { uint64_t dn, out, wsel, pair_of; uint32_t n, E, K, pad; } CombPush;
 typedef struct { uint64_t x, y, w, q, d; uint32_t len, xs, ys, qs; float eps; uint32_t nmix; float mixw[4]; } NormqPush;
 typedef struct {
     uint64_t logits, bias, wsel, pair_of, pair_tok, items, items_s, ind;
-    uint32_t n, NE, K, gx_gu, gx_dn_b, gx_dn_s;
-    float    rscale, pad;
+    uint32_t n, NE, K, gx_gu, gx_dn, gx_gu_s, gx_dn_s;
+    float    rscale;
 } RoutePush;
 typedef struct { uint64_t w, x, m, y; uint32_t E, R, bf16, pad; float eps, pad2; } CdownPush;
-typedef struct { uint64_t args, cur, query, out, part; uint32_t n_blk, nq, n, E, nsplit, phase; } MixsPush;
+typedef struct { uint64_t args, cur, query, out, part; uint32_t n_blk, nq, n, E, nsplit, phase, ostride, orep; } MixsPush;
 typedef struct { uint64_t x, w, y, inv; uint32_t xs, ys, pos0, ocap, orow0, tmin; float eps, pad; } RopePush;
 typedef struct {
     uint64_t q, K, V, kb, vb, o;
@@ -197,7 +199,7 @@ typedef struct {
     GLayer    L[OC_INK_MAX_LAYERS];
     GMat      output;
     uint64_t  output_norm, output_res_query;
-    OcVkPipe *quant, *mm, *mv[9], *mv_situ[9], *norm, *ew, *mix, *ctrl, *lin, *lint, *conv, *commit, *qk, *attn, *topk, *group, *comb, *normq, *route, *cdown, *mixs, *dsrope, *dsattn, *attnd, *acomb, *walkj, *walkg, *walkp;
+    OcVkPipe *quant, *mm, *mv[9], *mv_situ[9], *norm, *ew, *mix, *ctrl, *lin, *lint, *conv, *commit, *qk, *attn, *topk, *group, *normq, *route, *cdown, *mixs, *dsrope, *dsattn, *attnd, *acomb, *walkj, *walkg, *walkp;
 } GModel;
 
 /* First-fit placement with fixed chunk capacity, identical in both passes. */
@@ -317,7 +319,7 @@ static void upload(GModel *g, const OcInklingModel *m)
  * kernel kill other processes to make room. */
 static bool ram_ok(const OcVk *vk, size_t bytes, const char *what)
 {
-    if (!oc_vk_info(vk)->integrated) return true;
+    if (!oc_vk_info(vk)->integrated || getenv("OC_INK_NO_RAM_CHECK")) return true;
     FILE *f = fopen("/proc/meminfo", "r");
     if (!f) return true;
     char line[128];
@@ -327,8 +329,8 @@ static bool ram_ok(const OcVk *vk, size_t bytes, const char *what)
     fclose(f);
     const double avail = (double)kb * 1024.0, need = (double)bytes + (double)(1u << 30);
     if (kb == 0 || need <= avail) return true;
-    oc_log(OC_LOG_ERROR, "inkling-gpu: %s needs %.2f GB but only %.2f GB of RAM is available (1 GB is kept free)", what,
-           (double)bytes / 1e9, avail / 1e9);
+    oc_log(OC_LOG_ERROR, "inkling-gpu: %s needs %.2f GB but only %.2f GB of RAM is available (1 GB is kept free; "
+           "OC_INK_NO_RAM_CHECK=1 skips this check)", what, (double)bytes / 1e9, avail / 1e9);
     return false;
 }
 
@@ -359,7 +361,9 @@ static OcError gmodel_alloc(GModel *g, const char *what)
 static bool supported(const OcInklingModel *m)
 {
     if (m->head_dim != 128 || m->n_head / m->n_head_kv > 4 || m->n_rel > 16 || m->n_expert > 256 ||
-        m->n_expert_used > 16 || m->n_conv != 4) return false;
+        m->n_expert_used > 16 || m->n_conv != 4 || m->n_embd % 64 || m->n_ff_exp % 64 ||
+        (size_t)m->n_head_kv * m->head_dim > 65536)
+        return false;
     for (uint32_t il = 0; il < m->n_layer; il++) {
         const OcInkLayer *ly = &m->layers[il];
         const OcInkMat *mats[] = { &ly->wq, &ly->wk, &ly->wv, &ly->wo, &ly->wgate, &ly->wr };
@@ -379,7 +383,7 @@ static void gmodel_free(GModel *g)
 {
     if (!g) return;
     OcVkPipe *pp[] = { g->quant, g->mm, g->norm, g->ew, g->mix, g->ctrl, g->lin, g->lint, g->conv, g->commit, g->qk, g->attn,
-                       g->topk, g->group, g->comb, g->normq, g->route, g->cdown, g->mixs, g->dsrope, g->dsattn, g->attnd, g->acomb, g->walkj, g->walkg, g->walkp };
+                       g->topk, g->group, g->normq, g->route, g->cdown, g->mixs, g->dsrope, g->dsattn, g->attnd, g->acomb, g->walkj, g->walkg, g->walkp };
     for (size_t i = 0; i < sizeof pp / sizeof pp[0]; i++) oc_vk_pipe_free(g->vk, pp[i]);
     for (int i = 1; i <= 8; i++) { oc_vk_pipe_free(g->vk, g->mv[i]); oc_vk_pipe_free(g->vk, g->mv_situ[i]); }
     for (uint32_t i = 0; i < MAX_CHUNK; i++) if (g->chunk[i].impl) oc_vk_buf_free(g->vk, &g->chunk[i]);
@@ -423,7 +427,6 @@ OcError ink_gpu_model_load(OcInklingModel *m)
     PIPE(g->attn, SPV_ATTN, AttnPush);
     PIPE(g->topk, SPV_TOPK, TopkPush);
     PIPE(g->group, SPV_GROUP, GroupPush);
-    PIPE(g->comb, SPV_COMB, CombPush);
     PIPE(g->normq, SPV_NORMQ, NormqPush);
     PIPE(g->route, SPV_ROUTE, RoutePush);
     PIPE(g->cdown, SPV_CDOWN, CdownPush);
@@ -462,10 +465,10 @@ void ink_gpu_model_free(OcInklingModel *m)
 
 /* GPU profile (OC_INK_PROF=1): timestamps after barrier-separated phases. */
 enum { GP_MIX, GP_CTRL, GP_NORM, GP_PROJ, GP_CONV, GP_QK, GP_ATTN, GP_WO, GP_RES, GP_ROUTE, GP_GATEUP, GP_DOWN,
-       GP_COMB, GP_HEAD, GP_MISC, GP__N };
+       GP_HEAD, GP_MISC, GP__N };
 static const char *const GP_NAMES[GP__N] = { "depth_mix", "loop_ctrl", "norm+quant", "qkv_proj", "conv", "qk_post",
                                              "attention", "attn_out", "residual", "route", "moe_gate_up",
-                                             "moe_down", "moe_combine", "lm_head", "misc" };
+                                             "moe_down", "lm_head", "misc" };
 #define MAX_MARKS 4096
 
 /* Conv history rows kept per visit beyond the 3 previous inputs: calls of
@@ -490,10 +493,12 @@ struct InkGpu {
     OcVk    *vk;
     uint32_t n_ctx, B, NC, vstride, n_taps, n_pool;
     OcVkBuf  dev, hist, host, ind, kv[OC_INK_MAX_VISITS];
+    OcVkBuf  saved[OC_INK_SAVE_SLOTS];       /* ink_gpu_save: rows 0..2 per visit */
+    OcVkBuf  saved_swa[OC_INK_SAVE_SLOTS];   /* [swa visits][K, V][n_swa][KV]     */
     uint64_t kc[OC_INK_MAX_VISITS], vc[OC_INK_MAX_VISITS];
     uint32_t cap[OC_INK_MAX_VISITS];
-    uint64_t cur, inp_sa, in3, q, kx, vx, kxc, vxc, ac, r, gt, sink, kdyn, vdyn, o, a, xm, mixed, msg, gl;
-    uint64_t prelude, bank_out, mixp, apart, args_dev;
+    uint64_t cur, inp_sa, in3, q, kx, vx, kxc, vxc, ac, r, gt, sink, kdyn, vdyn, o, a, xm, msg, gl;
+    uint64_t prelude, bank_out, mixp, mixp2, apart, args_dev;
     uint64_t pool[N_POOL], pool_rs[N_POOL];
     uint64_t router, sel, wsel, pair_of, pair_tok, items, items_s, act, dn;
     uint64_t aq[3], ad[3], aqo, ado, aqp, adp;
@@ -535,6 +540,7 @@ void ink_gpu_free(InkGpu *s)
     OcVk *vk = s->vk;
     oc_vk_buf_free(vk, &s->dev);
     oc_vk_buf_free(vk, &s->hist);
+    for (int i = 0; i < OC_INK_SAVE_SLOTS; i++) { oc_vk_buf_free(vk, &s->saved[i]); oc_vk_buf_free(vk, &s->saved_swa[i]); }
     oc_vk_buf_free(vk, &s->host);
     oc_vk_buf_free(vk, &s->ind);
     for (int i = 0; i < OC_INK_MAX_VISITS; i++) oc_vk_buf_free(vk, &s->kv[i]);
@@ -584,9 +590,10 @@ OcError ink_gpu_new(const OcInklingModel *m, uint32_t n_ctx, uint32_t n_taps, In
         T(s->kx, B * KV * F); T(s->vx, B * KV * F); T(s->kxc, B * KV * F); T(s->vxc, B * KV * F);
         T(s->ac, B * E * F); T(s->r, B * m->n_head * m->n_rel * F); T(s->gt, B * QD * F);
         T(s->sink, B * m->n_head * F); T(s->kdyn, B * m->n_head_kv * 4 * F); T(s->vdyn, B * m->n_head_kv * 4 * F);
-        T(s->o, B * QD * F); T(s->a, B * E * F); T(s->xm, B * E * F); T(s->mixed, 3 * B * E * F);
+        T(s->o, B * QD * F); T(s->a, B * E * F); T(s->xm, B * E * F);
         T(s->msg, OC_INK_N_CTRL * B * E * F); T(s->gl, 3 * B * R * F);
         T(s->prelude, B * E * F); T(s->bank_out, B * E * F); T(s->mixp, (size_t)MIX_SPLIT * 16 * 72 * F);
+        T(s->mixp2, (size_t)MIX_SPLIT * 16 * 72 * F);
         T(s->apart, (size_t)(ATTN_DEC / ATTN_DTQ) * m->n_head_kv * (n_ctx / ATTN_SHARE + 2) * ATTN_DTQ * 4 * 130 * F); T(s->args_dev, 256 * 1024);
         for (uint32_t i = 0; i < s->n_pool; i++) { T(s->pool[i], B * E * F); T(s->pool_rs[i], B * F); }
         T(s->router, B * NE * F); T(s->sel, B * K * 4); T(s->wsel, B * K * F); T(s->pair_of, B * K * 4); T(s->pair_tok, P * 4);
@@ -679,6 +686,9 @@ static OcError split(InkGpu *s, uint32_t n)
 
 static uint32_t cdiv(size_t a, size_t b) { return (uint32_t)((a + b - 1) / b); }
 
+/* Rows per nvfp4_mv workgroup without SITU: two per lane cluster for one column. */
+static uint32_t mv_rows(uint32_t nv) { return nv == 1 ? 64 : 32; }
+
 static void d_norm(InkGpu *s, uint64_t x, uint64_t y, uint64_t w, uint64_t rs, uint32_t rows, uint32_t len,
                    uint32_t xs, uint32_t ys, float eps)
 {
@@ -731,7 +741,7 @@ static void d_linear(InkGpu *s, const GMat *W, uint64_t x, uint32_t xs, uint64_t
         const MmPush p = { .w = W->a, .gscale = W->scale, .aq = aq, .ad = ad, .y = y, .mat_bytes = W->mat_bytes,
                            .rows = W->rows, .cols = W->cols, .n = n, .y_stride = ys, .aq_stride = W->cols,
                            .ad_stride = W->cols / 64, .post = cap > 0.0f ? POST_SOFTCAP : POST_NONE, .cap = cap };
-        if (n <= 8) oc_vk_dispatch(s->vk, s->g->mv[n], &p, cdiv(W->rows, 32), 1, 1);
+        if (n <= 8) oc_vk_dispatch(s->vk, s->g->mv[n], &p, cdiv(W->rows, mv_rows(n)), 1, 1);
         else oc_vk_dispatch(s->vk, s->g->mm, &p, cdiv(W->rows, 64), cdiv(n, 128), 1);
         return;
     }
@@ -749,25 +759,54 @@ static void d_linear(InkGpu *s, const GMat *W, uint64_t x, uint32_t xs, uint64_t
     }
 }
 
-static void d_mix(InkGpu *s, const uint64_t *blk, const uint64_t *rs, uint32_t n_blk, uint64_t cur, uint32_t n,
-                  uint64_t query, uint32_t nq, uint64_t out)
+/* One depth-attention call. The split kernel (few tokens) runs in two
+ * phases with a barrier between them, so independent mixes are staged with
+ * mix_prep and run phase by phase to share that barrier; the one-workgroup
+ * kernel runs whole in phase 0. Output qi of token t goes to
+ * out + (qi + r) * ostride + t * E for r < orep. */
+typedef struct {
+    bool     ok, split;
+    MixsPush ps;
+    MixPush  pm;
+} MixCall;
+
+static MixCall mix_prep(InkGpu *s, const uint64_t *blk, const uint64_t *rs, uint32_t n_blk, uint64_t cur, uint32_t n,
+                        uint64_t query, uint32_t nq, uint64_t out, uint32_t ostride, uint32_t orep, uint64_t part)
 {
-    if (s->args_used + 256 > s->args_cap) return;
+    MixCall c = { 0 };
+    if (s->args_used + 256 > s->args_cap) return c;
     uint64_t *args = (uint64_t *)(s->h_args + s->args_used);
     const uint64_t aa = s->a_args + s->args_used;
     s->args_used += 256;
     for (uint32_t k = 0; k < n_blk; k++) { args[k] = blk[k]; args[16 + k] = rs[k]; }
     const uint32_t E = s->m->n_embd, ns = cdiv(E, 256);
-    if (n <= MIX_SPLIT && E % ns == 0 && ns <= 16) {
-        MixsPush p = { aa, cur, query, out, s->mixp, n_blk, nq, n, E, ns, 0 };
-        oc_vk_dispatch(s->vk, s->g->mixs, &p, n, ns, 1);
-        BAR();
-        p.phase = 1;
-        oc_vk_dispatch(s->vk, s->g->mixs, &p, n, ns, 1);
-        return;
+    c.ok = true;
+    c.split = n <= MIX_SPLIT && E % ns == 0 && ns <= 16;
+    c.ps = (MixsPush){ aa, cur, query, out, part, n_blk, nq, n, E, ns, 0, ostride, orep };
+    c.pm = (MixPush){ aa, cur, query, out, n_blk, nq, n, E, ostride, orep };
+    return c;
+}
+
+static void mix_run(InkGpu *s, MixCall *c, uint32_t phase)
+{
+    if (!c->ok) return;
+    if (c->split) {
+        c->ps.phase = phase;
+        oc_vk_dispatch(s->vk, s->g->mixs, &c->ps, c->ps.n, c->ps.nsplit, 1);
+    } else if (phase == 0) {
+        oc_vk_dispatch(s->vk, s->g->mix, &c->pm, c->pm.n, 1, 1);
     }
-    const MixPush p = { aa, cur, query, out, n_blk, nq, n, E };
-    oc_vk_dispatch(s->vk, s->g->mix, &p, n, 1, 1);
+}
+
+static void d_mix(InkGpu *s, const uint64_t *blk, const uint64_t *rs, uint32_t n_blk, uint64_t cur, uint32_t n,
+                  uint64_t query, uint32_t nq, uint64_t out)
+{
+    MixCall c = mix_prep(s, blk, rs, n_blk, cur, n, query, nq, out, n * s->m->n_embd, 1, s->mixp);
+    mix_run(s, &c, 0);
+    if (c.split) {
+        BAR();
+        mix_run(s, &c, 1);
+    }
 }
 
 /* cur[k] <- (1 - tanh forget) * cur[k] + tanh gain * msg[k] for the
@@ -795,21 +834,22 @@ static uint64_t hist_at(const InkGpu *s, uint32_t vi, uint32_t row, uint32_t off
     return s->hist.addr + F4((uint64_t)vi * s->vstride + (uint64_t)row * s->NC + off);
 }
 
-/* Short convolution of this call's inputs x into y, and the history update:
+/* Short convolution of this call's inputs into y, and the history update:
  * every input for calls of up to HMAX tokens (rows 3 + t), else the last
- * three (rows 3..5). Both only read history rows 0..2, so they run
- * together. */
+ * three (rows 3..5). The inputs are x, or with comb the MoE combine of the
+ * last d_moe's expert outputs. */
 static void d_conv(InkGpu *s, uint32_t vi, uint32_t off, uint32_t C, uint64_t x, uint64_t y, uint64_t res,
-                   uint32_t n, uint64_t wT, uint64_t dyn, uint32_t n_heads)
+                   uint32_t n, uint64_t wT, uint64_t dyn, uint32_t n_heads, bool comb)
 {
-    const ConvPush p = { hist_at(s, vi, 0, 0), x, y, wT, dyn, res, n, C, s->NC, off, n_heads, dyn ? C / n_heads : C,
+    const ConvPush p = { hist_at(s, vi, 0, 0), x, y, wT, dyn, res, comb ? s->dn : 0, s->wsel, s->pair_of, n, C, s->NC,
+                         off, n_heads, dyn ? C / n_heads : C, s->m->n_expert_used, HMAX,
                          1.0f / sqrtf((float)((dyn ? 2 : 1) * 4 + 1)), 0 };
     oc_vk_dispatch(s->vk, s->g->conv, &p, cdiv((size_t)n * C, 256), 1, 1);
-    if (n <= HMAX) d_ew(s, hist_at(s, vi, 3, off), x, 0, n, C, s->NC, C, 0, 0);
-    else d_ew(s, hist_at(s, vi, 3, off), x + F4((uint64_t)(n - 3) * C), 0, 3, C, s->NC, C, 0, 0);
 }
 
-static void d_moe(InkGpu *s, const OcInkLayer *ly, const GLayer *L, uint64_t x, uint32_t n, uint64_t out)
+/* Routing, gate_up and down of the MoE; the combine runs in the following
+ * d_conv (comb). */
+static void d_moe(InkGpu *s, const GLayer *L, uint64_t x, uint32_t n)
 {
     const OcInklingModel *m = s->m;
     const uint32_t E = m->n_embd, NE = m->n_expert, K = m->n_expert_used, FF = m->n_ff_exp;
@@ -820,14 +860,15 @@ static void d_moe(InkGpu *s, const OcInkLayer *ly, const GLayer *L, uint64_t x, 
     const uint32_t nv = n < 8 ? n : 8;
     if (n <= 16) {
         const RoutePush rp = { s->router, L->router_bias, s->wsel, s->pair_of, s->pair_tok, s->items, s->items_s,
-                               s->ind.addr, n, NE, K, cdiv(FF, 32), cdiv(E, 64), cdiv(E, 32), m->route_scale, 0 };
+                               s->ind.addr, n, NE, K, cdiv(FF, 32), cdiv(E, 64), cdiv(FF, 64), cdiv(E, mv_rows(nv)),
+                               m->route_scale };
         oc_vk_dispatch(s->vk, s->g->route, &rp, 1, 1, 1);
     } else {
         const TopkPush tp = { s->router, L->router_bias, s->sel, s->wsel, NE, K, m->route_scale, 0 };
         oc_vk_dispatch(s->vk, s->g->topk, &tp, n, 1, 1);
         BAR();
         const GroupPush gp = { s->sel, s->pair_of, s->pair_tok, s->items, s->items_s, s->ind.addr, n, NE, K,
-                               cdiv(FF, 32), cdiv(E, 64), cdiv(E, 32) };
+                               cdiv(FF, 32), cdiv(E, 64), cdiv(FF, 64), cdiv(E, mv_rows(nv)), 0 };
         oc_vk_dispatch(s->vk, s->g->group, &gp, 1, 1, 1);
     }
     BAR();
@@ -838,11 +879,19 @@ static void d_moe(InkGpu *s, const OcInkLayer *ly, const GLayer *L, uint64_t x, 
                   .post = POST_SITU, .ff = FF, .beta = m->situ_beta, .lbeta = m->situ_lbeta };
     if (n > 8) oc_vk_dispatch_indirect(s->vk, s->g->mm, &gu, &s->ind, 0);
     gu.items = s->items_s;
+    if (n <= 8) {
+        /* every item on the matvec, which quantizes its own output */
+        gu.post = POST_SITU_Q;
+        gu.y = s->aqp;
+        gu.yd = s->adp;
+    }
     oc_vk_dispatch_indirect(s->vk, s->g->mv_situ[nv], &gu, &s->ind, 24);
     BAR();
     mark(s, GP_GATEUP);
-    d_quant(s, s->act, n * K, FF, FF, s->aqp, s->adp);
-    BAR();
+    if (n > 8) {
+        d_quant(s, s->act, n * K, FF, FF, s->aqp, s->adp);
+        BAR();
+    }
     MmPush dn = { .w = L->down.a, .gscale = L->down.scale, .aq = s->aqp, .ad = s->adp, .items = s->items,
                   .y = s->dn, .mat_bytes = L->down.mat_bytes, .rows = E, .cols = FF, .y_stride = E,
                   .aq_stride = FF, .ad_stride = FF / 64 };
@@ -851,11 +900,6 @@ static void d_moe(InkGpu *s, const OcInkLayer *ly, const GLayer *L, uint64_t x, 
     oc_vk_dispatch_indirect(s->vk, s->g->mv[nv], &dn, &s->ind, 36);
     BAR();
     mark(s, GP_DOWN);
-    const CombPush cp = { s->dn, out, s->wsel, s->pair_of, n, E, K, 0 };
-    oc_vk_dispatch(s->vk, s->g->comb, &cp, cdiv((size_t)n * E, 256), 1, 1);
-    BAR();
-    mark(s, GP_COMB);
-    (void)ly;
 }
 
 static void push_block(InkGpu *s, GBlocks *bl, uint64_t x, uint32_t n)
@@ -868,7 +912,11 @@ static void push_block(InkGpu *s, GBlocks *bl, uint64_t x, uint32_t n)
     bl->rs[bl->n_blk++] = s->pool_rs[i];
 }
 
-static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0, GBlocks *bl, uint64_t msgs)
+/* One layer visit. On loop passes after the first, msgs holds the loop
+ * messages that msgmix (staged by the caller) computes alongside the
+ * visit's first depth mix. */
+static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0, GBlocks *bl, uint64_t msgs,
+                  MixCall *msgmix)
 {
     const OcInklingModel *m = s->m;
     const OcInkLayer *ly = &m->layers[il];
@@ -881,12 +929,20 @@ static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0
     const uint64_t in[3] = { s->in3, s->in3 + BE, s->in3 + 2 * BE };
 
     d_copy(s, s->inp_sa, s->cur, n, E);
-    if (ly->attn_res_query) {
-        d_mix(s, bl->blk, bl->rs, bl->n_blk, s->cur, n, L->attn_res_query, ly->n_attn_res_query, s->mixed);
-        BAR();
-        for (int k = 0; k < n_in; k++) d_copy(s, in[k], s->mixed + (ly->swa ? 0 : (uint64_t)k) * nE, n, E);
-    } else {
+    /* the attention inputs straight from the depth mix: one per query, or
+     * the one query's mix in each of a sliding-window layer's inputs */
+    MixCall am = { 0 };
+    if (ly->attn_res_query)
+        am = mix_prep(s, bl->blk, bl->rs, bl->n_blk, s->cur, n, L->attn_res_query,
+                      ly->swa ? 1 : ly->n_attn_res_query, in[0], s->B * E, ly->swa ? (uint32_t)n_in : 1, s->mixp);
+    else
         for (int k = 0; k < n_in; k++) d_copy(s, in[k], s->cur, n, E);
+    if (msgmix) mix_run(s, msgmix, 0);
+    mix_run(s, &am, 0);
+    if ((msgmix && msgmix->split) || am.split) {
+        BAR();
+        if (msgmix) mix_run(s, msgmix, 1);
+        mix_run(s, &am, 1);
     }
     BAR();
     mark(s, GP_MIX);
@@ -919,8 +975,8 @@ static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0
     mark(s, GP_PROJ);
     chk(s, "q", vi, s->q, (size_t)n * QD);
     chk(s, "k", vi, s->kx, (size_t)n * KV);
-    d_conv(s, vi, 0, KV, s->kx, s->kxc, 0, n, L->conv_t[0], ly->swa ? 0 : s->kdyn, NKV);
-    d_conv(s, vi, KV, KV, s->vx, s->vxc, 0, n, L->conv_t[1], ly->swa ? 0 : s->vdyn, NKV);
+    d_conv(s, vi, 0, KV, s->kx, s->kxc, 0, n, L->conv_t[0], ly->swa ? 0 : s->kdyn, NKV, false);
+    d_conv(s, vi, KV, KV, s->vx, s->vxc, 0, n, L->conv_t[1], ly->swa ? 0 : s->vdyn, NKV, false);
     BAR();
     mark(s, GP_CONV);
     const QkPush qp = { s->q, s->r, s->kxc, s->vxc, L->q_clip, L->rel_clip, s->kc[vi], s->vc[vi], n, pos0, NH, NKV,
@@ -939,16 +995,18 @@ static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0
         ap.nsplit = (pos0 + n - 1) / ATTN_SHARE - ap.s0 + 1;
         oc_vk_dispatch(s->vk, s->g->attnd, &ap, cdiv(n, ATTN_DTQ), NKV, ap.nsplit);
         BAR();
-        const AcombPush cp = { s->apart, s->sink, s->gt, s->o, NH, NKV, ap.nsplit, ATTN_DTQ * 4 };
+        /* the merge also quantizes the output for wo */
+        const AcombPush cp = { s->apart, s->sink, s->gt, s->o, s->aqo, s->ado, NH, NKV, ap.nsplit, ATTN_DTQ * 4 };
         oc_vk_dispatch(s->vk, s->g->acomb, &cp, n * (NH / NKV), NKV, 1);
+        BAR();
     } else {
         oc_vk_dispatch(s->vk, s->g->attn, &ap, cdiv(n, ATTN_ROWS / (NH / NKV)), NKV, 1);
+        BAR();
+        d_quant(s, s->o, n, QD, QD, s->aqo, s->ado);
+        BAR();
     }
-    BAR();
     mark(s, GP_ATTN);
     chk(s, "attn", vi, s->o, (size_t)n * QD);
-    d_quant(s, s->o, n, QD, QD, s->aqo, s->ado);
-    BAR();
     d_linear(s, &L->wo, s->o, QD, s->aqo, s->ado, n, s->a, E, 0.0f);
     BAR();
     mark(s, GP_WO);
@@ -957,9 +1015,9 @@ static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0
      * visit starts a depth-attention block */
     if (il % m->res_block == 0) {
         push_block(s, bl, s->inp_sa, n);
-        d_conv(s, vi, 2 * KV, E, s->a, s->cur, 0, n, L->conv_t[2], 0, 0);
+        d_conv(s, vi, 2 * KV, E, s->a, s->cur, 0, n, L->conv_t[2], 0, 0, false);
     } else {
-        d_conv(s, vi, 2 * KV, E, s->a, s->cur, s->inp_sa, n, L->conv_t[2], 0, 0);
+        d_conv(s, vi, 2 * KV, E, s->a, s->cur, s->inp_sa, n, L->conv_t[2], 0, 0, false);
     }
     BAR();
     mark(s, GP_RES);
@@ -977,11 +1035,76 @@ static void visit(InkGpu *s, uint32_t vi, uint32_t il, uint32_t n, uint32_t pos0
     BAR();
     mark(s, GP_NORM);
     chk(s, "ffn_in", vi, s->xm, (size_t)n * E);
-    d_moe(s, ly, L, s->xm, n, s->a);
-    chk(s, "moe", vi, s->a, (size_t)n * E);
-    d_conv(s, vi, 2 * KV + E, E, s->a, s->cur, s->cur, n, L->conv_t[3], 0, 0);
+    d_moe(s, L, s->xm, n);
+    d_conv(s, vi, 2 * KV + E, E, 0, s->cur, s->cur, n, L->conv_t[3], 0, 0, true);
     BAR();
     mark(s, GP_RES);
+}
+
+/* The sliding-window K/V rows before position pos, which later positions
+ * overwrite in the ring: copied into buf ([swa visits][K, V][n_swa][KV]) on
+ * save, back into the cache on restore. */
+static void d_swa_window(InkGpu *s, uint64_t buf, uint32_t pos, bool save)
+{
+    const OcInklingModel *m = s->m;
+    const uint32_t KV = m->n_head_kv * m->head_dim, W = m->n_swa, n = pos < W ? pos : W;
+    for (uint32_t vi = 0; vi < m->n_visits; vi++) {
+        if (!m->layers[m->visit_layer[vi]].swa) continue;
+        const uint32_t cap = s->cap[vi], r0 = (pos - n) % cap, n1 = n < cap - r0 ? n : cap - r0;
+        for (int h = 0; h < 2; h++, buf += F4((uint64_t)W * KV))
+            for (int k = 0; k < 2; k++) {
+                const uint32_t rows = k ? n - n1 : n1;
+                const uint64_t c = (h ? s->vc[vi] : s->kc[vi]) + (k ? 0 : F4((uint64_t)r0 * KV));
+                const uint64_t b = buf + (k ? F4((uint64_t)n1 * KV) : 0);
+                /* at most 65535 x 256 values per copy, the minimum X group limit */
+                const uint32_t step = (uint32_t)(65535u * 256u / KV);
+                for (uint32_t r = 0; r < rows; r += step) {
+                    const uint32_t nr = rows - r < step ? rows - r : step;
+                    const uint64_t cr = c + F4((uint64_t)r * KV), br = b + F4((uint64_t)r * KV);
+                    d_copy(s, save ? br : cr, save ? cr : br, nr, KV);
+                }
+            }
+    }
+}
+
+OcError ink_gpu_save(InkGpu *s, uint32_t keep, uint32_t slot, uint32_t pos)
+{
+    const OcInklingModel *m = s->m;
+    const uint32_t nv = m->n_visits, row3 = 3 * s->NC;
+    if (keep && s->last_big) {
+        if (keep != s->last_n) return OC_ERR_INVALID_ARG;
+        keep = 3;
+    }
+    uint64_t n_swa_visits = 0;
+    for (uint32_t vi = 0; vi < nv; vi++) n_swa_visits += m->layers[m->visit_layer[vi]].swa;
+    const size_t swa_bytes = F4(n_swa_visits * 2 * m->n_swa * m->n_head_kv * m->head_dim);
+    OcError e = OC_OK;
+    OcVkBuf *sv = &s->saved[slot], *sw = &s->saved_swa[slot];
+    if (!sv->impl) e = oc_vk_buf_new(s->vk, F4((uint64_t)nv * row3), OC_VK_MEM_DEVICE, sv);
+    if (e == OC_OK && swa_bytes && !sw->impl)
+        e = ram_ok(s->vk, swa_bytes, "a prompt-cache slot") ? oc_vk_buf_new(s->vk, swa_bytes, OC_VK_MEM_DEVICE, sw) : OC_ERR_OOM;
+    if (e == OC_OK) e = oc_vk_begin(s->vk);
+    if (e != OC_OK) return e;
+    if (keep) {
+        const CommitPush cp = { s->hist.addr, nv, s->NC, s->vstride, keep };
+        oc_vk_dispatch(s->vk, s->g->commit, &cp, cdiv((size_t)nv * s->NC, 256), 1, 1);
+        BAR();
+    }
+    d_ew(s, sv->addr, s->hist.addr, 0, nv, row3, row3, s->vstride, 0, 0);
+    if (swa_bytes) d_swa_window(s, sw->addr, pos, true);
+    return oc_vk_submit(s->vk);
+}
+
+OcError ink_gpu_restore(InkGpu *s, uint32_t slot, uint32_t pos)
+{
+    const OcVkBuf *sv = &s->saved[slot], *sw = &s->saved_swa[slot];
+    if (!sv->impl) return OC_ERR_INVALID_ARG;
+    const uint32_t nv = s->m->n_visits, row3 = 3 * s->NC;
+    const OcError e = oc_vk_begin(s->vk);
+    if (e != OC_OK) return e;
+    d_ew(s, s->hist.addr, sv->addr, 0, nv, row3, s->vstride, row3, 0, 0);
+    if (sw->impl) d_swa_window(s, sw->addr, pos, false);
+    return oc_vk_submit(s->vk);
 }
 
 static void d_tap(InkGpu *s, int32_t visit_id, uint64_t x, uint32_t n, const int32_t *tv, uint32_t nt)
@@ -1037,7 +1160,7 @@ OcError ink_gpu_forward(InkGpu *s, const uint32_t *tokens, size_t n_, uint32_t p
     uint32_t vi = 0;
     for (uint32_t il = 0; il < m->core_start; il++, vi++) {
         d_tap(s, (int32_t)vi, s->cur, n, tv, nt);
-        visit(s, vi, il, n, pos0, &bl, 0);
+        visit(s, vi, il, n, pos0, &bl, 0, NULL);
         if ((e = split(s, n)) != OC_OK) return e;
     }
     d_copy(s, s->prelude, s->cur, n, E);
@@ -1058,19 +1181,18 @@ OcError ink_gpu_forward(InkGpu *s, const uint32_t *tokens, size_t n_, uint32_t p
         for (uint32_t il = m->core_start; il < m->core_end; il++, vi++) {
             d_tap(s, (int32_t)vi, s->cur, n, tv, nt);
             if (pass == 0) {
-                visit(s, vi, il, n, pos0, &bl, 0);
+                visit(s, vi, il, n, pos0, &bl, 0, NULL);
             } else {
-                d_mix(s, bank, bank_rs, n_bank, s->bank_out, n, s->g->L[il].msg_query, OC_INK_N_CTRL, s->msg);
-                BAR();
-                mark(s, GP_MIX);
-                visit(s, vi, il, n, pos0, &bl, s->msg);
+                MixCall mm = mix_prep(s, bank, bank_rs, n_bank, s->bank_out, n, s->g->L[il].msg_query, OC_INK_N_CTRL,
+                                      s->msg, n * E, 1, s->mixp2);
+                visit(s, vi, il, n, pos0, &bl, s->msg, &mm);
             }
             if ((e = split(s, n)) != OC_OK) return e;
         }
     }
     for (uint32_t il = m->core_end; il < m->n_layer; il++, vi++) {
         d_tap(s, (int32_t)vi, s->cur, n, tv, nt);
-        visit(s, vi, il, n, pos0, &bl, 0);
+        visit(s, vi, il, n, pos0, &bl, 0, NULL);
         if ((e = split(s, n)) != OC_OK) return e;
     }
 
@@ -1372,6 +1494,17 @@ OcError ink_gpu_forward(InkGpu *g, const uint32_t *tokens, size_t n, uint32_t po
 {
     (void)g; (void)tokens; (void)n; (void)pos0; (void)keep; (void)logits; (void)all_logits;
     (void)tap_visits; (void)n_taps; (void)taps;
+    return OC_ERR_BACKEND;
+}
+
+OcError ink_gpu_save(InkGpu *g, uint32_t keep, uint32_t slot, uint32_t pos)
+{
+    (void)g; (void)keep; (void)slot; (void)pos;
+    return OC_ERR_BACKEND;
+}
+OcError ink_gpu_restore(InkGpu *g, uint32_t slot, uint32_t pos)
+{
+    (void)g; (void)slot; (void)pos;
     return OC_ERR_BACKEND;
 }
 

@@ -137,3 +137,64 @@ Test(inkling, rejects_bad_arguments, .init = setup, .fini = teardown)
     cr_assert(oc_inkling_gguf_is_inkling(g_gguf));
     oc_inkling_free(&m);
 }
+
+/* Prompt caching: save after a prompt, run more tokens, restore and feed a
+ * different continuation; the logits must match a fresh session fed the
+ * prompt and that continuation. */
+Test(inkling, save_restore_matches_fresh_prefill, .init = setup, .fini = teardown)
+{
+    OcInklingModel m;
+    cr_assert_eq(oc_inkling_load(g_gguf, &m), OC_OK);
+    const size_t V = m.n_vocab;
+    OcInklingSession *a = NULL, *b = NULL;
+    cr_assert_eq(oc_inkling_session_new(&m, 64, NULL, 0, &a), OC_OK);
+    cr_assert_eq(oc_inkling_session_new(&m, 64, NULL, 0, &b), OC_OK);
+    float *la = malloc(V * sizeof(float)), *lb = malloc(V * sizeof(float));
+    cr_assert(la && lb);
+    cr_assert_eq(oc_inkling_session_restore(a, 1), OC_ERR_INVALID_ARG);
+    cr_assert_eq(oc_inkling_forward(a, TOKS, 12, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_session_save(a, 1), OC_OK);
+    cr_assert_eq(oc_inkling_forward(a, TOKS + 20, 5, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_forward(a, TOKS + 30, 1, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_session_restore(a, 1), OC_OK);
+    cr_assert_eq(oc_inkling_session_pos(a), 12u);
+    cr_assert_eq(oc_inkling_forward(a, TOKS + 12, 6, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_forward(b, TOKS, 18, lb, false), OC_OK);
+    cr_assert_lt(max_diff(la, lb, V), 1e-4f);
+    free(la);
+    free(lb);
+    oc_inkling_session_free(a);
+    oc_inkling_session_free(b);
+    oc_inkling_free(&m);
+}
+
+/* A restore after running far enough past the save point for the SWA rings
+ * to wrap must bring the window back; rollback(0) right after a save or
+ * restore stays put, and a reset drops every slot. */
+Test(inkling, restore_after_swa_ring_wraps, .init = setup, .fini = teardown)
+{
+    OcInklingModel m;
+    cr_assert_eq(oc_inkling_load(g_gguf, &m), OC_OK);
+    OcInklingSession *a = NULL, *b = NULL;
+    cr_assert_eq(oc_inkling_session_new(&m, 512, NULL, 0, &a), OC_OK);
+    cr_assert_eq(oc_inkling_session_new(&m, 512, NULL, 0, &b), OC_OK);
+    float la[FX_V], lb[FX_V];
+    uint32_t seq[320];
+    for (size_t i = 0; i < 320; i++) seq[i] = TOKS[(i * 7) % 40];
+    cr_assert_eq(oc_inkling_prefill(a, TOKS, 30, la), OC_OK);
+    cr_assert_eq(oc_inkling_session_save(a, 0), OC_OK);
+    cr_assert_eq(oc_inkling_rollback(a, 0), OC_OK);
+    cr_assert_eq(oc_inkling_session_pos(a), 30u);
+    cr_assert_eq(oc_inkling_prefill(a, seq, 320, la), OC_OK);
+    cr_assert_eq(oc_inkling_session_restore(a, 0), OC_OK);
+    cr_assert_eq(oc_inkling_rollback(a, 0), OC_OK);
+    cr_assert_eq(oc_inkling_session_pos(a), 30u);
+    cr_assert_eq(oc_inkling_forward(a, TOKS + 30, 10, la, false), OC_OK);
+    cr_assert_eq(oc_inkling_prefill(b, TOKS, 40, lb), OC_OK);
+    cr_assert_lt(max_diff(la, lb, FX_V), 1e-4f);
+    oc_inkling_session_reset(a);
+    cr_assert_eq(oc_inkling_session_restore(a, 0), OC_ERR_INVALID_ARG);
+    oc_inkling_session_free(a);
+    oc_inkling_session_free(b);
+    oc_inkling_free(&m);
+}

@@ -41,6 +41,7 @@ typedef struct {
     uint64_t w, gscale, aq, ad, items, cidx, y, mat_bytes;
     uint32_t rows, cols, n, y_stride, aq_stride, ad_stride, post, ff;
     float    beta, lbeta, cap, pad;
+    uint64_t yd;
 } MmPush;
 
 typedef struct {
@@ -175,7 +176,7 @@ static void mm_push(MmPush *mp, const OcVkBuf *w, size_t off, size_t rows, size_
 
 static void run_mm(const MmPush *mp, size_t rows, size_t n)
 {
-    if (n <= 8) oc_vk_dispatch(vk, p_mv[n], mp, (uint32_t)((rows + 31) / 32), 1, 1);
+    if (n <= 8) oc_vk_dispatch(vk, p_mv[n], mp, (uint32_t)((rows + (n == 1 ? 63 : 31)) / (n == 1 ? 64 : 32)), 1, 1);
     else oc_vk_dispatch(vk, p_mm, mp, (uint32_t)((rows + 63) / 64), (uint32_t)((n + 127) / 128), 1);
 }
 
@@ -313,12 +314,13 @@ static void sec_moe(void)
                       .rows = (uint32_t)E, .cols = (uint32_t)FF, .y_stride = (uint32_t)E, .aq_stride = (uint32_t)FF,
                       .ad_stride = (uint32_t)(FF / 64) };
         const int R = 3;
+        const uint32_t mvr = maxc == 1 ? 64 : 32;
         CK(oc_vk_begin(vk));
         quant(&x, n, E, &q, &d, 0);
         oc_vk_barrier(vk);
         oc_vk_stamp(vk, 0);
         for (int r = 0; r < R; r++) {
-            if (small) oc_vk_dispatch(vk, p_mv_situ[maxc], &gu, (uint32_t)((FF + 31) / 32), (uint32_t)ni_, 1);
+            if (small) oc_vk_dispatch(vk, p_mv_situ[maxc], &gu, (uint32_t)((FF + 63) / 64), (uint32_t)ni_, 1);
             else oc_vk_dispatch(vk, p_mm, &gu, (uint32_t)((FF + 31) / 32), (uint32_t)ni_, 1);
             oc_vk_barrier(vk);
         }
@@ -327,7 +329,7 @@ static void sec_moe(void)
         oc_vk_barrier(vk);
         oc_vk_stamp(vk, 2);
         for (int r = 0; r < R; r++) {
-            if (small) oc_vk_dispatch(vk, p_mv[maxc], &dn, (uint32_t)((E + 31) / 32), (uint32_t)ni_, 1);
+            if (small) oc_vk_dispatch(vk, p_mv[maxc], &dn, (uint32_t)((E + mvr - 1) / mvr), (uint32_t)ni_, 1);
             else oc_vk_dispatch(vk, p_mm, &dn, (uint32_t)((E + 63) / 64), (uint32_t)ni_, 1);
             oc_vk_barrier(vk);
         }

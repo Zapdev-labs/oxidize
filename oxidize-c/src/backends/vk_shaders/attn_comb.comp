@@ -3,10 +3,13 @@
  * (t, head) of KV head g, the shares' P.V rows weighted by exp(m_s - M) in
  * share order, the sink as one more share (m = sink, l = 1, no P.V), the
  * sigmoid output gate. One workgroup per (t * grp + head in group, g); the
- * kernel's tiles hold TQ = QHM / 4 tokens. */
+ * kernel's tiles hold TQ = QHM / 4 tokens. With q != 0 the head's two
+ * 64-value blocks are also quantized as quant_act does into q / d (row
+ * stride NH * 128 bytes). */
 #include "common.glsl"
+#extension GL_KHR_shader_subgroup_clustered : require
 layout(local_size_x = 32) in;
-layout(push_constant) uniform P { uint64_t part, sink, g, o; uint NH, NKV, nsplit, QHM; } p;
+layout(push_constant) uniform P { uint64_t part, sink, g, o, q, d; uint NH, NKV, nsplit, QHM; } p;
 
 void main()
 {
@@ -27,5 +30,12 @@ void main()
     }
     const uint idx = (t * p.NH * 128u + h * 128u) / 4u + d4;
     const vec4 gv = FV4(p.g).v[idx];
-    FV4(p.o).v[idx] = acc / den / (vec4(1.0) + exp(-gv));
+    const vec4 o = acc / den / (vec4(1.0) + exp(-gv));
+    FV4(p.o).v[idx] = o;
+    if (p.q == 0) return;
+    const vec4 a = abs(o);
+    const float amax = subgroupClusteredMax(max(max(a.x, a.y), max(a.z, a.w)), 16u);
+    const float d = amax / 127.0, id = d > 0.0 ? 1.0 / d : 0.0;
+    U32(p.q).v[idx] = uint(pack32(i8vec4(ivec4(roundEven(o * id)))));
+    if ((d4 & 15u) == 0u) F32(p.d).v[(t * p.NH * 128u + h * 128u + d4 * 4u) / 64u] = d;
 }

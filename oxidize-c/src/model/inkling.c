@@ -486,6 +486,11 @@ struct OcInklingSession {
 
     uint32_t max_batch;
     InkGpu  *gpu;                            /* forward on the GPU when set  */
+
+    bool     saved[OC_INK_SAVE_SLOTS];       /* oc_inkling_session_save      */
+    uint32_t saved_pos[OC_INK_SAVE_SLOTS];
+    float   *saved_hist[OC_INK_SAVE_SLOTS];  /* CPU: [n_visits][3][n_ch]     */
+    float   *saved_swa[OC_INK_SAVE_SLOTS];   /* CPU: [swa visits][2][n_swa][KV] */
 };
 
 static size_t kv_row(const OcInklingModel *m) { return (size_t)m->n_head_kv * m->head_dim; }
@@ -549,6 +554,7 @@ void oc_inkling_session_free(OcInklingSession *s)
     prof_report();
     ink_gpu_free(s->gpu);
     for (int i = 0; i < OC_INK_MAX_VISITS; i++) { free(s->k[i]); free(s->v[i]); free(s->hist[i]); }
+    for (int i = 0; i < OC_INK_SAVE_SLOTS; i++) { free(s->saved_hist[i]); free(s->saved_swa[i]); }
     float *bufs[] = { s->cur, s->inp_sa, s->in3, s->q, s->kx, s->vx, s->r, s->g, s->sink, s->kdyn,
                       s->vdyn, s->o, s->a, s->xm, s->router, s->gu, s->act, s->dn, s->mixed, s->msg,
                       s->tmp, s->prelude, s->bank_out, s->taps, s->gain, s->forget };
@@ -567,6 +573,7 @@ void oc_inkling_session_reset(OcInklingSession *s)
     s->n_past = 0;
     s->last_n = 0;
     s->keep = 0;
+    for (int i = 0; i < OC_INK_SAVE_SLOTS; i++) s->saved[i] = false;
     for (uint32_t vi = 0; vi < s->m->n_visits; vi++) memset(s->hist[vi], 0, (3 + OC_INK_MAX_BATCH) * s->n_ch * sizeof(float));
 }
 
@@ -615,6 +622,82 @@ static void commit_conv(OcInklingSession *s)
     for (uint32_t vi = 0; vi < s->m->n_visits; vi++)
         memmove(s->hist[vi], s->hist[vi] + (size_t)s->keep * s->n_ch, 3 * s->n_ch * sizeof(float));
     s->keep = 0;
+}
+
+/* The sliding-window K/V rows before position pos, which later positions
+ * overwrite in the ring: copied into buf ([swa visits][K, V][n_swa][KV]) on
+ * save, back into the cache on restore. */
+static void swa_window(OcInklingSession *s, float *buf, uint32_t pos, bool save)
+{
+    const OcInklingModel *m = s->m;
+    const size_t KV = kv_row(m), W = m->n_swa;
+    const uint32_t n = pos < m->n_swa ? pos : m->n_swa;
+    for (uint32_t vi = 0; vi < m->n_visits; vi++) {
+        if (!m->layers[m->visit_layer[vi]].swa) continue;
+        float *bk = buf, *bv = buf + W * KV;
+        buf += 2 * W * KV;
+        for (uint32_t r = 0; r < n; r++) {
+            const size_t row = (size_t)((pos - n + r) % s->cap[vi]) * KV;
+            if (save) {
+                memcpy(bk + r * KV, s->k[vi] + row, KV * sizeof(float));
+                memcpy(bv + r * KV, s->v[vi] + row, KV * sizeof(float));
+            } else {
+                memcpy(s->k[vi] + row, bk + r * KV, KV * sizeof(float));
+                memcpy(s->v[vi] + row, bv + r * KV, KV * sizeof(float));
+            }
+        }
+    }
+}
+
+OcError oc_inkling_session_save(OcInklingSession *s, uint32_t slot)
+{
+    if (slot >= OC_INK_SAVE_SLOTS) return OC_ERR_INVALID_ARG;
+    s->saved[slot] = false;
+    if (s->gpu) {
+        const OcError e = ink_gpu_save(s->gpu, s->keep, slot, s->n_past);
+        if (e != OC_OK) return e;
+    } else {
+        commit_conv(s);
+        const OcInklingModel *m = s->m;
+        const size_t row3 = 3 * s->n_ch;
+        size_t n_swa_visits = 0;
+        for (uint32_t vi = 0; vi < m->n_visits; vi++) n_swa_visits += m->layers[m->visit_layer[vi]].swa;
+        if (!s->saved_hist[slot]) s->saved_hist[slot] = malloc((size_t)m->n_visits * row3 * sizeof(float));
+        size_t swa_bytes = 0;
+        if (__builtin_mul_overflow(n_swa_visits * 2, (size_t)m->n_swa, &swa_bytes) ||
+            __builtin_mul_overflow(swa_bytes, kv_row(m) * sizeof(float), &swa_bytes))
+            return OC_ERR_OOM;
+        if (!s->saved_swa[slot] && n_swa_visits) s->saved_swa[slot] = malloc(swa_bytes);
+        if (!s->saved_hist[slot] || (n_swa_visits && !s->saved_swa[slot])) return OC_ERR_OOM;
+        for (uint32_t vi = 0; vi < m->n_visits; vi++)
+            memcpy(s->saved_hist[slot] + vi * row3, s->hist[vi], row3 * sizeof(float));
+        if (n_swa_visits) swa_window(s, s->saved_swa[slot], s->n_past, true);
+    }
+    s->keep = 0;
+    s->last_n = 0;
+    s->last_pos0 = s->n_past;
+    s->saved[slot] = true;
+    s->saved_pos[slot] = s->n_past;
+    return OC_OK;
+}
+
+OcError oc_inkling_session_restore(OcInklingSession *s, uint32_t slot)
+{
+    if (slot >= OC_INK_SAVE_SLOTS || !s->saved[slot]) return OC_ERR_INVALID_ARG;
+    if (s->gpu) {
+        const OcError e = ink_gpu_restore(s->gpu, slot, s->saved_pos[slot]);
+        if (e != OC_OK) return e;
+    } else {
+        const size_t row3 = 3 * s->n_ch;
+        for (uint32_t vi = 0; vi < s->m->n_visits; vi++)
+            memcpy(s->hist[vi], s->saved_hist[slot] + vi * row3, row3 * sizeof(float));
+        if (s->saved_swa[slot]) swa_window(s, s->saved_swa[slot], s->saved_pos[slot], false);
+    }
+    s->keep = 0;
+    s->last_n = 0;
+    s->n_past = s->saved_pos[slot];
+    s->last_pos0 = s->n_past;
+    return OC_OK;
 }
 
 OcError oc_inkling_rollback(OcInklingSession *s, size_t n_keep)

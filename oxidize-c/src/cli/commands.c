@@ -38,6 +38,7 @@
 #include "oxidize/eagle4.h"
 #include "oxidize/log.h"
 #include "oxidize/merge.h"
+#include "oxidize/inkling_api.h"
 #include "oxidize/openai.h"
 #include "oxidize/perplexity.h"
 #include "oxidize/prune.h"
@@ -557,7 +558,13 @@ void oc_cli_command_help_for(OcCliCommand cmd)
                "  --host HOST           Bind host (default 127.0.0.1)\n"
                "  --port PORT           Bind port (default 8080)\n"
                "  --auto                Apply autotune plan to scheduler/KV\n"
-               "  --prefill-chunk-size N Prefill chunk (overrides plan)\n");
+               "  --prefill-chunk-size N Prefill chunk (overrides plan; not used for Inkling)\n\n"
+               "With an Inkling-2 GGUF (from inkling-convert) it serves the Inkling chat API\n"
+               "(reasoning_content, tool_calls, prompt caching across turns):\n"
+               "  --gpu                 Run on the Vulkan forward (make vulkan)\n"
+               "  --draft PATH          DSpark drafter GGUF for speculative decoding\n"
+               "  --ctx N               Context positions (default 32768)\n"
+               "  --effort F            Default reasoning effort in [0, 0.99] (default 0.9)\n");
         break;
     case OC_CLI_CMD_SERVE_REALTIME:
         printf("start WebSocket realtime server\n\n"
@@ -1624,8 +1631,78 @@ OcError oc_cli_run_perplexity(OcCliContext *ctx)
 
 /* ─── serve ────────────────────────────────────────────────────────────── */
 
+static void ink_threads(const OcCliContext *ctx);
+
+/* serve with an Inkling-2 GGUF: the Inkling chat API (inkling_api.h), on the
+ * GPU with --gpu and with the DSpark drafter given by --draft. */
+static OcError cli_serve_inkling(OcCliContext *ctx)
+{
+    if (!(ctx->effort >= 0.0f && ctx->effort <= 0.99f)) {
+        cli_error("--effort must be in [0, 0.99]");
+        return OC_ERR_INVALID_ARG;
+    }
+    if (ctx->api_key == NULL && strcmp(ctx->host, "127.0.0.1") != 0 && strcmp(ctx->host, "localhost") != 0 &&
+        strcmp(ctx->host, "::1") != 0)
+        fprintf(stderr, "warning: serving on %s without --api-key; anyone who can reach this port can use the model\n",
+                ctx->host);
+    ink_threads(ctx);
+    OcInklingModel m;
+    progress(ctx, "loading model: %s", ctx->model_path);
+    OcError e = oc_inkling_load(ctx->model_path, &m);
+    if (e != OC_OK) {
+        cli_error("failed to load %s (%s)", ctx->model_path, oc_error_msg(e));
+        return e;
+    }
+    OcInklingDraft d;
+    bool have_draft = false;
+    if (ctx->draft_path) {
+        e = oc_inkling_draft_load(ctx->draft_path, &m, &d);
+        if (e != OC_OK) {
+            cli_error("failed to load drafter %s (%s)", ctx->draft_path, oc_error_msg(e));
+            oc_inkling_free(&m);
+            return e;
+        }
+        have_draft = true;
+    }
+    if (ctx->gpu) {
+        e = oc_inkling_gpu_compiled() ? oc_inkling_gpu_load(&m) : OC_ERR_BACKEND;
+        if (e != OC_OK)
+            cli_error("GPU upload failed (%s)%s", oc_error_msg(e),
+                      oc_inkling_gpu_compiled() ? "" : "; --gpu needs the Vulkan build (make vulkan)");
+    }
+    OcMiddleware mw;
+    uint32_t mw_enabled = OC_MW_METRICS | OC_MW_AUDIT;
+    if (ctx->api_key != NULL)     mw_enabled |= OC_MW_AUTH;
+    if (ctx->rate_limit_rpm > 0)  mw_enabled |= OC_MW_RATE_LIMIT;
+    if (ctx->cors_origin != NULL) mw_enabled |= OC_MW_CORS;
+    OcRateLimitConfig rl = { .requests_per_minute = ctx->rate_limit_rpm, .burst_size = ctx->rate_limit_rpm / 60u + 1u,
+                             .per_ip = true };
+    if (e == OC_OK) e = oc_middleware_init(&mw, mw_enabled, ctx->api_key, &rl, ctx->cors_origin);
+    if (e == OC_OK) {
+        const char *slash = strrchr(ctx->model_path, '/');
+        char model_id[256];
+        snprintf(model_id, sizeof model_id, "%s", slash ? slash + 1 : ctx->model_path);
+        char *ext = strstr(model_id, ".gguf");
+        if (ext && ext[5] == '\0') *ext = '\0';
+        const OcInklingServeOptions o = {
+            .host = ctx->host, .port = (uint16_t)ctx->port, .model_id = model_id,
+            .n_ctx = ctx->n_ctx ? ctx->n_ctx : 32768, .n_predict = 8192, .draft_max = ctx->draft_max,
+            .p_min = ctx->draft_p_min, .effort = ctx->effort, .mw = &mw,
+            .json = ctx->output_format == OC_CLI_OUTPUT_JSON,
+        };
+        e = oc_inkling_serve(&m, have_draft ? &d : NULL, ctx->gpu, &o);
+        if (e != OC_OK) cli_error("server failed (%s)", oc_error_msg(e));
+        oc_middleware_free(&mw);
+    }
+    if (have_draft) oc_inkling_draft_free(&d);
+    oc_inkling_free(&m);
+    return e;
+}
+
 OcError oc_cli_run_serve(OcCliContext *ctx)
 {
+    if (ctx->model_path && oc_inkling_gguf_is_inkling(ctx->model_path)) return cli_serve_inkling(ctx);
+
     OcError e;
     OcOpenaiState st;
     memset(&st, 0, sizeof(st));

@@ -481,10 +481,15 @@ static void *worker_main(void *arg)
                 "\r\n"
                 ": oxidize\n\n",
                 server_extra(srv));
+            /* a client that stops reading fails the stream's writes after
+             * 30 s instead of blocking its producer for good */
+            const struct timeval send_timeout = { .tv_sec = 30 };
+            const bool timed = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout)) == 0;
+            if (!timed) oc_log(OC_LOG_WARN, "http: cannot set a stream write timeout: %s", strerror(errno));
             atomic_init(&heartbeat.stop, false);
             atomic_init(&heartbeat.disconnected, false);
             pthread_mutex_init(&heartbeat.write_mutex, NULL);
-            if (hn < 0 || (size_t)hn >= sizeof(handshake) ||
+            if (!timed || hn < 0 || (size_t)hn >= sizeof(handshake) ||
                 !stream_write(&heartbeat, handshake, (size_t)hn)) {
                 pthread_mutex_destroy(&heartbeat.write_mutex);
                 close(fd);

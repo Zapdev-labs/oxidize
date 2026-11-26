@@ -6,7 +6,7 @@
 layout(local_size_x = 512) in;
 layout(push_constant) uniform P {
     uint64_t sel, pair_of, pair_tok, items, items_s, ind;
-    uint n, NE, K, gx_gu, gx_dn_b, gx_dn_s;
+    uint n, NE, K, gx_gu, gx_dn, gx_gu_s, gx_dn_s, pad;
 } p;
 shared uint cnt[256], first_[256], fill[256];
 #include "moe_group.glsl"
@@ -19,7 +19,7 @@ void main()
     I32 S = I32(p.sel);
     for (uint i = tid; i < np; i += 512u) atomicAdd(cnt[uint(S.v[i])], 1u);
     barrier();
-    if (tid == 0u) build_items(p.NE, p.items, p.items_s, p.ind, p.gx_gu, p.gx_dn_b, p.gx_dn_s);
+    if (tid == 0u) build_items(p.NE, p.items, p.items_s, p.ind, p.gx_gu, p.gx_dn, p.gx_gu_s, p.gx_dn_s);
     barrier();
     for (uint i = tid; i < np; i += 512u) {
         const uint e = uint(S.v[i]), pi = first_[e] + atomicAdd(fill[e], 1u);

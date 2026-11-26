@@ -149,6 +149,18 @@ OcError oc_inkling_prefill(OcInklingSession *s, const uint32_t *tokens, size_t n
  * are restored from that call's input history). */
 OcError oc_inkling_rollback(OcInklingSession *s, size_t n_keep);
 
+/* Saved positions for prompt caching, OC_INK_SAVE_SLOTS per session: save
+ * records the position, the convolution history and the sliding-window K/V
+ * rows before it in a slot; restore returns the session there, keeping the
+ * full-attention KV entries before it (later entries are overwritten as
+ * positions are reused, so a slot saved further on is stale once an earlier
+ * one is restored and run past). A drafter on the session follows by
+ * injecting the new calls as usual. restore fails for a slot never saved
+ * and for every slot after oc_inkling_session_reset. */
+#define OC_INK_SAVE_SLOTS 2
+OcError  oc_inkling_session_save(OcInklingSession *s, uint32_t slot);
+OcError  oc_inkling_session_restore(OcInklingSession *s, uint32_t slot);
+
 /* Tap features of token i of the most recent forward call: [n_taps][n_embd]. */
 const float *oc_inkling_taps(const OcInklingSession *s, size_t i);
 

@@ -10,8 +10,8 @@
 layout(local_size_x = 256) in;
 layout(push_constant) uniform P {
     uint64_t logits, bias, wsel, pair_of, pair_tok, items, items_s, ind;
-    uint n, NE, K, gx_gu, gx_dn_b, gx_dn_s;
-    float rscale, pad;
+    uint n, NE, K, gx_gu, gx_dn, gx_gu_s, gx_dn_s;
+    float rscale;
 } p;
 shared uint sel_s[NMAX * KMAX];
 shared float pr_s[NMAX * KMAX];
@@ -53,7 +53,7 @@ void main()
     barrier();
     for (uint i = tid; i < p.n * p.K; i += 256u) atomicAdd(cnt[sel_s[(i / p.K) * KMAX + i % p.K]], 1u);
     barrier();
-    if (tid == 0u) build_items(p.NE, p.items, p.items_s, p.ind, p.gx_gu, p.gx_dn_b, p.gx_dn_s);
+    if (tid == 0u) build_items(p.NE, p.items, p.items_s, p.ind, p.gx_gu, p.gx_dn, p.gx_gu_s, p.gx_dn_s);
     barrier();
     for (uint i = tid; i < p.n * p.K; i += 256u) {
         const uint e = sel_s[(i / p.K) * KMAX + i % p.K], pi = first_[e] + atomicAdd(fill[e], 1u);
