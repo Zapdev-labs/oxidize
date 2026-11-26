@@ -244,7 +244,16 @@ static bool load_mat(const OcGgufMmappedFile *map, const char *name, OcInkMat *o
                    : out->gtype == GT_NV3 ? oc_nv3_row_bytes(out->cols)
                    : out->gtype == GT_BF16 ? out->cols * 2 : out->cols * 4;
     out->mat_bytes = out->row_bytes * out->rows;
-    if (out->gtype == GT_NVFP4 || out->gtype == GT_NV3) {
+    const bool blocked = out->gtype == GT_NVFP4 || out->gtype == GT_NV3;
+    if (blocked && out->cols % 64) return false;
+    /* the GGUF reader cannot size every type (NV3), so check the extent here */
+    if (ti->shard_index >= map->n_shards || !out->data) return false;
+    const OcGgufShard *sh = &map->shards[ti->shard_index];
+    size_t total = 0;
+    if (__builtin_mul_overflow(out->mat_bytes, out->n_mat, &total) || (const uint8_t *)out->data < sh->bytes ||
+        total > sh->len - (size_t)((const uint8_t *)out->data - sh->bytes))
+        return false;
+    if (blocked) {
         char sn[160];
         size_t len = strlen(name);
         snprintf(sn, sizeof sn, "%.*s.scale", (int)(len > 7 ? len - 7 : len), name);

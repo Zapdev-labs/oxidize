@@ -152,8 +152,10 @@ Test(inkling_convert, nv3_experts_track_nvfp4, .init = setup, .fini = teardown)
     OcInklingModel a, b;
     cr_assert_eq(oc_inkling_load(g_gguf, &a), OC_OK);
     cr_assert_eq(oc_inkling_load(p3, &b), OC_OK);
-    for (int l = 0; l < FX_L; l++) {
-        const OcInkMat *wa = &a.layers[l].gate_up, *wb = &b.layers[l].gate_up;
+    for (int k = 0; k < 2 * FX_L; k++) {
+        const int l = k / 2;
+        const OcInkMat *wa = k % 2 ? &a.layers[l].down : &a.layers[l].gate_up;
+        const OcInkMat *wb = k % 2 ? &b.layers[l].down : &b.layers[l].gate_up;
         double err = 0.0, ref = 0.0;
         float ra[4096], rb[4096];
         cr_assert_leq(wa->cols, 4096u);

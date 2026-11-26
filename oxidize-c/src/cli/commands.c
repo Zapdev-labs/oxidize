@@ -2494,12 +2494,22 @@ OcError oc_cli_run_eagle4_export(OcCliContext *ctx)
 
 #include "oxidize/inkling.h"
 
-static OcInklingWeightType ink_wtype(const char *s, OcInklingWeightType def)
+/* --flag value (NULL = NVFP4) as one of the types in allowed ("nvfp4|nv3|bf16"
+ * names); false with an error for anything else. */
+static bool ink_wtype(const char *flag, const char *s, const char *allowed, OcInklingWeightType *out)
 {
-    if (!s) return def;
-    if (ieq(s, "bf16")) return OC_INK_W_BF16;
-    if (ieq(s, "nv3")) return OC_INK_W_NV3;
-    return OC_INK_W_NVFP4;
+    static const struct { const char *name; OcInklingWeightType t; } types[] = {
+        { "nvfp4", OC_INK_W_NVFP4 }, { "bf16", OC_INK_W_BF16 }, { "nv3", OC_INK_W_NV3 },
+    };
+    *out = OC_INK_W_NVFP4;
+    if (!s) return true;
+    for (size_t i = 0; i < sizeof types / sizeof types[0]; i++)
+        if (ieq(s, types[i].name) && strstr(allowed, types[i].name)) {
+            *out = types[i].t;
+            return true;
+        }
+    cli_error("%s must be one of %s (got '%s')", flag, allowed, s);
+    return false;
 }
 
 static void ink_threads(const OcCliContext *ctx)
@@ -2514,15 +2524,12 @@ OcError oc_cli_run_inkling_convert(OcCliContext *ctx)
         return OC_ERR_INVALID_ARG;
     }
     ink_threads(ctx);
-    OcInklingConvertOptions o = {
-        .hf_dir = ctx->input_path,
-        .out_path = ctx->output_path,
-        .draft_out_path = ctx->draft_out,
-        .dense_type = ink_wtype(ctx->target_type, OC_INK_W_NVFP4),
-        .output_type = ink_wtype(ctx->lm_type, OC_INK_W_NVFP4),
-        .draft_type = ink_wtype(ctx->draft_type, OC_INK_W_NVFP4),
-        .expert_type = ink_wtype(ctx->expert_type, OC_INK_W_NVFP4),
-    };
+    OcInklingConvertOptions o = { .hf_dir = ctx->input_path, .out_path = ctx->output_path, .draft_out_path = ctx->draft_out };
+    if (!ink_wtype("--quant-type", ctx->target_type, "nvfp4|nv3|bf16", &o.dense_type) ||
+        !ink_wtype("--lm-type", ctx->lm_type, "nvfp4|bf16", &o.output_type) ||
+        !ink_wtype("--draft-type", ctx->draft_type, "nvfp4|bf16", &o.draft_type) ||
+        !ink_wtype("--expert-type", ctx->expert_type, "nvfp4|nv3", &o.expert_type))
+        return OC_ERR_INVALID_ARG;
     double t0 = dflash2_now_sec();
     OcError e = oc_inkling_convert(&o);
     if (e != OC_OK) {

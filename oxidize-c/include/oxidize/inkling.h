@@ -44,7 +44,7 @@ extern "C" {
 typedef enum {
     OC_INK_W_NVFP4 = 0,
     OC_INK_W_BF16  = 1,
-    OC_INK_W_NV3   = 2,   /* experts only: 3-bit NV3 (nv3.h) */
+    OC_INK_W_NV3   = 2,   /* 3-bit NV3 (nv3.h): experts and target attention; not the lm head or drafter */
 } OcInklingWeightType;
 
 typedef struct OcInklingConvertOptions {

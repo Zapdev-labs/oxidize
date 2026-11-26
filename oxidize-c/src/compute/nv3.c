@@ -99,26 +99,32 @@ void oc_nv3_gemm_rows(const uint8_t *w, size_t cols, size_t r0, size_t r1, float
                       const OcNvfp4Act *acts, size_t n_vec, float *y, size_t y_stride)
 {
     const size_t nb = cols / OC_NV3_BLOCK, rb = oc_nv3_row_bytes(cols);
+    int8_t wq[64];
     for (size_t r = r0; r < r1; r++) {
         const uint8_t *row = w + r * rb;
-        for (size_t t = 0; t < n_vec; t++) {
-            float acc = 0.0f;
-            for (size_t b = 0; b < nb; b++) {
-                const uint8_t *blk = row + b * OC_NV3_BLOCK_BYTES;
+        for (size_t t = 0; t < n_vec; t++) y[t * y_stride + r] = 0.0f;
+        for (size_t b = 0; b < nb; b++) {
+            /* decode the block once, in the NVFP4 activation order: x[16s + i]
+             * at s*8 + i for i < 8, 32 + s*8 + i - 8 otherwise */
+            const uint8_t *blk = row + b * OC_NV3_BLOCK_BYTES;
+            for (size_t v = 0; v < 64; v++) {
+                const size_t s = v / 16, i = v % 16;
+                wq[i < 8 ? s * 8 + i : 32 + s * 8 + i - 8] = (int8_t)nv3_value(blk, v);
+            }
+            float d[4];
+            for (size_t s = 0; s < 4; s++) d[s] = 0.5f * oc_nvfp4_ue4m3(blk[s]);
+            for (size_t t = 0; t < n_vec; t++) {
                 const int8_t *q = acts[t].q + b * OC_NV3_BLOCK;
                 float sb = 0.0f;
                 for (size_t s = 0; s < 4; s++) {
                     int32_t si = 0;
-                    /* the activation is in the NVFP4 order: x[16s + i] at
-                     * s*8 + i for i < 8, 32 + s*8 + i - 8 otherwise */
-                    for (size_t i = 0; i < 16; i++)
-                        si += nv3_value(blk, 16 * s + i) * q[i < 8 ? s * 8 + i : 32 + s * 8 + i - 8];
-                    sb += (float)si * 0.5f * oc_nvfp4_ue4m3(blk[s]);
+                    for (size_t j = 0; j < 8; j++) si += wq[s * 8 + j] * q[s * 8 + j] + wq[32 + s * 8 + j] * q[32 + s * 8 + j];
+                    sb += (float)si * d[s];
                 }
-                acc += sb * acts[t].d[b];
+                y[t * y_stride + r] += sb * acts[t].d[b];
             }
-            y[t * y_stride + r] = acc * gscale;
         }
+        for (size_t t = 0; t < n_vec; t++) y[t * y_stride + r] *= gscale;
     }
 }
 

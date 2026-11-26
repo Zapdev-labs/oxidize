@@ -416,6 +416,7 @@ Test(cli, context_prefill_chunk_size_is_append_only)
         offsetof(OcCliContext, lm_type),
         offsetof(OcCliContext, draft_type),
         offsetof(OcCliContext, effort),
+        offsetof(OcCliContext, expert_type),
     };
     for (size_t i = 1; i < sizeof(order) / sizeof(order[0]); i++) {
         cr_assert(order[i] > order[i - 1],
@@ -423,10 +424,10 @@ Test(cli, context_prefill_chunk_size_is_append_only)
                   i);
     }
     cr_assert_eq(order[sizeof(order) / sizeof(order[0]) - 1],
-                 offsetof(OcCliContext, effort));
+                 offsetof(OcCliContext, expert_type));
     /* Only alignment padding may follow the last field. */
     cr_assert_eq(sizeof(OcCliContext),
-                 ((offsetof(OcCliContext, effort) + sizeof(float)
+                 ((offsetof(OcCliContext, expert_type) + sizeof(const char *)
                    + _Alignof(OcCliContext) - 1)
                   / _Alignof(OcCliContext)) * _Alignof(OcCliContext));
 }

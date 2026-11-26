@@ -52,8 +52,7 @@ void block_dot(uvec4 q0, uvec4 q1, uint sw, uint lb, uint count, inout float acc
     }
 }
 
-/* Blocks [b0, b1) of the cluster's first nrow rows (row0 + CL r), two blocks
- * per row and step, every load of a step issued before any is used. */
+/* The weight words of block bi, in the layout block_dot takes. */
 void load_block(UV4 WQ, UV2 WH, uint bi, out uvec4 q0, out uvec4 q1)
 {
     if (FMT == 1u) {
@@ -65,6 +64,8 @@ void load_block(UV4 WQ, UV2 WH, uint bi, out uvec4 q0, out uvec4 q1)
     }
 }
 
+/* Blocks [b0, b1) of the cluster's first nrow rows (row0 + CL r), two blocks
+ * per row and step, every load of a step issued before any is used. */
 void row_dot(UV4 WQ, UV2 WH, U32 WS, uint row0, uint nrow, uint nb, uint b0, uint b1, uint lane, uint count,
              inout float acc[RPT][NV])
 {

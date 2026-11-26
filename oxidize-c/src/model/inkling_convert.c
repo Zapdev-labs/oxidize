@@ -740,6 +740,11 @@ static OcError plan_draft(Ctx *c, int n_layer, int n_fuse, uint64_t n_vocab)
 OcError oc_inkling_convert(const OcInklingConvertOptions *opt)
 {
     if (!opt || !opt->hf_dir || (!opt->out_path && !opt->draft_out_path)) return OC_ERR_INVALID_ARG;
+    if (opt->output_type == OC_INK_W_NV3 || opt->draft_type == OC_INK_W_NV3) {
+        /* the DSpark drafter reads the lm head and its own weights as NVFP4 or BF16 only */
+        oc_log(OC_LOG_ERROR, "inkling-convert: NV3 is for the experts and attention, not the lm head or drafter");
+        return OC_ERR_INVALID_ARG;
+    }
     char path[4096];
     OcArena *arena = oc_arena_new(64u << 20);
     if (!arena) return OC_ERR_OOM;
