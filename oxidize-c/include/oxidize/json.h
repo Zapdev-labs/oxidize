@@ -11,6 +11,7 @@ typedef struct OcJson {
     OcJsonType type;
     char *key, *string;
     double number;
+    char *raw;        /* a number's text as written */
     bool boolean;
     size_t count;
     struct OcJson *child, *next;

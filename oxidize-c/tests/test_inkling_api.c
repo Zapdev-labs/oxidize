@@ -141,3 +141,40 @@ Test(inkling_api, reply_keeps_an_unparsable_tool_body_as_text)
     cr_assert(!r.done);
     oc_inkling_reply_free(&r);
 }
+
+Test(inkling_api, reply_keeps_a_call_without_name_or_object_args_as_text)
+{
+    Parts p = { 0 };
+    OcInklingReply r;
+    oc_inkling_reply_init(&r, collect, &p);
+    const char *toks[] = { "<|message_model|>", "<|content_invoke_tool_json|>", "{\"args\":[]}", "<|end_message|>",
+                           "<|message_model|>", "f", "<|content_invoke_tool_json|>", "{\"args\":[1]}", "<|end_message|>" };
+    for (size_t i = 0; i < sizeof toks / sizeof toks[0]; i++) push(&r, toks[i]);
+    cr_assert_eq(p.n_calls, 0);
+    cr_assert_str_eq(p.content, "{\"args\":[]}{\"args\":[1]}");
+    oc_inkling_reply_free(&r);
+}
+
+Test(inkling_api, render_keeps_large_integers_exact)
+{
+    const char *err = NULL;
+    char *out = render("{\"messages\":[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"c\","
+                       "\"function\":{\"name\":\"get\",\"arguments\":{\"id\":9007199254740993,\"x\":1.50}}}]}]}", &err);
+    cr_assert_not_null(out, "%s", err);
+    cr_assert_not_null(strstr(out, "{\"id\":9007199254740993,\"x\":1.5}"), "%s", out);
+    free(out);
+}
+
+Test(inkling_api, render_names_tool_results_from_every_matching_call)
+{
+    const char *err = NULL;
+    char *out = render("{\"messages\":[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":["
+                       "{\"id\":\"b\",\"function\":{\"name\":\"two\",\"arguments\":\"{}\"}},"
+                       "{\"id\":\"a\",\"function\":{\"name\":\"one\",\"arguments\":\"{}\"}}]},"
+                       "{\"role\":\"tool\",\"tool_call_id\":\"a\",\"content\":\"r1\"},"
+                       "{\"role\":\"tool\",\"tool_call_id\":\"b\",\"content\":\"r2\"}]}", &err);
+    cr_assert_not_null(out, "%s", err);
+    cr_assert_not_null(strstr(out, "<|message_tool|>one<|content_text|>r1"), "%s", out);
+    cr_assert_not_null(strstr(out, "<|message_tool|>two<|content_text|>r2"), "%s", out);
+    free(out);
+}

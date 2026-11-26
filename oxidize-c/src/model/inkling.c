@@ -663,8 +663,11 @@ OcError oc_inkling_session_save(OcInklingSession *s, uint32_t slot)
         size_t n_swa_visits = 0;
         for (uint32_t vi = 0; vi < m->n_visits; vi++) n_swa_visits += m->layers[m->visit_layer[vi]].swa;
         if (!s->saved_hist[slot]) s->saved_hist[slot] = malloc((size_t)m->n_visits * row3 * sizeof(float));
-        if (!s->saved_swa[slot] && n_swa_visits)
-            s->saved_swa[slot] = malloc(n_swa_visits * 2 * m->n_swa * kv_row(m) * sizeof(float));
+        size_t swa_bytes = 0;
+        if (__builtin_mul_overflow(n_swa_visits * 2, (size_t)m->n_swa, &swa_bytes) ||
+            __builtin_mul_overflow(swa_bytes, kv_row(m) * sizeof(float), &swa_bytes))
+            return OC_ERR_OOM;
+        if (!s->saved_swa[slot] && n_swa_visits) s->saved_swa[slot] = malloc(swa_bytes);
         if (!s->saved_hist[slot] || (n_swa_visits && !s->saved_swa[slot])) return OC_ERR_OOM;
         for (uint32_t vi = 0; vi < m->n_visits; vi++)
             memcpy(s->saved_hist[slot] + vi * row3, s->hist[vi], row3 * sizeof(float));

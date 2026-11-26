@@ -31,7 +31,8 @@ OcError ink_gpu_forward(InkGpu *g, const uint32_t *tokens, size_t n, uint32_t po
 /* Commit the previous call's first keep inputs (as the next forward would)
  * and save rows 0..2 of every visit's conv history and the sliding-window
  * K/V rows before position pos in a slot (< OC_INK_SAVE_SLOTS); restore
- * copies them back. */
+ * copies them back and must get the pos the slot was saved at (the rows are
+ * placed by position in the ring). */
 OcError ink_gpu_save(InkGpu *g, uint32_t keep, uint32_t slot, uint32_t pos);
 OcError ink_gpu_restore(InkGpu *g, uint32_t slot, uint32_t pos);
 
