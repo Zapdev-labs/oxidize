@@ -240,12 +240,12 @@ static bool load_mat(const OcGgufMmappedFile *map, const char *name, OcInkMat *o
     out->cols = (size_t)ti->dims[0];
     out->rows = ti->n_dims > 1 ? (size_t)ti->dims[1] : 1;
     out->n_mat = ti->n_dims > 2 ? (size_t)ti->dims[2] : 1;
-    out->row_bytes = out->gtype == GT_NVFP4 ? oc_nvfp4_row_bytes(out->cols)
-                   : out->gtype == GT_NV3 ? oc_nv3_row_bytes(out->cols)
-                   : out->gtype == GT_BF16 ? out->cols * 2 : out->cols * 4;
-    out->mat_bytes = out->row_bytes * out->rows;
     const bool blocked = out->gtype == GT_NVFP4 || out->gtype == GT_NV3;
     if (blocked && out->cols % 64) return false;
+    if (out->gtype == GT_NVFP4) out->row_bytes = oc_nvfp4_row_bytes(out->cols);
+    else if (out->gtype == GT_NV3) out->row_bytes = oc_nv3_row_bytes(out->cols);
+    else if (__builtin_mul_overflow(out->cols, out->gtype == GT_BF16 ? 2 : 4, &out->row_bytes)) return false;
+    if (__builtin_mul_overflow(out->row_bytes, out->rows, &out->mat_bytes)) return false;
     /* the GGUF reader cannot size every type (NV3), so check the extent here */
     if (ti->shard_index >= map->n_shards || !out->data) return false;
     const OcGgufShard *sh = &map->shards[ti->shard_index];
@@ -258,7 +258,13 @@ static bool load_mat(const OcGgufMmappedFile *map, const char *name, OcInkMat *o
         size_t len = strlen(name);
         snprintf(sn, sizeof sn, "%.*s.scale", (int)(len > 7 ? len - 7 : len), name);
         const OcGgufTensorInfo *si = oc_gguf_map_tensor_get(map, sn);
-        out->scale = si ? (const float *)oc_gguf_map_tensor_data(map, si) : NULL;
+        if (si) {
+            /* one F32 global scale per matrix (the reader checked its extent) */
+            uint64_t n = 1;
+            for (uint32_t d = 0; d < si->n_dims; d++) n *= si->dims[d];
+            if (si->ggml_type != GT_F32 || n < out->n_mat) return false;
+            out->scale = (const float *)oc_gguf_map_tensor_data(map, si);
+        }
     }
     return out->gtype == GT_NVFP4 || out->gtype == GT_NV3 || out->gtype == GT_BF16 || out->gtype == GT_F32;
 }
