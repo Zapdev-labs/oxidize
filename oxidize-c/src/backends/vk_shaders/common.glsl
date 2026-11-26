@@ -6,6 +6,7 @@
 
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer U32 { uint v[]; };
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer UV4 { uvec4 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer UV2 { uvec2 v[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer F32 { float v[]; };
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer FV4 { vec4 v[]; };
 layout(buffer_reference, std430, buffer_reference_align = 4) buffer I32 { int v[]; };
@@ -49,6 +50,23 @@ uvec4 e2m1_sub(uint w0, uint w1)
 {
     return uvec4(e2m1x4(w0 & 0x0F0F0F0Fu), e2m1x4(w1 & 0x0F0F0F0Fu),
                  e2m1x4((w0 >> 4) & 0x0F0F0F0Fu), e2m1x4((w1 >> 4) & 0x0F0F0F0Fu));
+}
+
+/* NV3 (nv3.h): four 2-bit magnitude indices and four sign bits, one per
+ * byte, to four int8 of {1, 3, 6, 10}: 1 + 2m + m(m-1)/2, negated by sign. */
+uint nv3x4(uint t, uint n)
+{
+    const uint h = (t >> 1) & 0x01010101u;
+    const uint mag = 0x01010101u + (t << 1) + h + ((h & t) << 1);
+    return (mag ^ (n * 0xFFu)) + n;
+}
+
+/* One NV3 sub-block: its magnitude word and its sign bits (sign word shifted
+ * so bit 8 j + c belongs to value 4 c + j) to 16 int8 in natural order. */
+uvec4 nv3_sub(uint mw, uint sw)
+{
+    return uvec4(nv3x4(mw & 0x03030303u, sw & 0x01010101u), nv3x4((mw >> 2) & 0x03030303u, (sw >> 1) & 0x01010101u),
+                 nv3x4((mw >> 4) & 0x03030303u, (sw >> 2) & 0x01010101u), nv3x4((mw >> 6) & 0x03030303u, (sw >> 3) & 0x01010101u));
 }
 
 int dot4(uint a, uint b) { return dotPacked4x8EXT(int(a), int(b)); }

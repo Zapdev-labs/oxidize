@@ -16,6 +16,7 @@
 #include "oxidize/arena.h"
 #include "oxidize/json.h"
 #include "oxidize/log.h"
+#include "oxidize/nv3.h"
 #include "oxidize/nvfp4.h"
 #include "oxidize/parallel.h"
 #include "oxidize/safetensors.h"
@@ -25,7 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { GT_F32 = 0, GT_BF16 = 30, GT_NVFP4 = 40 };
+enum { GT_F32 = 0, GT_BF16 = 30, GT_NVFP4 = 40, GT_NV3 = OC_NV3_GGML_TYPE };
 enum { MV_U32 = 4, MV_I32 = 5, MV_F32 = 6, MV_BOOL = 7, MV_STR = 8, MV_ARR = 9 };
 
 /* ─── small helpers ─────────────────────────────────────────────────────── */
@@ -187,7 +188,7 @@ static PT *plan_add(Plan *p, const char *name, Kind kind, uint32_t gtype, uint32
     t->n_dims = n_dims;
     t->dims[0] = d0; t->dims[1] = d1; t->dims[2] = d2;
     uint64_t n = d0 * (n_dims > 1 ? d1 : 1) * (n_dims > 2 ? d2 : 1);
-    t->nbytes = gtype == GT_F32 ? n * 4 : gtype == GT_BF16 ? n * 2 : n / 64 * 36;
+    t->nbytes = gtype == GT_F32 ? n * 4 : gtype == GT_BF16 ? n * 2 : gtype == GT_NV3 ? n / 64 * 28 : n / 64 * 36;
     return t;
 }
 
@@ -213,6 +214,27 @@ static void quantize_matrix(const float *x, size_t rows, size_t cols, float gsca
 {
     QJob j = { x, out, cols, gscale };
     oc_parallel_for(rows, q_rows, &j);
+}
+
+static void q3_rows(size_t b, size_t e, size_t tid, void *u)
+{
+    (void)tid;
+    QJob *j = u;
+    const size_t rb = oc_nv3_row_bytes(j->cols);
+    for (size_t r = b; r < e; r++) oc_nv3_quantize_row(j->src + r * j->cols, NULL, j->cols, j->gscale, j->dst + r * rb);
+}
+
+/* One matrix in NV3 (gtype GT_NV3) or NVFP4; returns its global scale. */
+static float quantize_weights(const float *x, size_t rows, size_t cols, uint32_t gtype, uint8_t *out)
+{
+    if (gtype != GT_NV3) {
+        const float g = oc_nvfp4_global_scale(x, rows * cols);
+        quantize_matrix(x, rows, cols, g, out);
+        return g;
+    }
+    QJob j = { x, out, cols, oc_nv3_global_scale(x, rows * cols) };
+    oc_parallel_for(rows, q3_rows, &j);
+    return j.gscale;
 }
 
 /* ModelOpt NVFP4 row (pairs packed low-first, E4M3 scale per 16) -> ggml block row. */
@@ -271,10 +293,8 @@ static OcError produce(Plan *p, PT *t, W *w)
         uint8_t *q = malloc((size_t)t->nbytes);
         if (!x || !q) { free(x); free(q); return OC_ERR_OOM; }
         for (size_t i = 0; i < rows * cols; i++) x[i] = elem(st, d, i);
-        float g = oc_nvfp4_global_scale(x, rows * cols);
-        quantize_matrix(x, rows, cols, g, q);
+        p->scales[0] = quantize_weights(x, rows, cols, t->gtype, q);
         w_bytes(w, q, (size_t)t->nbytes);
-        p->scales[0] = g;
         p->n_scales = 1;
         free(x); free(q);
         return OC_OK;
@@ -298,7 +318,9 @@ static OcError produce(Plan *p, PT *t, W *w)
         const float denom = *(const float *)tdata(t->f, dn);
         const size_t rb = oc_nvfp4_row_bytes(cols);
         uint8_t *buf = malloc(rows * rb);
-        if (!buf) return OC_ERR_OOM;
+        float *x = t->gtype == GT_NV3 ? malloc(rows * cols * sizeof(float)) : NULL;
+        uint8_t *q = t->gtype == GT_NV3 ? malloc(rows * oc_nv3_row_bytes(cols)) : NULL;
+        if (!buf || (t->gtype == GT_NV3 && (!x || !q))) { free(buf); free(x); free(q); return OC_ERR_OOM; }
         const uint8_t *wd = d;
         for (size_t e = 0; e < ne; e++) {
             for (size_t r = 0; r < rows; r++) {
@@ -306,11 +328,21 @@ static OcError produce(Plan *p, PT *t, W *w)
                 repack_nvfp4_row(wd + (e * rows + sr) * (cols / 2),
                                  sd + (e * rows + sr) * (cols / 16), cols, buf + r * rb);
             }
-            w_bytes(w, buf, rows * rb);
             p->scales[e] = amax[e] / denom;
+            if (t->gtype != GT_NV3) {
+                w_bytes(w, buf, rows * rb);
+                continue;
+            }
+            /* NV3: requantize the checkpoint's NVFP4 values */
+            for (size_t r = 0; r < rows; r++) {
+                oc_nvfp4_dequant_row(buf + r * rb, cols, x + r * cols);
+                for (size_t c = 0; c < cols; c++) x[r * cols + c] *= p->scales[e];
+            }
+            p->scales[e] = quantize_weights(x, rows, cols, GT_NV3, q);
+            w_bytes(w, q, rows * oc_nv3_row_bytes(cols));
         }
         p->n_scales = ne;
-        free(buf);
+        free(buf); free(x); free(q);
         return OC_OK;
     }
     case K_EXP_MXFP8: {
@@ -318,7 +350,7 @@ static OcError produce(Plan *p, PT *t, W *w)
         size_t cols = (size_t)t->dims[0], rows = (size_t)t->dims[1], ne = (size_t)t->dims[2];
         const uint8_t *sd = tdata(t->f, t->t2);
         if (!sd) return OC_ERR_FORMAT;
-        const size_t rb = oc_nvfp4_row_bytes(cols);
+        const size_t rb = t->gtype == GT_NV3 ? oc_nv3_row_bytes(cols) : oc_nvfp4_row_bytes(cols);
         float *x = malloc(rows * cols * sizeof(float));
         uint8_t *q = malloc(rows * rb);
         if (!x || !q) { free(x); free(q); return OC_ERR_OOM; }
@@ -331,10 +363,8 @@ static OcError produce(Plan *p, PT *t, W *w)
                 for (size_t c = 0; c < cols; c++)
                     x[r * cols + c] = e4m3fn(src[c]) * ldexpf(1.0f, (int)ss[c / 32] - 127);
             }
-            float g = oc_nvfp4_global_scale(x, rows * cols);
-            quantize_matrix(x, rows, cols, g, q);
+            p->scales[e] = quantize_weights(x, rows, cols, t->gtype, q);
             w_bytes(w, q, rows * rb);
-            p->scales[e] = g;
         }
         p->n_scales = ne;
         free(x); free(q);
@@ -543,7 +573,7 @@ static void add_dense(Ctx *c, const OcSafetensorsFile *f, const char *dst, const
         pt->f = f; pt->t = t;
         return;
     }
-    PT *pt = plan_add(c->p, dst, K_DENSE, GT_NVFP4, 2, cols, rows, 1);
+    PT *pt = plan_add(c->p, dst, K_DENSE, type == OC_INK_W_NV3 ? GT_NV3 : GT_NVFP4, 2, cols, rows, 1);
     pt->f = f; pt->t = t;
     snprintf(nm, sizeof nm, "%.*s.scale", (int)(strlen(dst) - 7), dst);
     plan_add(c->p, nm, K_SCALE, GT_F32, 1, 1, 1, 1);
@@ -559,7 +589,8 @@ static void add_experts(Ctx *c, int il, bool w13)
     const bool fp4 = strcmp(t->dtype, "U8") == 0;
     uint64_t ne = t->shape[0], rows = t->shape[1], cols = fp4 ? t->shape[2] * 2 : t->shape[2];
     snprintf(dst, sizeof dst, "blk.%d.%s.weight", il, w13 ? "ffn_gate_up_exps" : "ffn_down_exps");
-    PT *pt = plan_add(c->p, dst, fp4 ? K_EXP_NVFP4 : K_EXP_MXFP8, GT_NVFP4, 3, cols, rows, ne);
+    PT *pt = plan_add(c->p, dst, fp4 ? K_EXP_NVFP4 : K_EXP_MXFP8, c->o.expert_type == OC_INK_W_NV3 ? GT_NV3 : GT_NVFP4,
+                      3, cols, rows, ne);
     pt->f = c->f; pt->t = t; pt->t2 = s; pt->arg = w13;
     snprintf(nm, sizeof nm, "blk.%d.%s.scale", il, w13 ? "ffn_gate_up_exps" : "ffn_down_exps");
     plan_add(c->p, nm, K_SCALE, GT_F32, 1, ne, 1, 1);

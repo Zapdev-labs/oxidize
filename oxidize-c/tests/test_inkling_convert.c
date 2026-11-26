@@ -7,6 +7,7 @@
 #include "inkling_fixture.h"
 #include "oxidize/gguf.h"
 #include "oxidize/inkling.h"
+#include "oxidize/nv3.h"
 #include "oxidize/nvfp4.h"
 #include "oxidize/safetensors.h"
 
@@ -127,6 +128,57 @@ Test(inkling_convert, draft_metadata, .init = setup, .fini = teardown)
     cr_assert_float_eq(s, 1.0f, 1e-5f);
     oc_inkling_draft_free(&d);
     oc_inkling_free(&m);
+}
+
+/* --expert-type nv3: both expert tensors become NV3, within 3-bit error of
+ * the NVFP4 conversion's weights, and the model runs. */
+Test(inkling_convert, nv3_experts_track_nvfp4, .init = setup, .fini = teardown)
+{
+    char p3[600];
+    snprintf(p3, sizeof p3, "%s/model-nv3.gguf", g_dir);
+    OcInklingConvertOptions o = { .hf_dir = g_dir, .out_path = p3, .expert_type = OC_INK_W_NV3 };
+    cr_assert_eq(oc_inkling_convert(&o), OC_OK);
+    OcGgufMmappedFile map;
+    cr_assert_eq(oc_gguf_map_open(p3, &map), OC_OK);
+    for (int l = 0; l < FX_L; l++) {
+        char n[64];
+        snprintf(n, sizeof n, "blk.%d.ffn_gate_up_exps.weight", l);
+        cr_assert_eq(oc_gguf_map_tensor_get(&map, n)->ggml_type, OC_NV3_GGML_TYPE, "%s", n);
+        snprintf(n, sizeof n, "blk.%d.ffn_down_exps.weight", l);
+        cr_assert_eq(oc_gguf_map_tensor_get(&map, n)->ggml_type, OC_NV3_GGML_TYPE, "%s", n);
+    }
+    oc_gguf_map_free(&map);
+
+    OcInklingModel a, b;
+    cr_assert_eq(oc_inkling_load(g_gguf, &a), OC_OK);
+    cr_assert_eq(oc_inkling_load(p3, &b), OC_OK);
+    for (int l = 0; l < FX_L; l++) {
+        const OcInkMat *wa = &a.layers[l].gate_up, *wb = &b.layers[l].gate_up;
+        double err = 0.0, ref = 0.0;
+        float ra[4096], rb[4096];
+        cr_assert_leq(wa->cols, 4096u);
+        for (size_t e = 0; e < wa->n_mat; e++)
+            for (size_t r = 0; r < wa->rows; r++) {
+                oc_nvfp4_dequant_row(wa->data + e * wa->mat_bytes + r * wa->row_bytes, wa->cols, ra);
+                oc_nv3_dequant_row(wb->data + e * wb->mat_bytes + r * wb->row_bytes, wb->cols, rb);
+                for (size_t c = 0; c < wa->cols; c++) {
+                    const double x = ra[c] * wa->scale[e], y = rb[c] * wb->scale[e];
+                    err += (x - y) * (x - y);
+                    ref += x * x;
+                }
+            }
+        /* the MXFP8 layer compares two requantizations of its source */
+        cr_assert_lt(sqrt(err / ref), l == FX_L - 1 ? 0.3 : 0.2, "layer %d relative rms %f", l, sqrt(err / ref));
+    }
+    OcInklingSession *s = NULL;
+    cr_assert_eq(oc_inkling_session_new(&b, 32, NULL, 0, &s), OC_OK);
+    static const uint32_t toks[8] = { 3, 17, 99, 4, 200, 7, 31, 150 };
+    float lg[FX_V];
+    cr_assert_eq(oc_inkling_forward(s, toks, 8, lg, false), OC_OK);
+    for (size_t i = 0; i < FX_V; i++) cr_assert(isfinite(lg[i]));
+    oc_inkling_session_free(s);
+    oc_inkling_free(&a);
+    oc_inkling_free(&b);
 }
 
 Test(inkling_convert, missing_dir_fails)

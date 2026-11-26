@@ -189,6 +189,7 @@ typedef struct OcCliContext {
     uint32_t           draft_max;
     float              draft_p_min;
     const char        *lm_type;
+    const char        *expert_type;
     const char        *draft_type;
     float              effort;
 } OcCliContext;

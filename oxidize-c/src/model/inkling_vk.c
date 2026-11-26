@@ -13,6 +13,7 @@
 #ifdef OC_VULKAN
 
 #include "oxidize/log.h"
+#include "oxidize/nv3.h"
 #include "oxidize/nvfp4.h"
 #include "oxidize/vk.h"
 
@@ -24,6 +25,7 @@
 #define GT_F32   0u
 #define GT_BF16  30u
 #define GT_NVFP4 40u
+#define GT_NV3   OC_NV3_GGML_TYPE
 #define N_POOL   16
 #define ATTN_ROWS 64  /* query rows (token x head) per attn.comp workgroup */
 #define ATTN_DTQ 4    /* query tokens per attn_dec.comp tile */
@@ -199,7 +201,7 @@ typedef struct {
     GLayer    L[OC_INK_MAX_LAYERS];
     GMat      output;
     uint64_t  output_norm, output_res_query;
-    OcVkPipe *quant, *mm, *mv[9], *mv_situ[9], *norm, *ew, *mix, *ctrl, *lin, *lint, *conv, *commit, *qk, *attn, *topk, *group, *normq, *route, *cdown, *mixs, *dsrope, *dsattn, *attnd, *acomb, *walkj, *walkg, *walkp;
+    OcVkPipe *quant, *mm, *mm3, *mv[9], *mv_situ[9], *mv3[9], *mv3_situ[9], *norm, *ew, *mix, *ctrl, *lin, *lint, *conv, *commit, *qk, *attn, *topk, *group, *normq, *route, *cdown, *mixs, *dsrope, *dsattn, *attnd, *acomb, *walkj, *walkg, *walkp;
 } GModel;
 
 /* First-fit placement with fixed chunk capacity, identical in both passes. */
@@ -235,6 +237,7 @@ static void up_mat(GModel *g, const OcInkMat *W, GMat *o)
     if (dst) {
         for (size_t i = 0; i < W->n_mat; i++) {
             if (W->gtype == GT_NVFP4) oc_nvfp4_planar(W->data + i * W->mat_bytes, W->rows, W->cols, dst + i * W->mat_bytes);
+            else if (W->gtype == GT_NV3) oc_nv3_planar(W->data + i * W->mat_bytes, W->rows, W->cols, dst + i * W->mat_bytes);
             else memcpy(dst + i * W->mat_bytes, W->data + i * W->mat_bytes, W->mat_bytes);
         }
     }
@@ -366,8 +369,11 @@ static bool supported(const OcInklingModel *m)
         const OcInkLayer *ly = &m->layers[il];
         const OcInkMat *mats[] = { &ly->wq, &ly->wk, &ly->wv, &ly->wo, &ly->wgate, &ly->wr };
         for (size_t i = 0; i < sizeof mats / sizeof mats[0]; i++)
-            if (mats[i]->gtype != GT_NVFP4 || mats[i]->cols > 4096) return false;
+            if ((mats[i]->gtype != GT_NVFP4 && mats[i]->gtype != GT_NV3) || mats[i]->cols > 4096) return false;
         if (ly->down.cols > 4096) return false;
+        if ((ly->gate_up.gtype != GT_NVFP4 && ly->gate_up.gtype != GT_NV3) ||
+            (ly->down.gtype != GT_NVFP4 && ly->down.gtype != GT_NV3))
+            return false;
         if (ly->msg_query)
             for (int c = 0; c < OC_INK_N_CTRL; c++)
                 if (ly->ctrl_gain[c].gtype != GT_BF16 || ly->ctrl_forget[c].gtype != GT_BF16 || ly->ctrl_down[c].gtype == GT_NVFP4)
@@ -380,10 +386,15 @@ static bool supported(const OcInklingModel *m)
 static void gmodel_free(GModel *g)
 {
     if (!g) return;
-    OcVkPipe *pp[] = { g->quant, g->mm, g->norm, g->ew, g->mix, g->ctrl, g->lin, g->lint, g->conv, g->commit, g->qk, g->attn,
+    OcVkPipe *pp[] = { g->quant, g->mm, g->mm3, g->norm, g->ew, g->mix, g->ctrl, g->lin, g->lint, g->conv, g->commit, g->qk, g->attn,
                        g->topk, g->group, g->normq, g->route, g->cdown, g->mixs, g->dsrope, g->dsattn, g->attnd, g->acomb, g->walkj, g->walkg, g->walkp };
     for (size_t i = 0; i < sizeof pp / sizeof pp[0]; i++) oc_vk_pipe_free(g->vk, pp[i]);
-    for (int i = 1; i <= 8; i++) { oc_vk_pipe_free(g->vk, g->mv[i]); oc_vk_pipe_free(g->vk, g->mv_situ[i]); }
+    for (int i = 1; i <= 8; i++) {
+        oc_vk_pipe_free(g->vk, g->mv[i]);
+        oc_vk_pipe_free(g->vk, g->mv_situ[i]);
+        oc_vk_pipe_free(g->vk, g->mv3[i]);
+        oc_vk_pipe_free(g->vk, g->mv3_situ[i]);
+    }
     for (uint32_t i = 0; i < MAX_CHUNK; i++) if (g->chunk[i].impl) oc_vk_buf_free(g->vk, &g->chunk[i]);
     oc_vk_free(g->vk);
     free(g);
@@ -437,10 +448,14 @@ OcError ink_gpu_model_load(OcInklingModel *m)
     PIPE(g->walkg, SPV_WALKG, WalkGatePush);
     PIPE(g->walkp, SPV_WALKP, WalkPickPush);
 #undef PIPE
+    const uint32_t fmt3 = 1;
+    if (e == OC_OK) e = oc_vk_pipe_new(g->vk, SPV_MM, sizeof SPV_MM, sizeof(MmPush), &fmt3, 1, &g->mm3);
     for (uint32_t nv = 1; nv <= 8 && e == OC_OK; nv++) {
-        const uint32_t s0[2] = { nv, 0 }, s1[2] = { nv, 1 };
-        e = oc_vk_pipe_new(g->vk, SPV_MV, sizeof SPV_MV, sizeof(MmPush), s0, 2, &g->mv[nv]);
-        if (e == OC_OK) e = oc_vk_pipe_new(g->vk, SPV_MV, sizeof SPV_MV, sizeof(MmPush), s1, 2, &g->mv_situ[nv]);
+        const uint32_t s0[3] = { nv, 0, 0 }, s1[3] = { nv, 1, 0 }, t0[3] = { nv, 0, 1 }, t1[3] = { nv, 1, 1 };
+        e = oc_vk_pipe_new(g->vk, SPV_MV, sizeof SPV_MV, sizeof(MmPush), s0, 3, &g->mv[nv]);
+        if (e == OC_OK) e = oc_vk_pipe_new(g->vk, SPV_MV, sizeof SPV_MV, sizeof(MmPush), s1, 3, &g->mv_situ[nv]);
+        if (e == OC_OK) e = oc_vk_pipe_new(g->vk, SPV_MV, sizeof SPV_MV, sizeof(MmPush), t0, 3, &g->mv3[nv]);
+        if (e == OC_OK) e = oc_vk_pipe_new(g->vk, SPV_MV, sizeof SPV_MV, sizeof(MmPush), t1, 3, &g->mv3_situ[nv]);
     }
     if (e != OC_OK) goto fail;
     size_t total = 0;
@@ -735,12 +750,13 @@ static void d_normq_mix(InkGpu *s, uint64_t x, uint64_t y, uint64_t w, uint32_t 
 static void d_linear(InkGpu *s, const GMat *W, uint64_t x, uint32_t xs, uint64_t aq, uint64_t ad, uint32_t n,
                      uint64_t y, uint32_t ys, float cap)
 {
-    if (W->gtype == GT_NVFP4) {
+    if (W->gtype == GT_NVFP4 || W->gtype == GT_NV3) {
+        const bool nv3 = W->gtype == GT_NV3;
         const MmPush p = { .w = W->a, .gscale = W->scale, .aq = aq, .ad = ad, .y = y, .mat_bytes = W->mat_bytes,
                            .rows = W->rows, .cols = W->cols, .n = n, .y_stride = ys, .aq_stride = W->cols,
                            .ad_stride = W->cols / 64, .post = cap > 0.0f ? POST_SOFTCAP : POST_NONE, .cap = cap };
-        if (n <= 8) oc_vk_dispatch(s->vk, s->g->mv[n], &p, cdiv(W->rows, mv_rows(n)), 1, 1);
-        else oc_vk_dispatch(s->vk, s->g->mm, &p, cdiv(W->rows, 64), cdiv(n, 128), 1);
+        if (n <= 8) oc_vk_dispatch(s->vk, nv3 ? s->g->mv3[n] : s->g->mv[n], &p, cdiv(W->rows, mv_rows(n)), 1, 1);
+        else oc_vk_dispatch(s->vk, nv3 ? s->g->mm3 : s->g->mm, &p, cdiv(W->rows, 64), cdiv(n, 128), 1);
         return;
     }
     if (n > 8) {
@@ -875,7 +891,8 @@ static void d_moe(InkGpu *s, const GLayer *L, uint64_t x, uint32_t n)
                   .items = s->items, .cidx = s->pair_tok, .y = s->act, .mat_bytes = L->gate_up.mat_bytes,
                   .rows = 2 * FF, .cols = E, .y_stride = FF, .aq_stride = E, .ad_stride = E / 64,
                   .post = POST_SITU, .ff = FF, .beta = m->situ_beta, .lbeta = m->situ_lbeta };
-    if (n > 8) oc_vk_dispatch_indirect(s->vk, s->g->mm, &gu, &s->ind, 0);
+    const bool gu3 = L->gate_up.gtype == GT_NV3, dn3 = L->down.gtype == GT_NV3;
+    if (n > 8) oc_vk_dispatch_indirect(s->vk, gu3 ? s->g->mm3 : s->g->mm, &gu, &s->ind, 0);
     gu.items = s->items_s;
     if (n <= 8) {
         /* every item on the matvec, which quantizes its own output */
@@ -883,7 +900,7 @@ static void d_moe(InkGpu *s, const GLayer *L, uint64_t x, uint32_t n)
         gu.y = s->aqp;
         gu.yd = s->adp;
     }
-    oc_vk_dispatch_indirect(s->vk, s->g->mv_situ[nv], &gu, &s->ind, 24);
+    oc_vk_dispatch_indirect(s->vk, gu3 ? s->g->mv3_situ[nv] : s->g->mv_situ[nv], &gu, &s->ind, 24);
     BAR();
     mark(s, GP_GATEUP);
     if (n > 8) {
@@ -893,9 +910,9 @@ static void d_moe(InkGpu *s, const GLayer *L, uint64_t x, uint32_t n)
     MmPush dn = { .w = L->down.a, .gscale = L->down.scale, .aq = s->aqp, .ad = s->adp, .items = s->items,
                   .y = s->dn, .mat_bytes = L->down.mat_bytes, .rows = E, .cols = FF, .y_stride = E,
                   .aq_stride = FF, .ad_stride = FF / 64 };
-    if (n > 8) oc_vk_dispatch_indirect(s->vk, s->g->mm, &dn, &s->ind, 12);
+    if (n > 8) oc_vk_dispatch_indirect(s->vk, dn3 ? s->g->mm3 : s->g->mm, &dn, &s->ind, 12);
     dn.items = s->items_s;
-    oc_vk_dispatch_indirect(s->vk, s->g->mv[nv], &dn, &s->ind, 36);
+    oc_vk_dispatch_indirect(s->vk, dn3 ? s->g->mv3[nv] : s->g->mv[nv], &dn, &s->ind, 36);
     BAR();
     mark(s, GP_DOWN);
 }

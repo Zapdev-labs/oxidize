@@ -590,11 +590,12 @@ void oc_cli_command_help_for(OcCliCommand cmd)
     case OC_CLI_CMD_INKLING_CONVERT:
         printf("Convert an Inkling-2 checkpoint to oxidize GGUF\n\n"
                "USAGE: oxidize-c inkling-convert --input <hf_dir> --output <model.gguf> \\\n"
-               "       [--draft-out <dspark.gguf>] [--quant-type nvfp4|bf16]\n"
-               "       [--lm-type nvfp4|bf16] [--draft-type nvfp4|bf16]\n\n"
-               "Experts are copied bit for bit from the NVFP4 checkpoint; --quant-type\n"
-               "sets the attention projections, --lm-type the lm head, --draft-type\n"
-               "the DSpark drafter (from mtp.safetensors).\n");
+               "       [--draft-out <dspark.gguf>] [--quant-type nvfp4|nv3|bf16]\n"
+               "       [--lm-type nvfp4|bf16] [--draft-type nvfp4|bf16] [--expert-type nvfp4|nv3]\n\n"
+               "Experts are copied bit for bit from the NVFP4 checkpoint, or requantized\n"
+               "to 3.5-bit NV3 with --expert-type nv3 (smaller and faster to decode);\n"
+               "--quant-type sets the attention projections, --lm-type the lm head,\n"
+               "--draft-type the DSpark drafter (from mtp.safetensors).\n");
         break;
     case OC_CLI_CMD_INKLING:
         printf("Inkling-2 generation with optional DSpark speculative decoding\n\n"
@@ -2496,6 +2497,7 @@ static OcInklingWeightType ink_wtype(const char *s, OcInklingWeightType def)
 {
     if (!s) return def;
     if (ieq(s, "bf16")) return OC_INK_W_BF16;
+    if (ieq(s, "nv3")) return OC_INK_W_NV3;
     return OC_INK_W_NVFP4;
 }
 
@@ -2518,6 +2520,7 @@ OcError oc_cli_run_inkling_convert(OcCliContext *ctx)
         .dense_type = ink_wtype(ctx->target_type, OC_INK_W_NVFP4),
         .output_type = ink_wtype(ctx->lm_type, OC_INK_W_NVFP4),
         .draft_type = ink_wtype(ctx->draft_type, OC_INK_W_NVFP4),
+        .expert_type = ink_wtype(ctx->expert_type, OC_INK_W_NVFP4),
     };
     double t0 = dflash2_now_sec();
     OcError e = oc_inkling_convert(&o);
