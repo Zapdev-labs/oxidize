@@ -165,16 +165,44 @@ Test(inkling_api, render_keeps_large_integers_exact)
     free(out);
 }
 
-Test(inkling_api, render_names_tool_results_from_every_matching_call)
+/* A tool result is named by every earlier call with its id, in order, and
+ * never by a call made after it. */
+Test(inkling_api, render_names_tool_results_from_earlier_matching_calls)
 {
     const char *err = NULL;
     char *out = render("{\"messages\":[{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":["
                        "{\"id\":\"b\",\"function\":{\"name\":\"two\",\"arguments\":\"{}\"}},"
-                       "{\"id\":\"a\",\"function\":{\"name\":\"one\",\"arguments\":\"{}\"}}]},"
+                       "{\"id\":\"a\",\"function\":{\"name\":\"one\",\"arguments\":\"{}\"}},"
+                       "{\"id\":\"a\",\"function\":{\"name\":\"uno\",\"arguments\":\"{}\"}}]},"
                        "{\"role\":\"tool\",\"tool_call_id\":\"a\",\"content\":\"r1\"},"
-                       "{\"role\":\"tool\",\"tool_call_id\":\"b\",\"content\":\"r2\"}]}", &err);
+                       "{\"role\":\"tool\",\"tool_call_id\":\"b\",\"content\":\"r2\"},"
+                       "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":["
+                       "{\"id\":\"b\",\"function\":{\"name\":\"later\",\"arguments\":\"{}\"}}]}]}", &err);
     cr_assert_not_null(out, "%s", err);
-    cr_assert_not_null(strstr(out, "<|message_tool|>one<|content_text|>r1"), "%s", out);
+    cr_assert_not_null(strstr(out, "<|message_tool|>oneuno<|content_text|>r1"), "%s", out);
     cr_assert_not_null(strstr(out, "<|message_tool|>two<|content_text|>r2"), "%s", out);
     free(out);
+}
+
+Test(inkling_api, render_tool_choice_none_hides_tools_and_others_are_refused)
+{
+    const char *err = NULL;
+    char *out = render("{\"messages\":[{\"role\":\"user\",\"content\":\"q\"}],\"tool_choice\":\"none\","
+                       "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\",\"parameters\":{}}}]}", &err);
+    cr_assert_not_null(out, "%s", err);
+    cr_assert_null(strstr(out, "tool_declare"), "%s", out);
+    free(out);
+}
+
+Test(inkling_api, reply_with_tools_as_text_keeps_calls_as_content)
+{
+    Parts p = { 0 };
+    OcInklingReply r;
+    oc_inkling_reply_init(&r, collect, &p);
+    r.tools_as_text = true;
+    const char *toks[] = { "<|message_model|>", "f", "<|content_invoke_tool_json|>", "{\"args\":{}}", "<|end_message|>" };
+    for (size_t i = 0; i < sizeof toks / sizeof toks[0]; i++) push(&r, toks[i]);
+    cr_assert_eq(p.n_calls, 0);
+    cr_assert_str_eq(p.content, "{\"args\":{}}");
+    oc_inkling_reply_free(&r);
 }

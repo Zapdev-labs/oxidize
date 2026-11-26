@@ -364,7 +364,9 @@ static OcError gmodel_alloc(GModel *g, const char *what)
 static bool supported(const OcInklingModel *m)
 {
     if (m->head_dim != 128 || m->n_head / m->n_head_kv > 4 || m->n_rel > 16 || m->n_expert > 256 ||
-        m->n_expert_used > 16 || m->n_conv != 4 || m->n_embd % 64 || m->n_ff_exp % 64) return false;
+        m->n_expert_used > 16 || m->n_conv != 4 || m->n_embd % 64 || m->n_ff_exp % 64 ||
+        (size_t)m->n_head_kv * m->head_dim > 65536)
+        return false;
     for (uint32_t il = 0; il < m->n_layer; il++) {
         const OcInkLayer *ly = &m->layers[il];
         const OcInkMat *mats[] = { &ly->wq, &ly->wk, &ly->wv, &ly->wo, &ly->wgate, &ly->wr };
